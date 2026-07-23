@@ -41,3 +41,51 @@ example
 # generated native folders
 /ios
 /android
+
+# Android build and local machine state
+/android/.gradle/
+/android/app/.cxx/
+/android/app/build/
+/android/build/
+/android/local.properties
+/android/**/*.apk
+/android/**/*.aab
+
+# Local packages and signing material
+/*.apk
+/*.aab
+*.keystore
+*.jks
+
+# Local validation output and generated diagnostics
+/*.log
+/*.txt
+/*.xml
+/coverage/
+/*.png
+!/splash.png
+/emu*.png
+/ftv*.png
+/firetv*.png
+/novacast*.png
+/stab*.png
+/verify*.png
+/diag*.png
+/dump*.png
+
+# Local Netlify folder
+.netlify
+
+# Local Supabase
+supabase/.temp/
+supabase/failed-migration-pulls/
+supabase/migrations-backup-before-repair/
+
+# Local Expo
+.expo-device-check/
+.expo-export-check/
+.expo-export-check-2/
+
+# Local output
+.logs/
+artifacts/

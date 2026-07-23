@@ -1,0 +1,16 @@
+project_id = "novacast"
+
+[functions.pairing-create]
+verify_jwt = true
+
+[functions.pairing-status]
+verify_jwt = true
+
+[functions.pairing-submit]
+verify_jwt = true
+
+[functions.pairing-redeem]
+verify_jwt = true
+
+[functions.pairing-cancel]
+verify_jwt = true

@@ -1,6 +1,6 @@
-:root { color: #f5f8ff; background: #020611; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-synthesis: none; }
+﻿:root { color: #f5f8ff; background: #020611; font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-synthesis: none; }
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; min-height: 100vh; background: #020611 url('../../assets/images/pairingbackground.png') center / cover fixed no-repeat; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: #020611 url('/pairingbackground.png') center / cover fixed no-repeat; }
 body::before { content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none; background: rgba(0, 3, 12, .38); }
 button, input { font: inherit; }
 .shell { position: relative; z-index: 1; min-height: 100vh; display: grid; place-items: center; padding: 40px 18px; }
@@ -46,3 +46,4 @@ button:disabled { cursor: wait; opacity: .65; }
 .successNotice { margin-top: 22px; padding: 12px 14px; border: 1px solid rgba(66,227,155,.45); border-radius: 10px; color: #b9ffd9; background: rgba(21,123,78,.2); }
 @media (max-width: 760px) { .adminGrid { grid-template-columns: 1fr; gap: 12px; } .adminHeader { align-items: start; flex-direction: column; } }
 @media (max-width: 480px) { .card { padding: 28px 20px; border-radius: 18px; } .brand { margin-bottom: 28px; } .brand img { width: 64px; height: 64px; } }
+

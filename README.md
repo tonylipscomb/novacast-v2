@@ -16,6 +16,19 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
    npx expo start
    ```
 
+3. Run the offline TV smoke suite
+
+   ```bash
+   npm run test:smoke
+   ```
+
+The smoke command runs the deterministic standalone tests under `scripts/` with
+Node's strip-types loader. It does not contact IPTV or metadata services.
+
+## Secure provider pairing
+
+The TV pairing screen is configured through the Supabase Edge Functions and the standalone website under `pairing-web/`. See [supabase/README.md](supabase/README.md) and [pairing-web/README.md](pairing-web/README.md) for deployment, public configuration, and server-only secrets. The app intentionally does not accept provider credentials from `EXPO_PUBLIC_*` variables.
+
 In the output, you'll find options to open the app in a
 
 - [development build](https://docs.expo.dev/develop/development-builds/introduction/)

@@ -10,6 +10,9 @@ button, input { font: inherit; }
 .brand div { display: grid; gap: 4px; }
 .brand small { color: #6e9fd7; font-size: 10px; font-weight: 800; letter-spacing: .2em; }
 .eyebrow { margin: 0 0 10px; color: #18d7ff; font-size: 12px; font-weight: 800; letter-spacing: .16em; }
+.deviceChip { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-top: 22px; padding: 14px 16px; border: 1px solid rgba(24, 215, 255, .35); border-radius: 12px; background: rgba(8, 28, 65, .72); }
+.deviceChip span { color: #6e9fd7; font-size: 11px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; }
+.deviceChip strong { color: #18d7ff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 18px; letter-spacing: .08em; }
 h1 { margin: 0; font-size: clamp(30px, 5vw, 44px); line-height: 1.05; letter-spacing: -.03em; }
 .lede, .card p { color: #a8b9d7; line-height: 1.6; }
 form { display: grid; gap: 16px; margin-top: 28px; }
@@ -30,7 +33,8 @@ button:disabled { cursor: wait; opacity: .65; }
 .error { padding: 12px 14px; border: 1px solid rgba(255, 116, 139, .45); border-radius: 10px; color: #ffc1cb; background: rgba(133, 26, 54, .22); }
 .privacy { margin: 20px 0 0; text-align: center; }
 .success { text-align: center; }
-.successIcon { display: grid; place-items: center; width: 68px; height: 68px; margin: 24px auto; border: 1px solid #63f0b0; border-radius: 50%; color: #08152b; background: #42e39b; box-shadow: 0 0 28px rgba(66, 227, 155, .35); font-size: 40px; font-weight: 900; }
+.successIcon { display: grid; place-items: center; width: 68px; height: 68px; margin: 24px auto; border: 1px solid #63f0b0; border-radius: 50%; color: #08152b; background: #42e39b; box-shadow: 0 0 28px rgba(66, 227, 155, .35); }
+.successIcon svg { width: 38px; height: 38px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2.8; }
 .success button { margin-top: 18px; }
 .adminShell { align-items: start; }
 .adminCard { width: min(100%, 1100px); }
@@ -44,6 +48,15 @@ button:disabled { cursor: wait; opacity: .65; }
 .adminRow small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dangerButton { min-height: 36px; padding: 0 12px; color: #ffc1cb; background: rgba(133,26,54,.32); }
 .successNotice { margin-top: 22px; padding: 12px 14px; border: 1px solid rgba(66,227,155,.45); border-radius: 10px; color: #b9ffd9; background: rgba(21,123,78,.2); }
+.adminTabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+.adminTabs button { min-height: 40px; text-transform: capitalize; background: rgba(39, 60, 107, .9); }
+.adminTabs .tabActive { background: linear-gradient(100deg, #087ce8, #6331dc); }
+.adminStats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-top: 24px; }
+.adminStat { padding: 14px; border: 1px solid rgba(61,127,220,.35); border-radius: 11px; background: rgba(6,20,48,.65); display: grid; gap: 6px; }
+.adminStat strong { color: #f5f8ff; font-size: 28px; }
+.adminStat span { color: #8195b8; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+.adminRowActions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.adminRowActions button { min-height: 34px; padding: 0 10px; font-size: 12px; background: rgba(39, 60, 107, .9); }
+select { width: 100%; min-height: 50px; padding: 0 14px; border: 1px solid rgba(61, 127, 220, .5); border-radius: 11px; outline: none; color: #fff; background: rgba(6, 20, 48, .9); }
 @media (max-width: 760px) { .adminGrid { grid-template-columns: 1fr; gap: 12px; } .adminHeader { align-items: start; flex-direction: column; } }
 @media (max-width: 480px) { .card { padding: 28px 20px; border-radius: 18px; } .brand { margin-bottom: 28px; } .brand img { width: 64px; height: 64px; } }
-

@@ -52,10 +52,15 @@ export function normalizeCode(value: string) {
 
 export function normalizeProviderUrl(value: string) {
   const trimmed = value.trim().replace(/\/+$/, '');
-  const url = new URL(trimmed);
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('Use a valid provider URL.');
-  if (url.username || url.password || url.search || url.hash) throw new Error('Provider URL must not contain credentials or query parameters.');
-  if (['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)) throw new Error('Local provider addresses are not supported.');
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error('invalid_provider_url');
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('invalid_provider_url');
+  if (url.username || url.password || url.search || url.hash) throw new Error('invalid_provider_url');
+  if (['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)) throw new Error('unsafe_provider_target');
   return url.toString().replace(/\/$/, '');
 }
 

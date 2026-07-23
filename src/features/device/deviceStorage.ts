@@ -38,7 +38,7 @@ export function writeCachedDeviceStatus(value: unknown) {
   return setSecureValue(DEVICE_STATUS_CACHE_KEY, JSON.stringify(value));
 }
 
-export function clearDeviceStorageForTests() {
+export async function clearDeviceIdentity() {
   return Promise.all([
     removeSecureValue(INSTALLATION_ID_KEY),
     removeSecureValue(DEVICE_SECRET_KEY),
@@ -46,4 +46,8 @@ export function clearDeviceStorageForTests() {
     removeSecureValue(PUBLIC_DEVICE_CODE_KEY),
     removeSecureValue(DEVICE_STATUS_CACHE_KEY),
   ]);
+}
+
+export function clearDeviceStorageForTests() {
+  return clearDeviceIdentity();
 }

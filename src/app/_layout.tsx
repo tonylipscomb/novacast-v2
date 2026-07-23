@@ -128,15 +128,13 @@ export default function RootLayout() {
     void SplashScreen.hideAsync().catch(() => undefined);
   }, []);
 
-  const handleLaunchLayout = useCallback(() => {
-    hideNativeSplash();
-  }, [hideNativeSplash]);
-
   useEffect(() => {
+    // Keep the native splash up until the intro video paints (or fails).
+    // Hiding on first layout left a black gap while the video was still decoding.
     const fallbackTimer = setTimeout(() => {
       logStartupPhase('native splash hide fallback');
       hideNativeSplash();
-    }, 1_500);
+    }, 4_500);
 
     return () => clearTimeout(fallbackTimer);
   }, [hideNativeSplash]);
@@ -159,9 +157,8 @@ export default function RootLayout() {
             exitRequested={exitRequested}
             startupReady={startupReady}
             onIntroComplete={() => setIntroComplete(true)}
-            onVideoReady={handleLaunchLayout}
+            onVideoReady={hideNativeSplash}
             onExitComplete={handleLaunchExitComplete}
-            onLayout={handleLaunchLayout}
           />
         </View>
       </SafeAreaProvider>

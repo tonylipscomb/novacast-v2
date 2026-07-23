@@ -10,8 +10,16 @@ test('pairing form accepts plain http provider URLs', () => {
   assert.equal(normalizeProviderUrl('http://max8k.top/'), 'http://max8k.top');
 });
 
+test('pairing form rejects non-URL server values', () => {
+  assert.throws(() => normalizeProviderUrl('091d0febec'), /invalid_provider_url/);
+});
+
 test('pairing form maps http rejection failures', () => {
   assert.match(failureMessage('http_provider_not_allowed'), /HTTP/i);
+});
+
+test('pairing form maps invalid provider URL failures', () => {
+  assert.match(failureMessage('invalid_provider_url'), /valid provider server URL/i);
 });
 
 test('pairing form uses sanitized failure messages', () => {

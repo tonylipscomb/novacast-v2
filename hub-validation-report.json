@@ -1,0 +1,54 @@
+[
+  {
+    "device": "emulator-5554",
+    "device_model": "AOSP TV on x86",
+    "checks": {
+      "1_home_without_blocking_catalog_ui": true,
+      "2_totals_visible_before_section_entry": true,
+      "3_no_zero_totals_on_cold_launch": true,
+      "4_cached_totals_on_warm_launch": true,
+      "5_movies_cached_categories_and_posters": true,
+      "8_discover_banner_non_blocking": true,
+      "9_discover_banner_can_appear_during_sync": true,
+      "10_category_switch_no_full_rebuild": false,
+      "11_rapid_dpad_responsive": true,
+      "9_discover_banner_clears": true,
+      "6_series_cached_categories_and_posters": false,
+      "13_background_foreground_preserves_totals": true,
+      "12_live_total_tile_present": true,
+      "7_no_render_time_full_catalog_scan": true,
+      "7_movies_ui_without_mass_resync": true,
+      "log_no_unhandled_promises": true,
+      "log_no_player_cleanup_errors": true,
+      "log_duplicate_sync_started_reasonable": false
+    },
+    "timings": {
+      "cold_launch_to_home_ms": 5658,
+      "cached_totals_visible_ms": 2214,
+      "home_to_movies_usable_ms": 5485,
+      "home_to_series_usable_ms": 26482,
+      "category_switch_ms": 2550,
+      "longest_js_stall_ms": null
+    },
+    "log_findings": {
+      "catalog_sync_lines": 118,
+      "sync_started_count": 3,
+      "movie_category_sync_events": 115,
+      "series_category_sync_events": 0,
+      "smart_movie_cache_built": 0,
+      "smart_series_cache_built": 0,
+      "list_all_entries_mentions": 0,
+      "movies_ui_events": 3,
+      "async_storage_mentions": 0,
+      "unhandled_promise_signals": 0,
+      "player_error_signals": 0,
+      "live_channel_totals_logged": [],
+      "longest_logged_stall_ms": null
+    },
+    "notes": [
+      "install: Success",
+      "warm_launch_totals_ms=5153",
+      "rapid_dpad_14_keys_ms=1929"
+    ]
+  }
+]

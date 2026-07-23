@@ -2,7 +2,7 @@ import { getClientAddress, jsonResponse, optionsResponse, readJson } from '../_s
 import { pairingDiagnostic } from '../_shared/diagnostics.ts';
 import { consumeRateLimit, getAdminClient } from '../_shared/supabase.ts';
 import { decryptSecret, hashInstallation, hashToken, normalizeInstallationId } from '../_shared/security.ts';
-import { authenticateDevice } from '../_shared/device.ts';
+import { optionalAuthenticateDevice } from '../_shared/device.ts';
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return optionsResponse();
@@ -15,9 +15,7 @@ Deno.serve(async (request) => {
     if (!sessionId) return jsonResponse({ errorCategory: 'invalid_pairing_session' }, 400);
 
     const client = getAdminClient();
-    const authenticatedDevice = request.headers.get('x-novacast-device-id') && request.headers.get('x-novacast-device-secret')
-      ? await authenticateDevice(request, client)
-      : null;
+    const authenticatedDevice = await optionalAuthenticateDevice(request, client);
     if (Deno.env.get('DEVICE_ACTIVATION_REQUIRED') === 'true' && (!authenticatedDevice || authenticatedDevice.activation_status !== 'active')) {
       return jsonResponse({ errorCategory: 'activation_required' }, 403);
     }
@@ -27,12 +25,13 @@ Deno.serve(async (request) => {
       return jsonResponse({ errorCategory: 'rate_limited' }, 429);
     }
 
-    let sessionQuery = client
+    // Ownership remains installation_hash so polling works before/after device_id migration.
+    const { data: session, error } = await client
       .from('pairing_sessions')
       .select('id,state,expires_at,provider_record_id,redemption_ciphertext,redemption_iv,redemption_expires_at,redemption_consumed_at')
-      .eq('id', sessionId);
-    sessionQuery = authenticatedDevice ? sessionQuery.eq('device_id', authenticatedDevice.id) : sessionQuery.eq('installation_hash', installationHash);
-    const { data: session, error } = await sessionQuery.maybeSingle();
+      .eq('id', sessionId)
+      .eq('installation_hash', installationHash)
+      .maybeSingle();
     if (error) throw new Error('server_configuration_error');
     if (!session) return jsonResponse({ errorCategory: 'invalid_pairing_session' }, 404);
 
@@ -68,7 +67,6 @@ Deno.serve(async (request) => {
       .from('pairing_provider_records')
       .select('provider_name')
       .eq('id', session.provider_record_id)
-      .eq('installation_hash', installationHash)
       .maybeSingle();
     if (providerError || !provider) throw new Error('server_configuration_error');
 
@@ -80,7 +78,7 @@ Deno.serve(async (request) => {
     });
   } catch (error) {
     const category = error instanceof Error ? error.message : 'pairing_request_failed';
-    const status = category === 'rate_limited' ? 429 : category === 'invalid_device' ? 400 : 503;
+    const status = category === 'rate_limited' ? 429 : category === 'invalid_device' || category === 'invalid_pairing_session' ? 400 : 503;
     return jsonResponse({ errorCategory: category }, status);
   }
 });

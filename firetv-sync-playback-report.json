@@ -1,0 +1,94 @@
+{
+  "started_at": "2026-07-15T17:59:33.379639",
+  "device": "10.0.0.179:5555",
+  "snapshots": [
+    {
+      "stage": "after_hub_launch_sync_window",
+      "timestamp": "2026-07-15T17:59:54.758112",
+      "pid": "5637",
+      "total_pss_kb": 193741
+    },
+    {
+      "stage": "live_preview_active",
+      "timestamp": "2026-07-15T18:00:53.253559",
+      "pid": "6527",
+      "total_pss_kb": 278292
+    },
+    {
+      "stage": "hold_30s",
+      "timestamp": "2026-07-15T18:01:24.522334",
+      "pid": "6527",
+      "total_pss_kb": 327225
+    },
+    {
+      "stage": "hold_61s",
+      "timestamp": "2026-07-15T18:01:55.499916",
+      "pid": "6527",
+      "total_pss_kb": 337608
+    },
+    {
+      "stage": "hold_92s",
+      "timestamp": "2026-07-15T18:02:26.469122",
+      "pid": "6527",
+      "total_pss_kb": 353315
+    },
+    {
+      "stage": "hold_123s",
+      "timestamp": "2026-07-15T18:02:57.425134",
+      "pid": "6527",
+      "total_pss_kb": 364984
+    },
+    {
+      "stage": "hold_154s",
+      "timestamp": "2026-07-15T18:03:28.499373",
+      "pid": "6527",
+      "total_pss_kb": 379172
+    },
+    {
+      "stage": "hold_185s",
+      "timestamp": "2026-07-15T18:03:59.522860",
+      "pid": "6527",
+      "total_pss_kb": 398525
+    },
+    {
+      "stage": "hold_216s",
+      "timestamp": "2026-07-15T18:04:30.479871",
+      "pid": "6527",
+      "total_pss_kb": 426536
+    },
+    {
+      "stage": "hold_247s",
+      "timestamp": "2026-07-15T18:05:01.559078",
+      "pid": "6527",
+      "total_pss_kb": 431266
+    },
+    {
+      "stage": "hold_278s",
+      "timestamp": "2026-07-15T18:05:32.547196",
+      "pid": "6527",
+      "total_pss_kb": 431580
+    },
+    {
+      "stage": "hold_309s",
+      "timestamp": "2026-07-15T18:06:03.913798",
+      "pid": "6527",
+      "total_pss_kb": 385348
+    },
+    {
+      "stage": "after_preview_closed",
+      "timestamp": "2026-07-15T18:06:08.639483",
+      "pid": "6527",
+      "total_pss_kb": 419972
+    },
+    {
+      "stage": "after_idle_5s",
+      "timestamp": "2026-07-15T18:06:14.710996",
+      "pid": "6527",
+      "total_pss_kb": 420265
+    }
+  ],
+  "sync_log_lines": [],
+  "process_deaths": [],
+  "oom_events": [],
+  "ended_at": "2026-07-15T18:06:14.711040"
+}

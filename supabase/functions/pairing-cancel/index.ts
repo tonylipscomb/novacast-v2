@@ -2,7 +2,7 @@ import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
 import { pairingDiagnostic } from '../_shared/diagnostics.ts';
 import { getAdminClient } from '../_shared/supabase.ts';
 import { hashInstallation, normalizeInstallationId } from '../_shared/security.ts';
-import { authenticateDevice } from '../_shared/device.ts';
+import { optionalAuthenticateDevice } from '../_shared/device.ts';
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return optionsResponse();
@@ -14,16 +14,15 @@ Deno.serve(async (request) => {
     const installationId = normalizeInstallationId(body?.installationId);
     if (!sessionId) return jsonResponse({ errorCategory: 'invalid_pairing_session' }, 400);
     const client = getAdminClient();
-    const authenticatedDevice = request.headers.get('x-novacast-device-id') && request.headers.get('x-novacast-device-secret')
-      ? await authenticateDevice(request, client)
-      : null;
-    let sessionQuery = client
+    // Optional auth: activation-required mode can be enforced later without breaking cancel.
+    await optionalAuthenticateDevice(request, client).catch(() => null);
+
+    const { error } = await client
       .from('pairing_sessions')
       .update({ state: 'cancelled' })
       .eq('id', sessionId)
+      .eq('installation_hash', await hashInstallation(installationId))
       .in('state', ['pending', 'claiming', 'validating']);
-    sessionQuery = authenticatedDevice ? sessionQuery.eq('device_id', authenticatedDevice.id) : sessionQuery.eq('installation_hash', await hashInstallation(installationId));
-    const { error } = await sessionQuery;
     if (error) throw new Error('server_configuration_error');
     pairingDiagnostic('session-cancelled', { state: 'cancelled' });
     return jsonResponse({ status: 'cancelled' });

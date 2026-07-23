@@ -224,7 +224,7 @@ function AdminPage() {
             ].map(([labelText, value]) => (
               <div className="adminStat" key={String(labelText)}>
                 <strong>{String(value ?? 0)}</strong>
-                <span>{labelText}</span>
+                <span>{String(labelText ?? '')}</span>
               </div>
             ))}
             <p className="privacy">Current beta build: {String(dashboard?.currentBetaBuild ?? 'unknown')}</p>

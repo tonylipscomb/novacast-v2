@@ -4,9 +4,26 @@ const ANON_KEY = viteEnv.VITE_SUPABASE_ANON_KEY?.trim() ?? '';
 const SUPABASE_URL = viteEnv.VITE_SUPABASE_URL?.trim() || API_URL.replace(/\/functions\/v1\/?$/, '');
 
 export async function adminLogin(email: string, password: string) {
-  const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, { method: 'POST', headers: { apikey: ANON_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+  if (!SUPABASE_URL || !ANON_KEY) {
+    throw new Error('admin_config_missing');
+  }
+  const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok || typeof payload.access_token !== 'string') throw new Error('admin_login_failed');
+  if (!response.ok || typeof payload.access_token !== 'string') {
+    const category =
+      typeof payload.error_description === 'string'
+        ? payload.error_description
+        : typeof payload.msg === 'string'
+          ? payload.msg
+          : typeof payload.error === 'string'
+            ? payload.error
+            : 'admin_login_failed';
+    throw new Error(category);
+  }
   return payload.access_token as string;
 }
 

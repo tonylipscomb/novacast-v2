@@ -33,12 +33,13 @@ test('showing a notification adds it to visible state', () => {
   assert.equal(snapshot.visible[0].title, 'Hello there');
 });
 
-test('showNotification defaults position to bottom-right and autoFocusAction to false', () => {
+test('showNotification defaults position to bottom-right, passive mode, and autoFocusAction to false', () => {
   showNotification({ id: 'defaults-1', type: 'success', title: 'Saved' });
 
   const [notification] = getNotificationsSnapshot().visible;
   assert.equal(notification.position, 'bottom-right');
   assert.equal(notification.autoFocusAction, false);
+  assert.equal(notification.interactionMode, 'passive');
 });
 
 test('temporary notifications auto-dismiss after their duration', async () => {

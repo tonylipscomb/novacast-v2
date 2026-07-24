@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, Platform, StyleSheet, Text, View } from 'react-native';
+import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 
 import { NovaTvShell } from '@/components/nova';
@@ -10,9 +11,13 @@ import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
 import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
 import { resetOnboarding } from '@/features/onboarding/onboardingStore';
 import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
+import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
+import { getSafeDeviceDiagnostics } from '@/features/device/deviceDiagnostics';
 import { useMoviesSettingsStore } from '@/features/movies/smart/moviesSettingsStore';
 import { useProviderLibrarySummary } from '@/features/providers/providerLibrarySummaryStore';
 import { useProviderStore } from '@/features/providers/providerStore';
+import { getOfflineSnapshot } from '@/features/resilience/offlineStatus';
+import { buildDiagnosticCode, getSanitizedDiagnostics } from '@/features/resilience/sanitizedDiagnostics';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 
 import {
@@ -59,6 +64,10 @@ export function SettingsScreen() {
     selectedProviderExpiration,
     providerInitialized,
   } = useProviderStore();
+  const accessExpiration = useAccessExpirationDisplay({
+    provider: selectedProvider,
+    account: selectedProvider?.account ?? null,
+  });
   const providerId = selectedProvider?.id ?? 'no-provider';
   const { summary } = useProviderLibrarySummary(providerId);
   const {
@@ -102,7 +111,10 @@ export function SettingsScreen() {
     () => ({
       providerName: selectedProvider?.name ?? 'No provider connected',
       providerStatus: providerInitialized ? 'Connected' : selectedProvider ? 'Unavailable' : 'Not connected',
-      expirationLabel: selectedProviderExpiration ?? 'Unknown',
+      expirationCaption: accessExpiration.caption,
+      expirationLabel: accessExpiration.closedBeta
+        ? accessExpiration.value
+        : (selectedProviderExpiration ?? 'Unknown'),
       connectionType: selectedProvider?.connection?.type === 'xtream' ? 'Xtream Codes' : selectedProvider ? 'Provider' : 'None',
       username: selectedProvider?.connection?.type === 'xtream' ? 'Linked account' : '—',
       initialized: providerInitialized,
@@ -111,8 +123,27 @@ export function SettingsScreen() {
       liveChannelCount: summary.liveChannelCount,
       lastSyncLabel: formatSyncLabel(summary.lastProviderSyncAt),
     }),
-    [providerInitialized, selectedProvider, selectedProviderExpiration, summary],
+    [accessExpiration, providerInitialized, selectedProvider, selectedProviderExpiration, summary],
   );
+
+  const betaSupport = useMemo(() => {
+    const device = getSafeDeviceDiagnostics();
+    const network = getOfflineSnapshot().status;
+    const lastError = getSanitizedDiagnostics().at(-1)?.errorType;
+    return {
+      deviceId: device.deviceId,
+      deviceModel: Constants.deviceName ?? Platform.OS,
+      osVersion: String(Platform.Version),
+      activation: device.activation,
+      network,
+      diagnosticCode: buildDiagnosticCode({
+        version: Constants.expoConfig?.version ?? '1.0.1',
+        activation: device.activation,
+        network,
+        lastErrorType: lastError,
+      }),
+    };
+  }, [selectedProvider?.id, summary.lastProviderSyncAt]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -200,14 +231,12 @@ export function SettingsScreen() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleSettingsRetry,
       duration: SETTINGS_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'settings',
     });
-  }, [dismissNotification, failedAction, handleSettingsRetry, showNotification]);
+  }, [dismissNotification, failedAction, showNotification]);
 
   useEffect(() => {
     return () => {
@@ -243,6 +272,7 @@ export function SettingsScreen() {
             pinConfigured={pinConfigured}
             hideSmartCategories={hideSmartCategories}
             account={accountInfo}
+            betaSupport={betaSupport}
             onAppearanceTheme={(value) => void setAppearanceTheme(value)}
             onPlaybackQuality={(value) => void setPlaybackQuality(value)}
             onPlaybackAudio={(value) => void setPlaybackAudio(value)}

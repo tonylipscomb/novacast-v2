@@ -4,8 +4,10 @@ import { useRouter } from 'expo-router';
 
 import { NovaLogo, NovaScreen } from '@/components/nova';
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { isClosedBetaManagedFlow, isPersonalPairingEnabled } from '@/features/device';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import { clearProvidersForPairing, retryProviderInitialization, useProviderStore } from '@/features/providers/providerStore';
+import { downloadManagedProviderAssignment } from '@/features/device/managedProviderDownload';
 import { novaTheme } from '@/theme';
 
 import {
@@ -14,7 +16,12 @@ import {
   resolveAuthInitNotification,
 } from './authScreenLogic';
 
-export function ProviderInitErrorScreen() {
+type ProviderInitErrorScreenProps = {
+  title?: string;
+  message?: string;
+};
+
+export function ProviderInitErrorScreen({ title, message }: ProviderInitErrorScreenProps = {}) {
   const router = useRouter();
   const authRetryAttemptedRef = useRef(false);
   const lastRetryAtRef = useRef(0);
@@ -22,6 +29,7 @@ export function ProviderInitErrorScreen() {
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
   const [focusedAction, setFocusedAction] = useState<'retry' | 'pair'>('retry');
   const [initFailed, setInitFailed] = useState(true);
+  const allowPairAnother = isPersonalPairingEnabled() && !isClosedBetaManagedFlow();
 
   const retry = useCallback(async () => {
     const now = Date.now();
@@ -33,6 +41,9 @@ export function ProviderInitErrorScreen() {
     authRetryAttemptedRef.current = true;
 
     try {
+      if (isClosedBetaManagedFlow()) {
+        await downloadManagedProviderAssignment().catch(() => undefined);
+      }
       await retryProviderInitialization();
       setInitFailed(false);
       authRetryAttemptedRef.current = false;
@@ -50,10 +61,6 @@ export function ProviderInitErrorScreen() {
     router.replace('/pair');
   }, [dismissNotification, router]);
 
-  const handleNotificationRetry = useCallback(() => {
-    void retry();
-  }, [retry]);
-
   useEffect(() => {
     const spec = resolveAuthInitNotification(initFailed && !isSwitchingProvider, authRetryAttemptedRef.current);
     if (!spec) {
@@ -66,14 +73,12 @@ export function ProviderInitErrorScreen() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleNotificationRetry,
       duration: AUTH_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'auth',
     });
-  }, [dismissNotification, handleNotificationRetry, initFailed, isSwitchingProvider, showNotification]);
+  }, [dismissNotification, initFailed, isSwitchingProvider, showNotification]);
 
   useEffect(() => {
     if (!initFailed) {
@@ -91,8 +96,10 @@ export function ProviderInitErrorScreen() {
     <NovaScreen>
       <View style={styles.container}>
         <NovaLogo variant="mark" size="xl" />
-        <Text style={styles.title}>Welcome back</Text>
-        <Text style={styles.copy}>Choose an option below to connect NovaCast to your provider.</Text>
+        <Text style={styles.title}>{title ?? 'Welcome back'}</Text>
+        <Text style={styles.copy}>
+          {message ?? 'Choose an option below to connect NovaCast to your provider.'}
+        </Text>
 
         {isSwitchingProvider ? (
           <>
@@ -109,13 +116,15 @@ export function ProviderInitErrorScreen() {
               style={[styles.button, styles.primaryButton, novaTvFocus.base, focusedAction === 'retry' && novaTvFocus.active]}>
               <Text style={styles.primaryText}>Retry</Text>
             </Pressable>
-            <Pressable
-              focusable
-              onFocus={() => setFocusedAction('pair')}
-              onPress={() => void pairAnother()}
-              style={[styles.button, styles.secondaryButton, novaTvFocus.base, focusedAction === 'pair' && novaTvFocus.active]}>
-              <Text style={styles.secondaryText}>Pair Another Provider</Text>
-            </Pressable>
+            {allowPairAnother ? (
+              <Pressable
+                focusable
+                onFocus={() => setFocusedAction('pair')}
+                onPress={() => void pairAnother()}
+                style={[styles.button, styles.secondaryButton, novaTvFocus.base, focusedAction === 'pair' && novaTvFocus.active]}>
+                <Text style={styles.secondaryText}>Pair Another Provider</Text>
+              </Pressable>
+            ) : null}
           </View>
         )}
       </View>

@@ -1,5 +1,8 @@
 ﻿import { FormEvent, useMemo, useState } from 'react';
 import { activateDevice, adminLogin, adminRequest, failureMessage, isPairingWebConfigured, normalizeCode, pairingWebConfigError, submitPairing, type ProviderInput } from './pairing';
+import { AdminDashboard } from './AdminDashboard';
+import { AdminDevices } from './AdminDevices';
+import { AdminInvitations } from './AdminInvitations';
 
 type ViewState = 'form' | 'submitting' | 'success' | 'error';
 
@@ -72,6 +75,9 @@ function AdminPage() {
   const [providerUsername, setProviderUsername] = useState('');
   const [providerPassword, setProviderPassword] = useState('');
   const [message, setMessage] = useState('');
+  const [lastInviteCode, setLastInviteCode] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
+  const [newInvitationRequested, setNewInvitationRequested] = useState(false);
   const signedIn = Boolean(token);
 
   const load = async (nextToken: string) => {
@@ -92,31 +98,45 @@ function AdminPage() {
     setMessage('');
     try {
       const nextToken = await adminLogin(email, password);
-      setToken(nextToken);
-      await load(nextToken);
-    } catch {
-      setMessage('Administrator sign-in failed.');
+      try {
+        await load(nextToken);
+        setToken(nextToken);
+      } catch (loadError) {
+        const detail = loadError instanceof Error ? loadError.message : 'admin_request_failed';
+        if (detail === 'admin_unauthorized') {
+          setMessage('Signed in, but this account is not an admin. Set app_metadata.role to "admin" in Supabase Auth.');
+        } else {
+          setMessage(`Signed in, but admin APIs failed (${detail}). Check Edge Functions and VITE_PAIRING_API_URL.`);
+        }
+      }
+    } catch (loginError) {
+      const detail = loginError instanceof Error ? loginError.message : 'admin_login_failed';
+      setMessage(
+        detail === 'admin_login_failed'
+          ? 'Administrator sign-in failed. Check email/password, and that this site’s VITE_SUPABASE_URL + anon key match your NovaCast project.'
+          : `Administrator sign-in failed (${detail}).`,
+      );
     }
   };
 
-  const createInvite = async (event: FormEvent) => {
-    event.preventDefault();
+  const createInvite = async (input: { label: string; maximumDevices: number; durationHours: number; managedProviderId: string }) => {
+    const result = await adminRequest('admin-invites', token, {
+      method: 'POST',
+      body: JSON.stringify({ ...input, activationDurationHours: input.durationHours, contentPolicy: 'us_only' }),
+    });
+    const code = typeof result.code === 'string' ? result.code : '';
+    setMessage(code ? 'Invitation created. Copy the code below — it cannot be shown again.' : 'Invitation created.');
+    await load(token);
+    return code;
+  };
+
+  const copyLastInviteCode = async () => {
+    if (!lastInviteCode) return;
     try {
-      const result = await adminRequest('admin-invites', token, {
-        method: 'POST',
-        body: JSON.stringify({
-          label,
-          maximumDevices: Number(maximumDevices),
-          activationDurationHours: Number(durationHours) || 72,
-          managedProviderId: managedProviderId || undefined,
-          contentPolicy: 'us_only',
-        }),
-      });
-      setMessage(`New invitation code: ${result.code}`);
-      setLabel('');
-      await load(token);
+      await navigator.clipboard.writeText(lastInviteCode);
+      setMessage('Invitation code copied.');
     } catch {
-      setMessage('Could not create invitation.');
+      setMessage('Could not copy automatically — select the code and copy it manually.');
     }
   };
 
@@ -166,6 +186,19 @@ function AdminPage() {
     setMessage(`Queued command: ${command}`);
   };
 
+  const refreshDashboard = async () => {
+    if (refreshing || !token) return;
+    setRefreshing(true);
+    try {
+      await load(token);
+      setMessage('Dashboard refreshed.');
+    } catch {
+      setMessage('Could not refresh dashboard data.');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   if (!signedIn) {
     return (
       <main className="shell">
@@ -191,16 +224,10 @@ function AdminPage() {
   }
 
   return (
-    <main className="shell adminShell">
-      <section className="card adminCard">
-        <Brand />
-        <div className="adminHeader">
-          <div>
-            <p className="eyebrow">NOVACAST CLOUD ADMIN</p>
-            <h1>Closed beta control plane</h1>
-          </div>
-          <button onClick={() => setToken('')}>Sign out</button>
-        </div>
+    <main className="adminApp">
+      <aside className="adminSidebar"><Brand /><p className="sidebarKicker">CLOUD ADMIN</p><nav aria-label="Admin navigation">{(['dashboard', 'devices', 'invitations', 'providers'] as const).map((item) => <button key={item} className={tab === item ? 'navActive' : ''} onClick={() => setTab(item)}><span>{item === 'dashboard' ? '⌂' : item === 'devices' ? '▣' : item === 'invitations' ? '✦' : '◈'}</span>{item}</button>)}<button disabled title="Coming soon"><span>◌</span>Activity log</button><button disabled title="Coming soon"><span>◒</span>Analytics</button><button disabled title="Coming soon"><span>⚙</span>Settings</button></nav><div className="adminProfile"><span className="profileAvatar">NC</span><div><strong>NovaCast Admin</strong><small>{email}</small></div><button aria-label="Sign out" onClick={() => setToken('')}>↪</button></div></aside>
+      <section className="adminMain">
+        <header className="dashboardHeader"><div><p className="eyebrow">NOVACAST CLOUD ADMIN</p><h1>{tab === 'devices' ? 'Devices' : tab === 'invitations' ? 'Invitations' : tab[0].toUpperCase() + tab.slice(1)}</h1><p>{tab === 'devices' ? 'Manage and monitor all beta devices' : tab === 'invitations' ? 'Create, manage, and monitor access to the NovaCast beta.' : 'Real-time overview of your closed beta program'}</p></div><div className="headerTools"><span className="liveStatus"><i /> Live</span><button aria-label="Refresh dashboard" onClick={() => void refreshDashboard()} disabled={refreshing}>{refreshing ? '↻' : '⟳'}</button><button aria-label="Notifications">♧</button>{tab === 'devices' ? <button className="addDeviceHeader" onClick={() => setMessage('Devices register themselves from the NovaCast TV. Use the TV pairing screen to add a device.')}>＋ Add device</button> : tab === 'invitations' ? <button className="addDeviceHeader" onClick={() => setNewInvitationRequested(true)}>＋ New invitation</button> : null}</div></header>
         <div className="adminTabs">
           {(['dashboard', 'devices', 'invitations', 'providers'] as const).map((item) => (
             <button key={item} className={tab === item ? 'tabActive' : ''} onClick={() => setTab(item)}>
@@ -210,98 +237,11 @@ function AdminPage() {
         </div>
         {message ? <div className="successNotice">{message}</div> : null}
 
-        {tab === 'dashboard' ? (
-          <div className="adminStats">
-            {[
-              ['Online', dashboard?.devicesOnline],
-              ['Offline', dashboard?.devicesOffline],
-              ['Activated', dashboard?.activatedDevices],
-              ['Expired', dashboard?.expiredDevices],
-              ['Pending', dashboard?.pendingActivations],
-              ['Providers', dashboard?.providers],
-              ['Invites', dashboard?.activeInvitations],
-              ['Command queue', dashboard?.syncQueue],
-            ].map(([labelText, value]) => (
-              <div className="adminStat" key={String(labelText)}>
-                <strong>{String(value ?? 0)}</strong>
-                <span>{String(labelText ?? '')}</span>
-              </div>
-            ))}
-            <p className="privacy">Current beta build: {String(dashboard?.currentBetaBuild ?? 'unknown')}</p>
-          </div>
-        ) : null}
+        {tab === 'dashboard' ? <AdminDashboard data={dashboard as Record<string, unknown> | null} devices={devices} invitations={invitations} providers={providers} onNavigate={setTab} onRefresh={() => void refreshDashboard()} refreshing={refreshing} onCreateInvite={() => setTab('invitations')} /> : null}
 
-        {tab === 'devices' ? (
-          <div>
-            <h2>Devices</h2>
-            {devices.map((device) => (
-              <div className="adminRow" key={String(device.id)}>
-                <div>
-                  <strong>{String(device.public_device_code)}</strong>
-                  <small>
-                    {String(device.assigned_tester_name || device.friendly_name || device.model || 'NovaCast device')} ·{' '}
-                    {String(device.activation_status)} · {String(device.content_policy || 'us_only')} ·{' '}
-                    {String(device.app_version || 'n/a')}
-                  </small>
-                </div>
-                <div className="adminRowActions">
-                  <button onClick={() => void extend(String(device.id), 24)}>+24h</button>
-                  <button onClick={() => void extend(String(device.id), 72)}>+72h</button>
-                  <button onClick={() => void extend(String(device.id), 168)}>+7d</button>
-                  <button onClick={() => void sendCommand(String(device.id), 'refresh_library')}>Refresh</button>
-                  <button onClick={() => void sendCommand(String(device.id), 'run_diagnostics')}>Diagnostics</button>
-                  <button className="dangerButton" onClick={() => void revoke(String(device.id))}>
-                    Revoke
-                  </button>
-                </div>
-              </div>
-            ))}
-            {!devices.length ? <p className="privacy">No registered devices.</p> : null}
-          </div>
-        ) : null}
+        {tab === 'devices' ? <AdminDevices devices={devices} onExtend={(id, hours) => void extend(id, hours)} onCommand={(id) => void sendCommand(id, 'refresh_library')} onRevoke={(id) => void revoke(id)} onMessage={setMessage} /> : null}
 
-        {tab === 'invitations' ? (
-          <div>
-            <h2>Invitations</h2>
-            <form onSubmit={createInvite}>
-              <label>
-                Label
-                <input value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Beta tester" />
-              </label>
-              <label>
-                Maximum devices
-                <input type="number" min="1" value={maximumDevices} onChange={(event) => setMaximumDevices(event.target.value)} />
-              </label>
-              <label>
-                Duration hours
-                <input type="number" min="1" value={durationHours} onChange={(event) => setDurationHours(event.target.value)} />
-              </label>
-              <label>
-                Managed provider
-                <select value={managedProviderId} onChange={(event) => setManagedProviderId(event.target.value)}>
-                  <option value="">None</option>
-                  {providers.map((provider) => (
-                    <option key={String(provider.id)} value={String(provider.id)}>
-                      {String(provider.display_name)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button className="submit">Create invitation</button>
-            </form>
-            {invitations.map((invite) => (
-              <div className="adminRow" key={String(invite.id)}>
-                <div>
-                  <strong>{String(invite.display_label || 'Invitation')}</strong>
-                  <small>
-                    {String(invite.status)} · {String(invite.redeemed_count)} / {String(invite.maximum_devices)} ·{' '}
-                    {String(invite.activation_duration_hours || '—')}h · {String(invite.content_policy || 'us_only')}
-                  </small>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : null}
+        {tab === 'invitations' ? <AdminInvitations invitations={invitations} providers={providers} onCreate={createInvite} onMessage={setMessage} openCreate={newInvitationRequested} onOpenCreateHandled={() => setNewInvitationRequested(false)} /> : null}
 
         {tab === 'providers' ? (
           <div>

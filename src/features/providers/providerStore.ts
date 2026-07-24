@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { classifyProviderFailure } from '../resilience/providerFailureClassifier.ts';
 import { getDevPairingPayload, type PairingConnectionPayload } from '../pairing/pairingBridge.ts';
 import {
   formatPairingTransactionError,
@@ -99,11 +100,8 @@ function setRuntime(next: ProviderRuntimeState) {
 }
 
 function describeSwitchFailure(error: unknown, providerId: string) {
-  if (error instanceof Error && /secure credentials|missing connection details|incomplete/i.test(error.message)) {
-    return 'This provider is missing secure connection details. Pair it again and try again.';
-  }
-
-  return `Unable to connect to provider "${providerId}".`;
+  const classified = classifyProviderFailure(error, { providerLabel: providerId });
+  return classified.message;
 }
 
 function getLegacyCredentials(value: unknown): ProviderCredentialRecord | null {
@@ -808,6 +806,7 @@ export function clearProviderCacheForTests() {
     switchingProviderId: null,
     lastError: null,
   };
+  cachedProviderChrome = null;
 }
 
 export function subscribeProviderState(listener: () => void) {
@@ -936,4 +935,61 @@ export function useProviderStore() {
     },
     [bundleGeneration, expirationLabel, ready, runtimeState, selectedProvider, state],
   );
+}
+
+export type ProviderChromeSnapshot = {
+  selectedProviderId: string | null;
+  selectedProviderName: string;
+  selectedProviderExpiration: string | null;
+  selectedProvider: ProviderRecord | null;
+};
+
+let cachedProviderChrome: ProviderChromeSnapshot | null = null;
+
+/**
+ * Navbar/shell-only provider fields. Stable reference unless displayed chrome changes.
+ * Does not expose sync progress, switching flags, or full provider lists.
+ */
+export function getProviderChromeSnapshot(): ProviderChromeSnapshot {
+  const state = cache ?? createEmptyProviderState();
+  const selectedProvider = getSelectedProvider(state);
+  const selectedProviderExpiration = formatProviderExpirationLabel(
+    selectedProvider,
+    getActiveRepositoryBundle()?.accountMetadata ?? selectedProvider?.account ?? null,
+  );
+  const next: ProviderChromeSnapshot = {
+    selectedProviderId: selectedProvider?.id ?? null,
+    selectedProviderName: selectedProvider?.name ?? 'No provider',
+    selectedProviderExpiration,
+    selectedProvider,
+  };
+
+  if (
+    cachedProviderChrome &&
+    cachedProviderChrome.selectedProviderId === next.selectedProviderId &&
+    cachedProviderChrome.selectedProviderName === next.selectedProviderName &&
+    cachedProviderChrome.selectedProviderExpiration === next.selectedProviderExpiration &&
+    cachedProviderChrome.selectedProvider === next.selectedProvider
+  ) {
+    return cachedProviderChrome;
+  }
+
+  cachedProviderChrome = next;
+  return cachedProviderChrome;
+}
+
+function subscribeProviderChrome(listener: () => void) {
+  const unsubState = subscribeProviderState(listener);
+  const unsubRuntime = subscribeProviderRuntime(listener);
+  const unsubBundle = subscribeRepositoryBundle(listener);
+  return () => {
+    unsubState();
+    unsubRuntime();
+    unsubBundle();
+  };
+}
+
+/** Prefer this in NovaTvShell / headers so catalog sync ticks do not rerender the navbar. */
+export function useProviderChrome() {
+  return useSyncExternalStore(subscribeProviderChrome, getProviderChromeSnapshot, getProviderChromeSnapshot);
 }

@@ -18,7 +18,7 @@ export function resolveContentHubProviderSwitchNotification(
 
   return {
     title: 'Provider switch failed',
-    message: 'We could not connect to that provider. Check your subscription and try again.',
+    message: 'Please select the provider and try again.',
     persistent: retryAttemptedAndStillFailing,
   };
 }

@@ -26,30 +26,24 @@ export function visibleRangeFromViewableItems(
 }
 
 /**
- * Scroll when the focused row is offscreen or within one row of the visible edge.
+ * Scroll only when the focused row is outside the currently visible range.
+ * Near-edge "keep centered" scrolling is left to native TV focus navigation.
  */
 export function shouldScrollToKeepFocusVisible(
   focusedIndex: number,
   visible: VisibleIndexRange | null,
   totalCount: number,
-  edgeBuffer = 1,
+  _edgeBuffer = 0,
 ): boolean {
   if (totalCount <= 0 || focusedIndex < 0 || focusedIndex >= totalCount) {
     return false;
   }
 
   if (visible === null) {
-    return true;
+    return false;
   }
 
-  if (focusedIndex < visible.first || focusedIndex > visible.last) {
-    return true;
-  }
-
-  const nearBottom = focusedIndex >= visible.last - edgeBuffer && focusedIndex < totalCount - 1;
-  const nearTop = focusedIndex <= visible.first + edgeBuffer && focusedIndex > 0;
-
-  return nearBottom || nearTop;
+  return focusedIndex < visible.first || focusedIndex > visible.last;
 }
 
 /** TV channel list keeps the focused row near the middle of the viewport. */

@@ -1,6 +1,7 @@
 import { Image, ImageBackground, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { formatBetaCountdown, getRemainingMs } from '@/features/device/betaAccessCountdown';
 import { useDeviceState } from '@/features/device/deviceActivation';
 import { novaTheme } from '@/theme';
 
@@ -17,7 +18,7 @@ export function BetaExpiredScreen({
   const { width, height } = useWindowDimensions();
   const scale = Math.min(1, Math.max(0.72, Math.min(width / 1280, height / 720)));
   const device = useDeviceState();
-  const remainingHours = device.status?.remainingBetaHours ?? 0;
+  const remainingMs = getRemainingMs(expiresAt) ?? device.status?.remainingBetaMs ?? 0;
 
   return (
     <ImageBackground source={backgroundAsset} resizeMode="cover" style={styles.screen}>
@@ -32,13 +33,9 @@ export function BetaExpiredScreen({
 
         <View style={styles.statRow}>
           <View style={styles.stat}>
-            <Text style={styles.statLabel}>Remaining access</Text>
-            <Text style={[styles.statValue, { fontSize: 28 * scale }]}>{remainingHours} Hours</Text>
-          </View>
-          <View style={styles.stat}>
-            <Text style={styles.statLabel}>Expired at</Text>
-            <Text style={[styles.statValue, { fontSize: 18 * scale }]}>
-              {expiresAt ? new Date(expiresAt).toLocaleString() : 'Unknown'}
+            <Text style={styles.statLabel}>Countdown</Text>
+            <Text style={[styles.statValue, { fontSize: 28 * scale }]}>
+              {formatBetaCountdown(Math.max(0, remainingMs)) ?? '0:00:00'}
             </Text>
           </View>
         </View>

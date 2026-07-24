@@ -2,12 +2,19 @@ import { memo, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import {
+  novaTvFocus,
+  createNovaTvFocusTextStyles,
+  createNovaTvGlassOverlayStyle,
+} from '@/components/nova/novaTvFocus';
 import { displayStreamTitle, formatMediaMetaLabel } from '@/features/series/metadata/titleNormalization';
 import { novaTheme } from '@/theme';
 
 import { logSearchEvent } from './searchDiagnostics';
 import type { MovieSearchResult, SeriesSearchResult } from './searchTypes';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
+const focusGlass = createNovaTvGlassOverlayStyle(novaTheme);
 
 type SearchPosterCardProps = {
   result: MovieSearchResult | SeriesSearchResult;
@@ -88,12 +95,13 @@ export const SearchPosterCard = memo(function SearchPosterCard({
         ) : (
           <Text style={styles.initials}>{makeInitials(result.title)}</Text>
         )}
+        {nativeFocused ? <View pointerEvents="none" style={styles.focusGlass} /> : null}
       </View>
       <Text numberOfLines={2} style={[styles.title, nativeFocused && styles.titleFocused]}>
         {displayStreamTitle(result.title)}
       </Text>
       {metaPrimary ? (
-        <Text numberOfLines={1} style={styles.meta}>
+        <Text numberOfLines={1} style={[styles.meta, nativeFocused && styles.metaFocused]}>
           {metaPrimary}
         </Text>
       ) : null}
@@ -110,10 +118,8 @@ const styles = StyleSheet.create({
   },
   cardFocused: {
     borderColor: 'transparent',
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 7,
   },
+  focusGlass: focusGlass,
   poster: {
     aspectRatio: 2 / 3,
     borderRadius: 0,
@@ -148,9 +154,9 @@ const styles = StyleSheet.create({
     minHeight: 28,
   },
   titleFocused: {
-    color: novaTheme.colors.accentHover,
-    textShadowColor: novaTheme.colors.focusRing,
-    textShadowRadius: 8,
+    ...focusText.title,
+    fontSize: 12,
+    fontWeight: '900',
   },
   meta: {
     marginTop: 1,
@@ -158,4 +164,5 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
   },
+  metaFocused: focusText.secondary,
 });

@@ -506,14 +506,17 @@ export function useMoviesScreenModel(
     });
   };
 
-  const focusMovie = (movie: MovieSummary) => {
-    logMoviesAction('movie-focused', { movieId: movie.id });
-    focusedMovieIdRef.current = movie.id;
-    setFocusedMovieId(movie.id);
-    rememberMoviesScreenMemory(activeProviderId, {
-      focusedMovieId: movie.id,
-    });
-  };
+  const focusMovie = useCallback(
+    (movie: MovieSummary) => {
+      // Keep D-pad focus out of React state — matching Series. Local poster chrome
+      // handles highlight; writing focusedMovieId here re-renders the whole grid.
+      focusedMovieIdRef.current = movie.id;
+      rememberMoviesScreenMemory(activeProviderId, {
+        focusedMovieId: movie.id,
+      });
+    },
+    [activeProviderId],
+  );
 
   const selectMovie = (movie: MovieSummary) => {
     logMoviesAction('movie-selected', { movieId: movie.id });
@@ -642,7 +645,8 @@ export function useMoviesScreenModel(
     movieDetail: resolvedDataSource ? movieDetail : null,
     detailLoading: resolvedDataSource ? detailLoading : false,
     detailError: resolvedDataSource ? detailError : null,
-    resolvePlaybackMovieId: () => resolvePlaybackMovieId(selectedMovieId, focusedMovieId),
+    resolvePlaybackMovieId: () => resolvePlaybackMovieId(selectedMovieId, focusedMovieIdRef.current),
+    getFocusedMovieId: () => focusedMovieIdRef.current,
     loadMore,
     reload,
     searchQuery,

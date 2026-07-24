@@ -84,16 +84,46 @@ export class MovieCatalogIndex {
   private sourceUniqueIds = new Set<string>();
   private indexTruncated = false;
   private categoryLoadTruncated = false;
+  private pendingRestore: {
+    entries: Map<string, MovieCatalogEntry>;
+    sourceUniqueIds: Set<string>;
+    indexTruncated: boolean;
+    categoryLoadTruncated: boolean;
+  } | null = null;
 
   constructor(providerId: string) {
     this.providerId = providerId;
   }
 
   beginSync() {
+    // Snapshot prior catalog so a failed refresh can restore usable browse data.
+    this.pendingRestore = {
+      entries: new Map(this.entries),
+      sourceUniqueIds: new Set(this.sourceUniqueIds),
+      indexTruncated: this.indexTruncated,
+      categoryLoadTruncated: this.categoryLoadTruncated,
+    };
     this.entries.clear();
     this.sourceUniqueIds.clear();
     this.indexTruncated = false;
     this.categoryLoadTruncated = false;
+  }
+
+  /** Restore the pre-sync catalog after a failed refresh. */
+  abortSync() {
+    if (!this.pendingRestore) {
+      return;
+    }
+    this.entries = this.pendingRestore.entries;
+    this.sourceUniqueIds = this.pendingRestore.sourceUniqueIds;
+    this.indexTruncated = this.pendingRestore.indexTruncated;
+    this.categoryLoadTruncated = this.pendingRestore.categoryLoadTruncated;
+    this.pendingRestore = null;
+  }
+
+  /** Drop the snapshot after a successful sync commit. */
+  commitSync() {
+    this.pendingRestore = null;
   }
 
   markCategoryLoadTruncated() {

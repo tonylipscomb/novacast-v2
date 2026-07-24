@@ -1,17 +1,18 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
-import { novaTheme } from '@/theme';
 
 type UnifiedPlayerLoadingStateProps = {
   title?: string;
 };
 
+/** Centered compact spaceship pulse — no label, no energy bar, no dim panel. */
 export function UnifiedPlayerLoadingState({ title }: UnifiedPlayerLoadingStateProps) {
+  const label = title ? `Loading ${title}` : 'Starting playback';
+
   return (
-    <View style={styles.container}>
-      <NovaSpaceLoader label={title ? `Loading ${title}…` : 'Starting playback…'} />
-      <Text style={styles.hint}>Buffering stream</Text>
+    <View style={styles.container} pointerEvents="none" accessibilityLabel={label}>
+      <NovaSpaceLoader label={label} variant="badge" />
     </View>
   );
 }
@@ -21,13 +22,8 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.45)',
-    gap: 10,
-    zIndex: 4,
-  },
-  hint: {
-    color: novaTheme.colors.textMuted,
-    fontSize: 12,
-    fontWeight: '600',
+    backgroundColor: 'transparent',
+    // Below control chrome (zIndex 3) so the badge never covers title / seek UI.
+    zIndex: 2,
   },
 });

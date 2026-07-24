@@ -2,8 +2,10 @@ import type { RefObject } from 'react';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 type NovaScopeTabsProps<T extends string> = {
   options: readonly T[];
@@ -62,7 +64,7 @@ export function NovaScopeTabs<T extends string>({
             {...(focusUpHandle ? { nextFocusUp: focusUpHandle } : null)}
             {...(focusDownHandle ? { nextFocusDown: focusDownHandle } : null)}
             {...(option === options[0] && focusLeftHandle ? { nextFocusLeft: focusLeftHandle } : null)}
-            style={[styles.tab, novaTvFocus.base, focused && styles.tabFocused]}>
+            style={[styles.tab, novaTvFocus.base, focused && novaTvFocus.active]}>
             <Text style={[styles.tabText, active && !focused && styles.tabTextActive, focused && styles.tabTextFocused]}>
               {label}
             </Text>
@@ -100,10 +102,7 @@ const styles = StyleSheet.create({
   tabTextActive: {
     color: novaTheme.colors.textPrimary,
   },
-  tabTextFocused: {
-    color: novaTheme.colors.accentHover,
-    fontWeight: '800',
-  },
+  tabTextFocused: focusText.title,
   activeIndicator: {
     position: 'absolute',
     left: 0,
@@ -111,11 +110,5 @@ const styles = StyleSheet.create({
     bottom: 0,
     height: 2,
     backgroundColor: novaTheme.colors.success,
-  },
-  tabFocused: {
-    backgroundColor: 'transparent',
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 6,
   },
 });

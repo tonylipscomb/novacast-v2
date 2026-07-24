@@ -2,7 +2,7 @@
   "expo": {
     "name": "NovaCast",
     "slug": "novacast-v2",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "landscape",
     "icon": "./assets/images/icon.png",
     "scheme": "novacastv2",
@@ -12,9 +12,8 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#07090D",
+        "backgroundColor": "#32145F",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "usesCleartextTraffic": true,
@@ -37,12 +36,20 @@
         }
       ],
       "expo-secure-store",
-      "expo-video"
+      "expo-video",
+      [
+        "@sentry/react-native/expo",
+        {
+          "url": "https://sentry.io/",
+          "project": "novacast-tv",
+          "organization": "launchpoint-digital"
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
     },
-    "backgroundColor": "#07090D"
+    "backgroundColor": "#32145F"
   }
 }

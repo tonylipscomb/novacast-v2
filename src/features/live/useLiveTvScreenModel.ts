@@ -206,18 +206,14 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         return;
       }
 
-      const persistedCountIndex = await readCategoryCountIndex(bundle.providerId, 'live');
-      if (requestId !== requestRef.current) {
-        return;
-      }
-
-      const hydratedCategories = nextCategories.map((category) => ({
+      // Don't block first paint on count-index disk I/O — hydrate counts in the background.
+      const categoriesWithoutCounts = nextCategories.map((category) => ({
         ...category,
-        count: category.count ?? persistedCountIndex.counts[category.id] ?? null,
+        count: category.count ?? null,
       }));
-      setBaseCategories(hydratedCategories);
+      setBaseCategories(categoriesWithoutCounts);
       const visibleCategories = [
-        ...hydratedCategories.filter((category) => category.id !== 'favorites'),
+        ...categoriesWithoutCounts.filter((category) => category.id !== 'favorites'),
         ...(personalizationState.liveFavorites.length
           ? [
               {
@@ -243,6 +239,21 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         : visibleCategories[0]?.id ?? '';
 
       setSelectedCategoryId(resolvedCategoryId);
+
+      void readCategoryCountIndex(bundle.providerId, 'live')
+        .then((persistedCountIndex) => {
+          if (requestId !== requestRef.current) {
+            return;
+          }
+
+          setBaseCategories((current) =>
+            current.map((category) => ({
+              ...category,
+              count: category.count ?? persistedCountIndex.counts[category.id] ?? null,
+            })),
+          );
+        })
+        .catch(() => undefined);
 
       const nextChannels = await loadChannelsForCategory(resolvedCategoryId, signal);
       if (requestId !== requestRef.current) {
@@ -278,9 +289,8 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         return;
       }
 
-      channelsBaselineRef.current = [];
-      setChannels([]);
-      setStatus('error');
+      // Keep last-good channels on refresh failure — do not wipe a usable browse list.
+      setStatus(channelsBaselineRef.current.length ? 'ready' : 'error');
       setErrorMessage('Unable to load live channels from your provider.');
     }
   }, [applyCategoryCounts, bundle, initialCategoryId, commitChannels, loadChannelsForCategory, personalizationState.liveFavorites.length, prefetchChannelEpg, updateCategoryCount]);
@@ -330,11 +340,10 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
           return [];
         }
 
-        channelsBaselineRef.current = [];
-        setChannels([]);
-        setStatus('error');
+        // Retain previous category list on failure so the user is not left with an empty rail.
+        setStatus(channelsBaselineRef.current.length ? 'ready' : 'error');
         setErrorMessage('Unable to load channels for this category.');
-        return [];
+        return channelsBaselineRef.current;
       }
     },
     [bundle, commitChannels, loadChannelsForCategory, prefetchChannelEpg, updateCategoryCount],

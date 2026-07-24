@@ -2,7 +2,11 @@ import { spawnSync } from 'node:child_process';
 
 const suites = [
   'app-notifications.test.mjs',
+  'architecture-cleanup.test.mjs',
+  'beta-readiness-resilience.test.mjs',
   'notification-focus.test.mjs',
+  'tv-focus-stabilization.test.mjs',
+  'movies-series-stabilization.test.mjs',
   'auth-notifications.test.mjs',
   'category-regional-pipeline.test.mjs',
   'category-normalization.test.mjs',
@@ -16,8 +20,10 @@ const suites = [
   'library-performance.test.mjs',
   'live-guide-smoke.test.mjs',
   'live-tv-channel-accent.test.mjs',
+  'live-tv-focus-pass2.test.mjs',
   'guide-polish.test.mjs',
   'live-tv-scroll-perf.test.mjs',
+  'tv-focus-stabilization.test.mjs',
   'navigation-smoke.test.mjs',
   'new-releases-curation.test.mjs',
   'onboarding-smoke.test.mjs',

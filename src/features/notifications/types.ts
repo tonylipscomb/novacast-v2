@@ -1,6 +1,12 @@
 export type AppNotificationType = 'error' | 'warning' | 'success' | 'info';
 export type AppNotificationPosition = 'top-right' | 'bottom-right' | 'bottom-center';
 
+/**
+ * `passive` (default): non-blocking toast — never steals TV focus or intercepts Back.
+ * `blocking`: rare modal-style toast that may capture focus for an explicit choice.
+ */
+export type NotificationInteractionMode = 'passive' | 'blocking';
+
 export type AppNotification = {
   id: string;
   type: AppNotificationType;
@@ -17,11 +23,12 @@ export type AppNotification = {
   /** Collapses repeated triggers of the same underlying condition into one entry instead of stacking duplicates. */
   dedupeKey?: string;
   /**
-   * When true, the notification's Retry/action button receives initial TV focus instead of
-   * Dismiss. Defaults to false: toasts snap focus to Dismiss and trap it there until the
-   * toast is dismissed or its action is activated.
+   * Only meaningful for `blocking` notifications. When true, Retry/action receives
+   * initial TV focus instead of Dismiss.
    */
   autoFocusAction?: boolean;
+  /** Defaults to `passive`. Existing call sites stay non-blocking unless they opt in. */
+  interactionMode?: NotificationInteractionMode;
 };
 
 export type ShowNotificationInput = Omit<AppNotification, 'id'> & { id?: string };

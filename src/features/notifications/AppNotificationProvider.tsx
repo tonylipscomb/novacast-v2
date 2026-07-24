@@ -5,6 +5,7 @@ import { Platform, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppNotificationToast } from './AppNotificationToast';
+import { shouldCaptureNotificationFocus } from './notificationFocusLogic';
 import { getNotificationsSnapshot, subscribeNotifications } from './notificationStore';
 import type { AppNotification, AppNotificationPosition } from './types';
 
@@ -26,8 +27,7 @@ const FocusBoundaryView = (
 ) as ComponentType<FocusBoundaryProps>;
 
 // Bottom buckets use a generous base offset so a bottom-right/bottom-center toast clears
-// typical screen-level bottom chrome (e.g. Guide's Program Details panel, which sits at
-// roughly safeArea.bottom + its own ~78px height + gap below the content area) without
+// typical screen-level bottom chrome (e.g. Guide's Program Details panel) without
 // this generic host needing per-screen positioning knowledge.
 const POSITION_OFFSETS: Record<AppNotificationPosition, PositionOffsets> = {
   'top-right': { top: 24, right: 24 },
@@ -55,8 +55,8 @@ function groupByPosition(notifications: AppNotification[]): Record<AppNotificati
 }
 
 /**
- * Mounted once near the app root. Toast cards trap TV focus locally; the scrim must
- * stay non-interactive so playback and full-screen overlays remain usable underneath.
+ * Mounted once near the app root. Passive toasts never steal TV focus.
+ * Blocking toasts may trap focus locally; the scrim stays non-interactive.
  */
 export function AppNotificationProvider() {
   const { visible } = useNotificationsSnapshot();
@@ -67,19 +67,22 @@ export function AppNotificationProvider() {
   }
 
   const groups = groupByPosition(visible);
-  const topmostToastId = visible[visible.length - 1]?.id ?? null;
+  const topmostToast = visible[visible.length - 1] ?? null;
+  const anyBlocking = visible.some((notification) =>
+    shouldCaptureNotificationFocus(notification.id === topmostToast?.id, notification.interactionMode),
+  );
 
   return (
     <View
       pointerEvents="box-none"
       style={styles.host}
-      accessibilityViewIsModal
-      importantForAccessibility="yes">
+      accessibilityViewIsModal={anyBlocking}
+      importantForAccessibility={anyBlocking ? 'yes' : 'no-hide-descendants'}>
       <View pointerEvents="none" style={styles.focusScrim} accessible={false} importantForAccessibility="no" />
       <FocusBoundaryView
         style={styles.focusGuide}
         pointerEvents="box-none"
-        {...(Platform.OS === 'android'
+        {...(Platform.OS === 'android' && anyBlocking
           ? {
               trapFocusLeft: true,
               trapFocusRight: true,
@@ -112,7 +115,10 @@ export function AppNotificationProvider() {
                 <AppNotificationToast
                   key={notification.id}
                   notification={notification}
-                  captureFocus={notification.id === topmostToastId}
+                  captureFocus={shouldCaptureNotificationFocus(
+                    notification.id === topmostToast?.id,
+                    notification.interactionMode,
+                  )}
                 />
               ))}
             </View>

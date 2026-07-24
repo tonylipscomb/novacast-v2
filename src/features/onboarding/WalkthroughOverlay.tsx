@@ -12,8 +12,10 @@ import {
 import * as ReactNative from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 export type WalkthroughStep = {
   title: string;
@@ -186,7 +188,9 @@ export function WalkthroughOverlay({
                   goTo(clampedIndex + 1);
                 }}
                 style={[styles.actionButton, novaTvFocus.base, focused === 'action' && novaTvFocus.active]}>
-                <Text style={styles.actionLabel}>{isLastStep ? 'Got it' : 'Next'}</Text>
+                <Text style={[styles.actionLabel, focused === 'action' && styles.actionLabelFocused]}>
+                  {isLastStep ? 'Got it' : 'Next'}
+                </Text>
               </Pressable>
             </View>
           </View>
@@ -338,4 +342,5 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '800',
   },
+  actionLabelFocused: focusText.title,
 });

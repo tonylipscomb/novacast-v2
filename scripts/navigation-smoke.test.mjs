@@ -72,25 +72,42 @@ test('Live TV fullscreen launch source: second OK on the ready, previewing chann
   assert.equal(chooseLiveChannel(ready, 'chan-1').fullscreenChannelId, 'chan-1');
 });
 
-test('Live TV first OK on an already-ready channel confirms preview without fullscreen', () => {
+test('Live TV OK on a ready channel without confirmation only confirms preview', () => {
   const state = createInitialLiveTvState('cat-1', 'chan-1');
-  const ready = { ...state, previewStatus: 'ready' };
+  const readyUnconfirmed = {
+    ...state,
+    previewStatus: 'ready',
+    previewConfirmedChannelId: null,
+  };
 
-  assert.equal(isChannelPressEnteringFullscreen(ready, 'chan-1'), false);
-  const afterFirstOk = chooseLiveChannel(ready, 'chan-1');
+  assert.equal(isChannelPressEnteringFullscreen(readyUnconfirmed, 'chan-1'), false);
+  const afterFirstOk = chooseLiveChannel(readyUnconfirmed, 'chan-1');
   assert.equal(afterFirstOk.fullscreenChannelId, null);
   assert.equal(afterFirstOk.previewConfirmedChannelId, 'chan-1');
   assert.equal(afterFirstOk.previewStatus, 'ready');
 });
 
-test('Live TV accepted channel OK requests preview action focus, but second OK does not', () => {
+test('Live TV OK on category auto-preview (already confirmed + ready) enters fullscreen', () => {
   const state = createInitialLiveTvState('cat-1', 'chan-1');
   const ready = { ...state, previewStatus: 'ready' };
-  const selected = chooseLiveChannel(ready, 'chan-1');
+
+  assert.equal(ready.previewConfirmedChannelId, 'chan-1');
+  assert.equal(isChannelPressEnteringFullscreen(ready, 'chan-1'), true);
+  assert.equal(chooseLiveChannel(ready, 'chan-1').fullscreenChannelId, 'chan-1');
+});
+
+test('Live TV accepted channel OK requests preview action focus, but second OK does not', () => {
+  const state = createInitialLiveTvState('cat-1', 'chan-1');
+  const readyUnconfirmed = {
+    ...state,
+    previewStatus: 'ready',
+    previewConfirmedChannelId: null,
+  };
+  const selected = chooseLiveChannel(readyUnconfirmed, 'chan-1');
   const confirmed = { ...selected, previewStatus: 'ready' };
   const fullscreen = chooseLiveChannel({ ...confirmed, previewConfirmedChannelId: 'chan-1' }, 'chan-1');
 
-  assert.equal(shouldFocusPreviewActionAfterChannelOk(ready, selected, 'chan-1'), true);
+  assert.equal(shouldFocusPreviewActionAfterChannelOk(readyUnconfirmed, selected, 'chan-1'), true);
   assert.equal(shouldFocusPreviewActionAfterChannelOk(confirmed, fullscreen, 'chan-1'), false);
 });
 

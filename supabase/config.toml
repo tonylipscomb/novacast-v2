@@ -14,3 +14,37 @@ verify_jwt = true
 
 [functions.pairing-cancel]
 verify_jwt = true
+
+# Device endpoints authenticate via x-novacast-device-* headers (plus anon apikey).
+[functions.device-register]
+verify_jwt = false
+
+[functions.device-activate]
+verify_jwt = false
+
+[functions.device-status]
+verify_jwt = false
+
+[functions.device-heartbeat]
+verify_jwt = false
+
+[functions.device-provider-assignment]
+verify_jwt = false
+
+[functions.admin-devices]
+verify_jwt = false
+
+[functions.admin-invites]
+verify_jwt = false
+
+[functions.admin-device-action]
+verify_jwt = false
+
+[functions.admin-providers]
+verify_jwt = false
+
+[functions.admin-dashboard]
+verify_jwt = false
+
+[functions.admin-commands]
+verify_jwt = false

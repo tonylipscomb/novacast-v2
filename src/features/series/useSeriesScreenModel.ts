@@ -353,6 +353,12 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
     detailError,
     loadSeriesDetail,
     continueWatching,
+    isSelectedFavorite: browser.selectedItem
+      ? library.isFavorite(browser.selectedItem.seriesId)
+      : false,
+    isSelectedWatchlisted: browser.selectedItem
+      ? library.isWatchlisted(browser.selectedItem.seriesId)
+      : false,
     hasDataSource: Boolean(resolvedDataSource),
     bundle,
     activeProviderId,

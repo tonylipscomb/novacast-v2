@@ -52,11 +52,29 @@ export function BetaInviteActivationScreen({ onActivated }: { onActivated?: () =
     } catch (activationError) {
       const message =
         activationError instanceof Error ? activationError.message : 'activation_unavailable';
-      setError(
+      const friendly =
         message === 'rate_limited'
           ? 'Too many attempts. Wait a moment and try again.'
-          : 'That invitation code could not be used. Check the code and try again.',
-      );
+          : message === 'invite_not_found'
+            ? 'That invitation code was not recognized. Create a new invite and copy it carefully.'
+            : message === 'invite_exhausted' || message === 'invite_inactive' || message === 'invite_expired'
+              ? 'That invitation can no longer be used. Create a new one in admin.'
+              : message === 'device_not_found'
+                ? 'This TV is not registered yet. Wait for the Device ID, then try again.'
+                : message === 'device_blocked'
+                  ? 'This TV has been blocked. Ask admin to restore it.'
+                  : message === 'provider_not_assigned' || message === 'managed_provider_unavailable'
+                    ? 'Invite accepted, but no provider was assigned. Recreate the invite with BetaTester selected.'
+                    : message === 'provider_unavailable' || message === 'provider_download_failed'
+                      ? 'Invite accepted, but the library download failed. Try again or check provider credentials/encryption.'
+                      : message === 'activation_rpc_missing'
+                        ? 'Backend activation is outdated. Apply the closed-beta migration, then try a new invite.'
+                        : message === 'activation_expired'
+                          ? 'This device activation has expired. Ask admin to extend access.'
+                          : message === 'invalid_device' || message === 'device_registration_failed'
+                            ? 'This TV could not register with NovaCast. Check network and try again.'
+                            : `That invitation code could not be used (${message}). Check the code and try again.`;
+      setError(friendly);
       setPhase('error');
     } finally {
       submittingRef.current = false;

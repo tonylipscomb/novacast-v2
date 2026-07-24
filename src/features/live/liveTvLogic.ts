@@ -16,32 +16,51 @@ export function createInitialLiveTvState(
   selectedCategoryId = 'entertainment',
   selectedChannelId = 'entertainment-nova-one',
 ): LiveTvState {
+  const hasChannel = Boolean(selectedChannelId);
+
   return {
     selectedCategoryId,
     selectedChannelId,
-    previewChannelId: selectedChannelId,
-    previewStatus: 'loading',
-    previewRequestId: 1,
+    // Arrive on Live TV / a category with an auto-starting preview of the landing channel.
+    previewChannelId: hasChannel ? selectedChannelId : null,
+    previewStatus: hasChannel ? 'loading' : 'idle',
+    previewRequestId: hasChannel ? 1 : 0,
     previewError: null,
-    previewConfirmedChannelId: null,
+    previewConfirmedChannelId: hasChannel ? selectedChannelId : null,
     fullscreenChannelId: null,
   };
 }
 
 export function selectLiveCategory(state: LiveTvState, categoryId: string, firstChannelId: string): LiveTvState {
-  if (state.selectedCategoryId === categoryId && state.selectedChannelId === firstChannelId) {
+  if (
+    state.selectedCategoryId === categoryId &&
+    state.selectedChannelId === firstChannelId &&
+    state.previewChannelId === firstChannelId &&
+    (state.previewStatus === 'loading' || state.previewStatus === 'ready')
+  ) {
     return state;
+  }
+
+  if (!firstChannelId) {
+    return {
+      ...state,
+      selectedCategoryId: categoryId,
+      selectedChannelId: '',
+      previewConfirmedChannelId: null,
+      fullscreenChannelId: null,
+    };
   }
 
   return {
     ...state,
     selectedCategoryId: categoryId,
     selectedChannelId: firstChannelId,
+    // Explicit category selection (OK/press): auto-start preview for the first channel once.
     previewChannelId: firstChannelId,
+    previewConfirmedChannelId: firstChannelId,
     previewStatus: 'loading',
     previewRequestId: state.previewRequestId + 1,
     previewError: null,
-    previewConfirmedChannelId: null,
     fullscreenChannelId: null,
   };
 }
@@ -57,20 +76,41 @@ export function clearPreviewConfirmationOnFocus(state: LiveTvState, focusedChann
   };
 }
 
-/** Move preview/selection highlight with D-pad focus without confirming OK. */
+/**
+ * Record focus without changing selection or starting preview.
+ * Selection stays on the last OK/category tune.
+ */
 export function focusLiveChannel(state: LiveTvState, channelId: string): LiveTvState {
-  if (state.selectedChannelId === channelId && state.previewChannelId === channelId) {
-    return clearPreviewConfirmationOnFocus(state, channelId);
+  let next = clearPreviewConfirmationOnFocus(state, channelId);
+
+  if (next.fullscreenChannelId && next.fullscreenChannelId !== channelId) {
+    next = {
+      ...next,
+      fullscreenChannelId: null,
+    };
+  }
+
+  return next;
+}
+
+/**
+ * Apply a focus-debounced preview without treating it as an OK selection.
+ * Does not bump selectedChannelId or previewConfirmedChannelId.
+ */
+export function applyDebouncedPreview(state: LiveTvState, channelId: string): LiveTvState {
+  if (
+    state.previewChannelId === channelId &&
+    (state.previewStatus === 'loading' || state.previewStatus === 'ready')
+  ) {
+    return state;
   }
 
   return {
     ...state,
-    selectedChannelId: channelId,
     previewChannelId: channelId,
     previewStatus: 'loading',
     previewRequestId: state.previewRequestId + 1,
     previewError: null,
-    previewConfirmedChannelId: null,
     fullscreenChannelId: null,
   };
 }
@@ -201,4 +241,3 @@ export function createLiveTvShellState(selectedCategoryId: string): LiveTvState 
     fullscreenChannelId: null,
   };
 }
-

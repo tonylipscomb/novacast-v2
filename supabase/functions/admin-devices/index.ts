@@ -11,7 +11,16 @@ Deno.serve(async (request) => {
     if (search) query = query.or(`public_device_code.ilike.%${search}%,friendly_name.ilike.%${search}%,model.ilike.%${search}%`);
     const { data, error } = await query;
     if (error) throw new Error('admin_query_failed');
-    return jsonResponse({ devices: data ?? [] });
+    const deviceRows = data ?? [];
+    const ids = deviceRows.map((row) => row.id).filter((id): id is string => typeof id === 'string');
+    const activations = ids.length
+      ? await client.from('device_activations').select('device_id,expires_at').in('device_id', ids).eq('status', 'active')
+      : { data: [], error: null };
+    if (activations.error) throw new Error('admin_query_failed');
+    const expiryByDevice = new Map((activations.data ?? []).map((row) => [row.device_id, row.expires_at]));
+    return jsonResponse({
+      devices: deviceRows.map((row) => ({ ...row, activation_expires_at: expiryByDevice.get(row.id) ?? null })),
+    });
   } catch (error) {
     const category = error instanceof Error && error.message === 'admin_unauthorized' ? error.message : 'admin_query_failed';
     return jsonResponse({ errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);

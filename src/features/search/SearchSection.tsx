@@ -1,9 +1,11 @@
 import { FlatList, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { useState } from 'react';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 import { SearchPosterCard } from './SearchPosterCard';
 import { SearchResults } from './SearchResults';
@@ -188,10 +190,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
-  viewAllTextFocused: {
-    color: novaTheme.colors.textPrimary,
-    fontWeight: '800',
-  },
+  viewAllTextFocused: focusText.title,
   posterRow: {
     gap: novaTheme.density.artworkGap,
     paddingBottom: 4,

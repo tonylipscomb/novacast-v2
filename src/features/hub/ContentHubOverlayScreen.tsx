@@ -177,8 +177,6 @@ export function ContentHubOverlayScreen() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: retryProviderId ? 'Retry' : undefined,
-      onAction: retryProviderId ? handleSwitchRetry : undefined,
       duration: CONTENT_HUB_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
@@ -186,10 +184,8 @@ export function ContentHubOverlayScreen() {
     });
   }, [
     dismissNotification,
-    handleSwitchRetry,
     isSwitchingProvider,
     providerSwitchError,
-    retryProviderId,
     showNotification,
   ]);
 

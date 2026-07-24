@@ -1,9 +1,10 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ElementRef } from 'react';
-import { useEffect, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
+import { createNovaTvGlassOverlayStyle, NOVA_TV_GLASS } from '@/components/nova/novaTvFocus';
 import { displayStreamTitle, formatMediaMetaLabel } from '@/features/series/metadata/titleNormalization';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
@@ -18,6 +19,8 @@ type MoviePosterCardProps = {
   registerRef?: (instance: ElementRef<typeof Pressable> | null) => void;
   isDiscover?: boolean;
   focusable?: boolean;
+  /** When true, Down stays on this card (last row) instead of jumping to categories/nav. */
+  trapFocusDown?: boolean;
 };
 
 const POSTER_THEMES: Record<
@@ -47,7 +50,20 @@ function makeInitials(title: string) {
     .join('');
 }
 
-export function MoviePosterCard({
+function moviePosterCardPropsAreEqual(previous: MoviePosterCardProps, next: MoviePosterCardProps) {
+  return (
+    previous.movie === next.movie &&
+    previous.hasPreferredFocus === next.hasPreferredFocus &&
+    previous.focusable === next.focusable &&
+    previous.isDiscover === next.isDiscover &&
+    previous.trapFocusDown === next.trapFocusDown &&
+    previous.onFocus === next.onFocus &&
+    previous.onPress === next.onPress
+    // registerRef intentionally ignored — ref wiring must not invalidate memo.
+  );
+}
+
+export const MoviePosterCard = memo(function MoviePosterCard({
   movie,
   hasPreferredFocus,
   onFocus,
@@ -55,11 +71,14 @@ export function MoviePosterCard({
   registerRef,
   isDiscover = false,
   focusable = true,
+  trapFocusDown = false,
 }: MoviePosterCardProps) {
+  void isDiscover;
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [isFocused, setIsFocused] = useState(false);
   const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
+  const [selfFocusHandle, setSelfFocusHandle] = useState<number | undefined>();
   const posterColors = getPosterColors(movie.posterStyleKey);
   const initials = makeInitials(movie.title);
   const posterKey = `${movie.id}:${movie.posterUrl ?? ''}`;
@@ -76,12 +95,26 @@ export function MoviePosterCard({
     setIsFocused(false);
   }, [movie.id]);
 
+  const bindRef = useCallback(
+    (instance: ElementRef<typeof Pressable> | null) => {
+      registerRef?.(instance);
+      if (!trapFocusDown) {
+        setSelfFocusHandle((prev) => (prev === undefined ? prev : undefined));
+        return;
+      }
+      const handle = instance ? findNodeHandle(instance) ?? undefined : undefined;
+      setSelfFocusHandle((prev) => (prev === handle ? prev : handle));
+    },
+    [registerRef, trapFocusDown],
+  );
+
   return (
     <Pressable
-      ref={registerRef}
+      ref={bindRef}
       focusable={focusable}
       disabled={!focusable}
       hasTVPreferredFocus={hasPreferredFocus}
+      {...(trapFocusDown && selfFocusHandle != null ? { nextFocusDown: selfFocusHandle } : null)}
       onFocus={() => {
         setIsFocused(true);
         onFocus(movie);
@@ -90,7 +123,12 @@ export function MoviePosterCard({
       onPress={() => onPress?.(movie)}
       style={styles.card}>
       <View style={[styles.posterShell, isFocused && styles.posterShellFocused]}>
-        <View style={[styles.poster, showPosterArt ? styles.posterWithArt : { backgroundColor: posterColors.background }, isFocused && styles.posterFocused]}>
+        <View
+          style={[
+            styles.poster,
+            showPosterArt ? styles.posterWithArt : { backgroundColor: posterColors.background },
+            isFocused && styles.posterFocused,
+          ]}>
           {showPosterArt ? (
             <>
               <TvRemoteImage uri={movie.posterUrl} style={styles.posterImage} onError={() => setFailedPosterKey(posterKey)} />
@@ -127,10 +165,11 @@ export function MoviePosterCard({
               ) : null}
             </>
           )}
+          {isFocused ? <View pointerEvents="none" style={styles.focusGlass} /> : null}
         </View>
       </View>
 
-      <Text numberOfLines={1} style={[styles.title, isFocused && styles.titleFocused]}>
+      <Text numberOfLines={1} style={styles.title}>
         {displayStreamTitle(movie.title)}
       </Text>
       <View style={styles.metaRow}>
@@ -140,9 +179,10 @@ export function MoviePosterCard({
       </View>
     </Pressable>
   );
-}
+}, moviePosterCardPropsAreEqual);
 
 function createStyles(theme: NovaTheme) {
+  const light = theme.scheme === 'light';
   return StyleSheet.create({
     card: {
       flex: 1,
@@ -153,19 +193,7 @@ function createStyles(theme: NovaTheme) {
     posterShell: {
       borderRadius: 2,
     },
-    posterShellFocused:
-      theme.scheme === 'light'
-        ? {
-            transform: [{ scale: 1.06 }],
-          }
-        : {
-            transform: [{ scale: 1.06 }],
-            shadowColor: theme.colors.focusRing,
-            shadowOpacity: 0.85,
-            shadowRadius: 16,
-            shadowOffset: { width: 0, height: 0 },
-            elevation: 10,
-          },
+    posterShellFocused: {},
     poster: {
       aspectRatio: 2 / 3,
       borderRadius: 2,
@@ -174,14 +202,10 @@ function createStyles(theme: NovaTheme) {
       overflow: 'hidden',
       padding: 10,
     },
-    posterFocused:
-      theme.scheme === 'light'
-        ? {
-            borderColor: theme.colors.focusRing,
-          }
-        : {
-            borderColor: 'rgba(255,255,255,0.42)',
-          },
+    posterFocused: {
+      borderColor: light ? theme.colors.focusRing : NOVA_TV_GLASS.border,
+    },
+    focusGlass: createNovaTvGlassOverlayStyle(theme),
     posterWithArt: {
       padding: 0,
       backgroundColor: '#0B1018',
@@ -252,6 +276,7 @@ function createStyles(theme: NovaTheme) {
       gap: 4,
       paddingHorizontal: 7,
       paddingVertical: 4,
+      zIndex: 2,
     },
     ratingText: {
       color: theme.colors.textPrimary,
@@ -264,22 +289,6 @@ function createStyles(theme: NovaTheme) {
       fontSize: 11,
       fontWeight: '700',
     },
-    titleFocused:
-      theme.scheme === 'light'
-        ? {
-            color: theme.colors.accent,
-            fontSize: 12,
-            fontWeight: '800',
-            transform: [{ scale: 1.05 }],
-          }
-        : {
-            color: theme.colors.accentHover,
-            fontSize: 12,
-            fontWeight: '800',
-            textShadowColor: theme.colors.focusRing,
-            textShadowRadius: 8,
-            transform: [{ scale: 1.05 }],
-          },
     metaRow: {
       marginTop: 1,
       flexDirection: 'row',

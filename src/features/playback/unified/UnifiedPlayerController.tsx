@@ -32,6 +32,7 @@ import {
   shouldAutoHideUnifiedControls,
   UNIFIED_CONTROL_ACTIVATE_DEBOUNCE_MS,
   UNIFIED_PLAYER_CHROME_AUTO_HIDE_MS,
+  UNIFIED_PLAYER_BUFFERING_TIMEOUT_MS,
   UNIFIED_PLAYER_LOADING_TIMEOUT_MS,
   UNIFIED_SEEK_FLUSH_DEBOUNCE_MS,
 } from './unifiedPlayerLogic.ts';
@@ -162,6 +163,21 @@ export function UnifiedPlayerController() {
         setUnifiedPlayerError('Playback timed out while loading.');
       }
     }, UNIFIED_PLAYER_LOADING_TIMEOUT_MS);
+
+    return () => clearTimeout(timer);
+  }, [playbackActive, snapshot.item?.id, snapshot.machineState]);
+
+  useEffect(() => {
+    if (!playbackActive || snapshot.machineState !== 'buffering') {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      const current = getUnifiedPlayerState();
+      if (current.machineState === 'buffering' && current.item) {
+        setUnifiedPlayerError('Playback stalled while buffering. Try again.');
+      }
+    }, UNIFIED_PLAYER_BUFFERING_TIMEOUT_MS);
 
     return () => clearTimeout(timer);
   }, [playbackActive, snapshot.item?.id, snapshot.machineState]);
@@ -559,14 +575,12 @@ export function UnifiedPlayerController() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleRetry,
       duration: PLAYBACK_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'playback',
     });
-  }, [dismissNotification, handleRetry, playbackActive, showNotification, snapshot.machineState]);
+  }, [dismissNotification, playbackActive, showNotification, snapshot.machineState]);
 
   useEffect(() => {
     if (snapshot.machineState === 'playing' || snapshot.machineState === 'ready' || snapshot.machineState === 'paused') {

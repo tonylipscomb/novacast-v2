@@ -3,6 +3,7 @@ import type { PlaybackItem, PlaybackLaunchSource, PlaybackMode, UnifiedPlayerMac
 
 export const UNIFIED_PLAYER_CHROME_AUTO_HIDE_MS = 4000;
 export const UNIFIED_PLAYER_LOADING_TIMEOUT_MS = 20_000;
+export const UNIFIED_PLAYER_BUFFERING_TIMEOUT_MS = 30_000;
 export const SEEK_BACK_MS = 10_000;
 export const SEEK_FORWARD_MS = 30_000;
 

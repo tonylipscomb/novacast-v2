@@ -5,16 +5,14 @@ import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 
 import { NovaLogo, NovaTvShell } from '@/components/nova';
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { ChannelHeroCard } from '@/features/hub/ChannelHeroCard';
-import { loadRandomUsEntertainmentChannels } from '@/features/hub/hubLiveNow';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { ExitConfirmOverlay, useExitConfirmOnBack } from '@/features/navigation/ExitConfirmOverlay';
 import { classifyProviderCategoryType, type ProviderCategoryType } from '@/features/providers/categoryNormalization';
-import { useProviderLibrarySummary } from '@/features/providers/providerLibrarySummaryStore';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 import type { ProviderLiveChannel } from '@/features/providers/providerRepositories';
@@ -66,10 +64,7 @@ export function MainMenuScreen() {
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.hub.key);
   const exitConfirm = useExitConfirmOnBack(!playbackActive && !playbackClosing && !guide.visible);
   const activeProviderId = selectedProvider?.id ?? 'demo-provider';
-  const heroHeight = Math.min(200, Math.max(148, Math.round(width * 0.11)));
-  const { summary: librarySummary } = useProviderLibrarySummary(activeProviderId);
-  const [liveNow, setLiveNow] = useState<ProviderLiveChannel[]>([]);
-  const [liveNowProviderId, setLiveNowProviderId] = useState('');
+  const heroHeight = Math.min(280, Math.max(200, Math.round(width * 0.16)));
   const [categoryTypeById, setCategoryTypeById] = useState<Map<string, ProviderCategoryType>>(new Map());
   const [personalization, setPersonalization] = useState<HomePersonalizationSnapshot>(() => ({
     providerId: '',
@@ -79,14 +74,11 @@ export function MainMenuScreen() {
     favoriteSeries: [] as SeriesSummary[],
     recentlyWatched: [] as RecentItemRecord[],
   }));
-  const liveNowItems = liveNowProviderId === activeProviderId ? liveNow.slice(0, 5) : [];
   const recentlyWatchedItems =
     personalization.providerId === activeProviderId ? personalization.recentlyWatched.slice(0, 6) : [];
   const firstHomeFocusId =
     guide.visible
       ? null
-      : liveNowItems.length
-      ? `live-${liveNowItems[0].id}`
       : recentlyWatchedItems.length
         ? `recent-${recentlyWatchedItems[0].mediaType}-${recentlyWatchedItems[0].contentId}`
         : personalization.providerId === activeProviderId && personalization.continueWatching.length
@@ -98,30 +90,6 @@ export function MainMenuScreen() {
               : personalization.providerId === activeProviderId && personalization.favoriteSeries.length
                 ? `favorite-series-${personalization.favoriteSeries[0].id}`
                 : null;
-
-  useEffect(() => {
-    if (!bundle) {
-      return;
-    }
-
-    let cancelled = false;
-    void (async () => {
-      const channels = await loadRandomUsEntertainmentChannels(
-        () => bundle.live.getCategories(),
-        (categoryId) => bundle.live.getChannels(categoryId),
-        undefined,
-        5,
-      );
-      if (!cancelled) {
-        setLiveNow(channels);
-        setLiveNowProviderId(activeProviderId);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProviderId, bundle, librarySummary.lastProviderSyncAt, librarySummary.liveChannelCount]);
 
   useEffect(() => {
     if (!bundle || !selectedProvider) {
@@ -153,7 +121,7 @@ export function MainMenuScreen() {
     return () => {
       cancelled = true;
     };
-  }, [activeProviderId, bundle, librarySummary.lastProviderSyncAt]);
+  }, [activeProviderId, bundle]);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,7 +156,7 @@ export function MainMenuScreen() {
       unsubscribeMedia();
       unsubscribePersonalization();
     };
-  }, [activeProviderId, bundle, librarySummary.lastProviderSyncAt]);
+  }, [activeProviderId, bundle]);
 
   const navigateTo = (route: '/live' | '/movies' | '/series' | '/guide') => {
     if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
@@ -368,23 +336,6 @@ export function MainMenuScreen() {
         </View>
 
         <View style={styles.rows}>
-          {liveNowItems.length ? (
-            <HomeRow title="Live Now" compact>
-              {liveNowItems.map((item) => (
-                <ChannelHeroCard
-                  key={item.id}
-                  title={item.name}
-                  subtitle={item.current || 'Now playing'}
-                  logoUrl={item.logoUrl}
-                  categoryType={resolveChannelCategoryType(item, categoryTypeById)}
-                  isLive
-                  preferredFocus={firstHomeFocusId === `live-${item.id}`}
-                  onPress={() => void playLiveChannelFullscreen(item)}
-                />
-              ))}
-            </HomeRow>
-          ) : null}
-
           {recentlyWatchedItems.length ? (
             <HomeRow title="Recently Watched" compact>
               {recentlyWatchedItems.map((item) => (
@@ -586,6 +537,8 @@ const HomeMediaCard = memo(function HomeMediaCard({
 });
 
 function createHomeStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
+  const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
   root: {
     flex: 1,
@@ -662,31 +615,12 @@ function createHomeStyles(theme: NovaTheme) {
     width: 168,
     minHeight: 148,
     borderRadius: 0,
-    borderWidth: 2,
-    borderColor: 'transparent',
     backgroundColor: 'transparent',
     padding: 0,
+    ...focusChrome.base,
   },
-  mediaCardFocused:
-    theme.scheme === 'light'
-      ? {
-          borderColor: theme.colors.focusRing,
-          backgroundColor: 'transparent',
-        }
-      : {
-          borderColor: 'transparent',
-          backgroundColor: 'transparent',
-          shadowColor: theme.colors.focusRing,
-          shadowOpacity: 0.65,
-          shadowRadius: 7,
-        },
-  mediaArtworkFocused:
-    theme.scheme === 'light'
-      ? {
-          borderBottomWidth: 2,
-          borderBottomColor: theme.colors.focusRing,
-        }
-      : {},
+  mediaCardFocused: focusChrome.active,
+  mediaArtworkFocused: {},
   mediaCardWrap: {
     width: 168,
     gap: 5,
@@ -701,18 +635,9 @@ function createHomeStyles(theme: NovaTheme) {
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
+    ...focusChrome.base,
   },
-  removeButtonFocused:
-    theme.scheme === 'light'
-      ? {
-          borderColor: theme.colors.focusRing,
-        }
-      : {
-          borderColor: theme.colors.focusRing,
-          shadowColor: theme.colors.focusRing,
-          shadowOpacity: 0.65,
-          shadowRadius: 6,
-        },
+  removeButtonFocused: focusChrome.active,
   removeButtonText: {
     color: theme.colors.textSecondary,
     fontSize: 10,
@@ -751,25 +676,14 @@ function createHomeStyles(theme: NovaTheme) {
     fontSize: 13,
     fontWeight: '800',
   },
-  mediaTitleFocused:
-    theme.scheme === 'light'
-      ? {
-          color: theme.colors.accent,
-        }
-      : {
-          color: theme.colors.accentHover,
-          textShadowColor: theme.colors.focusRing,
-          textShadowRadius: 8,
-        },
+  mediaTitleFocused: focusText.title,
   mediaSubtitle: {
     marginTop: 3,
     color: theme.colors.textMuted,
     fontSize: 11,
     fontWeight: '600',
   },
-  mediaSubtitleFocused: {
-    color: theme.colors.textPrimary,
-  },
+  mediaSubtitleFocused: focusText.secondary,
   lowerGrid: {
     flex: 0.74,
     minHeight: 0,

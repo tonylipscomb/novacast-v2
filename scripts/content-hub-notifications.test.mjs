@@ -10,7 +10,7 @@ test('Content Hub notifications only surface provider switch failures', () => {
 
   const error = resolveContentHubProviderSwitchNotification('Connection timed out', false);
   assert.equal(error?.title, 'Provider switch failed');
-  assert.match(error?.message ?? '', /could not connect/i);
+  assert.equal(error?.message, 'Please select the provider and try again.');
   assert.equal(error?.persistent, false);
   assert.equal(resolveContentHubProviderSwitchNotification('Connection timed out', true)?.persistent, true);
 });

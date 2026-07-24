@@ -4,6 +4,7 @@ import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { isProviderCategory } from '@/features/media-browser/mediaCategoryUtils';
 import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
+import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
@@ -159,6 +160,8 @@ export function MovieCategoryRail({
 }
 
 function createStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
+  const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
     panel: {
       width: 260,
@@ -199,8 +202,6 @@ function createStyles(theme: NovaTheme) {
     row: {
       minHeight: 40,
       borderRadius: 0,
-      borderWidth: 1,
-      borderColor: 'transparent',
       backgroundColor: 'transparent',
       borderBottomWidth: 1,
       borderBottomColor: theme.colors.borderSubtle,
@@ -210,26 +211,12 @@ function createStyles(theme: NovaTheme) {
       gap: 6,
       paddingHorizontal: 8,
       paddingVertical: 4,
+      ...focusChrome.base,
     },
     rowSelected: {
       borderBottomColor: theme.colors.success,
     },
-    rowFocused:
-      theme.scheme === 'light'
-        ? {
-            borderColor: theme.colors.focusRing,
-            borderBottomColor: theme.colors.focusRing,
-            backgroundColor: theme.colors.surfaceFocused,
-            borderLeftWidth: 3,
-            borderLeftColor: theme.colors.focusRing,
-            paddingLeft: 5,
-          }
-        : {
-            backgroundColor: 'transparent',
-            shadowColor: theme.colors.focusRing,
-            shadowOpacity: 0.65,
-            shadowRadius: 7,
-          },
+    rowFocused: focusChrome.active,
     rowSmart: {
       borderBottomWidth: 1,
       borderBottomColor: theme.colors.borderSubtle,
@@ -246,19 +233,11 @@ function createStyles(theme: NovaTheme) {
       color: theme.colors.textPrimary,
       fontWeight: '800',
     },
-    nameFocused:
-      theme.scheme === 'light'
-        ? {
-            color: theme.colors.accent,
-            fontSize: 14,
-            fontWeight: '800',
-            lineHeight: 17,
-          }
-        : {
-            color: theme.colors.accentHover,
-            textShadowColor: theme.colors.focusRing,
-            textShadowRadius: 8,
-          },
+    nameFocused: {
+      ...focusText.title,
+      fontSize: 15,
+      lineHeight: 18,
+    },
     count: {
       flexShrink: 0,
       minWidth: 32,
@@ -270,18 +249,10 @@ function createStyles(theme: NovaTheme) {
     countSelected: {
       color: theme.colors.textPrimary,
     },
-    countFocused:
-      theme.scheme === 'light'
-        ? {
-            color: theme.colors.accent,
-            fontSize: 12,
-            fontWeight: '800',
-          }
-        : {
-            color: theme.colors.accentHover,
-            textShadowColor: theme.colors.focusRing,
-            textShadowRadius: 8,
-          },
+    countFocused: {
+      ...focusText.count,
+      fontSize: 13,
+    },
     sectionRow: {
       minHeight: 24,
       justifyContent: 'center',

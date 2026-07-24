@@ -15,7 +15,7 @@ import { useRouter } from 'expo-router';
 
 import { NovaTvShell, type NovaNavigationFocusHandles } from '@/components/nova';
 import { NovaFocusRow } from '@/components/nova/NovaFocusRow';
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
@@ -23,6 +23,8 @@ import { useAppNotification } from '@/features/notifications/useAppNotification'
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 import { SearchEmptyState } from './SearchEmptyState';
 import { SearchInput } from './SearchInput';
@@ -205,14 +207,12 @@ export function SearchScreen() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleReload,
       duration: SEARCH_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'search',
     });
-  }, [dismissNotification, errorMessage, handleReload, hasDataSource, query, showNotification, status]);
+  }, [dismissNotification, errorMessage, hasDataSource, query, showNotification, status]);
 
   useEffect(() => {
     return () => {
@@ -597,10 +597,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
-  historyClearFocused: {
-    color: novaTheme.colors.textPrimary,
-    fontWeight: '800',
-  },
+  historyClearFocused: focusText.title,
   historyClearButton: {
     minWidth: 48,
     minHeight: 28,

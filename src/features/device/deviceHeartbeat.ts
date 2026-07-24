@@ -1,11 +1,15 @@
 import { deviceAuthHeaders, deviceMetadata } from './deviceRegistration';
 import type { DeviceHeartbeatResponse, DevicePendingCommand } from './deviceTypes';
-import { checkDeviceStatus } from './deviceActivation';
+import { applyHeartbeatAccess, checkDeviceStatus } from './deviceActivation';
 import { setContentPolicyOverride } from '@/features/content-policy/ContentPolicyService';
 import { downloadManagedProviderAssignment } from './managedProviderDownload';
 import { resetPairingKeepDevice, factoryResetNovacast } from '@/features/pairing/resetPairing';
 import { scheduleProviderCatalogSync } from '@/features/providers/providerCatalogSync';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
+import { closeUnifiedPlayback, getUnifiedPlayerState } from '@/features/playback/unified/unifiedPlayerStore';
+import { isUnifiedPlaybackActive } from '@/features/playback/unified/unifiedPlayerLogic';
+import { reportNetworkOutcome } from '@/features/resilience/offlineStatus';
+import { router } from 'expo-router';
 
 type CommandHandlerResult = { id: string; status: 'completed' | 'failed'; result?: Record<string, unknown> };
 
@@ -95,11 +99,33 @@ export async function sendDeviceHeartbeat(options?: {
   }).catch(() => null);
 
   if (!response || !response.ok) {
+    reportNetworkOutcome(false);
     return null;
   }
 
   const payload = (await response.json().catch(() => null)) as DeviceHeartbeatResponse | null;
   if (!payload) return null;
+
+  reportNetworkOutcome(true);
+  applyHeartbeatAccess(payload);
+
+  if (payload.deviceActive === false || payload.activationStatus === 'revoked' || payload.activationStatus === 'suspended') {
+    const player = getUnifiedPlayerState();
+    if (isUnifiedPlaybackActive(player.machineState, player.item)) {
+      closeUnifiedPlayback();
+    }
+    try {
+      router.replace('/');
+    } catch {
+      // Navigation may be unavailable during teardown.
+    }
+  } else if (payload.activationStatus === 'expired') {
+    try {
+      router.replace('/');
+    } catch {
+      // Ignore.
+    }
+  }
 
   if (payload.contentPolicy === 'us_only' || payload.contentPolicy === 'unrestricted') {
     setContentPolicyOverride(payload.contentPolicy);

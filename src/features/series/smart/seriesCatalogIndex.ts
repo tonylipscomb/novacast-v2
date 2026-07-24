@@ -78,16 +78,43 @@ export class SeriesCatalogIndex {
   private sourceUniqueIds = new Set<string>();
   private indexTruncated = false;
   private categoryLoadTruncated = false;
+  private pendingRestore: {
+    entries: Map<string, SeriesCatalogEntry>;
+    sourceUniqueIds: Set<string>;
+    indexTruncated: boolean;
+    categoryLoadTruncated: boolean;
+  } | null = null;
 
   constructor(providerId: string) {
     this.providerId = providerId;
   }
 
   beginSync() {
+    this.pendingRestore = {
+      entries: new Map(this.entries),
+      sourceUniqueIds: new Set(this.sourceUniqueIds),
+      indexTruncated: this.indexTruncated,
+      categoryLoadTruncated: this.categoryLoadTruncated,
+    };
     this.entries.clear();
     this.sourceUniqueIds.clear();
     this.indexTruncated = false;
     this.categoryLoadTruncated = false;
+  }
+
+  abortSync() {
+    if (!this.pendingRestore) {
+      return;
+    }
+    this.entries = this.pendingRestore.entries;
+    this.sourceUniqueIds = this.pendingRestore.sourceUniqueIds;
+    this.indexTruncated = this.pendingRestore.indexTruncated;
+    this.categoryLoadTruncated = this.pendingRestore.categoryLoadTruncated;
+    this.pendingRestore = null;
+  }
+
+  commitSync() {
+    this.pendingRestore = null;
   }
 
   markCategoryLoadTruncated() {

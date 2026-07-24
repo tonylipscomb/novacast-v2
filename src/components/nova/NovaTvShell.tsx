@@ -6,11 +6,12 @@ import type { Href } from 'expo-router';
 import { usePathname, useRouter } from 'expo-router';
 
 import { NovaLogo } from '@/components/nova/NovaLogo';
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { createNovaTvFocusTextStyles, createNovaTvFocusChrome, novaTvFocus } from '@/components/nova/novaTvFocus';
 import { NovaScreen } from '@/components/nova/NovaScreen';
 import { getTvDensity } from '@/components/nova/tvDensity';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
-import { useProviderStore } from '@/features/providers/providerStore';
+import { useProviderChrome } from '@/features/providers/providerStore';
+import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import { themeLogoIncludesWordmark } from '@/theme/brandingAssets';
 import type { NovaTheme } from '@/theme/tokens';
@@ -63,6 +64,16 @@ function formatClock(date: Date) {
   return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+/** Isolated so the 30s clock tick does not re-render the navbar or screen children. */
+function ShellHeaderClock({ style }: { style: { color?: string; fontSize?: number; fontWeight?: '600' | '700' | '800' | '900' } }) {
+  const [clock, setClock] = useState(() => new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setClock(new Date()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  return <Text style={style}>{formatClock(clock)}</Text>;
+}
+
 export function NovaTvShell({
   activeId,
   title,
@@ -85,24 +96,29 @@ export function NovaTvShell({
   const pathname = usePathname();
   const { width } = useWindowDimensions();
   const [focusedId, setFocusedId] = useState<NavigationId | null>(null);
-  const [clock, setClock] = useState(() => new Date());
   const navigationGateRef = useRef(createTvNavigationGate());
   const navItemRefs = useRef<Partial<Record<NavigationId, View | null>>>({});
   const lastNavHandlesJson = useRef('');
-  const { selectedProvider, selectedProviderExpiration } = useProviderStore();
-  const resolvedProviderLabel = providerLabel ?? selectedProvider?.name ?? 'No provider';
-  const resolvedExpirationLabel = expirationLabel ?? selectedProviderExpiration;
+  const {
+    selectedProvider,
+    selectedProviderName,
+    selectedProviderExpiration,
+  } = useProviderChrome();
+  const accessExpiration = useAccessExpirationDisplay({
+    provider: selectedProvider,
+    account: selectedProvider?.account ?? null,
+  });
+  const resolvedProviderLabel = providerLabel ?? selectedProviderName;
+  const resolvedExpirationLabel = accessExpiration.closedBeta
+    ? accessExpiration.value
+    : (expirationLabel ?? selectedProviderExpiration);
+  const expirationCaption = accessExpiration.caption;
   const density = getTvDensity(width);
   const compactNavWidth = density === 'compact' ? 60 : 68;
   const safeHorizontal = density === 'compact' ? 28 : density === 'normal' ? 38 : 46;
   const safeVertical = density === 'compact' ? 18 : density === 'normal' ? 24 : 30;
   const shellGap = density === 'compact' ? 14 : density === 'normal' ? 20 : 24;
   const headerHeight = density === 'compact' ? 56 : density === 'normal' ? 64 : 70;
-
-  useEffect(() => {
-    const timer = setInterval(() => setClock(new Date()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
 
   useLayoutEffect(() => {
     if (!navigationFocusable || !onNavigationFocusHandles) {
@@ -169,7 +185,6 @@ export function NovaTvShell({
                   styles.navItem,
                   compactNavigationRail && styles.navItemCompact,
                   novaTvFocus.base,
-                  active && !focused && styles.navItemActive,
                   focused && styles.navItemFocused,
                 ];
                 const iconColor = active || focused ? theme.colors.textPrimary : theme.colors.textSecondary;
@@ -270,13 +285,13 @@ export function NovaTvShell({
                 {resolvedExpirationLabel ? (
                   <>
                     <View style={styles.expirationBox}>
-                      <Text style={styles.expirationLabel}>Expires</Text>
+                      <Text style={styles.expirationLabel}>{expirationCaption}</Text>
                       <Text style={styles.expirationValue}>{resolvedExpirationLabel}</Text>
                     </View>
                     <View style={styles.metaDivider} />
                   </>
                 ) : null}
-                <Text style={styles.clock}>{formatClock(clock)}</Text>
+                <ShellHeaderClock style={styles.clock} />
               </View>
               {headerSupplement ? <View style={styles.headerSupplement}>{headerSupplement}</View> : null}
             </View>
@@ -290,6 +305,8 @@ export function NovaTvShell({
 }
 
 function createShellStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
+  const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
     safeFrame: {
       flex: 1,
@@ -340,12 +357,12 @@ function createShellStyles(theme: NovaTheme) {
     navItem: {
       position: 'relative',
       minHeight: 46,
-      borderRadius: 0,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 10,
       paddingHorizontal: 8,
       paddingVertical: 4,
+      ...focusChrome.base,
     },
     navItemCompact: {
       minHeight: 40,
@@ -356,17 +373,7 @@ function createShellStyles(theme: NovaTheme) {
     navItemActive: {
       backgroundColor: 'transparent',
     },
-    navItemFocused:
-      theme.scheme === 'light'
-        ? {
-            backgroundColor: theme.colors.surfaceFocused,
-          }
-        : {
-            backgroundColor: 'transparent',
-            shadowColor: theme.colors.focusRing,
-            shadowOpacity: 0.65,
-            shadowRadius: 7,
-          },
+    navItemFocused: focusChrome.active,
     navActiveIndicator: {
       position: 'absolute',
       left: 0,
@@ -375,27 +382,12 @@ function createShellStyles(theme: NovaTheme) {
       width: 3,
       backgroundColor: theme.colors.success,
     },
-    navFocusIndicator:
-      theme.scheme === 'light'
-        ? {
-            position: 'absolute',
-            left: 0,
-            top: 6,
-            bottom: 6,
-            width: 3,
-            backgroundColor: theme.colors.focusRing,
-          }
-        : {
-            position: 'absolute',
-            left: 0,
-            top: 6,
-            bottom: 6,
-            width: 3,
-            backgroundColor: theme.colors.focusRing,
-            shadowColor: theme.colors.focusRing,
-            shadowOpacity: 0.85,
-            shadowRadius: 6,
-          },
+    navFocusIndicator: {
+      // Glass box replaces the old focus rail / glow.
+      width: 0,
+      height: 0,
+      opacity: 0,
+    },
     navLabel: {
       flexShrink: 1,
       color: theme.colors.textSecondary,
@@ -410,27 +402,8 @@ function createShellStyles(theme: NovaTheme) {
       color: theme.colors.textPrimary,
       fontWeight: '700',
     },
-    navLabelFocused:
-      theme.scheme === 'light'
-        ? {
-            color: theme.colors.accent,
-          }
-        : {
-            color: theme.colors.accentHover,
-            textShadowColor: theme.colors.focusRing,
-            textShadowRadius: 8,
-          },
-    navIconFocused:
-      theme.scheme === 'light'
-        ? {
-            transform: [{ scale: 1.08 }],
-          }
-        : {
-            transform: [{ scale: 1.16 }],
-            shadowColor: theme.colors.focusRing,
-            shadowOpacity: 0.9,
-            shadowRadius: 7,
-          },
+    navLabelFocused: focusText.title,
+    navIconFocused: {},
     connectionCard: {
       minHeight: 58,
       borderTopWidth: 1,

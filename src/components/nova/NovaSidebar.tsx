@@ -1,7 +1,10 @@
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 type SidebarItem = {
   id: string;
@@ -20,7 +23,8 @@ export function NovaSidebar({ items, activeId, onSelect }: NovaSidebarProps) {
   return (
     <View style={styles.sidebar}>
       {items.map((item) => {
-        const highlighted = focusedId === item.id || activeId === item.id;
+        const focused = focusedId === item.id;
+        const highlighted = focused || activeId === item.id;
         return (
           <Pressable
             key={item.id}
@@ -29,7 +33,9 @@ export function NovaSidebar({ items, activeId, onSelect }: NovaSidebarProps) {
             onBlur={() => setFocusedId(null)}
             onPress={() => onSelect?.(item.id)}
             style={[styles.item, highlighted && styles.itemFocused]}>
-            <Text style={[styles.itemLabel, highlighted && styles.itemLabelFocused]}>{item.label}</Text>
+            <Text style={[styles.itemLabel, highlighted && styles.itemLabelHighlighted, focused && styles.itemLabelFocused]}>
+              {item.label}
+            </Text>
           </Pressable>
         );
       })}
@@ -63,7 +69,8 @@ const styles = StyleSheet.create({
     fontSize: novaTheme.typography.cardBody,
     fontWeight: '500',
   },
-  itemLabelFocused: {
+  itemLabelHighlighted: {
     color: novaTheme.colors.textPrimary,
   },
+  itemLabelFocused: focusText.title,
 });

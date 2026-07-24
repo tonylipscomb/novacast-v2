@@ -25,21 +25,36 @@ export function nextFocusId(currentId: string | null, nextId: string): string | 
   return currentId === nextId ? currentId : nextId;
 }
 
-export const PREVIEW_FOCUS_DEBOUNCE_MS = 320;
-
-/**
- * Focus moved again before the debounce fired — ignore the scheduled preview tune.
- */
-export function shouldApplyDebouncedPreviewTune(
-  scheduledChannelId: string,
-  focusedChannelId: string | null,
-): boolean {
-  return focusedChannelId === scheduledChannelId;
-}
+export {
+  LIVE_TV_PREVIEW_FOCUS_DEBOUNCE_MS as PREVIEW_FOCUS_DEBOUNCE_MS,
+  shouldApplyDebouncedPreviewTune,
+} from './liveTvFocusPreview.ts';
 
 /**
  * Skip redundant list jumps when native focus is already on the same row.
  */
 export function shouldScrollListToFocusIndex(lastScrolledIndex: number | null, nextIndex: number): boolean {
   return lastScrolledIndex !== nextIndex;
+}
+
+/**
+ * Programmatic scroll is reserved for restore / category jump / failed native focus —
+ * not for ordinary in-range D-pad movement.
+ */
+export function shouldProgrammaticScrollOnFocus(input: {
+  focusedIndex: number;
+  visible: { first: number; last: number } | null;
+  totalCount: number;
+  reason: 'focus' | 'restore' | 'category-jump' | 'focus-recovery';
+}): boolean {
+  if (input.reason === 'restore' || input.reason === 'category-jump' || input.reason === 'focus-recovery') {
+    return true;
+  }
+
+  // Ordinary focus: only when the row is genuinely outside the visible range.
+  if (input.visible === null) {
+    return false;
+  }
+
+  return input.focusedIndex < input.visible.first || input.focusedIndex > input.visible.last;
 }

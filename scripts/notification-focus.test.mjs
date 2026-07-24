@@ -4,7 +4,14 @@ import test from 'node:test';
 import {
   resolveNotificationInitialFocusTarget,
   shouldCaptureNotificationFocus,
+  isPassiveNotification,
+  resolveNotificationInteractionMode,
 } from '../src/features/notifications/notificationFocusLogic.ts';
+import {
+  getNotificationsSnapshot,
+  resetNotificationsForTests,
+  showNotification,
+} from '../src/features/notifications/notificationStore.ts';
 
 test('notification focus defaults to Dismiss unless autoFocusAction requests Retry', () => {
   assert.equal(resolveNotificationInitialFocusTarget(false, true), 'dismiss');
@@ -13,7 +20,17 @@ test('notification focus defaults to Dismiss unless autoFocusAction requests Ret
   assert.equal(resolveNotificationInitialFocusTarget(true, false), 'dismiss');
 });
 
-test('only the topmost visible toast should capture TV focus', () => {
-  assert.equal(shouldCaptureNotificationFocus(true), true);
-  assert.equal(shouldCaptureNotificationFocus(false), false);
+test('only a topmost blocking toast may capture TV focus', () => {
+  assert.equal(shouldCaptureNotificationFocus(true, 'blocking'), true);
+  assert.equal(shouldCaptureNotificationFocus(false, 'blocking'), false);
+  assert.equal(shouldCaptureNotificationFocus(true, 'passive'), false);
+  assert.equal(shouldCaptureNotificationFocus(true, undefined), false);
+});
+
+test('notifications default to passive interaction mode', () => {
+  resetNotificationsForTests();
+  showNotification({ id: 'passive-default', type: 'info', title: 'Hello' });
+  const [notification] = getNotificationsSnapshot().visible;
+  assert.equal(resolveNotificationInteractionMode(notification.interactionMode), 'passive');
+  assert.equal(isPassiveNotification(notification.interactionMode), true);
 });

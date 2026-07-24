@@ -3,7 +3,7 @@ export { NovaEmptyState } from './NovaEmptyState';
 export { NovaFocusCard } from './NovaFocusCard';
 export { NovaLoadingState } from './NovaLoadingState';
 export { NovaFocusText } from './NovaFocusText';
-export { novaTvFocus } from './novaTvFocus';
+export { novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome, createNovaTvGlassOverlayStyle, NOVA_TV_LITE_FOCUS, NOVA_TV_GLASS } from './novaTvFocus';
 export { NovaFocusRow } from './NovaFocusRow';
 export { NovaScopeTabs } from './NovaScopeTabs';
 export { NovaSpaceLoader } from './NovaSpaceLoader';

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { BackHandler, Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -104,6 +104,7 @@ export function useExitConfirmOnBack(enabled = true) {
 }
 
 function createStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
   return StyleSheet.create({
     overlay: {
       flex: 1,
@@ -155,8 +156,6 @@ function createStyles(theme: NovaTheme) {
       fontSize: 14,
       fontWeight: '800',
     },
-    buttonTextFocused: {
-      color: theme.scheme === 'light' ? theme.colors.accent : theme.colors.accentHover,
-    },
+    buttonTextFocused: focusText.title,
   });
 }

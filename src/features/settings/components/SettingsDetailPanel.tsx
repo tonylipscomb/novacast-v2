@@ -4,7 +4,7 @@ import { findNodeHandle, Pressable, ScrollView, StyleSheet, Text, View } from 'r
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { NovaLogo } from '@/components/nova';
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import {
   APPEARANCE_THEMES,
   type AppearanceThemeId,
@@ -25,6 +25,7 @@ import type { SettingsSectionId } from './SettingsRail';
 type ProviderAccountInfo = {
   providerName: string;
   providerStatus: string;
+  expirationCaption?: string;
   expirationLabel: string;
   connectionType: string;
   username: string;
@@ -35,12 +36,22 @@ type ProviderAccountInfo = {
   lastSyncLabel: string;
 };
 
+type BetaSupportInfo = {
+  deviceId: string;
+  deviceModel: string;
+  osVersion: string;
+  activation: string;
+  network: string;
+  diagnosticCode: string;
+};
+
 type SettingsDetailPanelProps = {
   sectionId: SettingsSectionId;
   settings: AppSettings;
   pinConfigured: boolean;
   hideSmartCategories: boolean;
   account: ProviderAccountInfo;
+  betaSupport: BetaSupportInfo;
   onAppearanceTheme: (theme: AppearanceThemeId) => void;
   onPlaybackQuality: (value: PlaybackQuality) => void;
   onPlaybackAudio: (value: PlaybackAudio) => void;
@@ -68,6 +79,7 @@ export function SettingsDetailPanel({
   pinConfigured,
   hideSmartCategories,
   account,
+  betaSupport,
   onAppearanceTheme,
   onPlaybackQuality,
   onPlaybackAudio,
@@ -296,7 +308,7 @@ export function SettingsDetailPanel({
       <View style={styles.infoGrid}>
         <InfoCell label="Provider" value={account.providerName} styles={styles} />
         <InfoCell label="Status" value={account.providerStatus} styles={styles} />
-        <InfoCell label="Expires" value={account.expirationLabel} styles={styles} />
+        <InfoCell label={account.expirationCaption ?? 'Expires'} value={account.expirationLabel} styles={styles} />
         <InfoCell label="Connection" value={account.connectionType} styles={styles} />
         <InfoCell label="Username" value={account.username} styles={styles} />
         <InfoCell label="Last sync" value={account.lastSyncLabel} styles={styles} />
@@ -510,13 +522,26 @@ export function SettingsDetailPanel({
         <Text style={styles.aboutMetaDot}>·</Text>
         <Text style={styles.aboutMetaItem}>
           <Text style={styles.aboutMetaLabel}>Build </Text>
-          V2 Preview
+          {Constants.nativeBuildVersion ?? Constants.expoConfig?.version ?? 'V2'}
         </Text>
         <Text style={styles.aboutMetaDot}>·</Text>
         <Text style={styles.aboutMetaItem}>
           <Text style={styles.aboutMetaLabel}>Theme </Text>
           {appearanceThemeLabel(settings.appearanceTheme)}
         </Text>
+      </View>
+
+      <View style={styles.betaSupportBox}>
+        <Text style={styles.sectionTitle}>Beta Support</Text>
+        <Text style={styles.aboutCopy}>Use this information when reporting a beta issue. It never includes passwords or stream links.</Text>
+        <Text style={styles.betaLine}>Device ID: {betaSupport.deviceId}</Text>
+        <Text style={styles.betaLine}>Model: {betaSupport.deviceModel}</Text>
+        <Text style={styles.betaLine}>Android: {betaSupport.osVersion}</Text>
+        <Text style={styles.betaLine}>Activation: {betaSupport.activation}</Text>
+        <Text style={styles.betaLine}>Provider: {account.providerName}</Text>
+        <Text style={styles.betaLine}>Last provider sync: {account.lastSyncLabel}</Text>
+        <Text style={styles.betaLine}>Network: {betaSupport.network}</Text>
+        <Text style={styles.betaLine}>Diagnostic code: {betaSupport.diagnosticCode}</Text>
       </View>
 
       <View style={styles.aboutActions}>
@@ -622,6 +647,7 @@ function StatChip({
 }
 
 function createStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
   return StyleSheet.create({
     panel: {
       flex: 1,
@@ -738,16 +764,7 @@ function createStyles(theme: NovaTheme) {
     choiceChipTextSelected: {
       color: theme.colors.accentHover,
     },
-    choiceChipTextFocused: {
-      color: theme.scheme === 'light' ? theme.colors.accent : theme.colors.accentHover,
-      ...(theme.scheme === 'light'
-        ? {}
-        : {
-            textShadowColor: theme.colors.accentHover,
-            textShadowRadius: 10,
-            textShadowOffset: { width: 0, height: 0 },
-          }),
-    },
+    choiceChipTextFocused: focusText.title,
     toggleRow: {
       minHeight: 52,
       flexDirection: 'row',
@@ -770,24 +787,13 @@ function createStyles(theme: NovaTheme) {
       fontSize: 14,
       fontWeight: '800',
     },
-    rowTitleFocused: {
-      color: theme.scheme === 'light' ? theme.colors.accent : theme.colors.accentHover,
-      ...(theme.scheme === 'light'
-        ? {}
-        : {
-            textShadowColor: theme.colors.accentHover,
-            textShadowRadius: 10,
-            textShadowOffset: { width: 0, height: 0 },
-          }),
-    },
+    rowTitleFocused: focusText.title,
     rowMeta: {
       color: theme.colors.textMuted,
       fontSize: 11,
       fontWeight: '600',
     },
-    rowMetaFocused: {
-      color: theme.scheme === 'light' ? theme.colors.accentHover : theme.colors.textSecondary,
-    },
+    rowMetaFocused: focusText.secondary,
     rowFocused: {
       borderBottomColor: theme.scheme === 'light' ? theme.colors.focusRing : theme.colors.accentHover,
       backgroundColor: 'transparent',
@@ -959,6 +965,20 @@ function createStyles(theme: NovaTheme) {
       color: theme.colors.textSecondary,
       fontSize: 12,
       fontWeight: '600',
+    },
+    betaSupportBox: {
+      gap: 6,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      backgroundColor: theme.colors.surfaceMuted,
+      borderWidth: 1,
+      borderColor: theme.colors.borderSubtle,
+    },
+    betaLine: {
+      color: theme.colors.textPrimary,
+      fontSize: 12,
+      fontWeight: '700',
+      fontVariant: ['tabular-nums'],
     },
     aboutMetaRow: {
       flexDirection: 'row',

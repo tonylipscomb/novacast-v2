@@ -89,3 +89,6 @@ supabase/migrations-backup-before-repair/
 # Local output
 .logs/
 artifacts/
+.env.local
+
+.env

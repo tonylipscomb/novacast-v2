@@ -1,13 +1,20 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ComponentProps, ElementRef } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, findNodeHandle, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import { getTvDensity } from '@/components/nova/tvDensity';
-import { novaTheme } from '@/theme';
+import { createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
+import { useAppTheme } from '@/theme/AppThemeProvider';
+import type { NovaTheme } from '@/theme/tokens';
 
 import { dismissNotification, triggerNotificationAction } from './notificationStore';
-import { resolveNotificationInitialFocusTarget } from './notificationFocusLogic';
+import {
+  isPassiveNotification,
+  resolveNotificationInitialFocusTarget,
+  shouldRenderNotificationFocusableControls,
+} from './notificationFocusLogic';
 import type { AppNotification, AppNotificationType } from './types';
 
 type IconName = ComponentProps<typeof MaterialCommunityIcons>['name'];
@@ -20,27 +27,39 @@ const TYPE_ICON: Record<AppNotificationType, IconName> = {
   info: 'information-outline',
 };
 
-const TYPE_ACCENT: Record<AppNotificationType, string> = {
-  error: novaTheme.colors.danger,
-  warning: novaTheme.colors.warning,
-  success: novaTheme.colors.success,
-  info: novaTheme.colors.accentHover,
-};
-
 type AppNotificationToastProps = {
   notification: AppNotification;
   captureFocus?: boolean;
 };
 
+function typeAccent(theme: NovaTheme, type: AppNotificationType): string {
+  switch (type) {
+    case 'error':
+      return theme.colors.danger;
+    case 'warning':
+      return theme.colors.warning;
+    case 'success':
+      return theme.colors.success;
+    case 'info':
+    default:
+      return theme.scheme === 'light' ? theme.colors.accent : theme.colors.accentHover;
+  }
+}
+
 /**
- * TV-safe toast card. When visible, focus is trapped inside the toast: it snaps to Dismiss
- * (or Retry when autoFocusAction is set), and D-pad navigation cannot escape to the screen
- * underneath until the toast is dismissed or its action is activated.
+ * Toast card. Passive (default) toasts are non-focusable and never steal TV focus.
+ * Blocking toasts trap focus for an explicit Retry/Dismiss choice.
  */
-export function AppNotificationToast({ notification, captureFocus = true }: AppNotificationToastProps) {
+export function AppNotificationToast({ notification, captureFocus = false }: AppNotificationToastProps) {
+  const { theme } = useAppTheme();
+  const styles = useMemo(() => createStyles(theme), [theme]);
+  const focusText = useMemo(() => createNovaTvFocusTextStyles(theme), [theme]);
   const { width } = useWindowDimensions();
   const density = getTvDensity(width);
   const maxWidth = density === 'compact' ? 380 : 440;
+  const passive = isPassiveNotification(notification.interactionMode);
+  const showFocusableControls = shouldRenderNotificationFocusableControls(notification.interactionMode);
+  const blocking = showFocusableControls && captureFocus;
 
   const actionRef = useRef<Focusable | null>(null);
   const dismissRef = useRef<Focusable | null>(null);
@@ -65,28 +84,36 @@ export function AppNotificationToast({ notification, captureFocus = true }: AppN
   }, [notification.id]);
 
   useEffect(() => {
+    if (passive) {
+      setActionHandle(undefined);
+      setDismissHandle(undefined);
+      return undefined;
+    }
+
     const frame = requestAnimationFrame(() => {
       setActionHandle(findNodeHandle(actionRef.current) ?? undefined);
       setDismissHandle(findNodeHandle(dismissRef.current) ?? undefined);
     });
     return () => cancelAnimationFrame(frame);
-  }, [hasAction]);
+  }, [hasAction, passive]);
 
   useEffect(() => {
-    if (!captureFocus || Platform.OS !== 'android') {
+    if (!blocking || Platform.OS !== 'android') {
       return undefined;
     }
 
-    const frame = requestAnimationFrame(() => {
-      const target = initialFocusTarget === 'action' ? actionRef.current : dismissRef.current;
-      target?.focus();
+    return requestTvFocus({
+      screen: 'notification-toast',
+      source: 'AppNotificationToast',
+      region: 'toast-actions',
+      itemId: notification.id,
+      reason: initialFocusTarget === 'action' ? 'blocking-focus-action' : 'blocking-focus-dismiss',
+      getTarget: () => (initialFocusTarget === 'action' ? actionRef.current : dismissRef.current),
     });
-
-    return () => cancelAnimationFrame(frame);
-  }, [captureFocus, initialFocusTarget, notification.id]);
+  }, [blocking, initialFocusTarget, notification.id]);
 
   useEffect(() => {
-    if (Platform.OS !== 'android') {
+    if (!blocking || Platform.OS !== 'android') {
       return undefined;
     }
 
@@ -101,32 +128,39 @@ export function AppNotificationToast({ notification, captureFocus = true }: AppN
     });
 
     return () => subscription.remove();
-  }, [notification.id]);
+  }, [blocking, notification.id]);
 
   const releaseDismissFocusLock = () => {
     lockDismissFocusRef.current = false;
   };
 
   const restoreDismissFocusIfLocked = () => {
-    if (!lockDismissFocusRef.current || initialFocusTarget !== 'dismiss') {
+    if (!blocking || !lockDismissFocusRef.current || initialFocusTarget !== 'dismiss') {
       return;
     }
 
-    requestAnimationFrame(() => {
-      dismissRef.current?.focus();
+    requestTvFocus({
+      screen: 'notification-toast',
+      source: 'AppNotificationToast',
+      region: 'toast-actions',
+      itemId: notification.id,
+      reason: 'blocking-reclaim-dismiss',
+      getTarget: () => dismissRef.current,
     });
   };
 
-  const accentColor = TYPE_ACCENT[notification.type];
+  const accentColor = typeAccent(theme, notification.type);
   const dismissTrapHandle = dismissHandle;
   const actionTrapHandle = actionHandle ?? dismissHandle;
 
   return (
     <View
+      pointerEvents={passive ? 'none' : 'auto'}
       style={[styles.toast, { maxWidth, borderColor: `${accentColor}66` }]}
-      importantForAccessibility="yes">
+      importantForAccessibility={passive ? 'no-hide-descendants' : 'yes'}
+      accessible={!passive}>
       <View style={[styles.accentRail, { backgroundColor: accentColor }]} />
-      <View style={styles.content}>
+      <View style={styles.content} pointerEvents={passive ? 'none' : 'auto'}>
         <View style={styles.header}>
           <View style={[styles.iconChip, { borderBottomColor: `${accentColor}99` }]}>
             <MaterialCommunityIcons name={TYPE_ICON[notification.type]} size={18} color={accentColor} />
@@ -142,160 +176,186 @@ export function AppNotificationToast({ notification, captureFocus = true }: AppN
           </Text>
         ) : null}
 
-        <View style={styles.actions}>
-          {hasAction ? (
+        {showFocusableControls ? (
+          <View style={styles.actions}>
+            {hasAction ? (
+              <Pressable
+                ref={actionRef}
+                focusable
+                hasTVPreferredFocus={blocking && initialFocusTarget === 'action'}
+                accessibilityRole="button"
+                accessibilityLabel={notification.actionLabel}
+                {...(actionTrapHandle != null ? { nextFocusUp: actionTrapHandle, nextFocusDown: actionTrapHandle } : null)}
+                {...(dismissHandle != null ? { nextFocusRight: dismissHandle } : null)}
+                {...(actionTrapHandle != null ? { nextFocusLeft: actionTrapHandle } : null)}
+                onFocus={() => {
+                  lockDismissFocusRef.current = false;
+                  setFocusedButton('action');
+                }}
+                onBlur={() => setFocusedButton((current) => (current === 'action' ? null : current))}
+                onPress={() => {
+                  releaseDismissFocusLock();
+                  triggerNotificationAction(notification.id);
+                }}
+                style={[styles.actionButton, focusedButton === 'action' && styles.buttonFocused]}>
+                <Text style={[styles.actionText, focusedButton === 'action' && focusText.title]}>
+                  {notification.actionLabel}
+                </Text>
+              </Pressable>
+            ) : null}
+
             <Pressable
-              ref={actionRef}
+              ref={dismissRef}
               focusable
-              hasTVPreferredFocus={captureFocus && initialFocusTarget === 'action'}
+              hasTVPreferredFocus={blocking && initialFocusTarget === 'dismiss'}
               accessibilityRole="button"
-              accessibilityLabel={notification.actionLabel}
-              {...(actionTrapHandle != null ? { nextFocusUp: actionTrapHandle, nextFocusDown: actionTrapHandle } : null)}
-              {...(dismissHandle != null ? { nextFocusRight: dismissHandle } : null)}
-              {...(actionTrapHandle != null ? { nextFocusLeft: actionTrapHandle } : null)}
-              onFocus={() => {
-                lockDismissFocusRef.current = false;
-                setFocusedButton('action');
+              accessibilityLabel={notification.dismissLabel ?? 'Dismiss'}
+              {...(dismissTrapHandle != null
+                ? {
+                    nextFocusUp: dismissTrapHandle,
+                    nextFocusDown: dismissTrapHandle,
+                    nextFocusRight: dismissTrapHandle,
+                  }
+                : null)}
+              {...(hasAction && actionHandle != null
+                ? { nextFocusLeft: actionHandle }
+                : dismissTrapHandle != null
+                  ? { nextFocusLeft: dismissTrapHandle }
+                  : null)}
+              onFocus={() => setFocusedButton('dismiss')}
+              onBlur={() => {
+                setFocusedButton((current) => (current === 'dismiss' ? null : current));
+                restoreDismissFocusIfLocked();
               }}
-              onBlur={() => setFocusedButton((current) => (current === 'action' ? null : current))}
               onPress={() => {
                 releaseDismissFocusLock();
-                triggerNotificationAction(notification.id);
+                dismissNotification(notification.id);
               }}
-              style={[styles.actionButton, focusedButton === 'action' && styles.buttonFocused]}>
-              <Text style={styles.actionText}>{notification.actionLabel}</Text>
-            </Pressable>
-          ) : null}
-
-          <Pressable
-            ref={dismissRef}
-            focusable
-            hasTVPreferredFocus={captureFocus && initialFocusTarget === 'dismiss'}
-            accessibilityRole="button"
-            accessibilityLabel={notification.dismissLabel ?? 'Dismiss'}
-            {...(dismissTrapHandle != null
-              ? {
-                  nextFocusUp: dismissTrapHandle,
-                  nextFocusDown: dismissTrapHandle,
-                  nextFocusRight: dismissTrapHandle,
+              style={[styles.dismissButton, focusedButton === 'dismiss' && styles.buttonFocused]}>
+              <MaterialCommunityIcons
+                name="close"
+                size={14}
+                color={
+                  focusedButton === 'dismiss'
+                    ? theme.scheme === 'light'
+                      ? theme.colors.accent
+                      : theme.colors.accentHover
+                    : theme.colors.textSecondary
                 }
-              : null)}
-            {...(hasAction && actionHandle != null
-              ? { nextFocusLeft: actionHandle }
-              : dismissTrapHandle != null
-                ? { nextFocusLeft: dismissTrapHandle }
-                : null)}
-            onFocus={() => setFocusedButton('dismiss')}
-            onBlur={() => {
-              setFocusedButton((current) => (current === 'dismiss' ? null : current));
-              restoreDismissFocusIfLocked();
-            }}
-            onPress={() => {
-              releaseDismissFocusLock();
-              dismissNotification(notification.id);
-            }}
-            style={[styles.dismissButton, focusedButton === 'dismiss' && styles.buttonFocused]}>
-            <MaterialCommunityIcons name="close" size={14} color={novaTheme.colors.textSecondary} />
-            <Text style={styles.dismissText}>{notification.dismissLabel ?? 'Dismiss'}</Text>
-          </Pressable>
-        </View>
+              />
+              <Text style={[styles.dismissText, focusedButton === 'dismiss' && focusText.title]}>
+                {notification.dismissLabel ?? 'Dismiss'}
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  toast: {
-    minWidth: 320,
-    flexDirection: 'row',
-    overflow: 'hidden',
-    borderRadius: 0,
-    borderTopWidth: 1,
-    borderBottomWidth: 1,
-    backgroundColor: 'rgba(7,9,13,0.94)',
-    shadowColor: '#000000',
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 5,
-  },
-  accentRail: {
-    width: 3,
-  },
-  content: {
-    flex: 1,
-    minWidth: 0,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    gap: 8,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  iconChip: {
-    width: 28,
-    height: 28,
-    borderRadius: 0,
-    borderBottomWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  title: {
-    flex: 1,
-    minWidth: 0,
-    color: novaTheme.colors.textPrimary,
-    fontSize: 14,
-    fontWeight: '800',
-    letterSpacing: 0.1,
-  },
-  message: {
-    color: novaTheme.colors.textSecondary,
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 8,
-    marginTop: 2,
-  },
-  actionButton: {
-    minHeight: 34,
-    borderRadius: 0,
-    borderBottomWidth: 1,
-    borderColor: novaTheme.colors.borderSubtle,
-    backgroundColor: 'transparent',
-    paddingHorizontal: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  actionText: {
-    color: novaTheme.colors.textPrimary,
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  dismissButton: {
-    minHeight: 34,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    borderRadius: 0,
-    borderBottomWidth: 1,
-    borderColor: novaTheme.colors.borderSubtle,
-    paddingHorizontal: 10,
-  },
-  dismissText: {
-    color: novaTheme.colors.textSecondary,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  buttonFocused: {
-    borderColor: novaTheme.colors.focusRing,
-    backgroundColor: 'transparent',
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.7,
-    shadowRadius: 6,
-  },
-});
+function createStyles(theme: NovaTheme) {
+  const light = theme.scheme === 'light';
+
+  return StyleSheet.create({
+    toast: {
+      minWidth: 320,
+      flexDirection: 'row',
+      overflow: 'hidden',
+      borderRadius: 0,
+      borderTopWidth: 1,
+      borderBottomWidth: 1,
+      backgroundColor: theme.colors.backgroundRaised,
+      borderColor: theme.colors.borderStrong,
+      shadowColor: light ? theme.colors.textPrimary : '#000000',
+      shadowOpacity: light ? 0.12 : 0.25,
+      shadowRadius: light ? 8 : 6,
+      shadowOffset: { width: 0, height: 3 },
+      elevation: 5,
+    },
+    accentRail: {
+      width: 3,
+    },
+    content: {
+      flex: 1,
+      minWidth: 0,
+      paddingHorizontal: 16,
+      paddingVertical: 14,
+      gap: 8,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    iconChip: {
+      width: 28,
+      height: 28,
+      borderRadius: 0,
+      borderBottomWidth: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    title: {
+      flex: 1,
+      minWidth: 0,
+      color: theme.colors.textPrimary,
+      fontSize: 14,
+      fontWeight: '800',
+      letterSpacing: 0.1,
+    },
+    message: {
+      color: theme.colors.textSecondary,
+      fontSize: 12,
+      lineHeight: 17,
+    },
+    actions: {
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+      gap: 8,
+      marginTop: 2,
+    },
+    actionButton: {
+      minHeight: 34,
+      borderRadius: 0,
+      borderBottomWidth: 1,
+      borderColor: theme.colors.borderSubtle,
+      backgroundColor: 'transparent',
+      paddingHorizontal: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    actionText: {
+      color: theme.colors.textPrimary,
+      fontSize: 13,
+      fontWeight: '800',
+    },
+    dismissButton: {
+      minHeight: 34,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      borderRadius: 0,
+      borderBottomWidth: 1,
+      borderColor: theme.colors.borderSubtle,
+      paddingHorizontal: 10,
+    },
+    dismissText: {
+      color: theme.colors.textSecondary,
+      fontSize: 13,
+      fontWeight: '700',
+    },
+    buttonFocused: light
+      ? {
+          borderColor: theme.colors.focusRing,
+          backgroundColor: theme.colors.surfaceFocused,
+        }
+      : {
+          borderColor: theme.colors.focusRing,
+          backgroundColor: 'transparent',
+          shadowColor: theme.colors.focusRing,
+          shadowOpacity: 0.7,
+          shadowRadius: 6,
+        },
+  });
+}

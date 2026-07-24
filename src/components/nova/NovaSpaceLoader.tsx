@@ -7,7 +7,8 @@ import type { NovaTheme } from '@/theme/tokens';
 
 type NovaSpaceLoaderProps = {
   label?: string;
-  variant?: 'inline' | 'panel';
+  /** panel = rocket + label + energy bar; inline = row; badge = compact pulsing rocket only */
+  variant?: 'inline' | 'panel' | 'badge';
 };
 
 export function NovaSpaceLoader({ label = 'Loading…', variant = 'panel' }: NovaSpaceLoaderProps) {
@@ -44,6 +45,17 @@ export function NovaSpaceLoader({ label = 'Loading…', variant = 'panel' }: Nov
   const rocketGlow = pulse.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.35, 0.85, 0.35] });
   const energyScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] });
   const accent = theme.colors.accentHover;
+
+  if (variant === 'badge') {
+    return (
+      <View style={styles.badge} accessibilityRole="progressbar" accessibilityLabel={label}>
+        <Animated.View style={[styles.badgeRocketWrap, { transform: [{ scale: rocketScale }] }]}>
+          <Animated.View style={[styles.badgeGlow, { opacity: rocketGlow }]} />
+          <MaterialCommunityIcons name="rocket-launch" size={28} color={accent} />
+        </Animated.View>
+      </View>
+    );
+  }
 
   if (variant === 'inline') {
     return (
@@ -121,6 +133,24 @@ function createStyles(theme: NovaTheme) {
       height: '100%',
       borderRadius: 99,
       backgroundColor: theme.colors.accentHover,
+    },
+    badge: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      alignSelf: 'center',
+    },
+    badgeRocketWrap: {
+      width: 48,
+      height: 48,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    badgeGlow: {
+      position: 'absolute',
+      width: 40,
+      height: 40,
+      borderRadius: 99,
+      backgroundColor: theme.scheme === 'light' ? 'rgba(12, 74, 110, 0.16)' : 'rgba(59, 130, 246, 0.26)',
     },
     inlineRow: {
       flexDirection: 'row',

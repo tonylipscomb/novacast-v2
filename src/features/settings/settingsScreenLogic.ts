@@ -11,20 +11,20 @@ export type SettingsNotificationSpec = {
 
 const ACTION_COPY: Record<SettingsActionKind, { title: string; message: string }> = {
   'smart-categories': {
-    title: 'Settings not saved',
-    message: 'Smart Categories preference could not be saved. Try again.',
+    title: 'Setting could not be updated',
+    message: 'Please try the setting again.',
   },
   'replay-guides': {
-    title: 'Guides not reset',
-    message: 'Walkthrough guides could not be reset. Try again.',
+    title: 'Setting could not be updated',
+    message: 'Please try the setting again.',
   },
   'suppress-guides': {
-    title: 'Guides not updated',
-    message: 'Guide preferences could not be updated. Try again.',
+    title: 'Setting could not be updated',
+    message: 'Please try the setting again.',
   },
 };
 
-/** Recoverable settings action failures become toasts; the settings list stays focusable. */
+/** Recoverable settings action failures become passive toasts; retry via the setting control. */
 export function resolveSettingsActionNotification(
   action: SettingsActionKind | null,
   retryAttemptedAndStillFailing: boolean,

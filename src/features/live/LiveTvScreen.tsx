@@ -17,10 +17,11 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
-import { getTvDensity, NovaSpaceLoader, NovaTvShell, novaTvFocus } from '@/components/nova';
+import { getTvDensity, NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusChrome } from '@/components/nova';
 import { usePlaybackActivity } from '@/features/playback/usePlaybackActivity';
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import type { ProviderLiveCategory, ProviderLiveChannel } from '@/features/providers/providerRepositories';
 import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
@@ -33,6 +34,7 @@ import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
 import {
+  applyDebouncedPreview,
   chooseLiveChannel,
   clearPreviewConfirmationOnFocus,
   closeLiveFullscreen,
@@ -87,45 +89,25 @@ import {
   recordLiveTvScreenRender,
 } from './liveTvScrollPerf';
 import {
+  PREVIEW_FOCUS_DEBOUNCE_MS,
   shouldClearPreviewStreamUrl,
 } from './liveTvPreviewScheduling';
+import {
+  shouldApplyDebouncedPreviewTune,
+  shouldLoadCategoryOnFocusAlone,
+  shouldSkipPreviewRestart,
+} from './liveTvFocusPreview';
+import {
+  recordLiveTvFocusEvent,
+  recordLiveTvPreviewCancel,
+  recordLiveTvPreviewStart,
+} from './liveTvFocusDiagnostics';
 import { getLiveTvRowVisualFlags } from './liveTvUiPerfMode';
 import { useLiveTvScreenModel } from './useLiveTvScreenModel';
 import { displayLiveProgramText, isRawLiveStreamValue } from './liveTvProgramText';
 import { SearchOverlay } from '@/features/search/SearchOverlay';
 import { searchLiveChannels } from '@/features/search/repositories/liveSearchRepository';
 import type { SearchResult } from '@/features/search/searchTypes';
-
-/** Bounded retry count for focusing a just-mounted/just-laid-out native view. */
-const FOCUS_RESTORE_MAX_ATTEMPTS = 3;
-
-/**
- * Calls `.focus()` on the target once it (and its native layout) is ready,
- * retrying across a few animation frames instead of a blind timeout. Bounded
- * to `FOCUS_RESTORE_MAX_ATTEMPTS` frames (~50ms) so it can never hang.
- */
-function focusNativeViewWhenReady(
-  getTarget: () => ElementRef<typeof View> | null | undefined,
-  onSettled: () => void,
-  attemptsLeft = FOCUS_RESTORE_MAX_ATTEMPTS,
-): () => void {
-  const target = getTarget();
-  if (target) {
-    target.focus();
-    onSettled();
-    return () => {};
-  }
-
-  if (attemptsLeft <= 0) {
-    onSettled();
-    return () => {};
-  }
-
-  const frame = requestAnimationFrame(() => {
-    focusNativeViewWhenReady(getTarget, onSettled, attemptsLeft - 1);
-  });
-  return () => cancelAnimationFrame(frame);
-}
 
 const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false } as const) : {};
 
@@ -293,7 +275,7 @@ export function LiveTvScreen() {
     frozenPreviewChannelRef.current = null;
   }
   const detailPanelChannel = rowVisualFlags.freezeDetailPanel
-    ? frozenPreviewChannelRef.current ?? selectedChannel
+    ? frozenPreviewChannelRef.current ?? previewChannel
     : previewChannel;
   const detailChannelIsFavorite = personalizationState.liveFavorites.map((item) => item.contentId).includes(detailPanelChannel?.id ?? '');
   const fullscreenChannel = useMemo(
@@ -308,7 +290,10 @@ export function LiveTvScreen() {
   // overlay unmounts requires calling .focus() directly on these refs.
   const channelRowRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
-  const [focusHandleRevision, setFocusHandleRevision] = useState(0);
+  const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
+  const [categoryNextFocusRightHandle, setCategoryNextFocusRightHandle] = useState<number | undefined>();
+  const pendingPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusedChannelIdRef = useRef<string | null>(null);
   const [categoryFocusEpoch, setCategoryFocusEpoch] = useState(0);
   const watchButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenCloseButtonRef = useRef<ElementRef<typeof View>>(null);
@@ -345,13 +330,28 @@ export function LiveTvScreen() {
     });
   }, [activeProviderId, liveState]);
 
+  const refreshBoundaryFocusHandles = useCallback(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+
+    const selectedCategoryId = liveStateRef.current?.selectedCategoryId;
+    const categoryRef = selectedCategoryId ? categoryRowRefs.current.get(selectedCategoryId) : null;
+    const nextLeft = categoryRef ? findNodeHandle(categoryRef) ?? undefined : undefined;
+    setCategoryFocusLeftHandle((current) => (current === nextLeft ? current : nextLeft));
+
+    const channelId = preferredChannelFocusId.current ?? channels[0]?.id ?? null;
+    const channelRef = channelId ? channelRowRefs.current.get(channelId) : null;
+    const nextRight = channelRef ? findNodeHandle(channelRef) ?? undefined : undefined;
+    setCategoryNextFocusRightHandle((current) => (current === nextRight ? current : nextRight));
+  }, [channels]);
+
   const registerChannelRowRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
     if (instance) {
       channelRowRefs.current.set(channelId, instance);
     } else {
       channelRowRefs.current.delete(channelId);
     }
-    setFocusHandleRevision((value) => value + 1);
   }, []);
 
   const registerCategoryRowRef = useCallback((categoryId: string, instance: ElementRef<typeof View> | null) => {
@@ -360,7 +360,6 @@ export function LiveTvScreen() {
     } else {
       categoryRowRefs.current.delete(categoryId);
     }
-    setFocusHandleRevision((value) => value + 1);
   }, []);
 
   useEffect(() => {
@@ -383,13 +382,19 @@ export function LiveTvScreen() {
 
       setPreviewStreamUrl(playbackUrl);
       setState((current) => resolveLivePreview(current ?? liveState, requestId, channelId, 'ready'));
-    }, 240);
+    }, PREVIEW_FOCUS_DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
   // The request id and preview channel fields are the intentional debounce
   // boundary; the full state object would restart the timer on every update.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- keep preview debounce scoped to its request fields.
   }, [channels, resolvePlaybackUrl, liveState?.previewChannelId, liveState?.previewRequestId, liveState?.previewStatus]);
+
+  useEffect(() => {
+    if (liveState?.previewStatus === 'idle' || !liveState?.previewChannelId) {
+      setPreviewStreamUrl(null);
+    }
+  }, [liveState?.previewChannelId, liveState?.previewStatus]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -413,11 +418,10 @@ export function LiveTvScreen() {
 
       if (action === 'swallow') {
         // Native focus is still being restored onto the control that launched
-        // fullscreen (bounded to a few animation frames, see
-        // focusNativeViewWhenReady). fullscreenChannelId is already cleared at
-        // this instant, so without this guard a stray/rapid second Back during
-        // that brief window would open the Content Hub instead of leaving
-        // focus to settle on this screen.
+        // fullscreen (bounded animation frames via requestTvFocus).
+        // fullscreenChannelId is already cleared at this instant, so without this
+        // guard a stray/rapid second Back during that brief window would open the
+        // Content Hub instead of leaving focus to settle on this screen.
         return true;
       }
 
@@ -454,20 +458,25 @@ export function LiveTvScreen() {
     const targetChannelId = liveState?.selectedChannelId ?? null;
     isRestoringFullscreenFocusRef.current = true;
 
-    const cancel = focusNativeViewWhenReady(
-      () => {
+    const cancel = requestTvFocus({
+      screen: 'live',
+      source: 'LiveTvScreen',
+      region: opening ? 'fullscreen-chrome' : 'browse-restore',
+      itemId: opening ? currentFullscreenChannelId : targetChannelId,
+      reason: opening ? 'fullscreen-open' : 'fullscreen-close-restore',
+      getTarget: () => {
         if (opening) {
           return fullscreenCloseButtonRef.current;
         }
         return source === 'button' ? watchButtonRef.current : targetChannelId ? channelRowRefs.current.get(targetChannelId) : null;
       },
-      () => {
+      onSettled: () => {
         isRestoringFullscreenFocusRef.current = false;
         if (closing) {
           fullscreenLaunchSourceRef.current = null;
         }
       },
-    );
+    });
 
     return cancel;
   }, [liveState?.fullscreenChannelId, liveState?.selectedChannelId]);
@@ -484,7 +493,14 @@ export function LiveTvScreen() {
     }
 
     pendingPreviewActionFocusRef.current = null;
-    return focusNativeViewWhenReady(() => watchButtonRef.current, () => {});
+    return requestTvFocus({
+      screen: 'live',
+      source: 'LiveTvScreen',
+      region: 'preview-actions',
+      itemId: liveState?.selectedChannelId ?? null,
+      reason: 'preview-action-after-ok',
+      getTarget: () => watchButtonRef.current,
+    });
   }, [
     liveState?.fullscreenChannelId,
     liveState?.previewChannelId,
@@ -585,7 +601,14 @@ export function LiveTvScreen() {
     }
 
     fullscreenRetryFocusKeyRef.current = focusKey;
-    return focusNativeViewWhenReady(() => fullscreenRetryButtonRef.current, () => {});
+    return requestTvFocus({
+      screen: 'live',
+      source: 'LiveTvScreen',
+      region: 'fullscreen-retry',
+      itemId: liveState.fullscreenChannelId,
+      reason: 'fullscreen-fallback-retry',
+      getTarget: () => fullscreenRetryButtonRef.current,
+    });
   }, [fullscreenFallbackVisible, fullscreenFrameStatus, liveState?.fullscreenChannelId]);
 
   useEffect(() => {
@@ -593,12 +616,28 @@ export function LiveTvScreen() {
       return;
     }
 
-    return focusNativeViewWhenReady(() => fullscreenInteractionRef.current, () => {});
+    return requestTvFocus({
+      screen: 'live',
+      source: 'LiveTvScreen',
+      region: 'fullscreen-interaction',
+      itemId: liveState.fullscreenChannelId,
+      reason: 'fullscreen-chrome-hidden',
+      getTarget: () => fullscreenInteractionRef.current,
+    });
   }, [showFullscreenChrome, fullscreenFrameStatus, liveState?.fullscreenChannelId]);
 
   useEffect(() => {
     syncLiveTvMemory();
   }, [syncLiveTvMemory]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingPreviewTimerRef.current) {
+        clearTimeout(pendingPreviewTimerRef.current);
+        pendingPreviewTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const scrollCategoryIntoView = useCallback(
     (categoryId: string) => {
@@ -617,59 +656,105 @@ export function LiveTvScreen() {
     [categories],
   );
 
-  const categoryFocusLeftHandle = useMemo(() => {
-    if (Platform.OS !== 'android' || !renderState?.selectedCategoryId) {
-      return undefined;
+  useEffect(() => {
+    refreshBoundaryFocusHandles();
+  }, [refreshBoundaryFocusHandles, renderState?.selectedCategoryId, renderState?.selectedChannelId, channels.length]);
+
+  const cancelPendingPreview = useCallback(() => {
+    if (pendingPreviewTimerRef.current) {
+      clearTimeout(pendingPreviewTimerRef.current);
+      pendingPreviewTimerRef.current = null;
     }
-
-    const categoryRef = categoryRowRefs.current.get(renderState.selectedCategoryId);
-    return categoryRef ? findNodeHandle(categoryRef) ?? undefined : undefined;
-  }, [focusHandleRevision, renderState?.selectedCategoryId]);
-
-  const categoryNextFocusRightHandle = useMemo(() => {
-    if (Platform.OS !== 'android') {
-      return undefined;
-    }
-
-    const channelId = preferredChannelFocusId.current ?? channels[0]?.id;
-    if (!channelId) {
-      return undefined;
-    }
-
-    const channelRef = channelRowRefs.current.get(channelId);
-    return channelRef ? findNodeHandle(channelRef) ?? undefined : undefined;
-  }, [channels, focusHandleRevision, renderState?.selectedChannelId, renderState?.selectedChannelId]);
+  }, []);
 
   const focusCategoryRow = useCallback(
     (categoryId: string) => {
       preferredCategoryFocusId.current = categoryId;
       preferCategoryFocusRef.current = false;
-      setCategoryFocusEpoch((value) => value + 1);
-      scrollCategoryIntoView(categoryId);
+      // Avoid FlatList epoch bumps on every category D-pad move.
     },
-    [scrollCategoryIntoView],
+    [],
   );
 
   const focusChannelRow = useCallback(
     (channelId: string) => {
       preferredChannelFocusId.current = channelId;
+      focusedChannelIdRef.current = channelId;
       preferChannelFocusRef.current = false;
+      recordLiveTvFocusEvent(channelId);
       enrichFocusedChannelEpg(channelId);
+
       setState((current) => {
-        const base = current ?? liveState;
+        const base = current ?? liveStateRef.current;
         if (!base) {
           return current;
         }
-
-        return focusLiveChannel(base, channelId);
+        const next = focusLiveChannel(base, channelId);
+        return next === base ? current : next;
       });
+
+      cancelPendingPreview();
+
+      const active = liveStateRef.current;
+      if (
+        active &&
+        shouldSkipPreviewRestart({
+          channelId,
+          previewChannelId: active.previewChannelId,
+          previewStatus: active.previewStatus,
+        })
+      ) {
+        return;
+      }
+
+      pendingPreviewTimerRef.current = setTimeout(() => {
+        pendingPreviewTimerRef.current = null;
+        if (!shouldApplyDebouncedPreviewTune(channelId, focusedChannelIdRef.current)) {
+          recordLiveTvPreviewCancel(channelId);
+          return;
+        }
+
+        setState((current) => {
+          const base = current ?? liveStateRef.current;
+          if (!base) {
+            return current;
+          }
+          if (
+            shouldSkipPreviewRestart({
+              channelId,
+              previewChannelId: base.previewChannelId,
+              previewStatus: base.previewStatus,
+            })
+          ) {
+            return current;
+          }
+          recordLiveTvPreviewStart(channelId);
+          if (shouldClearPreviewStreamUrl(base.previewChannelId, channelId)) {
+            setPreviewStreamUrl(null);
+          }
+          return applyDebouncedPreview(base, channelId);
+        });
+      }, PREVIEW_FOCUS_DEBOUNCE_MS);
     },
-    [enrichFocusedChannelEpg, liveState],
+    [cancelPendingPreview, enrichFocusedChannelEpg],
   );
 
   const closeLiveSearch = useCallback(() => {
     setSearchOpen(false);
     setSearchOverlayReady(false);
+    const channelId = liveStateRef.current?.selectedChannelId ?? null;
+    if (!channelId) {
+      return;
+    }
+
+    requestTvFocus({
+      screen: 'live',
+      source: 'LiveTvScreen',
+      region: 'channel-row',
+      itemId: channelId,
+      reason: 'restore-after-search-close',
+      getTarget: () => channelRowRefs.current.get(channelId),
+    });
   }, []);
 
   const handleSearchSelect = useCallback(
@@ -691,29 +776,41 @@ export function LiveTvScreen() {
   const selectCategory = (categoryId: string) => {
     liveRetryAttemptedRef.current = false;
     preferredCategoryFocusId.current = categoryId;
+    cancelPendingPreview();
     setCategoryFocusEpoch((value) => value + 1);
+    scrollCategoryIntoView(categoryId);
     void loadCategoryChannels(categoryId).then((nextChannels) => {
       const nextChannelId = nextChannels[0]?.id ?? '';
       preferredCategoryFocusId.current = categoryId;
       preferredChannelFocusId.current = nextChannelId;
-      preferCategoryFocusRef.current = true;
-      preferChannelFocusRef.current = true;
-      setPreviewStreamUrl(null);
+      // Category OK must leave the category rail and land in the channel list.
+      preferCategoryFocusRef.current = false;
+      preferChannelFocusRef.current = Boolean(nextChannelId);
       setState((current) =>
         current ? selectLiveCategory(current, categoryId, nextChannelId) : createInitialLiveTvState(categoryId, nextChannelId),
       );
       syncLiveTvMemory();
+      if (nextChannelId) {
+        requestTvFocus({
+          screen: 'live',
+          source: 'LiveTvScreen',
+          region: 'channel-list',
+          itemId: nextChannelId,
+          reason: 'category-ok-to-channels',
+          getTarget: () => channelRowRefs.current.get(nextChannelId),
+        });
+      }
     });
   };
 
   const handleCategoryFocus = useCallback(
     (categoryId: string) => {
       focusCategoryRow(categoryId);
-      if (renderState && categoryId !== renderState.selectedCategoryId) {
-        selectCategory(categoryId);
+      if (shouldLoadCategoryOnFocusAlone()) {
+        // Pass 2: category focus must not load/tune/preview.
       }
     },
-    [focusCategoryRow, renderState],
+    [focusCategoryRow],
   );
 
   const tuneChannel = useCallback(
@@ -724,6 +821,7 @@ export function LiveTvScreen() {
       }
 
       lastChannelOkPressRef.current = { channelId, at: now };
+      cancelPendingPreview();
       const base = interactionState ?? liveState;
       const nextState = chooseLiveChannel(base ?? createInitialLiveTvState(undefined, channelId), channelId);
       if (isChannelPressEnteringFullscreen(base, channelId)) {
@@ -832,8 +930,6 @@ export function LiveTvScreen() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleReload,
       duration: LIVE_TV_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
@@ -853,8 +949,6 @@ export function LiveTvScreen() {
       type: 'warning',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handlePreviewRetry,
       duration: LIVE_TV_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'top-right',
@@ -952,7 +1046,7 @@ export function LiveTvScreen() {
         title="Live TV"
         subtitle="Browse channels without losing the picture."
         providerLabel={selectedProviderLabel}
-        preferActiveNavigationFocus={!searchBlocksBrowse}
+        preferActiveNavigationFocus={false}
         compactNavigationRail>
         <View
           style={styles.screen}
@@ -1079,12 +1173,24 @@ export function LiveTvScreen() {
                     <Text style={styles.previewLoadingCopy}>
                       {detailPanelChannel?.name ? displayStreamTitle(detailPanelChannel.name) : 'Try another channel'}
                     </Text>
+                    <Pressable
+                      focusable
+                      accessibilityRole="button"
+                      accessibilityLabel="Retry preview"
+                      onPress={handlePreviewRetry}
+                      style={[styles.watchButton, novaTvFocus.base]}>
+                      <Text style={styles.watchButtonText}>Retry</Text>
+                    </Pressable>
                   </View>
-                ) : streamSurfaceInFullscreen || !hasLiveStream ? (
+                ) : renderState.previewStatus === 'idle' || streamSurfaceInFullscreen || !hasLiveStream ? (
                   <View style={styles.previewLoading}>
                     <MaterialCommunityIcons name="television" size={34} color={theme.colors.accentHover} />
                     <Text style={styles.previewLoadingTitle}>
-                      {streamSurfaceInFullscreen ? 'Playing full screen' : 'Preparing stream'}
+                      {streamSurfaceInFullscreen
+                        ? 'Playing full screen'
+                        : renderState.previewStatus === 'idle'
+                          ? 'Select a channel'
+                          : 'Preparing stream'}
                     </Text>
                     <Text style={styles.previewLoadingCopy}>{detailPanelChannel?.name ? displayStreamTitle(detailPanelChannel.name) : 'Unknown channel'}</Text>
                   </View>
@@ -1097,6 +1203,7 @@ export function LiveTvScreen() {
                 <LiveTvProgramDetailPanel
                   channel={detailPanelChannel}
                   previewWindow={formatPreviewWindow(detailPanelChannel)}
+                  upNext={detailPanelChannel?.next}
                 />
 
                 <View style={styles.actionRow}>
@@ -1144,35 +1251,6 @@ export function LiveTvScreen() {
               </View>
             </View>
           ) : null}
-        </View>
-
-        <View style={styles.miniGuide}>
-          <View style={styles.guideItem}>
-            <Text style={styles.guideLabel}>Now</Text>
-            <Text numberOfLines={1} style={styles.guideValue}>
-              {displayLiveProgramText(selectedChannel?.current, 'No program information available.')}
-            </Text>
-          </View>
-          <View style={styles.guideDivider} />
-          <View style={styles.guideItem}>
-            <Text style={styles.guideLabel}>Next</Text>
-            <Text numberOfLines={1} style={styles.guideValue}>
-              {displayLiveProgramText(selectedChannel?.next, 'No program information available.')}
-            </Text>
-          </View>
-          <View style={styles.guideDivider} />
-          <View style={styles.guideItem}>
-            <Text style={styles.guideLabel}>Following</Text>
-            <Text numberOfLines={1} style={styles.guideValue}>
-              {displayLiveProgramText(selectedChannel?.following, 'No program information available.')}
-            </Text>
-          </View>
-          <View style={styles.guideAction}>
-            <MaterialCommunityIcons name="calendar-clock-outline" size={20} color={theme.colors.accentHover} />
-            <Text style={styles.guideActionText}>
-              {selectedChannel ? `${selectedChannel.currentStart} - ${selectedChannel.currentEnd}` : 'Open Guide'}
-            </Text>
-          </View>
         </View>
         </View>
       </NovaTvShell>
@@ -1242,12 +1320,17 @@ export function LiveTvScreen() {
               </View>
               <View style={[styles.fullscreenMetaPanel, styles.fullscreenChromeMetaPanel]}>
                 <Text style={styles.fullscreenEyebrow}>WATCHING LIVE</Text>
-                <Text numberOfLines={2} style={styles.fullscreenTitle}>
+                <Text numberOfLines={1} style={styles.fullscreenTitle}>
                   {displayLiveProgramText(fullscreenChannel.current, 'No program information available.')}
                 </Text>
-                <Text numberOfLines={2} style={styles.fullscreenMeta}>
+                <Text numberOfLines={1} style={styles.fullscreenMeta}>
                   {displayStreamTitle(fullscreenChannel.name)} · {formatPreviewWindow(fullscreenChannel)}
                 </Text>
+                {fullscreenChannel.description ? (
+                  <Text numberOfLines={2} style={styles.fullscreenDescription}>
+                    {displayLiveProgramText(fullscreenChannel.description, '')}
+                  </Text>
+                ) : null}
               </View>
             </>
           ) : null}
@@ -1289,6 +1372,7 @@ export function LiveTvScreen() {
 }
 
 function createStyles(theme: NovaTheme) {
+  const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
   root: {
     flex: 1,
@@ -1369,8 +1453,12 @@ function createStyles(theme: NovaTheme) {
   },
   fullscreenMetaPanel: {
     position: 'absolute',
-    paddingTop: 12,
-    paddingHorizontal: 2,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.78)',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.12)',
   },
   mainGrid: {
     flex: 1,
@@ -1832,19 +1920,7 @@ function createStyles(theme: NovaTheme) {
   watchButtonDisabled: {
     opacity: 0.56,
   },
-  textFocusActive:
-    theme.scheme === 'light'
-      ? {
-          borderColor: theme.colors.focusRing,
-          backgroundColor: theme.colors.surfaceFocused,
-        }
-      : {
-          borderColor: 'transparent',
-          backgroundColor: 'transparent',
-          shadowColor: theme.colors.accentHover,
-          shadowOpacity: 0.9,
-          shadowRadius: 9,
-        },
+  textFocusActive: focusChrome.active,
   fullscreenChromeTopRow: {
     top: theme.safeArea.top,
     left: theme.safeArea.left,
@@ -1900,36 +1976,38 @@ function createStyles(theme: NovaTheme) {
     ...androidTextFit,
   },
   fullscreenEyebrow: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 11,
-    lineHeight: 14,
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 10,
+    lineHeight: 12,
     fontWeight: '800',
-    letterSpacing: 1.5,
+    letterSpacing: 1.4,
     ...androidTextFit,
   },
   fullscreenTitle: {
-    marginTop: 6,
+    marginTop: 4,
     color: '#FFFFFF',
-    fontSize: 32,
-    lineHeight: 38,
+    fontSize: 22,
+    lineHeight: 26,
     fontWeight: '900',
-    letterSpacing: -0.5,
+    letterSpacing: -0.3,
     ...androidTextFit,
   },
   fullscreenMeta: {
-    marginTop: 8,
+    marginTop: 4,
     color: '#D9E2F0',
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 13,
+    lineHeight: 17,
     fontWeight: '600',
     ...androidTextFit,
   },
   fullscreenDescription: {
-    marginTop: 10,
-    maxWidth: '68%',
-    color: theme.colors.textSecondary,
-    fontSize: 13,
-    lineHeight: 19,
+    marginTop: 6,
+    maxWidth: '92%',
+    color: 'rgba(255,255,255,0.82)',
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '500',
+    ...androidTextFit,
   },
   fullscreenHint: {
     marginTop: 12,

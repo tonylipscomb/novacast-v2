@@ -15,8 +15,23 @@ export type LiveTvChannelRowShellData = {
 
 export type LiveTvChannelEpgData = {
   current: string;
+  /** Progress is kept for callers but not used to invalidate row memo identity. */
   progress: number;
 };
+
+export function toLiveTvChannelEpgData(channel: ProviderLiveChannel): LiveTvChannelEpgData {
+  const current = resolveLiveTvNowPlaying(channel.current, channel.name);
+  return {
+    current: current === LIVE_TV_NO_PROGRAM_LABEL ? '' : current,
+    progress: channel.progress,
+  };
+}
+
+function epgFieldsEqualForRow(previous: LiveTvChannelEpgData, next: LiveTvChannelEpgData): boolean {
+  // Intentionally ignore progress — rows do not render a progress bar, and
+  // progress ticks must not force unrelated row updates.
+  return previous.current === next.current;
+}
 
 /** @deprecated Use LiveTvChannelRowShellData — kept for FlatList typing during migration. */
 export type LiveTvChannelRowData = LiveTvChannelRowShellData;
@@ -31,14 +46,6 @@ export function toLiveTvChannelRowShell(channel: ProviderLiveChannel): LiveTvCha
     tone: channel.tone,
     resolution: channel.resolution,
     logoUrl: channel.logoUrl,
-  };
-}
-
-export function toLiveTvChannelEpgData(channel: ProviderLiveChannel): LiveTvChannelEpgData {
-  const current = resolveLiveTvNowPlaying(channel.current, channel.name);
-  return {
-    current: current === LIVE_TV_NO_PROGRAM_LABEL ? '' : current,
-    progress: channel.progress,
   };
 }
 
@@ -89,7 +96,7 @@ export function buildLiveTvChannelEpgMap(channels: ProviderLiveChannel[]): Map<s
     const candidate = toLiveTvChannelEpgData(channel);
     activeIds.add(channel.id);
     const cached = rowEpgPool.get(channel.id);
-    if (cached && cached.current === candidate.current && cached.progress === candidate.progress) {
+    if (cached && epgFieldsEqualForRow(cached, candidate)) {
       nextMap.set(channel.id, cached);
       continue;
     }

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import type { SeriesEpisodeSummary, SeriesSeasonSummary } from '@/features/media-browser/mediaTypes';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -50,8 +50,10 @@ export function SeriesEpisodeList({
                 selected && styles.seasonChipSelected,
                 focused && (theme.scheme === 'light' ? styles.seasonChipFocusedLight : novaTvFocus.active),
               ]}>
-              <Text style={[styles.seasonChipText, selected && styles.seasonChipTextSelected]}>{season.label}</Text>
-              <Text style={styles.seasonCount}>{season.episodeCount}</Text>
+              <Text style={[styles.seasonChipText, selected && styles.seasonChipTextSelected, focused && styles.seasonChipTextFocused]}>
+                {season.label}
+              </Text>
+              <Text style={[styles.seasonCount, focused && styles.seasonCountFocused]}>{season.episodeCount}</Text>
             </Pressable>
           );
         })}
@@ -79,8 +81,8 @@ export function SeriesEpisodeList({
                 focused && (theme.scheme === 'light' ? styles.episodeRowFocusedLight : novaTvFocus.active),
               ]}>
               <View style={styles.episodeCopy}>
-                <Text style={styles.episodeNumber}>E{item.episodeNumber}</Text>
-                <Text numberOfLines={1} style={styles.episodeTitle}>
+                <Text style={[styles.episodeNumber, focused && styles.episodeNumberFocused]}>E{item.episodeNumber}</Text>
+                <Text numberOfLines={1} style={[styles.episodeTitle, focused && styles.episodeTitleFocused]}>
                   {displayStreamTitle(item.title)}
                 </Text>
               </View>
@@ -94,6 +96,7 @@ export function SeriesEpisodeList({
 }
 
 function createStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
   return StyleSheet.create({
     root: {
       flex: 1,
@@ -132,11 +135,13 @@ function createStyles(theme: NovaTheme) {
     seasonChipTextSelected: {
       color: theme.colors.accentHover,
     },
+    seasonChipTextFocused: focusText.title,
     seasonCount: {
       color: theme.colors.textMuted,
       fontSize: 10,
       fontWeight: '700',
     },
+    seasonCountFocused: focusText.count,
     episodeList: {
       gap: 6,
       paddingBottom: 8,
@@ -169,11 +174,13 @@ function createStyles(theme: NovaTheme) {
       fontWeight: '800',
       width: 28,
     },
+    episodeNumberFocused: focusText.count,
     episodeTitle: {
       flex: 1,
       color: theme.colors.textPrimary,
       fontSize: 12,
       fontWeight: '700',
     },
+    episodeTitleFocused: focusText.title,
   });
 }

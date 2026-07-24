@@ -1,10 +1,16 @@
 import { Stack } from 'expo-router';
+import * as Sentry from '@sentry/react-native';
 import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LogBox, Platform, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AppNotificationProvider } from '@/features/notifications/AppNotificationProvider';
+import { TvPerfHud } from '@/features/perf/TvPerfHud';
+import { NovaErrorBoundary } from '@/features/resilience/NovaErrorBoundary';
+import { OfflineStatusBanner } from '@/features/resilience/OfflineStatusBanner';
+import { ensureAppLifecycleMonitor, subscribeAppLifecycle } from '@/features/resilience/appLifecycle';
+import { cancelAllPendingTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { AppThemeProvider, useAppTheme } from '@/theme/AppThemeProvider';
 import { UnifiedPlayerHost } from '@/features/playback/unified';
 import {
@@ -21,16 +27,20 @@ import {
   markNativeSplashHidden,
   markProviderReady,
 } from '@/features/startup/startupDiagnostics';
-import {
-  getStartupSplashRemainingMs,
-  STARTUP_READY_TIMEOUT_MS,
-} from '@/features/startup/startupLogic';
+import { STARTUP_READY_TIMEOUT_MS } from '@/features/startup/startupLogic';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { initializeDevice, sendDeviceHeartbeat } from '@/features/device';
 import { isStartupReady, markStartupReady, subscribeStartupReadiness } from '@/features/startup/startupReadiness';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
   // Fast refresh can call this more than once.
+});
+
+Sentry.init({
+  dsn: process.env.EXPO_PUBLIC_SENTRY_DSN,
+  enabled: !__DEV__,
+  sendDefaultPii: false,
+  tracesSampleRate: 0.1,
 });
 
 export default function RootLayout() {
@@ -61,6 +71,15 @@ export default function RootLayout() {
     if (__DEV__) {
       LogBox.ignoreLogs(['Open debugger to view warnings']);
     }
+  }, []);
+
+  useEffect(() => {
+    ensureAppLifecycleMonitor();
+    return subscribeAppLifecycle((status) => {
+      if (status !== 'active') {
+        cancelAllPendingTvFocus('inactive');
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -102,11 +121,9 @@ export default function RootLayout() {
       return;
     }
 
-    const remaining = getStartupSplashRemainingMs(startedAt);
-    const exitTimer = setTimeout(requestExit, remaining);
-
-    return () => clearTimeout(exitTimer);
-  }, [introComplete, requestExit, startedAt]);
+    // Exit as soon as the intro video finishes — don't hold for a min-duration leftover.
+    requestExit();
+  }, [introComplete, requestExit]);
 
   useEffect(() => {
     const forceTimer = setTimeout(() => {
@@ -167,12 +184,14 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <AppThemeProvider>
-        <ThemedAppRoot
-          launchOverlay={launchOverlay}
-          onOverlayExitComplete={handleOverlayExitComplete}
-        />
-      </AppThemeProvider>
+      <NovaErrorBoundary region="root" showProviderAction>
+        <AppThemeProvider>
+          <ThemedAppRoot
+            launchOverlay={launchOverlay}
+            onOverlayExitComplete={handleOverlayExitComplete}
+          />
+        </AppThemeProvider>
+      </NovaErrorBoundary>
     </SafeAreaProvider>
   );
 }
@@ -197,9 +216,17 @@ function ThemedAppRoot({
       />
 
       <AppNotificationProvider />
+      <OfflineStatusBanner />
+      <TvPerfHud />
 
       <View pointerEvents="box-none" style={styles.playerHostLayer}>
-        <UnifiedPlayerHost />
+        <NovaErrorBoundary
+          region="playback"
+          fallbackTitle="Playback unavailable"
+          fallbackMessage="Playback hit an unexpected problem. Retry or return home."
+          showHomeAction>
+          <UnifiedPlayerHost />
+        </NovaErrorBoundary>
       </View>
 
       {launchOverlay.visible ? (

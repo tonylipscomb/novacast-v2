@@ -137,12 +137,12 @@ test('Live TV EPG merge replaces only channels whose EPG changed', () => {
   assert.equal(merged[1], previous[1]);
 });
 
-test('Live TV focus scroll only triggers near visible boundaries or offscreen rows', () => {
+test('Live TV focus scroll only triggers for offscreen rows', () => {
   const visible = { first: 4, last: 10 };
 
   assert.equal(shouldScrollToKeepFocusVisible(2, visible, 30), true);
   assert.equal(shouldScrollToKeepFocusVisible(12, visible, 30), true);
-  assert.equal(shouldScrollToKeepFocusVisible(9, visible, 30), true);
+  assert.equal(shouldScrollToKeepFocusVisible(9, visible, 30), false);
   assert.equal(shouldScrollToKeepFocusVisible(6, visible, 30), false);
   assert.equal(shouldScrollToKeepFocusVisible(0, visible, 30), true);
 });

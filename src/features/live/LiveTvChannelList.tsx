@@ -18,8 +18,9 @@ import {
   type VisibleIndexRange,
 } from './liveTvFocusScroll';
 import { getLiveTvChannelItemLayout } from './liveTvChannelRowLayout';
-import { shouldScrollListToFocusIndex } from './liveTvPreviewScheduling';
+import { shouldProgrammaticScrollOnFocus, shouldScrollListToFocusIndex } from './liveTvPreviewScheduling';
 import { recordLiveTvManualScroll } from './liveTvScrollPerf';
+import { recordLiveTvProgrammaticScroll, recordLiveTvVisibleRowRender } from './liveTvFocusDiagnostics';
 import { resolveLiveTvRowAbMode } from './liveTvUiPerfMode';
 
 const CHANNEL_KEY_EXTRACTOR = (item: LiveTvChannelRowShellData) => item.id;
@@ -36,6 +37,8 @@ type LiveTvChannelListProps = {
   preferFocusChannelId: string | null;
   listRef: RefObject<FlatList<LiveTvChannelRowShellData> | null>;
   categoryFocusLeftHandle?: number;
+  /** When true, allow one programmatic scroll for restore / category jump. */
+  allowRestoreScroll?: boolean;
   onTuneChannel: (channelId: string) => void;
   onChannelFocus: (channelId: string) => void;
   registerRowRef: (channelId: string, instance: ElementRef<typeof View> | null) => void;
@@ -48,6 +51,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   preferFocusChannelId,
   listRef,
   categoryFocusLeftHandle,
+  allowRestoreScroll = false,
   onTuneChannel,
   onChannelFocus,
   registerRowRef,
@@ -64,6 +68,9 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   const focusedIndexRef = useRef<number | null>(null);
   const visibleRangeRef = useRef<VisibleIndexRange | null>(null);
   const lastScrolledIndexRef = useRef<number | null>(null);
+  const scrollRetryRef = useRef<{ index: number; attempts: number } | null>(null);
+  const allowRestoreScrollRef = useRef(allowRestoreScroll);
+  allowRestoreScrollRef.current = allowRestoreScroll;
 
   const onTune = useMemo(
     () => (channelId: string) => {
@@ -90,29 +97,36 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   const epgByChannelId = useMemo(() => buildLiveTvChannelEpgMap(channels), [channels]);
   const channelIndexById = useMemo(() => new Map(rowShells.map((row, index) => [row.id, index])), [rowShells]);
 
-  const epgSignature = useMemo(
-    () => channels.map((channel) => `${channel.id}:${channel.current ?? ''}:${channel.progress ?? 0}`).join('|'),
-    [channels],
-  );
-
+  // Do not include a full-list EPG signature — per-row EPG props drive memoized updates.
   const listExtraData = useMemo(
-    () =>
-      `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}:${epgSignature}`,
-    [categoryFocusLeftHandle, epgSignature, previewChannelId, selectedChannelId],
+    () => `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}`,
+    [categoryFocusLeftHandle, previewChannelId, selectedChannelId],
   );
 
   const scrollToFocusedIndex = useCallback(
-    (nextIndex: number) => {
+    (nextIndex: number, reason: 'focus' | 'restore' | 'category-jump' | 'focus-recovery') => {
       if (!shouldScrollListToFocusIndex(lastScrolledIndexRef.current, nextIndex)) {
         return;
       }
 
-      if (!shouldScrollToKeepFocusVisible(nextIndex, visibleRangeRef.current, rowShells.length)) {
+      const shouldScroll =
+        reason !== 'focus'
+          ? shouldProgrammaticScrollOnFocus({
+              focusedIndex: nextIndex,
+              visible: visibleRangeRef.current,
+              totalCount: rowShells.length,
+              reason,
+            })
+          : shouldScrollToKeepFocusVisible(nextIndex, visibleRangeRef.current, rowShells.length);
+
+      if (!shouldScroll) {
         return;
       }
 
       recordLiveTvManualScroll();
+      recordLiveTvProgrammaticScroll(reason);
       lastScrolledIndexRef.current = nextIndex;
+      scrollRetryRef.current = { index: nextIndex, attempts: 0 };
       listRef.current?.scrollToIndex({
         index: nextIndex,
         animated: false,
@@ -131,7 +145,8 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       }
 
       focusedIndexRef.current = nextIndex;
-      scrollToFocusedIndex(nextIndex);
+      const reason = allowRestoreScrollRef.current ? 'restore' : 'focus';
+      scrollToFocusedIndex(nextIndex, reason);
     },
     [channelIndexById, onFocus, scrollToFocusedIndex],
   );
@@ -142,6 +157,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
 
   const renderItem = useCallback(
     ({ item, index }: ListRenderItemInfo<LiveTvChannelRowShellData>) => {
+      recordLiveTvVisibleRowRender();
       const epg = epgByChannelId.get(item.id) ?? { current: '', progress: 0 };
 
       return (
@@ -175,7 +191,15 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
 
   const onScrollToIndexFailed = useCallback(
     (info: { averageItemLength: number; index: number }) => {
+      const retry = scrollRetryRef.current;
+      if (retry && retry.index === info.index && retry.attempts >= 1) {
+        scrollRetryRef.current = null;
+        return;
+      }
+
+      scrollRetryRef.current = { index: info.index, attempts: (retry?.attempts ?? 0) + 1 };
       recordLiveTvManualScroll();
+      recordLiveTvProgrammaticScroll('focus-recovery');
       listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
       lastScrolledIndexRef.current = info.index;
     },
@@ -192,10 +216,10 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       showsVerticalScrollIndicator={false}
       contentContainerStyle={styles.channelList}
       removeClippedSubviews={false}
-      windowSize={7}
-      maxToRenderPerBatch={8}
-      updateCellsBatchingPeriod={50}
-      initialNumToRender={12}
+      windowSize={5}
+      maxToRenderPerBatch={6}
+      updateCellsBatchingPeriod={80}
+      initialNumToRender={10}
       getItemLayout={getLiveTvChannelItemLayout}
       onViewableItemsChanged={onViewableItemsChanged}
       viewabilityConfig={VIEWABILITY_CONFIG}
@@ -204,6 +228,8 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
     />
   );
 });
+
+export { CHANNEL_KEY_EXTRACTOR as liveTvChannelKeyExtractor };
 
 const styles = StyleSheet.create({
   list: {

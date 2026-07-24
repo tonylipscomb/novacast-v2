@@ -1,6 +1,8 @@
-const { getDefaultConfig } = require('expo/metro-config');
+const {
+  getSentryExpoConfig
+} = require("@sentry/react-native/metro");
 
-const config = getDefaultConfig(__dirname);
+const config = getSentryExpoConfig(__dirname);
 
 // The project root accumulates loose debug artifacts from manual device/emulator
 // testing sessions (screenshots, UI-dump XML, adb/gradle/metro logs, sideloaded

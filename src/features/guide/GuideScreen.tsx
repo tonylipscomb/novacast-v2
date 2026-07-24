@@ -15,7 +15,7 @@ import {
   View,
 } from 'react-native';
 
-import { NovaSpaceLoader, NovaTvShell, novaTvFocus } from '@/components/nova';
+import { NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
@@ -28,7 +28,10 @@ import { useProviderStore } from '@/features/providers/providerStore';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
+import { tvPerfSetFocus, tvPerfSetScreen } from '@/features/perf/tvPerfStore';
 import { GuideCategoryRail } from './GuideCategoryRail';
+import { GuideLocalFocusPressable } from './GuideLocalFocusPressable';
+import { GUIDE_DETAILS_FOCUS_DEBOUNCE_MS } from './guideFocusPolicy';
 import {
   focusGuideProgramAt,
   createInitialGuideState,
@@ -127,6 +130,11 @@ export function GuideScreen() {
     selectCategory,
     selectedCategoryTotalCount,
   } = useGuideScreenModel();
+
+  useEffect(() => {
+    tvPerfSetScreen('guide');
+  }, []);
+
   const { state: personalizationState } = usePersonalizationStore(activeProviderId);
   const selectedCategoryName = categories.find((category) => category.id === selectedCategoryId)?.name ?? '';
   const [guideState, setGuideState] = useState(() => ({
@@ -162,12 +170,23 @@ export function GuideScreen() {
   const guideRetryAttemptedRef = useRef(false);
   const [favoriteHandle, setFavoriteHandle] = useState<number | undefined>();
   const [stateActionHandle, setStateActionHandle] = useState<number | undefined>();
-  const [horizontalOffset, setHorizontalOffset] = useState(guideMemory.horizontalOffset);
+  const horizontalOffsetRef = useRef(guideMemory.horizontalOffset);
   const [focusGraphRevision, setFocusGraphRevision] = useState(0);
   const focusGraphFrameRef = useRef<number | null>(null);
   const programRefCallbacks = useRef<Record<string, (instance: Focusable | null) => void>>({});
   const channelRefCallbacks = useRef<Record<string, (instance: Focusable | null) => void>>({});
   const initialFocusProviderRef = useRef<string | null>(null);
+  const preferredFocusConsumedRef = useRef(false);
+  const detailsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestFocusRef = useRef({
+    channelId: guideMemory.focusedChannelId,
+    programId: guideMemory.focusedProgramId,
+    timestamp: guideMemory.focusedTimestamp ?? null as number | null,
+  });
+  const [detailsFocus, setDetailsFocus] = useState({
+    channelId: guideMemory.focusedChannelId,
+    programId: guideMemory.focusedProgramId,
+  });
 
   const favoriteIds = useMemo(
     () => new Set(personalizationState.liveFavorites.map((item) => item.contentId)),
@@ -188,13 +207,28 @@ export function GuideScreen() {
     ((timeline.endAt - timeline.startAt) / 60_000) * GUIDE_PIXELS_PER_MINUTE,
   );
   const preferredProgramKey = useMemo(() => {
-    const focused = filteredRows.some((row) => row.channel.id === guideState.focusedChannelId && row.programs.some((program) => programKey(row.channel.id, program.id) === guideState.focusedProgramId));
-    if (focused) return programKey(guideState.focusedChannelId ?? '', guideState.focusedProgramId ?? '');
+    if (preferredFocusConsumedRef.current) {
+      return null;
+    }
+    const seedChannelId = guideMemory.focusedChannelId;
+    const seedProgramId = guideMemory.focusedProgramId;
+    const focused = filteredRows.some(
+      (row) =>
+        row.channel.id === seedChannelId &&
+        row.programs.some((program) => programKey(row.channel.id, program.id) === seedProgramId),
+    );
+    if (focused && seedChannelId && seedProgramId) {
+      return programKey(seedChannelId, seedProgramId);
+    }
     const first = filteredRows[0]?.programs[0];
     return first && filteredRows[0] ? programKey(filteredRows[0].channel.id, first.id) : null;
-  }, [filteredRows, guideState.focusedChannelId, guideState.focusedProgramId]);
-  const focusedRow = filteredRows.find((row) => row.channel.id === guideState.focusedChannelId) ?? filteredRows[0];
-  const focusedProgram = focusedRow?.programs.find((program) => programKey(focusedRow.channel.id, program.id) === guideState.focusedProgramId) ?? focusedRow?.programs[0];
+  }, [filteredRows, guideMemory.focusedChannelId, guideMemory.focusedProgramId]);
+  const focusedRow =
+    filteredRows.find((row) => row.channel.id === detailsFocus.channelId) ?? filteredRows[0];
+  const focusedProgram =
+    focusedRow?.programs.find(
+      (program) => programKey(focusedRow.channel.id, program.id) === detailsFocus.programId,
+    ) ?? focusedRow?.programs[0];
   const focusedIsFavorite = Boolean(focusedRow && favoriteIds.has(focusedRow.channel.id));
   const focusedProgramTime = focusedProgram?.startAt
     ? `${formatGuideTime(focusedProgram.startAt)}${focusedProgram.endAt ? ` - ${formatGuideTime(focusedProgram.endAt)}` : ''}`
@@ -272,10 +306,18 @@ export function GuideScreen() {
       Object.values(rowScrollRefs.current).forEach((rowScrollRef) => {
         rowScrollRef?.scrollTo({ x: guideMemory.horizontalOffset, animated: false });
       });
-      setHorizontalOffset(guideMemory.horizontalOffset);
+      horizontalOffsetRef.current = guideMemory.horizontalOffset;
     });
     return () => cancelAnimationFrame(frame);
   }, [activeProviderId, guideMemory.horizontalOffset, guideMemory.verticalOffset, rows.length, status]);
+
+  useEffect(() => {
+    return () => {
+      if (detailsTimerRef.current) {
+        clearTimeout(detailsTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (status !== 'ready' || !filteredRows.length || initialFocusProviderRef.current === activeProviderId) return;
@@ -286,6 +328,7 @@ export function GuideScreen() {
       () => {
         if (!targetKey || programRefs.current[targetKey]) {
           initialFocusProviderRef.current = activeProviderId;
+          preferredFocusConsumedRef.current = true;
         }
       },
     );
@@ -380,7 +423,8 @@ export function GuideScreen() {
 
   const syncHorizontalOffset = (offset: number, sourceChannelId?: string) => {
     const nextOffset = Math.max(0, Math.round(offset));
-    setHorizontalOffset(nextOffset);
+    // Imperative scroll only — avoid setState on every D-pad / swipe move.
+    horizontalOffsetRef.current = nextOffset;
     rememberGuideMemory(activeProviderId, { horizontalOffset: nextOffset });
     timelineHeaderRef.current?.scrollTo({ x: nextOffset, animated: false });
     Object.entries(rowScrollRefs.current).forEach(([channelId, rowScrollRef]) => {
@@ -398,9 +442,44 @@ export function GuideScreen() {
     timelineHeaderRef.current?.scrollTo({ x, animated: true });
   };
 
+  const publishGuideFocus = useCallback(
+    (channelId: string, programId: string, timestamp: number | null, immediate = false) => {
+      latestFocusRef.current = { channelId, programId, timestamp };
+      preferredFocusConsumedRef.current = true;
+      tvPerfSetFocus('GuideProgram', `${channelId}:${programId}`);
+      rememberGuideMemory(activeProviderId, {
+        focusedChannelId: channelId,
+        focusedProgramId: programId,
+        focusedTimestamp: timestamp,
+      });
+
+      const apply = () => {
+        setDetailsFocus((current) =>
+          current.channelId === channelId && current.programId === programId
+            ? current
+            : { channelId, programId },
+        );
+        setGuideState((current) => focusGuideProgramAt(current, channelId, programId, timestamp));
+      };
+
+      if (detailsTimerRef.current) {
+        clearTimeout(detailsTimerRef.current);
+        detailsTimerRef.current = null;
+      }
+
+      if (immediate) {
+        apply();
+        return;
+      }
+
+      detailsTimerRef.current = setTimeout(apply, GUIDE_DETAILS_FOCUS_DEBOUNCE_MS);
+    },
+    [activeProviderId],
+  );
+
   const focusProgram = (rowIndex: number, row: NormalizedGuideRow, program: NormalizedGuideProgram, programIndex: number) => {
     const timestamp = getProgramTimestamp(program, programIndex);
-    setGuideState((current) => focusGuideProgramAt(current, row.channel.id, program.id, timestamp));
+    publishGuideFocus(row.channel.id, program.id, timestamp, false);
     scrollToProgram(rowIndex, row.channel.id, timestamp);
   };
 
@@ -411,7 +490,7 @@ export function GuideScreen() {
     }
 
     const key = programKey(row.channel.id, program.id);
-    setGuideState((current) => focusGuideProgramAt(current, row.channel.id, program.id, program.startAt ?? Date.now()));
+    publishGuideFocus(row.channel.id, program.id, program.startAt ?? Date.now(), true);
     scrollToProgram(rowIndex, row.channel.id, program.startAt ?? Date.now());
     focusNativeViewWhenReady(() => programRefs.current[key] ?? null, () => undefined);
   };
@@ -485,14 +564,12 @@ export function GuideScreen() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleRetry,
       duration: GUIDE_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'guide',
     });
-  }, [bundle, dismissNotification, handleRetry, showNotification, status]);
+  }, [bundle, dismissNotification, showNotification, status]);
 
   useEffect(() => {
     return () => {
@@ -573,7 +650,7 @@ export function GuideScreen() {
                 }}
                 style={[styles.actionButton, novaTvFocus.base, focusedAction === 'search' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="magnify" size={18} color={theme.colors.accentHover} />
-                <Text style={styles.actionText}>Search</Text>
+                <Text style={[styles.actionText, focusedAction === 'search' && styles.actionTextFocused]}>Search</Text>
               </Pressable>
             ) : null}
             <Pressable
@@ -586,7 +663,7 @@ export function GuideScreen() {
               onPress={() => setFilter((current) => (current === 'all' ? 'favorites' : 'all'))}
               style={[styles.actionButton, novaTvFocus.base, filter === 'favorites' && styles.actionSelected, focusedAction === 'filter' && styles.textFocusActive]}>
               <MaterialCommunityIcons name={filter === 'favorites' ? 'star' : 'star-outline'} size={18} color={theme.colors.accentHover} />
-              <Text style={[styles.actionText, filter === 'favorites' && styles.actionTextSelected]}>
+              <Text style={[styles.actionText, filter === 'favorites' && styles.actionTextSelected, focusedAction === 'filter' && styles.actionTextFocused]}>
                 {filter === 'favorites' ? 'Favorites' : 'All channels'}
               </Text>
             </Pressable>
@@ -600,7 +677,7 @@ export function GuideScreen() {
               onPress={jumpToNow}
               style={[styles.actionButton, novaTvFocus.base, focusedAction === 'jump' && styles.textFocusActive]}>
               <MaterialCommunityIcons name="clock-fast" size={18} color={theme.colors.accentHover} />
-              <Text style={styles.actionText}>Jump to Now</Text>
+              <Text style={[styles.actionText, focusedAction === 'jump' && styles.actionTextFocused]}>Jump to Now</Text>
             </Pressable>
           </View>
         </View>
@@ -668,7 +745,7 @@ export function GuideScreen() {
                 onPress={handleRetry}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color={theme.colors.textPrimary} />
-                <Text style={styles.retryText}>Retry</Text>
+                <Text style={[styles.retryText, focusedAction === 'retry' && styles.retryTextFocused]}>Retry</Text>
               </Pressable>
             </View>
           ) : status === 'empty' ? (
@@ -688,7 +765,7 @@ export function GuideScreen() {
                 onPress={handleRetry}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color={theme.colors.textPrimary} />
-                <Text style={styles.retryText}>Retry</Text>
+                <Text style={[styles.retryText, focusedAction === 'retry' && styles.retryTextFocused]}>Retry</Text>
               </Pressable>
             </View>
           ) : status === 'no-favorites' ? (
@@ -707,14 +784,15 @@ export function GuideScreen() {
                 onBlur={() => setFocusedAction(null)}
                 onPress={() => handleSelectCategory('all')}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
-                <Text style={styles.retryText}>Browse all channels</Text>
+                <Text style={[styles.retryText, focusedAction === 'retry' && styles.retryTextFocused]}>Browse all channels</Text>
               </Pressable>
             </View>
           ) : status === 'error' && !filteredRows.length ? (
             // A transient fetch failure with zero channels loaded. The "Guide data
-            // unavailable" corner toast (see the effect above) carries the real message
-            // and the Retry action; this is just a modest placeholder for the empty row
-            // area — no giant blocking panel, no focus stolen from the category rail.
+            // unavailable" corner toast (see the effect above) carries the message;
+            // this is just a modest placeholder for the empty row area — no giant
+            // blocking panel, no focus stolen from the category rail. Retry remains
+            // on the empty/unavailable panels and via category reselection.
             <View style={styles.inlineStateNotice}>
               <MaterialCommunityIcons name="cloud-off-outline" size={22} color={theme.colors.textMuted} />
               <Text style={styles.inlineStateText}>No channels to display right now.</Text>
@@ -740,7 +818,7 @@ export function GuideScreen() {
                   setSearchQuery('');
                 }}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
-                <Text style={styles.retryText}>Show all channels</Text>
+                <Text style={[styles.retryText, focusedAction === 'retry' && styles.retryTextFocused]}>Show all channels</Text>
               </Pressable>
             </View>
           ) : (
@@ -792,28 +870,40 @@ export function GuideScreen() {
                 const nextChannelHandle = getHandle(channelRefs.current[filteredRows[index + 1]?.channel.id]);
                 return (
                   <View style={styles.guideRow}>
-                    <Pressable
-                      ref={getChannelRefCallback(item.channel.id)}
+                    <GuideLocalFocusPressable
+                      pressableRef={getChannelRefCallback(item.channel.id)}
                       focusable
                       accessibilityRole="button"
                       accessibilityLabel={`Channel ${item.channel.name}`}
                       hasTVPreferredFocus={!preferredProgramKey && index === 0}
-                      {...(firstProgramHandle ? { nextFocusRight: firstProgramHandle } : null)}
-                      {...(previousChannelHandle ? { nextFocusUp: previousChannelHandle } : null)}
-                      {...(nextChannelHandle ? { nextFocusDown: nextChannelHandle } : null)}
+                      nextFocusRight={firstProgramHandle}
+                      nextFocusUp={previousChannelHandle}
+                      nextFocusDown={nextChannelHandle}
                       onFocus={() => {
-                        setGuideState((current) => ({ ...current, focusedChannelId: item.channel.id }));
+                        preferredFocusConsumedRef.current = true;
+                        latestFocusRef.current = {
+                          ...latestFocusRef.current,
+                          channelId: item.channel.id,
+                        };
+                        rememberGuideMemory(activeProviderId, { focusedChannelId: item.channel.id });
                       }}
                       onPress={() => tuneChannel(item)}
-                      style={[styles.channelCell, novaTvFocus.base, guideState.focusedChannelId === item.channel.id && styles.channelCellFocused]}>
-                      <Text style={styles.channelNumber}>{item.channel.number || '—'}</Text>
-                      <ChannelLogo channel={item.channel} />
-                      <View style={styles.channelCopy}>
-                        <Text numberOfLines={1} style={styles.channelName}>{item.channel.name}</Text>
-                        <Text style={styles.channelMeta}>{item.programs.length ? `${item.programs.length} programs` : 'No program information'}</Text>
-                      </View>
-                      {favoriteIds.has(item.channel.id) ? <MaterialCommunityIcons name="star" size={15} color={theme.colors.accentHover} /> : null}
-                    </Pressable>
+                      style={[styles.channelCell, novaTvFocus.base]}
+                      focusedStyle={styles.channelCellFocused}>
+                      {(focused) => (
+                        <>
+                          <Text style={[styles.channelNumber, focused && styles.channelNumberFocused]}>{item.channel.number || '—'}</Text>
+                          <ChannelLogo channel={item.channel} />
+                          <View style={styles.channelCopy}>
+                            <Text numberOfLines={1} style={[styles.channelName, focused && styles.channelNameFocused]}>{item.channel.name}</Text>
+                            <Text style={[styles.channelMeta, focused && styles.channelMetaFocused]}>
+                              {item.programs.length ? `${item.programs.length} programs` : 'No program information'}
+                            </Text>
+                          </View>
+                          {favoriteIds.has(item.channel.id) ? <MaterialCommunityIcons name="star" size={15} color={theme.colors.accentHover} /> : null}
+                        </>
+                      )}
+                    </GuideLocalFocusPressable>
 
                     <ScrollView
                       ref={(ref) => {
@@ -827,14 +917,13 @@ export function GuideScreen() {
                       style={styles.programScroller}
                       contentContainerStyle={[styles.programRow, { minWidth: timelineWidth }]}
                       onScroll={(event) => {
-                        if (guideState.focusedChannelId === item.channel.id) {
+                        if (latestFocusRef.current.channelId === item.channel.id) {
                           syncHorizontalOffset(event.nativeEvent.contentOffset.x, item.channel.id);
                         }
                       }}
                       scrollEventThrottle={100}>
                       {item.programs.length ? item.programs.map((program, programIndex) => {
                         const key = programKey(item.channel.id, program.id);
-                        const focused = guideState.focusedProgramId === program.id && guideState.focusedChannelId === item.channel.id;
                         const selected = guideState.selectedProgramId === program.id && guideState.selectedChannelId === item.channel.id;
                         const previous = item.programs[programIndex - 1];
                         const next = item.programs[programIndex + 1];
@@ -846,14 +935,15 @@ export function GuideScreen() {
                         const downTarget = down ? getHandle(down) : index === filteredRows.length - 1 ? favoriteHandle : ownHandle;
                         const programStatus = getProgramStatus(program);
                         return (
-                          <Pressable
+                          <GuideLocalFocusPressable
                             key={key}
-                            ref={getProgramRefCallback(key)}
+                            pressableRef={getProgramRefCallback(key)}
                             focusable
-                            {...(left ? { nextFocusLeft: left } : null)}
-                            {...(right ? { nextFocusRight: right } : null)}
-                            {...(up ? { nextFocusUp: getHandle(up) } : ownHandle ? { nextFocusUp: ownHandle } : null)}
-                            {...(downTarget ? { nextFocusDown: downTarget } : null)}
+                            hasTVPreferredFocus={preferredProgramKey === key}
+                            nextFocusLeft={left}
+                            nextFocusRight={right}
+                            nextFocusUp={up ? getHandle(up) : ownHandle}
+                            nextFocusDown={downTarget}
                             onFocus={() => focusProgram(index, item, program, programIndex)}
                             onPress={() => tuneProgram(item, program)}
                             style={[
@@ -874,15 +964,19 @@ export function GuideScreen() {
                               programStatus === 'past' && styles.programPast,
                               programStatus === 'live' && styles.programLive,
                               programStatus === 'unknown' && styles.programUnknown,
-                              focused && styles.programCellFocused,
                               selected && styles.programSelected,
-                            ]}>
-                            <View style={styles.programTopline}>
-                              {programStatus === 'live' ? <Text style={styles.liveLabel}>LIVE</Text> : null}
-                              <Text numberOfLines={1} style={styles.programMeta}>{program.meta}</Text>
-                            </View>
-                            <Text numberOfLines={2} style={styles.programTitle}>{program.title}</Text>
-                          </Pressable>
+                            ]}
+                            focusedStyle={styles.programCellFocused}>
+                            {(focused) => (
+                              <>
+                                <View style={styles.programTopline}>
+                                  {programStatus === 'live' ? <Text style={styles.liveLabel}>LIVE</Text> : null}
+                                  <Text numberOfLines={1} style={[styles.programMeta, focused && styles.programMetaFocused]}>{program.meta}</Text>
+                                </View>
+                                <Text numberOfLines={2} style={[styles.programTitle, focused && styles.programTitleFocused]}>{program.title}</Text>
+                              </>
+                            )}
+                          </GuideLocalFocusPressable>
                         );
                       }) : (
                         <View style={[styles.noProgramCell, { width: timelineWidth }]}>
@@ -919,7 +1013,9 @@ export function GuideScreen() {
             onPress={() => void toggleFocusedFavorite()}
             style={[styles.favoriteButton, novaTvFocus.base, focusedAction === 'favorite' && styles.textFocusActive]}>
             <MaterialCommunityIcons name={focusedIsFavorite ? 'star' : 'star-outline'} size={20} color={theme.colors.accentHover} />
-            <Text style={styles.actionText}>{focusedIsFavorite ? 'Favorited' : 'Favorite channel'}</Text>
+            <Text style={[styles.actionText, focusedAction === 'favorite' && styles.actionTextFocused]}>
+              {focusedIsFavorite ? 'Favorited' : 'Favorite channel'}
+            </Text>
           </Pressable>
         </View>
 
@@ -940,6 +1036,8 @@ export function GuideScreen() {
 
 function createStyles(theme: NovaTheme) {
   const light = theme.scheme === 'light';
+  const focusText = createNovaTvFocusTextStyles(theme);
+  const focusChrome = createNovaTvFocusChrome(theme);
 
   return StyleSheet.create({
     screen: { flex: 1, minHeight: 0, gap: 10 },
@@ -966,6 +1064,7 @@ function createStyles(theme: NovaTheme) {
     },
     actionText: { color: theme.colors.textPrimary, fontSize: 12, fontWeight: '800' },
     actionTextSelected: { color: theme.colors.accentHover },
+    actionTextFocused: focusText.title,
     searchBox: {
       minHeight: 38,
       width: 260,
@@ -1061,19 +1160,9 @@ function createStyles(theme: NovaTheme) {
       overflow: 'hidden',
       backgroundColor: 'transparent',
     },
-    channelCellFocused: light
-      ? {
-          borderColor: theme.colors.focusRing,
-          backgroundColor: theme.colors.surfaceFocused,
-        }
-      : {
-          borderColor: 'transparent',
-          backgroundColor: 'transparent',
-          shadowColor: theme.colors.accentHover,
-          shadowOpacity: 0.9,
-          shadowRadius: 9,
-        },
+    channelCellFocused: focusChrome.active,
     channelNumber: { width: 28, color: theme.colors.textMuted, fontSize: 11, textAlign: 'center' },
+    channelNumberFocused: focusText.count,
     channelLogo: {
       width: 32,
       height: 32,
@@ -1084,7 +1173,9 @@ function createStyles(theme: NovaTheme) {
     channelLogoText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
     channelCopy: { flex: 1, minWidth: 0 },
     channelName: { color: theme.colors.textPrimary, fontSize: 13, lineHeight: 16, fontWeight: '800' },
+    channelNameFocused: focusText.title,
     channelMeta: { marginTop: 3, color: theme.colors.textMuted, fontSize: 9 },
+    channelMetaFocused: focusText.secondary,
     programScroller: { flex: 1, minWidth: 0 },
     programRow: { height: 60, minHeight: 60, paddingRight: 8 },
     programCell: {
@@ -1097,21 +1188,12 @@ function createStyles(theme: NovaTheme) {
       overflow: 'hidden',
       backgroundColor: 'transparent',
     },
-    programCellFocused: light
-      ? {
-          borderColor: theme.colors.focusRing,
-          backgroundColor: theme.colors.surfaceFocused,
-        }
-      : {
-          borderColor: theme.colors.focusRing,
-          backgroundColor: 'transparent',
-          shadowColor: theme.colors.accentHover,
-          shadowOpacity: 0.9,
-          shadowRadius: 9,
-        },
+    programCellFocused: focusChrome.active,
     programTopline: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2, minWidth: 0 },
     programTitle: { color: theme.colors.textPrimary, fontSize: 12, lineHeight: 16, fontWeight: '800' },
+    programTitleFocused: focusText.title,
     programMeta: { flexShrink: 1, color: theme.colors.textMuted, fontSize: 9, lineHeight: 12, fontWeight: '700' },
+    programMetaFocused: focusText.secondary,
     liveLabel: { color: theme.colors.success, fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
     programPast: { opacity: 0.62 },
     programLive: { backgroundColor: 'rgba(59,130,246,0.12)', borderRightColor: theme.colors.borderSubtle },
@@ -1164,17 +1246,7 @@ function createStyles(theme: NovaTheme) {
       paddingHorizontal: 8,
     },
     retryText: { color: theme.colors.textPrimary, fontSize: 13, fontWeight: '800' },
-    textFocusActive: light
-      ? {
-          borderColor: theme.colors.focusRing,
-          backgroundColor: theme.colors.surfaceFocused,
-        }
-      : {
-          borderColor: 'transparent',
-          backgroundColor: 'transparent',
-          shadowColor: theme.colors.accentHover,
-          shadowOpacity: 0.9,
-          shadowRadius: 9,
-        },
+    retryTextFocused: focusText.title,
+    textFocusActive: focusChrome.active,
   });
 }

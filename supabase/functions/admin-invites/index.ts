@@ -57,6 +57,10 @@ Deno.serve(async (request) => {
 
     const code = createPairingCode();
     const durationHours = Number(body?.activationDurationHours);
+    const managedProviderId = typeof body?.managedProviderId === 'string' ? body.managedProviderId : '';
+    if (!managedProviderId) {
+      return jsonResponse({ errorCategory: 'managed_provider_required' }, 400);
+    }
     const { data, error } = await client
       .from('beta_invites')
       .insert({
@@ -66,7 +70,7 @@ Deno.serve(async (request) => {
         starts_at: typeof body?.startsAt === 'string' ? body.startsAt : null,
         expires_at: typeof body?.expiresAt === 'string' ? body.expiresAt : null,
         content_policy: typeof body?.contentPolicy === 'string' ? body.contentPolicy.slice(0, 64) : 'us_only',
-        managed_provider_id: typeof body?.managedProviderId === 'string' ? body.managedProviderId : null,
+        managed_provider_id: managedProviderId,
         assigned_email: typeof body?.assignedEmail === 'string' ? body.assignedEmail.slice(0, 200) : null,
         assigned_name: typeof body?.assignedName === 'string' ? body.assignedName.slice(0, 120) : null,
         notes: typeof body?.notes === 'string' ? body.notes.slice(0, 2000) : null,

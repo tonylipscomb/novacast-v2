@@ -311,14 +311,12 @@ export function PairingScreen({
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handlePairingRetry,
       duration: AUTH_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'auth',
     });
-  }, [connectionFailed, dismissNotification, handlePairingRetry, isConnecting, showNotification]);
+  }, [connectionFailed, dismissNotification, isConnecting, showNotification]);
 
   useEffect(() => {
     if (!connectionFailed) {

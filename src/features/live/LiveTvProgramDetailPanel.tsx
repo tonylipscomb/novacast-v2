@@ -13,10 +13,15 @@ const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false 
 type LiveTvProgramDetailPanelProps = {
   channel: ProviderLiveChannel | null;
   previewWindow: string;
+  upNext?: string | null;
 };
 
 function panelPropsAreEqual(previous: LiveTvProgramDetailPanelProps, next: LiveTvProgramDetailPanelProps): boolean {
   if (previous.previewWindow !== next.previewWindow) {
+    return false;
+  }
+
+  if ((previous.upNext ?? '') !== (next.upNext ?? '')) {
     return false;
   }
 
@@ -33,22 +38,23 @@ function panelPropsAreEqual(previous: LiveTvProgramDetailPanelProps, next: LiveT
 
   return (
     prevChannel.current === nextChannel.current &&
+    prevChannel.next === nextChannel.next &&
     prevChannel.currentStart === nextChannel.currentStart &&
     prevChannel.currentEnd === nextChannel.currentEnd &&
-    prevChannel.remaining === nextChannel.remaining &&
-    prevChannel.description === nextChannel.description
+    prevChannel.remaining === nextChannel.remaining
   );
 }
 
 export const LiveTvProgramDetailPanel = memo(function LiveTvProgramDetailPanel({
   channel,
   previewWindow,
+  upNext,
 }: LiveTvProgramDetailPanelProps) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const channelName = channel?.name ? displayLiveProgramText(channel.name, 'No channel selected') : 'No channel selected';
   const currentProgram = displayLiveProgramText(channel?.current, 'No program information available.');
-  const description = displayLiveProgramText(channel?.description, 'No program information available.');
+  const upNextProgram = displayLiveProgramText(upNext ?? channel?.next, '');
 
   return (
     <View style={styles.programInfo}>
@@ -64,11 +70,13 @@ export const LiveTvProgramDetailPanel = memo(function LiveTvProgramDetailPanel({
             {currentProgram}
           </Text>
           <Text style={styles.previewWindow}>{previewWindow}</Text>
+          {upNextProgram ? (
+            <Text numberOfLines={1} style={styles.upNext}>
+              Up next · {upNextProgram}
+            </Text>
+          ) : null}
         </View>
       </View>
-      <Text numberOfLines={2} style={styles.description}>
-        {description}
-      </Text>
     </View>
   );
 }, panelPropsAreEqual);
@@ -121,10 +129,11 @@ function createStyles(theme: NovaTheme) {
       fontWeight: '700',
       ...androidTextFit,
     },
-    description: {
-      color: theme.colors.textSecondary,
+    upNext: {
+      color: theme.colors.textMuted,
       fontSize: 12,
-      lineHeight: 18,
+      lineHeight: 16,
+      fontWeight: '600',
       ...androidTextFit,
     },
   });

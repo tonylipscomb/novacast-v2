@@ -3,7 +3,7 @@ function envFlag(name: string, fallback: boolean) {
   return value === undefined || value === '' ? fallback : value === 'true' || value === '1';
 }
 
-const closedBetaMode = envFlag('EXPO_PUBLIC_CLOSED_BETA_MODE', false);
+const closedBetaMode = envFlag('EXPO_PUBLIC_CLOSED_BETA_MODE', true);
 
 export const deviceFeatureFlags = {
   closedBetaMode,

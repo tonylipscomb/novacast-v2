@@ -1,12 +1,14 @@
-import type { ComponentType, ReactNode, RefObject } from 'react';
+import type { ComponentType, ReactNode } from 'react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
 import { BackHandler, findNodeHandle, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
-import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 import { SearchEmptyState } from './SearchEmptyState';
 import { SearchInput } from './SearchInput';
@@ -15,6 +17,7 @@ import { SearchPosterGrid } from './SearchPosterGrid';
 import { SearchResults } from './SearchResults';
 import { TvSearchKeyboard } from './TvSearchKeyboard';
 import { logSearchEvent } from './searchDiagnostics';
+import { shouldReclaimSearchFromClose, shouldReturnFocusToSearchShellAfterIme, shouldAutoFocusSearchFocusGuide, resolveCloseNextFocusHandles, shouldWireSearchNextFocusUpToClose } from './searchOverlayFocusPolicy';
 import { scopedSearchEmptyHint } from './searchScopes';
 import { isSearchableQuery } from './searchQuery';
 import type { SearchResult, SearchScope } from './searchTypes';
@@ -26,8 +29,6 @@ type SearchOverlayProps = {
   providerId: string;
   title: string;
   placeholder?: string;
-  /** Kept for API compatibility; Fire TV uses a solid dim (BlurView was invisible on device). */
-  blurTarget?: RefObject<View | null>;
   executeSearch: Parameters<typeof useSearchController<SearchResult>>[0]['executeSearch'];
   onClose: () => void;
   /** Fires once the native Modal is on screen — browse layers can defer blocking until then. */
@@ -62,10 +63,13 @@ function SearchOverlayContent({
   const closeButtonRef = useRef<View | null>(null);
   const focusConfirmedRef = useRef(false);
   const initialFocusRequestedRef = useRef(false);
+  const closeOwnsFocusRef = useRef(false);
   const [preferSearchFocus, setPreferSearchFocus] = useState(true);
   const [focusedResultKey, setFocusedResultKey] = useState<string | null>(null);
   const [closeFocused, setCloseFocused] = useState(false);
   const [searchFieldHandle, setSearchFieldHandle] = useState<number | undefined>(undefined);
+  const [closeHandle, setCloseHandle] = useState<number | undefined>(undefined);
+  // Fire TV / Android TV: native soft keyboard. Close never reclaims Search focus.
   const useNativeTvKeyboard = Platform.isTV;
   const useOnScreenKeyboard = Platform.OS === 'android' && !useNativeTvKeyboard;
 
@@ -82,15 +86,23 @@ function SearchOverlayContent({
   );
 
   const focusSearchField = useCallback(() => {
+    if (closeOwnsFocusRef.current) {
+      return;
+    }
     if (initialFocusRequestedRef.current && focusConfirmedRef.current) {
       return;
     }
 
     initialFocusRequestedRef.current = true;
-    focusNativeViewWhenReady(() => searchShellRef.current, () => {
-      searchShellRef.current?.focus();
+    requestTvFocus({
+      screen: 'search-overlay',
+      source: 'SearchOverlay',
+      region: 'search-shell',
+      reason: 'overlay-open',
+      isActive: () => visible && !closeOwnsFocusRef.current,
+      getTarget: () => searchShellRef.current,
     });
-  }, []);
+  }, [visible]);
 
   const handleSearchShellFocus = useCallback(() => {
     // Drop preferred focus after landing once — leaving it true fights Close/results forever.
@@ -99,11 +111,35 @@ function SearchOverlayContent({
   }, [confirmOverlayFocus]);
 
   const handleCloseFocus = useCallback(() => {
-    // Never redirect Close → Search. That bounce caused a permanent focus flash loop.
+    // Never reclaim Search when Close (or a result) receives focus.
+    if (shouldReclaimSearchFromClose(focusConfirmedRef.current)) {
+      return;
+    }
+
+    closeOwnsFocusRef.current = true;
     setCloseFocused(true);
     setPreferSearchFocus(false);
     confirmOverlayFocus('close');
   }, [confirmOverlayFocus]);
+
+  const handleKeyboardActivate = useCallback(() => {
+    logSearchEvent('search_input_ime_armed', { scope });
+  }, [scope]);
+
+  const handleImeReturnToShell = useCallback(() => {
+    if (closeOwnsFocusRef.current || !shouldReturnFocusToSearchShellAfterIme({ closeFocused })) {
+      return;
+    }
+
+    requestTvFocus({
+      screen: 'search-overlay',
+      source: 'SearchOverlay',
+      region: 'search-shell',
+      reason: 'ime-submit-return',
+      isActive: () => visible && !closeOwnsFocusRef.current,
+      getTarget: () => searchShellRef.current,
+    });
+  }, [closeFocused, visible]);
 
   const controller = useSearchController<SearchResult>({
     scope,
@@ -132,6 +168,7 @@ function SearchOverlayContent({
     if (!visible) {
       focusConfirmedRef.current = false;
       initialFocusRequestedRef.current = false;
+      closeOwnsFocusRef.current = false;
       setPreferSearchFocus(true);
       setFocusedResultKey(null);
       setCloseFocused(false);
@@ -141,16 +178,22 @@ function SearchOverlayContent({
   useLayoutEffect(() => {
     if (!visible) {
       setSearchFieldHandle(undefined);
+      setCloseHandle(undefined);
       return;
     }
 
     const search = searchShellRef.current ? findNodeHandle(searchShellRef.current) ?? undefined : undefined;
+    const close = closeButtonRef.current ? findNodeHandle(closeButtonRef.current) ?? undefined : undefined;
     setSearchFieldHandle((prev) => (prev === search ? prev : search));
+    setCloseHandle((prev) => (prev === close ? prev : close));
+    // Intentionally omit closeFocused/preferSearchFocus — refreshing nextFocus* mid
+    // transition is what bounces Down off Close back onto Close.
   }, [visible]);
 
   const handleModalShow = useCallback(() => {
     logSearchEvent('search_overlay_modal_shown', { scope, nativeTvKeyboard: useNativeTvKeyboard });
     onReady?.();
+    closeOwnsFocusRef.current = false;
     setPreferSearchFocus(true);
     initialFocusRequestedRef.current = false;
     focusConfirmedRef.current = false;
@@ -295,27 +338,15 @@ function SearchOverlayContent({
         <FocusBoundaryView
           style={styles.focusBoundary}
           {...(Platform.OS === 'android'
-            ? { trapFocusLeft: true, trapFocusRight: true, trapFocusUp: true, trapFocusDown: true }
+            ? {
+                autoFocus: shouldAutoFocusSearchFocusGuide(),
+                trapFocusLeft: true,
+                trapFocusRight: true,
+                trapFocusUp: true,
+                trapFocusDown: true,
+              }
             : {})}>
           <View style={styles.panel}>
-          <View style={styles.searchSlot}>
-          <SearchInput
-            focusRef={searchShellRef}
-            inputRef={inputRef}
-            value={controller.query}
-            onChangeText={setQueryLogged}
-            placeholder={placeholder ?? scopedSearchEmptyHint(scope)}
-            onClear={controller.clearQuery}
-            onSubmit={() => inputRef.current?.blur()}
-            showSoftKeyboard={!useOnScreenKeyboard}
-            openKeyboardOnFocus={useOnScreenKeyboard}
-            autoFocus={false}
-            preferredFocus={preferSearchFocus}
-            focusUpHandle={searchFieldHandle}
-            onShellFocus={handleSearchShellFocus}
-          />
-          </View>
-
           <View style={styles.header} pointerEvents="box-none">
             <Text style={styles.title}>{title}</Text>
             <Pressable
@@ -326,23 +357,42 @@ function SearchOverlayContent({
               onPress={handleClose}
               {...(Platform.isTV ? ({ onClick: handleClose } as object) : null)}
               onFocus={handleCloseFocus}
-              onBlur={() => setCloseFocused(false)}
-              {...(searchFieldHandle
-                ? {
-                    nextFocusDown: searchFieldHandle,
-                    nextFocusLeft: searchFieldHandle,
-                    nextFocusRight: searchFieldHandle,
-                  }
-                : null)}
+              onBlur={() => {
+                closeOwnsFocusRef.current = false;
+                setCloseFocused(false);
+              }}
+              {...(resolveCloseNextFocusHandles({ closeHandle, searchFieldHandle }) ?? null)}
               style={[styles.closeButton, novaTvFocus.base, closeFocused && styles.closeButtonFocused]}>
               <MaterialCommunityIcons
                 name="close"
                 size={17}
-                color={closeFocused ? novaTheme.colors.accentHover : novaTheme.colors.textSecondary}
+                color={closeFocused ? novaTheme.colors.textPrimary : novaTheme.colors.textSecondary}
                 style={closeFocused ? styles.closeIconFocused : undefined}
               />
               <Text style={[styles.closeText, closeFocused && styles.closeTextFocused]}>Close</Text>
             </Pressable>
+          </View>
+
+          <View style={styles.searchSlot}>
+          <SearchInput
+            focusRef={searchShellRef}
+            inputRef={inputRef}
+            value={controller.query}
+            onChangeText={setQueryLogged}
+            placeholder={placeholder ?? scopedSearchEmptyHint(scope)}
+            onClear={controller.clearQuery}
+            onSubmit={() => {
+              inputRef.current?.blur();
+              handleImeReturnToShell();
+            }}
+            showSoftKeyboard={!useOnScreenKeyboard}
+            openKeyboardOnFocus={false}
+            autoFocus={false}
+            preferredFocus={preferSearchFocus && !closeFocused}
+            focusUpHandle={shouldWireSearchNextFocusUpToClose() ? closeHandle : undefined}
+            onShellFocus={handleSearchShellFocus}
+            onKeyboardActivate={handleKeyboardActivate}
+          />
           </View>
 
           <View style={styles.body}>
@@ -397,17 +447,12 @@ const styles = StyleSheet.create({
     borderColor: novaTheme.colors.borderSubtle,
   },
   header: {
-    position: 'absolute',
-    top: 18,
-    left: 24,
-    right: 24,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    zIndex: 2,
+    marginBottom: 10,
   },
   searchSlot: {
-    marginTop: 48,
     zIndex: 1,
   },
   body: {
@@ -433,26 +478,15 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   closeButtonFocused: {
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: novaTheme.glow.focusShadowOpacity * 0.65,
-    shadowRadius: 7,
+    ...novaTvFocus.active,
   },
-  closeIconFocused: {
-    transform: [{ scale: 1.12 }],
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.9,
-    shadowRadius: 7,
-  },
+  closeIconFocused: {},
   closeText: {
     color: novaTheme.colors.textPrimary,
     fontSize: 12,
     fontWeight: '800',
   },
-  closeTextFocused: {
-    color: novaTheme.colors.accentHover,
-    textShadowColor: novaTheme.colors.focusRing,
-    textShadowRadius: 8,
-  },
+  closeTextFocused: focusText.title,
   tvBody: {
     flex: 1,
     minHeight: 0,

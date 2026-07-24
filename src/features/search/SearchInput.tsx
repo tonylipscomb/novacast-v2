@@ -3,10 +3,14 @@ import type { RefObject } from 'react';
 import { useLayoutEffect, useRef, useState } from 'react';
 import { findNodeHandle, Platform, Pressable, StyleSheet, TextInput, View, type TextInput as TextInputType } from 'react-native';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles, NOVA_TV_GLASS } from '@/components/nova/novaTvFocus';
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
 
 import { logSearchEvent } from './searchDiagnostics';
+import { shouldRefocusSearchShellOnTextInputBlur } from './searchOverlayFocusPolicy';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 type SearchInputProps = {
   value: string;
@@ -24,6 +28,8 @@ type SearchInputProps = {
   onSubmit?: () => void;
   onClear?: () => void;
   onShellFocus?: () => void;
+  onShellBlur?: () => void;
+  onKeyboardActivate?: () => void;
   /** Opens the platform IME when the TV shell receives focus. */
   openKeyboardOnFocus?: boolean;
 };
@@ -43,6 +49,8 @@ export function SearchInput({
   onSubmit,
   onClear,
   onShellFocus,
+  onShellBlur,
+  onKeyboardActivate,
   openKeyboardOnFocus = false,
 }: SearchInputProps) {
   const usePressableShell = Platform.isTV;
@@ -79,8 +87,13 @@ export function SearchInput({
       return;
     }
     logSearchEvent('search_input_activate', { platform: Platform.OS });
-    requestAnimationFrame(() => {
-      resolvedInputRef.current?.focus();
+    onKeyboardActivate?.();
+    requestTvFocus({
+      screen: 'search-overlay',
+      source: 'SearchInput',
+      region: 'search-ime',
+      reason: 'open-native-keyboard',
+      getTarget: () => resolvedInputRef.current,
     });
   };
 
@@ -95,13 +108,18 @@ export function SearchInput({
 
   const handleShellBlur = () => {
     setShellFocused(false);
+    onShellBlur?.();
   };
 
   const clear = () => {
     onChangeText('');
     onClear?.();
-    requestAnimationFrame(() => {
-      resolvedFocusRef.current?.focus();
+    requestTvFocus({
+      screen: 'search-overlay',
+      source: 'SearchInput',
+      region: 'search-shell',
+      reason: 'clear-return-shell',
+      getTarget: () => resolvedFocusRef.current,
     });
   };
 
@@ -126,19 +144,34 @@ export function SearchInput({
       editable={showSoftKeyboard}
       showSoftInputOnFocus={showSoftKeyboard}
       onSubmitEditing={onSubmit}
-      onFocus={() => setShellFocused(true)}
-      onBlur={() => setShellFocused(false)}
+      onFocus={() => {
+        setShellFocused(true);
+        onKeyboardActivate?.();
+      }}
+      onBlur={() => {
+        setShellFocused(false);
+        onShellBlur?.();
+        if (shouldRefocusSearchShellOnTextInputBlur()) {
+          requestTvFocus({
+            screen: 'search-overlay',
+            source: 'SearchInput',
+            region: 'search-shell',
+            reason: 'text-input-blur-return',
+            getTarget: () => resolvedFocusRef.current,
+          });
+        }
+      }}
       pointerEvents={usePressableShell ? 'none' : 'auto'}
     />
   );
 
   return (
-    <View style={[styles.searchBox, novaTvFocus.base, focused && styles.searchBoxFocused]}>
+    <View style={[styles.searchBox, focused && styles.searchBoxFocused]}>
       <View style={styles.searchField}>
         <MaterialCommunityIcons
           name="magnify"
           size={18}
-          color={focused ? novaTheme.colors.accentHover : novaTheme.colors.textMuted}
+          color={focused ? novaTheme.colors.textPrimary : novaTheme.colors.textMuted}
           style={focused ? styles.searchIconFocused : undefined}
         />
         {usePressableShell ? (
@@ -184,11 +217,13 @@ export function SearchInput({
         onBlur={() => setClearFocused(false)}
         {...(fieldHandle ? { nextFocusLeft: fieldHandle } : null)}
         {...(focusDownHandle ? { nextFocusDown: focusDownHandle } : null)}
+        {...(focusUpHandle ? { nextFocusUp: focusUpHandle } : null)}
+        {...(fieldHandle ? { nextFocusRight: fieldHandle } : null)}
         style={[styles.clearButton, novaTvFocus.base, clearFocused && styles.clearButtonFocused, !hasValue && styles.clearHidden]}>
         <MaterialCommunityIcons
           name="close"
           size={17}
-          color={clearFocused ? novaTheme.colors.accentHover : novaTheme.colors.textSecondary}
+          color={clearFocused ? novaTheme.colors.textPrimary : novaTheme.colors.textSecondary}
           style={clearFocused ? styles.clearIconFocused : undefined}
         />
       </Pressable>
@@ -203,8 +238,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     borderRadius: 0,
-    borderWidth: 0,
-    borderBottomWidth: 1,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    borderBottomWidth: 2,
     borderBottomColor: novaTheme.colors.borderSubtle,
     backgroundColor: 'transparent',
     paddingLeft: 2,
@@ -212,10 +248,9 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
   },
   searchBoxFocused: {
-    borderBottomColor: novaTheme.colors.focusRing,
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: novaTheme.glow.focusShadowOpacity * 0.65,
-    shadowRadius: 7,
+    borderColor: NOVA_TV_GLASS.border,
+    borderBottomColor: NOVA_TV_GLASS.border,
+    backgroundColor: NOVA_TV_GLASS.fill,
   },
   searchField: {
     flex: 1,
@@ -231,12 +266,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  searchIconFocused: {
-    transform: [{ scale: 1.12 }],
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.9,
-    shadowRadius: 7,
-  },
+  searchIconFocused: {},
   searchInput: {
     flex: 1,
     minWidth: 0,
@@ -244,11 +274,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     paddingVertical: 4,
   },
-  searchInputFocused: {
-    color: novaTheme.colors.accentHover,
-    textShadowColor: novaTheme.colors.focusRing,
-    textShadowRadius: 8,
-  },
+  searchInputFocused: focusText.title,
   clearButton: {
     width: 34,
     height: 34,
@@ -259,16 +285,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'transparent',
   },
   clearButtonFocused: {
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 7,
+    ...novaTvFocus.active,
   },
-  clearIconFocused: {
-    transform: [{ scale: 1.16 }],
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.9,
-    shadowRadius: 7,
-  },
+  clearIconFocused: {},
   clearHidden: {
     opacity: 0,
   },

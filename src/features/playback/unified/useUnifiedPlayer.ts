@@ -1,6 +1,6 @@
 import { useCallback, useRef, useSyncExternalStore } from 'react';
 
-import type { LaunchPlaybackOptions, PlaybackItem } from './types.ts';
+import type { LaunchPlaybackOptions, PlaybackItem, UnifiedPlayerState } from './types.ts';
 import { didUnifiedPlaybackJustClose, isUnifiedPlaybackActive } from './unifiedPlayerLogic.ts';
 import {
   closeUnifiedPlayback,
@@ -10,14 +10,51 @@ import {
 } from './unifiedPlayerStore.ts';
 import { prepareUnifiedPlaybackLaunch } from './UnifiedPlayerController.tsx';
 
-function useUnifiedPlayerSnapshot() {
-  return useSyncExternalStore(subscribeUnifiedPlayer, getUnifiedPlayerState, getUnifiedPlayerState);
+/**
+ * Activity-only snapshot — excludes positionMs/durationMs so browse screens
+ * do not re-render on playback progress ticks (~1 Hz).
+ */
+type UnifiedPlayerActivitySnapshot = {
+  machineState: UnifiedPlayerState['machineState'];
+  isActive: boolean;
+  launchSource: UnifiedPlayerState['launchSource'];
+};
+
+let cachedActivity: UnifiedPlayerActivitySnapshot | null = null;
+
+export function getUnifiedPlayerActivitySnapshot(): UnifiedPlayerActivitySnapshot {
+  const state = getUnifiedPlayerState();
+  const isActive = isUnifiedPlaybackActive(state.machineState, state.item);
+  if (
+    cachedActivity &&
+    cachedActivity.machineState === state.machineState &&
+    cachedActivity.isActive === isActive &&
+    cachedActivity.launchSource === state.launchSource
+  ) {
+    return cachedActivity;
+  }
+
+  cachedActivity = {
+    machineState: state.machineState,
+    isActive,
+    launchSource: state.launchSource,
+  };
+  return cachedActivity;
 }
 
+function useUnifiedPlayerActivitySnapshot() {
+  return useSyncExternalStore(subscribeUnifiedPlayer, getUnifiedPlayerActivitySnapshot, getUnifiedPlayerActivitySnapshot);
+}
+
+/**
+ * Browse/screen hook: activity flags + launch/close only.
+ * Does not subscribe to progress ticks. Controllers that need the full
+ * snapshot should use getUnifiedPlayerState / subscribeUnifiedPlayer directly.
+ */
 export function useUnifiedPlayer() {
-  const snapshot = useUnifiedPlayerSnapshot();
+  const snapshot = useUnifiedPlayerActivitySnapshot();
   const previousActiveRef = useRef(false);
-  const isActive = isUnifiedPlaybackActive(snapshot.machineState, snapshot.item);
+  const isActive = snapshot.isActive;
   // The external store can transition between renders; this ref is the
   // deliberately persistent edge detector for the close transition.
   // eslint-disable-next-line react-hooks/refs -- read the previous external-store snapshot during render.
@@ -36,7 +73,6 @@ export function useUnifiedPlayer() {
   }, []);
 
   return {
-    state: snapshot,
     isActive,
     isClosing: snapshot.machineState === 'closing',
     didJustClose,

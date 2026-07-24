@@ -2,8 +2,10 @@ import type { RefObject } from 'react';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 type NovaFocusRowProps = {
   title: string;
@@ -66,7 +68,7 @@ export function NovaFocusRow({
           {title}
         </Text>
         {subtitle ? (
-          <Text numberOfLines={1} style={styles.subtitle}>
+          <Text numberOfLines={1} style={[styles.subtitle, showFocused && styles.subtitleFocused]}>
             {subtitle}
           </Text>
         ) : null}
@@ -95,9 +97,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
     textTransform: 'uppercase',
   },
-  metaFocused: {
-    color: novaTheme.colors.accentHover,
-  },
+  metaFocused: focusText.count,
   copy: {
     flex: 1,
     minWidth: 0,
@@ -108,11 +108,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
   },
-  titleFocused: {
-    color: novaTheme.colors.textPrimary,
-  },
+  titleFocused: focusText.title,
   subtitle: {
     color: novaTheme.colors.textSecondary,
     fontSize: 12,
   },
+  subtitleFocused: focusText.secondary,
 });

@@ -67,6 +67,41 @@ Deno.serve(async (request) => {
       return jsonResponse({ ok: true });
     }
 
+    if (action === 'assign_invite') {
+      const inviteId = typeof body?.inviteId === 'string' ? body.inviteId : '';
+      const publicDeviceCode =
+        typeof body?.publicDeviceCode === 'string' ? body.publicDeviceCode.trim().toUpperCase() : '';
+      if (!inviteId || !publicDeviceCode) {
+        return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+      }
+      const { data, error } = await client.rpc('admin_activate_device_with_invite_id', {
+        p_public_device_code: publicDeviceCode,
+        p_invite_id: inviteId,
+        p_friendly_name: typeof body?.friendlyName === 'string' ? body.friendlyName : null,
+      });
+      if (error || !data?.[0]) {
+        const detail = typeof error?.message === 'string' ? error.message : '';
+        const known = [
+          'device_not_found',
+          'device_blocked',
+          'invite_not_found',
+          'invite_inactive',
+          'invite_not_started',
+          'invite_expired',
+          'invite_exhausted',
+        ] as const;
+        const category = known.find((code) => detail.includes(code)) ?? 'admin_update_failed';
+        return jsonResponse({ errorCategory: category }, 400);
+      }
+      return jsonResponse({
+        ok: true,
+        deviceId: data[0].device_id,
+        expiresAt: data[0].expires_at,
+        managedProviderId: data[0].managed_provider_id,
+        providerAssigned: Boolean(data[0].provider_assigned),
+      });
+    }
+
     return jsonResponse({ errorCategory: 'invalid_request' }, 400);
   } catch (error) {
     const category =

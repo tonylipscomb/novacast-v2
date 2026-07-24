@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, findNodeHandle, InteractionManager, Linking, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { BlurTargetView } from 'expo-blur';
 
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
@@ -24,6 +23,7 @@ import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
 import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
+import { tvPerfSetFocus, tvPerfSetScreen } from '@/features/perf/tvPerfStore';
 
 import { MovieCategoryRail } from './components/MovieCategoryRail';
 import { MoviePosterGrid } from './components/MoviePosterGrid';
@@ -52,31 +52,11 @@ import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
 import { SearchOverlay } from '@/features/search/SearchOverlay';
 import { searchMovies } from '@/features/search/repositories/movieSearchRepository';
 import type { SearchResult } from '@/features/search/searchTypes';
-
-const FOCUS_RESTORE_MAX_ATTEMPTS = 3;
-
-function focusNativeViewWhenReady(
-  getTarget: () => ElementRef<typeof View> | null | undefined,
-  onSettled: () => void,
-  attemptsLeft = FOCUS_RESTORE_MAX_ATTEMPTS,
-): () => void {
-  const target = getTarget();
-  if (target) {
-    target.focus();
-    onSettled();
-    return () => {};
-  }
-
-  if (attemptsLeft <= 0) {
-    onSettled();
-    return () => {};
-  }
-
-  const frame = requestAnimationFrame(() => {
-    focusNativeViewWhenReady(getTarget, onSettled, attemptsLeft - 1);
-  });
-  return () => cancelAnimationFrame(frame);
-}
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
+import {
+  resolvePosterRestorationId,
+  shouldPreferNavigationFocus,
+} from '@/features/media-browser/posterGridFocusPolicy';
 
 export function MoviesScreen() {
   const router = useRouter();
@@ -98,8 +78,8 @@ export function MoviesScreen() {
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof Pressable>>>(new Map());
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
-  const blurTargetRef = useRef<View | null>(null);
   const isRestoringPlaybackFocusRef = useRef(false);
+  const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailSuppressedForPlayback, setDetailSuppressedForPlayback] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -117,7 +97,6 @@ export function MoviesScreen() {
   const {
     categories,
     selectedCategoryId,
-    focusedMovie,
     selectedMovie,
     visibleMovies,
     loading,
@@ -139,6 +118,7 @@ export function MoviesScreen() {
     sortOption,
     setSort,
     categoryHasRatings,
+    getFocusedMovieId,
   } = useMoviesScreenModel(undefined, {
     initialSelectedCategoryId: moviesMemory.selectedCategoryId,
     initialFocusedMovieId: moviesMemory.focusedMovieId,
@@ -147,6 +127,60 @@ export function MoviesScreen() {
   const playbackUiActive = playbackActive || playbackClosing || launchingPlayback;
   const detailOverlayVisible =
     detailOpen && !detailSuppressedForPlayback && !playbackUiActive && Boolean(selectedMovie);
+
+  useEffect(() => {
+    tvPerfSetScreen('movies');
+  }, []);
+
+  const handleFocusMovie = useCallback(
+    (movie: { id: string }) => {
+      if (playbackUiActive || Date.now() < playFocusGuardUntilRef.current) {
+        return;
+      }
+      tvPerfSetFocus('MoviePosterCard', movie.id);
+      focusMovie(movie as Parameters<typeof focusMovie>[0]);
+    },
+    [focusMovie, playbackUiActive],
+  );
+
+  const handleSelectMovie = useCallback(
+    (movie: Parameters<typeof selectMovie>[0]) => {
+      if (
+        playbackLaunchInFlightRef.current ||
+        launchingPlayback ||
+        playbackUiActive ||
+        Date.now() < playFocusGuardUntilRef.current
+      ) {
+        logMoviesPlayback('select-blocked', {
+          movieId: movie.id,
+          reason: 'playback-guard',
+        });
+        return;
+      }
+
+      if (detailOpen && selectedMovie?.id === movie.id) {
+        return;
+      }
+
+      selectMovie(movie);
+      void loadMovieDetail(movie);
+      setDetailSuppressedForPlayback(false);
+      setDetailOpen(true);
+    },
+    [detailOpen, launchingPlayback, loadMovieDetail, playbackUiActive, selectMovie, selectedMovie?.id],
+  );
+
+  const handleRegisterPosterRef = useCallback((movieId: string, instance: ElementRef<typeof View> | null) => {
+    if (instance) {
+      posterRefs.current.set(movieId, instance);
+    } else {
+      posterRefs.current.delete(movieId);
+    }
+  }, []);
+
+  const handleLoadMore = useCallback(() => {
+    void loadMore();
+  }, [loadMore]);
 
   useEffect(() => {
     if (!searchOpen || playbackUiActive) {
@@ -229,27 +263,40 @@ export function MoviesScreen() {
     syncCategoryFocusLeftHandle();
   }, [categories.length, selectedCategoryId, syncCategoryFocusLeftHandle]);
 
-  const focusSelectedPoster = useCallback(() => {
-    const selectedId = selectedMovie?.id;
-    if (!selectedId) {
+  const focusSelectedPoster = useCallback((reason = 'restore-selected-poster') => {
+    const restoreId = resolvePosterRestorationId({
+      focusedId: getFocusedMovieId() ?? getMoviesScreenMemory(activeProviderId).focusedMovieId,
+      selectedId: selectedMovie?.id ?? null,
+      availableIds: visibleMovies.map((movie) => movie.id),
+    });
+    if (!restoreId) {
       return;
     }
 
-    requestAnimationFrame(() => {
-      focusNativeViewWhenReady(() => posterRefs.current.get(selectedId), () => {});
+    setRestoringBrowseFocus(true);
+    requestTvFocus({
+      screen: 'movies',
+      source: 'MoviesScreen',
+      region: 'poster-grid',
+      itemId: restoreId,
+      reason,
+      getTarget: () => posterRefs.current.get(restoreId),
+      onSettled: () => {
+        setRestoringBrowseFocus(false);
+      },
     });
-  }, [selectedMovie?.id]);
+  }, [activeProviderId, getFocusedMovieId, selectedMovie?.id, visibleMovies]);
 
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setSearchOverlayReady(false);
-    focusSelectedPoster();
+    focusSelectedPoster('restore-after-search-close');
   }, [focusSelectedPoster]);
 
   const closeDetail = useCallback(() => {
     setDetailOpen(false);
     setDetailSuppressedForPlayback(false);
-    focusSelectedPoster();
+    focusSelectedPoster('restore-after-detail-close');
   }, [focusSelectedPoster]);
 
   useEffect(() => {
@@ -334,37 +381,54 @@ export function MoviesScreen() {
     finishUnifiedPlaybackClose();
 
     isRestoringPlaybackFocusRef.current = true;
-    const selectedId = selectedMovie?.id ?? null;
+    setRestoringBrowseFocus(true);
+    const restoreId = resolvePosterRestorationId({
+      focusedId: getFocusedMovieId() ?? getMoviesScreenMemory(activeProviderId).focusedMovieId,
+      selectedId: selectedMovie?.id ?? null,
+      availableIds: visibleMovies.map((movie) => movie.id),
+    });
     let cancelled = false;
 
     const task = InteractionManager.runAfterInteractions(() => {
-      if (cancelled) {
+      if (cancelled || !restoreId) {
+        isRestoringPlaybackFocusRef.current = false;
+        setRestoringBrowseFocus(false);
         return;
       }
 
-      focusNativeViewWhenReady(
-        () => (selectedId ? posterRefs.current.get(selectedId) : null),
-        () => {
+      requestTvFocus({
+        screen: 'movies',
+        source: 'MoviesScreen',
+        region: 'poster-grid',
+        itemId: restoreId,
+        reason: 'restore-after-playback',
+        isActive: () => !cancelled,
+        getTarget: () => posterRefs.current.get(restoreId),
+        onSettled: () => {
           if (!cancelled) {
             isRestoringPlaybackFocusRef.current = false;
+            setRestoringBrowseFocus(false);
           }
         },
-      );
+      });
     });
 
     return () => {
       cancelled = true;
       task.cancel();
+      isRestoringPlaybackFocusRef.current = false;
+      setRestoringBrowseFocus(false);
     };
-  }, [didJustClose, selectedMovie?.id]);
+  }, [activeProviderId, didJustClose, getFocusedMovieId, selectedMovie?.id, visibleMovies]);
 
   useEffect(() => {
     rememberMoviesScreenMemory(activeProviderId, {
       selectedCategoryId,
-      focusedMovieId: focusedMovie?.id ?? getMoviesScreenMemory(activeProviderId).focusedMovieId,
+      // Focus is persisted from focusMovie/selectMovie — do not overwrite from
+      // stale focusedMovie state (focus no longer updates that state on D-pad move).
       selectedMovieId: selectedMovie?.id ?? getMoviesScreenMemory(activeProviderId).selectedMovieId,
     });
-  }, [activeProviderId, focusedMovie?.id, selectedCategoryId, selectedMovie?.id]);
+  }, [activeProviderId, selectedCategoryId, selectedMovie?.id]);
 
   const startPlayback = useCallback(() => {
     const movie = selectedMovieRef.current;
@@ -545,14 +609,12 @@ export function MoviesScreen() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleReload,
       duration: MOVIES_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'movies',
     });
-  }, [categories.length, dismissNotification, handleReload, hasDataSource, loadErrorMessage, loadStatus, showNotification]);
+  }, [categories.length, dismissNotification, hasDataSource, loadErrorMessage, loadStatus, showNotification]);
 
   useEffect(() => {
     if (!detailOpen || !detailError) {
@@ -566,14 +628,12 @@ export function MoviesScreen() {
       type: 'warning',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleDetailRetry,
       duration: MOVIES_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'movies',
     });
-  }, [detailError, detailOpen, dismissNotification, handleDetailRetry, showNotification]);
+  }, [detailError, detailOpen, dismissNotification, showNotification]);
 
   useEffect(() => {
     return () => {
@@ -626,19 +686,21 @@ export function MoviesScreen() {
     <View style={styles.root}>
       {!playbackUiActive ? (
         <>
-      <BlurTargetView
-        ref={blurTargetRef}
-        style={styles.blurTarget}
-        pointerEvents={detailOverlayVisible || searchBlocksBrowse ? 'none' : 'auto'}>
-        <View
-          style={styles.browseLayer}
-          pointerEvents={detailOpen || searchBlocksBrowse ? 'none' : 'auto'}
-          importantForAccessibility={detailOpen || searchBlocksBrowse ? 'no-hide-descendants' : 'auto'}
-          accessibilityElementsHidden={detailOpen || searchBlocksBrowse}>
+      <View
+        style={styles.browseLayer}
+        pointerEvents={detailOpen || searchBlocksBrowse ? 'none' : 'auto'}
+        importantForAccessibility={detailOpen || searchBlocksBrowse ? 'no-hide-descendants' : 'auto'}
+        accessibilityElementsHidden={detailOpen || searchBlocksBrowse}>
       <NovaTvShell
         activeId="movies"
         providerLabel={selectedProviderLabel}
-         preferActiveNavigationFocus={!playbackUiActive && !detailOverlayVisible && !searchBlocksBrowse}
+         preferActiveNavigationFocus={shouldPreferNavigationFocus({
+          playbackUiActive,
+          detailOverlayVisible,
+          searchBlocksBrowse,
+          restoringBrowseFocus,
+          gridEmpty: visibleMovies.length === 0,
+        })}
         compactNavigationRail>
         <View style={styles.screen}>
           <View style={styles.topBar}>
@@ -695,52 +757,18 @@ export function MoviesScreen() {
                 loading={loading}
                 categoryLoading={categoryLoading}
                 emptyNotice={gridEmptyNotice}
-                focusedMovieId={focusedMovie?.id ?? null}
                 selectedMovieId={selectedMovie?.id ?? null}
                 postersFocusable={!detailOpen && !playbackUiActive && !searchBlocksBrowse}
-                onFocusMovie={(movie) => {
-                  if (playbackUiActive || Date.now() < playFocusGuardUntilRef.current) {
-                    return;
-                  }
-                  focusMovie(movie);
-                }}
-                onSelectMovie={(movie) => {
-                  if (
-                    playbackLaunchInFlightRef.current ||
-                    launchingPlayback ||
-                    playbackUiActive ||
-                    Date.now() < playFocusGuardUntilRef.current
-                  ) {
-                    logMoviesPlayback('select-blocked', {
-                      movieId: movie.id,
-                      reason: 'playback-guard',
-                    });
-                    return;
-                  }
-
-                  if (detailOpen && selectedMovie?.id === movie.id) {
-                    return;
-                  }
-
-                  selectMovie(movie);
-                  void loadMovieDetail(movie);
-                  setDetailSuppressedForPlayback(false);
-                  setDetailOpen(true);
-                }}
-                registerPosterRef={(movieId, instance) => {
-                  if (instance) {
-                    posterRefs.current.set(movieId, instance);
-                  } else {
-                    posterRefs.current.delete(movieId);
-                  }
-                }}
+                onFocusMovie={handleFocusMovie}
+                onSelectMovie={handleSelectMovie}
+                registerPosterRef={handleRegisterPosterRef}
                 sortOption={sortOption}
                 onSortChange={setSort}
                 showRatingSort={categoryHasRatings}
                 isDiscover={isDiscoverCategory}
                 sortFocusLeftHandle={categoryFocusLeftHandle}
                 onSortFocusHandleReady={setSortFocusRightHandle}
-                loadMore={() => void loadMore()}
+                loadMore={handleLoadMore}
               />
               )}
             </View>
@@ -749,11 +777,9 @@ export function MoviesScreen() {
         </View>
       </NovaTvShell>
         </View>
-      </BlurTargetView>
 
       <MediaDetailOverlay
         visible={detailOverlayVisible}
-        blurTarget={blurTargetRef}
         detail={
           selectedMovie
             ? movieDetail?.id === selectedMovie.id
@@ -798,7 +824,6 @@ export function MoviesScreen() {
         scope="movie"
         providerId={activeProviderId}
         title="Search Movies"
-        blurTarget={blurTargetRef}
         executeSearch={executeMovieSearch}
         onReady={() => setSearchOverlayReady(true)}
         onClose={closeSearch}
@@ -827,10 +852,6 @@ function createMoviesStyles(theme: NovaTheme) {
     },
     browseLayer: {
       flex: 1,
-    },
-    blurTarget: {
-      flex: 1,
-      zIndex: 1,
     },
     screen: {
       flex: 1,

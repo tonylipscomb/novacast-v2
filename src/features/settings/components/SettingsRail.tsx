@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type ElementRef } from 'react';
 import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -37,6 +37,7 @@ export function SettingsRail({
 }: SettingsRailProps) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createRailStyles(theme), [theme]);
+  const focusChrome = useMemo(() => createNovaTvFocusChrome(theme), [theme]);
   const [focusedId, setFocusedId] = useState<SettingsSectionId | null>(null);
   const preferredFocusConsumedRef = useRef(false);
   const itemRefs = useRef<Map<SettingsSectionId, ElementRef<typeof Pressable>>>(new Map());
@@ -88,18 +89,13 @@ export function SettingsRail({
               }}
               onBlur={() => setFocusedId((current) => (current === item.id ? null : current))}
               onPress={() => onSelect(item.id)}
-              style={[
-                styles.row,
-                selected && styles.rowSelected,
-                focused && styles.rowFocused,
-                novaTvFocus.base,
-              ]}>
+              style={[styles.row, focusChrome.base, selected && styles.rowSelected, focused && focusChrome.active]}>
               <MaterialCommunityIcons
                 name={item.icon}
                 size={16}
-                color={focused || selected ? theme.colors.accentHover : theme.colors.textMuted}
+                color={focused || selected ? theme.colors.textPrimary : theme.colors.textMuted}
               />
-              <Text style={[styles.title, (focused || selected) && styles.titleActive]} numberOfLines={1}>
+              <Text style={[styles.title, selected && styles.titleSelected, focused && styles.titleFocused]} numberOfLines={1}>
                 {item.title}
               </Text>
             </Pressable>
@@ -111,6 +107,7 @@ export function SettingsRail({
 }
 
 function createRailStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
   return StyleSheet.create({
     panel: {
       width: 240,
@@ -142,16 +139,11 @@ function createRailStyles(theme: NovaTheme) {
       gap: 10,
       paddingHorizontal: 8,
       paddingVertical: 8,
-      borderBottomWidth: 2,
-      borderBottomColor: theme.colors.borderSubtle,
       backgroundColor: 'transparent',
     },
     rowSelected: {
+      borderBottomWidth: 2,
       borderBottomColor: theme.colors.success,
-      backgroundColor: 'transparent',
-    },
-    rowFocused: {
-      borderBottomColor: theme.scheme === 'light' ? theme.colors.focusRing : theme.colors.accentHover,
       backgroundColor: 'transparent',
     },
     title: {
@@ -161,15 +153,9 @@ function createRailStyles(theme: NovaTheme) {
       fontSize: 13,
       fontWeight: '800',
     },
-    titleActive: {
-      color: theme.scheme === 'light' ? theme.colors.accent : theme.colors.accentHover,
-      ...(theme.scheme === 'light'
-        ? {}
-        : {
-            textShadowColor: theme.colors.accentHover,
-            textShadowRadius: 10,
-            textShadowOffset: { width: 0, height: 0 },
-          }),
+    titleSelected: {
+      color: theme.colors.textPrimary,
     },
+    titleFocused: focusText.title,
   });
 }

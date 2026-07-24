@@ -1,7 +1,7 @@
-import { buildCategoryRegionalProfile } from '@/features/providers/categoryRegionalPipeline';
-import type { CategoryRegionGroup } from '@/features/providers/categoryRegionalConfig';
-import { deviceFeatureFlags } from '@/features/device/deviceFeatureFlags';
-import { getDeviceState } from '@/features/device/deviceActivation';
+import { buildCategoryRegionalProfile } from '../providers/categoryRegionalPipeline.ts';
+import type { CategoryRegionGroup } from '../providers/categoryRegionalConfig.ts';
+import { deviceFeatureFlags } from '../device/deviceFeatureFlags.ts';
+import { getDeviceState } from '../device/deviceActivation.ts';
 
 export type ContentPolicyId = 'us_only' | 'unrestricted';
 

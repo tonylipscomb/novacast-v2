@@ -2,7 +2,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type ElementRef } from 'react';
 import { BackHandler, findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -31,6 +31,7 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
 ) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const focusChrome = useMemo(() => createNovaTvFocusChrome(theme), [theme]);
   const [open, setOpen] = useState(false);
   const [focusedTarget, setFocusedTarget] = useState<'trigger' | number | null>(null);
   const openerRef = useRef<ElementRef<typeof Pressable> | null>(null);
@@ -86,17 +87,11 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
         onFocus={() => setFocusedTarget('trigger')}
         onBlur={() => setFocusedTarget(null)}
         onPress={() => setOpen((current) => !current)}
-        style={[styles.trigger, novaTvFocus.base, focusedTarget === 'trigger' && styles.triggerFocused]}>
+        style={[styles.trigger, focusChrome.base, focusedTarget === 'trigger' && focusChrome.active]}>
         <MaterialCommunityIcons
           name="sort-variant"
           size={18}
-          color={
-            focusedTarget === 'trigger'
-              ? theme.scheme === 'light'
-                ? theme.colors.accent
-                : theme.colors.accentHover
-              : theme.colors.textPrimary
-          }
+          color={theme.colors.textPrimary}
         />
         <Text style={[styles.triggerLabel, focusedTarget === 'trigger' && styles.triggerLabelFocused]}>
           Sort: {contentSortLabel(value)}
@@ -129,11 +124,11 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
               }}
               style={[
                 styles.option,
-                novaTvFocus.base,
-                focusedTarget === index && styles.optionFocused,
+                focusChrome.base,
+                focusedTarget === index && focusChrome.active,
                 option.value === value && styles.optionSelected,
               ]}>
-              <Text style={styles.optionText}>{option.label}</Text>
+              <Text style={[styles.optionText, focusedTarget === index && styles.optionTextFocused]}>{option.label}</Text>
               {option.value === value ? <Text style={styles.check}>✓</Text> : null}
             </Pressable>
           ))}
@@ -144,6 +139,7 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
 });
 
 function createStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
   return StyleSheet.create({
     root: { position: 'relative', zIndex: 20 },
     trigger: {
@@ -152,34 +148,12 @@ function createStyles(theme: NovaTheme) {
       alignItems: 'center',
       gap: 7,
       borderRadius: 0,
-      borderWidth: 1,
-      borderColor: 'transparent',
       backgroundColor: 'transparent',
       paddingHorizontal: 8,
       paddingVertical: 6,
     },
-    triggerFocused:
-      theme.scheme === 'light'
-        ? {
-            borderColor: theme.colors.focusRing,
-            backgroundColor: theme.colors.surfaceFocused,
-          }
-        : {
-            shadowColor: theme.colors.focusRing,
-            shadowOpacity: theme.glow.focusShadowOpacity * 0.65,
-            shadowRadius: 7,
-          },
     triggerLabel: { color: theme.colors.textPrimary, fontSize: 12, fontWeight: '800' },
-    triggerLabelFocused:
-      theme.scheme === 'light'
-        ? {
-            color: theme.colors.accent,
-          }
-        : {
-            color: theme.colors.accentHover,
-            textShadowColor: theme.colors.focusRing,
-            textShadowRadius: 8,
-          },
+    triggerLabelFocused: focusText.title,
     menu: {
       position: 'absolute',
       right: 0,
@@ -195,25 +169,11 @@ function createStyles(theme: NovaTheme) {
     option: {
       minHeight: 36,
       borderRadius: 0,
-      borderWidth: 1,
-      borderColor: 'transparent',
       paddingHorizontal: 10,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
     },
-    optionFocused:
-      theme.scheme === 'light'
-        ? {
-            borderColor: theme.colors.focusRing,
-            backgroundColor: theme.colors.surfaceFocused,
-          }
-        : {
-            shadowColor: theme.colors.focusRing,
-            shadowOpacity: 0.65,
-            shadowRadius: 7,
-            backgroundColor: 'transparent',
-          },
     optionSelected: {
       backgroundColor: theme.colors.surfaceMuted,
     },
@@ -222,6 +182,7 @@ function createStyles(theme: NovaTheme) {
       fontSize: 13,
       fontWeight: '700',
     },
+    optionTextFocused: focusText.title,
     check: {
       color: theme.colors.accent,
       fontSize: 13,

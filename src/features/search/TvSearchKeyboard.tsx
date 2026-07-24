@@ -1,8 +1,11 @@
+import type { RefObject } from 'react';
 import { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 const ROWS = [
   ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
@@ -16,21 +19,28 @@ type TvSearchKeyboardProps = {
   onBackspace: () => void;
   onClear: () => void;
   onSpace: () => void;
+  firstKeyRef?: RefObject<View | null>;
+  focusUpHandle?: number;
 };
 
 function Key({
   label,
   wide,
   onPress,
+  nativeRef,
+  focusUpHandle,
 }: {
   label: string;
   wide?: boolean;
   onPress: () => void;
+  nativeRef?: RefObject<View | null>;
+  focusUpHandle?: number;
 }) {
   const [focused, setFocused] = useState(false);
 
   return (
     <Pressable
+      ref={nativeRef}
       focusable
       accessibilityRole="button"
       accessibilityLabel={label}
@@ -38,13 +48,21 @@ function Key({
       onBlur={() => setFocused(false)}
       onPress={onPress}
       {...({ onClick: onPress } as object)}
+      {...(focusUpHandle ? { nextFocusUp: focusUpHandle } : null)}
       style={[styles.key, wide && styles.keyWide, novaTvFocus.base, focused && novaTvFocus.active]}>
       <Text style={[styles.keyLabel, focused && styles.keyLabelFocused]}>{label}</Text>
     </Pressable>
   );
 }
 
-export function TvSearchKeyboard({ onType, onBackspace, onClear, onSpace }: TvSearchKeyboardProps) {
+export function TvSearchKeyboard({
+  onType,
+  onBackspace,
+  onClear,
+  onSpace,
+  firstKeyRef,
+  focusUpHandle,
+}: TvSearchKeyboardProps) {
   const append = useCallback(
     (char: string) => {
       onType(char);
@@ -54,10 +72,16 @@ export function TvSearchKeyboard({ onType, onBackspace, onClear, onSpace }: TvSe
 
   return (
     <View style={styles.root}>
-      {ROWS.map((row) => (
+      {ROWS.map((row, rowIndex) => (
         <View key={row.join('')} style={styles.row}>
-          {row.map((char) => (
-            <Key key={char} label={char} onPress={() => append(char.toLowerCase())} />
+          {row.map((char, charIndex) => (
+            <Key
+              key={char}
+              label={char}
+              nativeRef={rowIndex === 0 && charIndex === 0 ? firstKeyRef : undefined}
+              focusUpHandle={rowIndex === 0 ? focusUpHandle : undefined}
+              onPress={() => append(char.toLowerCase())}
+            />
           ))}
         </View>
       ))}
@@ -101,7 +125,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
   },
-  keyLabelFocused: {
-    color: '#FFFFFF',
-  },
+  keyLabelFocused: focusText.title,
 });

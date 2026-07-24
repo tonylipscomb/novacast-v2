@@ -2,6 +2,7 @@ import { memo, useMemo, useState, type ElementRef } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
+import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import type { ProviderLiveCategory } from '@/features/providers/providerRepositories';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -76,7 +77,7 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
         style={[styles.categoryName, selected && styles.categoryNameSelected, isFocused && styles.categoryNameFocused]}>
         {displayName}
       </Text>
-      <Text numberOfLines={1} style={styles.categoryCount}>
+      <Text numberOfLines={1} style={[styles.categoryCount, isFocused && styles.categoryCountFocused]}>
         {formatLiveTvCategoryCount(category.count)}
       </Text>
       {selected || isFocused ? <View style={[styles.selectedRail, isFocused && styles.focusRail]} /> : null}
@@ -87,29 +88,22 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
 const MARKER_SLOT_WIDTH = 28;
 
 function createStyles(theme: NovaTheme) {
-  const lightFocus = theme.scheme === 'light';
+  const focusText = createNovaTvFocusTextStyles(theme);
+  const focusChrome = createNovaTvFocusChrome(theme);
 
   return StyleSheet.create({
     categoryRow: {
       height: 38,
       borderBottomWidth: 1,
       borderBottomColor: theme.colors.borderSubtle,
-      borderWidth: 1,
-      borderColor: 'transparent',
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
       paddingHorizontal: 8,
       paddingVertical: 0,
+      ...focusChrome.base,
     },
-    categoryRowFocused: lightFocus
-      ? {
-          borderColor: theme.colors.focusRing,
-          backgroundColor: theme.colors.surfaceFocused,
-        }
-      : {
-          backgroundColor: 'transparent',
-        },
+    categoryRowFocused: focusChrome.active,
     markerSlot: {
       width: MARKER_SLOT_WIDTH,
       alignItems: 'center',
@@ -129,16 +123,7 @@ function createStyles(theme: NovaTheme) {
     categoryNameSelected: {
       color: theme.colors.textPrimary,
     },
-    categoryNameFocused: lightFocus
-      ? {
-          color: theme.colors.accent,
-        }
-      : {
-          color: theme.colors.accentHover,
-          textShadowColor: theme.colors.accentHover,
-          textShadowOffset: { width: 0, height: 0 },
-          textShadowRadius: 8,
-        },
+    categoryNameFocused: focusText.title,
     categoryCount: {
       minWidth: 28,
       color: theme.colors.textMuted,
@@ -146,20 +131,17 @@ function createStyles(theme: NovaTheme) {
       fontWeight: '600',
       textAlign: 'right',
     },
+    categoryCountFocused: focusText.count,
     selectedRail: {
       width: 3,
       height: 20,
       borderRadius: 2,
       backgroundColor: theme.colors.success,
-      shadowColor: theme.colors.success,
-      shadowOpacity: 0.9,
-      shadowRadius: 6,
     },
     focusRail: {
-      backgroundColor: theme.colors.accentHover,
-      shadowColor: theme.colors.accentHover,
-      shadowOpacity: lightFocus ? 0 : 0.9,
-      shadowRadius: lightFocus ? 0 : 6,
+      // Glass box carries focus; keep rail width for layout stability only.
+      backgroundColor: 'transparent',
+      shadowOpacity: 0,
     },
     selectedRow: {
       backgroundColor: 'transparent',

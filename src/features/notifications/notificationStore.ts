@@ -132,6 +132,7 @@ function buildNotification(id: string, input: ShowNotificationInput): AppNotific
     scope: input.scope,
     dedupeKey: input.dedupeKey,
     autoFocusAction: input.autoFocusAction ?? false,
+    interactionMode: input.interactionMode ?? 'passive',
   };
 }
 
@@ -147,7 +148,8 @@ function notificationContentEqual(left: AppNotification, right: AppNotification)
     left.position === right.position &&
     left.scope === right.scope &&
     left.dedupeKey === right.dedupeKey &&
-    left.autoFocusAction === right.autoFocusAction
+    left.autoFocusAction === right.autoFocusAction &&
+    left.interactionMode === right.interactionMode
   );
 }
 

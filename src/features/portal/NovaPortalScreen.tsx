@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { markOnboardingGuideSeen, useOnboardingStore } from '@/features/onboarding/onboardingStore';
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
 import { ExitConfirmOverlay } from '@/features/navigation/ExitConfirmOverlay';
@@ -26,16 +26,18 @@ import { completeLaunchOverlay } from '@/features/startup/launchOverlay';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
 import { refreshProviderLiveChannelCount } from '@/features/providers/providerCatalogSync';
 import { getProviderRuntime, retryProviderInitialization, selectProvider, useProviderStore } from '@/features/providers/providerStore';
-import { formatProviderExpirationLabel } from '@/features/providers/providerExpiration';
+import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
 import { useProviderLibrarySummary } from '@/features/providers/providerLibrarySummaryStore';
 import { initializeDevice, isDeviceActivationRequired, useDeviceState } from '@/features/device';
 import { BetaExpiredScreen } from '@/features/device/BetaExpiredScreen';
 import { BetaInviteActivationScreen } from '@/features/device/BetaInviteActivationScreen';
 import { downloadManagedProviderAssignment } from '@/features/device/managedProviderDownload';
-import { isClosedBetaManagedFlow } from '@/features/device/deviceFeatureFlags';
+import { deviceFeatureFlags, isClosedBetaManagedFlow } from '@/features/device/deviceFeatureFlags';
 import { checkDeviceStatus } from '@/features/device/deviceActivation';
 import type { ProviderRecord } from '@/features/providers/providerModel';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 type PortalPanel = 'switch' | 'manage' | 'diagnostics' | null;
 type PortalIcon = keyof typeof MaterialCommunityIcons.glyphMap;
@@ -60,6 +62,13 @@ const MENU_ITEMS: readonly { id: string; icon: PortalIcon; title: string; subtit
   { id: 'settings', icon: 'cog-outline', title: 'Settings', subtitle: 'App preferences and configuration' },
   { id: 'diagnostics', icon: 'stethoscope', title: 'Diagnostics', subtitle: 'System information and tools' },
 ];
+
+function portalMenuItems() {
+  if (isClosedBetaManagedFlow() || !deviceFeatureFlags.personalProviderPairingEnabled) {
+    return MENU_ITEMS.filter((item) => item.id !== 'pair' && item.id !== 'switch');
+  }
+  return MENU_ITEMS;
+}
 
 function formatCount(count: number, ready: boolean) {
   return ready && count > 0 ? count.toLocaleString() : '—';
@@ -164,7 +173,7 @@ function PortalPanelCloseButton({ onPress, focusRef }: { onPress: () => void; fo
       onBlur={() => setFocused(false)}
       onPress={onPress}
       {...(Platform.isTV ? ({ onClick: onPress } as object) : null)}
-      style={[styles.panelCloseButton, novaTvFocus.base, focused && styles.panelCloseButtonFocused]}>
+      style={[styles.panelCloseButton, novaTvFocus.base, focused && novaTvFocus.active]}>
       <MaterialCommunityIcons name="close" size={25} color={focused ? novaTheme.colors.accentHover : novaTheme.colors.textPrimary} />
     </Pressable>
   );
@@ -221,13 +230,17 @@ function PortalManageProviderRow({
   onPress: () => void;
 }) {
   const [useFocused, setUseFocused] = useState(false);
+  const accessExpiration = useAccessExpirationDisplay({
+    provider,
+    account: provider.account ?? null,
+  });
 
   return (
     <View style={styles.manageRow}>
       <View style={styles.providerRowCopy}>
         <Text style={styles.providerRowName}>{provider.name}</Text>
         <Text style={styles.providerRowStatus}>
-          {provider.status} · {formatProviderExpirationLabel(provider, provider.account)}
+          {provider.status} · {accessExpiration.line}
         </Text>
       </View>
       <Pressable
@@ -398,7 +411,13 @@ function ProviderCard({
             : state === 'checking'
               ? 'Checking'
               : 'Ready to pair';
-  const expiration = selectedProvider ? formatProviderExpirationLabel(selectedProvider, selectedProvider.account) : null;
+  const accessExpiration = useAccessExpirationDisplay({
+    provider: selectedProvider,
+    account: selectedProvider?.account ?? null,
+  });
+  const expirationLine = selectedProvider
+    ? accessExpiration.line
+    : 'Pair a provider to continue';
 
   const cardBody = (
     <>
@@ -429,11 +448,7 @@ function ProviderCard({
             {safeProviderName(selectedProvider)}
           </Text>
           <Text numberOfLines={1} style={[styles.expiration, { fontSize: 19 * scale }]}>
-            {expiration
-              ? `Expires ${expiration}`
-              : selectedProvider
-                ? 'Expiration unavailable'
-                : 'Pair a provider to continue'}
+            {expirationLine}
           </Text>
         </View>
       </View>
@@ -609,20 +624,30 @@ export function NovaPortalScreen() {
     return () => subscription.remove();
   }, [closePairing, exitConfirmVisible, pairingVisible, panel]);
 
-  const openPairing = useCallback(() => setPairingVisible(true), []);
+  const openPairing = useCallback(() => {
+    if (isClosedBetaManagedFlow() || !deviceFeatureFlags.personalProviderPairingEnabled) {
+      router.replace('/');
+      return;
+    }
+    setPairingVisible(true);
+  }, [router]);
   const openSwitchProvider = useCallback(() => setPanel('switch'), []);
   const openManageProviders = useCallback(() => setPanel('manage'), []);
   const handleResetPairing = useCallback(async () => {
     setPanel(null);
     await resetPairingKeepDevice();
+    if (isClosedBetaManagedFlow()) {
+      router.replace('/');
+      return;
+    }
     openPairing();
-  }, [openPairing]);
+  }, [openPairing, router]);
   const handleFactoryReset = useCallback(async () => {
     setPanel(null);
     await factoryResetNovacast();
     await initializeDevice().catch(() => undefined);
-    openPairing();
-  }, [openPairing]);
+    router.replace('/');
+  }, [router]);
   const selectAndContinue = useCallback(async (providerId: string) => {
     try {
       await selectProvider(providerId);
@@ -702,7 +727,7 @@ export function NovaPortalScreen() {
         <View style={[styles.rightColumn, { width: '52%' }]}>
           <Text style={[styles.portalLabel, { fontSize: 23 * scale }]}>PORTAL</Text>
           <View style={styles.menuList}>
-            {MENU_ITEMS.map((item, index) => (
+            {portalMenuItems().map((item, index) => (
               <PortalMenuItem
                 key={item.id}
                 item={item}
@@ -887,11 +912,7 @@ const styles = StyleSheet.create({
     backgroundColor: GLASS.fillFocus,
     borderColor: GLASS.borderFocus,
   },
-  providerNameFocused: {
-    color: novaTheme.colors.accentHover,
-    textShadowColor: novaTheme.colors.focusRing,
-    textShadowRadius: 8,
-  },
+  providerNameFocused: focusText.title,
   cardLaunchHint: { marginLeft: 'auto' },
   statusLine: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   statusDot: { width: 14, height: 14, borderRadius: 7 },
@@ -940,8 +961,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0,
     shadowRadius: 0,
   },
-  menuTitleFocused: { color: novaTheme.colors.accentHover },
-  menuSubtitleFocused: { color: '#D7E6FF' },
+  menuTitleFocused: focusText.title,
+  menuSubtitleFocused: focusText.secondary,
   menuCopy: { flex: 1, minWidth: 0 },
   menuTitle: { color: '#F5F8FF', fontWeight: '700' },
   menuSubtitle: { color: '#AAB6CC', marginTop: 4 },
@@ -975,11 +996,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: GLASS.border,
   },
-  panelCloseButtonFocused: {
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 7,
-  },
   panelTitle: { flex: 1, color: '#F5F8FF', fontSize: 25, fontWeight: '800' },
   panelHint: { color: '#AAB6CC', fontSize: 16, lineHeight: 23, marginBottom: 14 },
   providerRow: {
@@ -996,9 +1012,6 @@ const styles = StyleSheet.create({
   providerRowFocused: {
     borderColor: GLASS.borderFocus,
     backgroundColor: GLASS.fillFocus,
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.55,
-    shadowRadius: 8,
   },
   manageRow: {
     minHeight: 76,
@@ -1013,7 +1026,7 @@ const styles = StyleSheet.create({
   },
   providerRowCopy: { flex: 1, gap: 5 },
   providerRowName: { color: '#F5F8FF', fontSize: 18, fontWeight: '800' },
-  providerRowNameFocused: { color: novaTheme.colors.accentHover },
+  providerRowNameFocused: focusText.title,
   providerRowStatus: { color: '#AAB6CC', fontSize: 14 },
   useButton: {
     paddingHorizontal: 15,
@@ -1026,12 +1039,9 @@ const styles = StyleSheet.create({
   useButtonFocused: {
     borderColor: GLASS.borderFocus,
     backgroundColor: GLASS.fillFocus,
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 7,
   },
   useButtonText: { color: '#18D7FF', fontWeight: '700' },
-  useButtonTextFocused: { color: novaTheme.colors.accentHover },
+  useButtonTextFocused: focusText.title,
   addProviderButton: {
     minHeight: 52,
     marginTop: 4,
@@ -1051,18 +1061,12 @@ const styles = StyleSheet.create({
   dangerActionButtonFocused: {
     borderColor: GLASS.borderFocus,
     backgroundColor: 'rgba(90, 24, 42, 0.92)',
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 7,
   },
   addProviderButtonFocused: {
     borderColor: GLASS.borderFocus,
     backgroundColor: GLASS.fillFocus,
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 7,
   },
   addProviderText: { color: '#F5F8FF', fontSize: 16, fontWeight: '700' },
-  addProviderTextFocused: { color: novaTheme.colors.accentHover },
+  addProviderTextFocused: focusText.title,
   diagnosticCopy: { color: '#AAB6CC', fontSize: 16, lineHeight: 28, paddingVertical: 10 },
 });

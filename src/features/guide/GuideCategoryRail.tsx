@@ -2,6 +2,7 @@ import { memo, useCallback, useMemo, useReducer, useRef, useState, type ElementR
 import { findNodeHandle, FlatList, Pressable, StyleSheet, Text } from 'react-native';
 
 import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
+import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import type { ProviderLiveCategory } from '@/features/providers/providerRepositories';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -169,7 +170,8 @@ export function GuideCategoryRail({ categories, selectedCategoryId, onSelect, on
 }
 
 function createStyles(theme: NovaTheme) {
-  const light = theme.scheme === 'light';
+  const focusText = createNovaTvFocusTextStyles(theme);
+  const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
     rail: { minHeight: 44, maxHeight: 44 },
     railContent: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 2 },
@@ -180,24 +182,16 @@ function createStyles(theme: NovaTheme) {
       gap: 7,
       flexShrink: 0,
       borderRadius: 0,
-      borderWidth: 0,
-      borderBottomWidth: 2,
-      borderBottomColor: 'transparent',
       backgroundColor: 'transparent',
       paddingHorizontal: 10,
       paddingVertical: 6,
+      ...focusChrome.base,
     },
     chipInnerSelected: {
+      borderBottomWidth: 2,
       borderBottomColor: theme.colors.success,
     },
-    chipInnerFocused: light
-      ? {
-          borderBottomColor: theme.colors.focusRing,
-          backgroundColor: theme.colors.surfaceFocused,
-        }
-      : {
-          backgroundColor: 'transparent',
-        },
+    chipInnerFocused: focusChrome.active,
     chipName: {
       flexShrink: 0,
       color: theme.colors.textSecondary,
@@ -208,23 +202,13 @@ function createStyles(theme: NovaTheme) {
       color: theme.colors.textPrimary,
       fontWeight: '800',
     },
-    chipNameFocused: light
-      ? {
-          color: theme.colors.accent,
-        }
-      : {
-          color: theme.colors.accentHover,
-          textShadowColor: theme.colors.accentHover,
-          textShadowRadius: 8,
-        },
+    chipNameFocused: focusText.title,
     chipCount: {
       flexShrink: 0,
       color: theme.colors.textMuted,
       fontSize: 10,
       fontWeight: '700',
     },
-    chipCountFocused: {
-      color: light ? theme.colors.accent : theme.colors.accentHover,
-    },
+    chipCountFocused: focusText.count,
   });
 }

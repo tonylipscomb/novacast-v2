@@ -17,11 +17,13 @@ import { BlurView } from 'expo-blur';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { MediaArtworkFallback } from '@/features/media-browser/MediaArtworkFallback';
 import type { MediaCastMember, MediaDetail, MediaDetailEpisode } from '@/features/media-browser/mediaTypes';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 type MediaDetailOverlayProps = {
   visible: boolean;
@@ -57,15 +59,6 @@ type TvEventPayload = {
 
 function noopUseTVEventHandler(_handler: (event: TvEventPayload) => void) {
   // RN 0.86 Android builds may not ship TV event hooks.
-}
-
-function formatDate(value?: string) {
-  if (!value?.trim()) {
-    return undefined;
-  }
-
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? new Date(parsed).toLocaleDateString() : value;
 }
 
 function formatRating(value?: number) {
@@ -160,10 +153,7 @@ function OverlayAction({
         compact && !primary && styles.actionGhost,
         disabled && styles.actionDisabled,
         novaTvFocus.base,
-        selected && !compact && novaTvFocus.active,
-        selected && compact && !primary && styles.actionGhostFocused,
-        selected && compact && primary && styles.actionPrimaryFocused,
-        selected && !compact && styles.actionFocused,
+        selected && novaTvFocus.active,
       ]}>
       {!compact ? (
         <MaterialCommunityIcons name={icon} size={20} color={primary ? '#FFFFFF' : novaTheme.colors.textPrimary} />
@@ -204,7 +194,7 @@ function CastRow({
               focusable
               accessibilityLabel={member.name}
               onFocus={() => onFocus(member.name)}
-              style={[styles.castMember, compact && styles.castMemberCompact, focused && styles.castMemberFocused]}>
+              style={[styles.castMember, compact && styles.castMemberCompact, novaTvFocus.base, focused && novaTvFocus.active]}>
               <View style={[styles.castAvatar, compact && styles.castAvatarCompact]}>
                 {member.imageUrl ? (
                   <TvRemoteImage uri={member.imageUrl} resizeMode="cover" style={styles.castImage} />
@@ -212,8 +202,12 @@ function CastRow({
                   <Text style={styles.castInitials}>{initials(member.name)}</Text>
                 )}
               </View>
-              <Text numberOfLines={1} style={styles.castName}>{member.name}</Text>
-              {member.character ? <Text numberOfLines={1} style={styles.castCharacter}>{member.character}</Text> : null}
+              <Text numberOfLines={1} style={[styles.castName, focused && styles.castNameFocused]}>{member.name}</Text>
+              {member.character ? (
+                <Text numberOfLines={1} style={[styles.castCharacter, focused && styles.castCharacterFocused]}>
+                  {member.character}
+                </Text>
+              ) : null}
             </Pressable>
           );
         })}
@@ -253,11 +247,11 @@ function SeriesEpisodePanel({
               accessibilityLabel={season.name ?? `Season ${season.seasonNumber}`}
               onFocus={() => onEpisodeFocus?.(`season-${season.seasonNumber}`)}
               onPress={() => onSeasonPress?.(season.seasonNumber)}
-              style={[styles.seasonChip, season.seasonNumber === selected && styles.seasonChipSelected, seasonFocused && styles.seasonChipFocused]}>
-              <Text style={[styles.seasonText, season.seasonNumber === selected && styles.seasonTextSelected]}>
+              style={[styles.seasonChip, novaTvFocus.base, season.seasonNumber === selected && styles.seasonChipSelected, seasonFocused && novaTvFocus.active]}>
+              <Text style={[styles.seasonText, season.seasonNumber === selected && styles.seasonTextSelected, seasonFocused && styles.seasonTextFocused]}>
                 {season.name ?? `Season ${season.seasonNumber}`}
               </Text>
-              <Text style={styles.seasonCount}>{season.episodeCount}</Text>
+              <Text style={[styles.seasonCount, seasonFocused && styles.seasonCountFocused]}>{season.episodeCount}</Text>
             </Pressable>
           );
         })}
@@ -273,7 +267,7 @@ function SeriesEpisodePanel({
               accessibilityLabel={`Episode ${episode.episodeNumber}, ${episode.title}`}
               onFocus={() => onEpisodeFocus?.(episode.id)}
               onPress={() => onEpisodePress?.(episode)}
-              style={[styles.episodeRow, focused && styles.episodeRowFocused]}>
+              style={[styles.episodeRow, novaTvFocus.base, focused && novaTvFocus.active]}>
               <View style={styles.episodeNumberBox}>
                 <Text style={[styles.episodeNumber, focused && styles.episodeNumberFocused]}>{episode.episodeNumber}</Text>
               </View>
@@ -317,7 +311,9 @@ export function MediaDetailOverlay({
 }: MediaDetailOverlayProps) {
   const { width, height } = useWindowDimensions();
   const [focusedTarget, setFocusedTarget] = useState<ActionId | string | null>(null);
-  const [posterFailed, setPosterFailed] = useState(false);
+  const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
+  const posterKey = detail ? `${detail.id}:${detail.posterUrl ?? ''}` : null;
+  const posterFailed = Boolean(posterKey) && failedPosterKey === posterKey;
   const [opacity] = useState(() => new Animated.Value(0));
   const actionRefs = useRef(new Map<ActionId, ElementRef<typeof Pressable>>());
   const playRef = useRef<ElementRef<typeof Pressable> | null>(null);
@@ -616,7 +612,15 @@ export function MediaDetailOverlay({
           <View style={[styles.posterColumn, styles.posterColumnCompact]}>
             <View style={[styles.posterFrame, styles.posterFrameCompact]}>
               {detail.posterUrl && !posterFailed ? (
-                <TvRemoteImage uri={detail.posterUrl} style={styles.posterImage} onError={() => setPosterFailed(true)} />
+                <TvRemoteImage
+                  uri={detail.posterUrl}
+                  style={styles.posterImage}
+                  onError={() => {
+                    if (posterKey) {
+                      setFailedPosterKey(posterKey);
+                    }
+                  }}
+                />
               ) : (
                 <MediaArtworkFallback title={title} kind={detail.mediaType} subtitle={detail.year} />
               )}
@@ -635,7 +639,6 @@ export function MediaDetailOverlay({
             <View style={[styles.metaRow, styles.metaRowCompact]}>
               {detail.year ? <Text style={styles.metaChip}>{detail.year}</Text> : null}
               {detail.runtime ? <Text style={styles.metaChip}>{detail.runtime}</Text> : null}
-              {detail.releaseDate ? <Text style={styles.metaChip}>Release {formatDate(detail.releaseDate)}</Text> : null}
               {detail.creator ? <Text style={styles.metaChip}>{detail.creator}</Text> : null}
               {detail.network ? <Text style={styles.metaChip}>{detail.network}</Text> : null}
               {detail.contentRating ? <Text style={styles.metaChip}>{detail.contentRating}</Text> : null}
@@ -827,17 +830,6 @@ const styles = StyleSheet.create({
     borderWidth: 0,
     backgroundColor: 'transparent',
   },
-  actionGhostFocused: {
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: novaTheme.glow.focusShadowOpacity * 0.65,
-    shadowRadius: 7,
-  },
-  actionPrimaryFocused: {
-    borderColor: novaTheme.colors.focusRing,
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.8,
-    shadowRadius: 8,
-  },
   action: {
     minHeight: 34,
     borderRadius: 0,
@@ -852,10 +844,6 @@ const styles = StyleSheet.create({
   actionPrimary: {
     borderColor: novaTheme.colors.accent,
     backgroundColor: novaTheme.colors.accent,
-  },
-  actionFocused: {
-    borderColor: novaTheme.colors.focusRing,
-    backgroundColor: novaTheme.colors.surfaceFocused,
   },
   actionDisabled: {
     opacity: 0.42,
@@ -994,11 +982,6 @@ const styles = StyleSheet.create({
     width: 62,
     minHeight: 84,
   },
-  castMemberFocused: {
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 6,
-  },
   castAvatar: {
     width: 48,
     height: 48,
@@ -1030,12 +1013,14 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     textAlign: 'center',
   },
+  castNameFocused: focusText.title,
   castCharacter: {
     marginTop: 2,
     color: novaTheme.colors.textMuted,
     fontSize: 9,
     textAlign: 'center',
   },
+  castCharacterFocused: focusText.secondary,
   sideColumn: {
     width: 240,
     minWidth: 220,
@@ -1073,24 +1058,21 @@ const styles = StyleSheet.create({
   seasonChipSelected: {
     backgroundColor: 'transparent',
   },
-  seasonChipFocused: {
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 6,
-  },
   seasonText: {
     color: novaTheme.colors.textSecondary,
     fontSize: 11,
     fontWeight: '800',
   },
   seasonTextSelected: {
-    color: novaTheme.colors.accentHover,
+    color: novaTheme.colors.textPrimary,
   },
+  seasonTextFocused: focusText.title,
   seasonCount: {
     color: novaTheme.colors.textMuted,
     fontSize: 10,
     fontWeight: '700',
   },
+  seasonCountFocused: focusText.count,
   episodeScroll: {
     flex: 1,
     minHeight: 0,
@@ -1110,11 +1092,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
     paddingVertical: 4,
   },
-  episodeRowFocused: {
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: 0.65,
-    shadowRadius: 6,
-  },
   episodeNumberBox: {
     width: 20,
     alignItems: 'center',
@@ -1133,12 +1110,8 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
   },
-  episodeTitleFocused: {
-    color: novaTheme.colors.accentHover,
-  },
-  episodeNumberFocused: {
-    color: novaTheme.colors.accentHover,
-  },
+  episodeTitleFocused: focusText.title,
+  episodeNumberFocused: focusText.count,
   episodeMeta: {
     marginTop: 2,
     color: novaTheme.colors.textMuted,

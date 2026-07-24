@@ -1,7 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { Animated, Easing, StyleSheet, Text, type StyleProp, type TextStyle } from 'react-native';
 
+import { createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { novaTheme } from '@/theme';
+
+const focusText = createNovaTvFocusTextStyles(novaTheme);
 
 type NovaFocusTextProps = {
   active: boolean;
@@ -55,7 +58,7 @@ export function NovaFocusText({ active, children, style, numberOfLines }: NovaFo
   });
 
   return (
-    <Animated.Text style={[style, styles.pulseText, { color }]} numberOfLines={numberOfLines}>
+    <Animated.Text style={[style, styles.pulseText, focusText.title, { color }]} numberOfLines={numberOfLines}>
       {children}
     </Animated.Text>
   );

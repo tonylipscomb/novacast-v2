@@ -102,7 +102,7 @@ test('startup provider init retries use bounded backoff before surfacing an erro
 test('Live TV debounced preview only applies to the still-focused channel', () => {
   assert.equal(shouldApplyDebouncedPreviewTune('chan-2', 'chan-2'), true);
   assert.equal(shouldApplyDebouncedPreviewTune('chan-2', 'chan-3'), false);
-  assert.equal(PREVIEW_FOCUS_DEBOUNCE_MS, 320);
+  assert.equal(PREVIEW_FOCUS_DEBOUNCE_MS, 300);
   assert.equal(shouldScrollListToFocusIndex(4, 4), false);
   assert.equal(shouldScrollListToFocusIndex(4, 5), true);
 });
@@ -178,9 +178,21 @@ test('Live TV duplicate OK on the same channel within the dedup window is ignore
 
 test('Live TV second deliberate OK opens fullscreen only after preview confirmation', () => {
   const state = createInitialLiveTvState('cat-1', 'chan-1');
-  const ready = { ...state, previewStatus: 'ready' };
-  const confirmed = chooseLiveChannel(ready, 'chan-1');
+  // Auto-preview arrives confirmed; first OK on a ready confirmed channel enters fullscreen.
+  const readyConfirmed = { ...state, previewStatus: 'ready' };
+  const fullscreenFromConfirmed = chooseLiveChannel(readyConfirmed, 'chan-1');
+  assert.equal(fullscreenFromConfirmed.fullscreenChannelId, 'chan-1');
+
+  // After focusing away and back without confirmation, OK must confirm before fullscreen.
+  const unconfirmed = {
+    ...state,
+    previewStatus: 'ready',
+    previewConfirmedChannelId: null,
+    fullscreenChannelId: null,
+  };
+  const confirmed = chooseLiveChannel(unconfirmed, 'chan-1');
   assert.equal(confirmed.fullscreenChannelId, null);
+  assert.equal(confirmed.previewConfirmedChannelId, 'chan-1');
   const fullscreen = chooseLiveChannel(confirmed, 'chan-1');
   assert.equal(fullscreen.fullscreenChannelId, 'chan-1');
 });

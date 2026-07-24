@@ -17,7 +17,7 @@ import { sortProviderCategoriesUsFirst, partitionMediaSummariesUsFirst } from '.
 import {
   getSmartCategoryCountSync,
   getSmartCategoryEntrySync,
-  getSmartCategoryCacheSync,
+  readSmartCategoryCache,
 } from '../../providers/smartCategoryCacheStore.ts';
 import { loadAllMoviesForCatalogIndex } from '../../providers/catalogCategoryLoader.ts';
 import { logSmartCategoryCatalogAudit } from '../../providers/catalogSyncAudit.ts';
@@ -174,7 +174,7 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
     }
 
     const definitions = getActiveSmartCategoryDefinitions();
-    const smartCache = getSmartCategoryCacheSync(providerId, 'movie');
+    const smartCache = await readSmartCategoryCache(providerId, 'movie');
 
     const smartCategories: MovieCategory[] = definitions.map((definition) => ({
       id: `${SMART_CATEGORY_PREFIX}${definition.key}`,
@@ -369,7 +369,7 @@ export async function refreshSmartCategoryCounts(
     return categories;
   }
 
-  const smartCache = getSmartCategoryCacheSync(providerId, 'movie');
+  const smartCache = await readSmartCategoryCache(providerId, 'movie');
 
   return categories.map((category) => {
     if (category.kind !== 'smart' || !category.smartKey) {

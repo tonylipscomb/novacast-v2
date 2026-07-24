@@ -25,7 +25,22 @@ Deno.serve(async (request) => {
     });
 
     if (error || !data?.[0]) {
-      return jsonResponse({ errorCategory: 'activation_unavailable' }, 400);
+      const detail = typeof error?.message === 'string' ? error.message : '';
+      const known = [
+        'device_not_found',
+        'device_blocked',
+        'invite_not_found',
+        'invite_inactive',
+        'invite_not_started',
+        'invite_expired',
+        'invite_exhausted',
+        'activation_unavailable',
+      ] as const;
+      const category = known.find((code) => detail.includes(code))
+        ?? (detail.includes('Could not find the function') || detail.includes('function public.activate_device_with_invite')
+          ? 'activation_rpc_missing'
+          : 'activation_unavailable');
+      return jsonResponse({ errorCategory: category }, 400);
     }
 
     const row = data[0] as {

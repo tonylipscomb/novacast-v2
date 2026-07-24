@@ -440,24 +440,13 @@ async function writePartialCountIndexes(
   movieCountMap: Record<string, number>,
   seriesCountMap: Record<string, number>,
 ) {
+  // Merge into existing indexes — never replace a complete map with a partial mid-sync write.
   if (Object.keys(movieCountMap).length) {
-    const movieCountIndex: CategoryCountIndex = {
-      providerId,
-      mediaType: 'movie',
-      counts: { ...movieCountMap },
-      updatedAt: Date.now(),
-    };
-    await writeCategoryCountIndex(movieCountIndex);
+    await mergeCategoryCountIndex(providerId, 'movie', movieCountMap);
   }
 
   if (Object.keys(seriesCountMap).length) {
-    const seriesCountIndex: CategoryCountIndex = {
-      providerId,
-      mediaType: 'series',
-      counts: { ...seriesCountMap },
-      updatedAt: Date.now(),
-    };
-    await writeCategoryCountIndex(seriesCountIndex);
+    await mergeCategoryCountIndex(providerId, 'series', seriesCountMap);
   }
 }
 
@@ -957,6 +946,8 @@ export async function runProviderCatalogSync(input: ProviderCatalogSyncInput, ru
       seriesCatalog: seriesIndex?.getCompleteness(),
     });
     await writeCheckpoint('complete', movieCategories.length, seriesCategories.length);
+    movieIndex?.commitSync();
+    seriesIndex?.commitSync();
     notifyPhase(providerId, 'ready');
   });
 }
@@ -965,9 +956,16 @@ function startProviderCatalogSync(input: ProviderCatalogSyncInput) {
   const runToken = syncGeneration;
   const task = runProviderCatalogSync(input, runToken)
     .catch((error) => {
+      try {
+        getMovieCatalogIndex(input.providerId)?.abortSync();
+        getSeriesCatalogIndex(input.providerId)?.abortSync();
+      } catch {
+        // Preserve browse state best-effort.
+      }
       notifyPhase(input.providerId, 'error');
       logSync(input.providerId, 'sync-failed', {
         error: error instanceof Error ? error.message : String(error),
+        cachedDataPreserved: true,
       });
     })
     .finally(() => {

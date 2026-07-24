@@ -2,7 +2,7 @@ import { memo, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 
-import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { LiveGlassBadge } from '@/features/live/LiveGlassBadge';
 import { categoryTypeAccentColor, categoryTypeLabel, type ProviderCategoryType } from '@/features/providers/categoryNormalization';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
@@ -89,6 +89,8 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
 });
 
 function createStyles(theme: NovaTheme) {
+  const focusText = createNovaTvFocusTextStyles(theme);
+  const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
     wrap: {
       width: 168,
@@ -97,24 +99,11 @@ function createStyles(theme: NovaTheme) {
       width: 168,
       minHeight: 164,
       borderRadius: 0,
-      borderWidth: 2,
-      borderColor: 'transparent',
       backgroundColor: 'transparent',
       padding: 0,
+      ...focusChrome.base,
     },
-    cardFocused:
-      theme.scheme === 'light'
-        ? {
-            backgroundColor: 'transparent',
-            borderColor: theme.colors.focusRing,
-          }
-        : {
-            borderColor: 'transparent',
-            backgroundColor: 'transparent',
-            shadowColor: theme.colors.focusRing,
-            shadowOpacity: 0.65,
-            shadowRadius: 7,
-          },
+    cardFocused: focusChrome.active,
     artwork: {
       height: 112,
       borderRadius: 0,
@@ -123,13 +112,7 @@ function createStyles(theme: NovaTheme) {
       justifyContent: 'center',
       overflow: 'hidden',
     },
-    artworkFocused:
-      theme.scheme === 'light'
-        ? {
-            borderBottomWidth: 2,
-            borderBottomColor: theme.colors.focusRing,
-          }
-        : {},
+    artworkFocused: {},
     backdropImage: {
       ...StyleSheet.absoluteFillObject,
     },
@@ -218,24 +201,13 @@ function createStyles(theme: NovaTheme) {
       fontSize: 13,
       fontWeight: '800',
     },
-    titleFocused:
-      theme.scheme === 'light'
-        ? {
-            color: theme.colors.accent,
-          }
-        : {
-            color: theme.colors.accentHover,
-            textShadowColor: theme.colors.focusRing,
-            textShadowRadius: 8,
-          },
+    titleFocused: focusText.title,
     subtitle: {
       marginTop: 3,
       color: theme.colors.textMuted,
       fontSize: 11,
       fontWeight: '600',
     },
-    subtitleFocused: {
-      color: theme.colors.textSecondary,
-    },
+    subtitleFocused: focusText.secondary,
   });
 }

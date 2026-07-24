@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, findNodeHandle, InteractionManager, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import { BlurTargetView } from 'expo-blur';
 
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
@@ -20,7 +19,8 @@ import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
 import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
-import { toggleMediaFavorite, toggleMediaWatchlist, useMediaLibraryStore } from '@/features/media-browser/mediaLibraryStore';
+import { tvPerfSetFocus, tvPerfSetScreen } from '@/features/perf/tvPerfStore';
+import { toggleMediaFavorite, toggleMediaWatchlist } from '@/features/media-browser/mediaLibraryStore';
 import { MediaCategoryRail } from '@/features/media-browser/MediaCategoryRail';
 import { buildSeriesMediaDetail, buildSeriesPreviewDetail } from '@/features/media-browser/mediaDetail';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
@@ -30,6 +30,11 @@ import type { NovaTheme } from '@/theme/tokens';
 import { SearchOverlay } from '@/features/search/SearchOverlay';
 import { searchSeries } from '@/features/search/repositories/seriesSearchRepository';
 import type { SearchResult } from '@/features/search/searchTypes';
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
+import {
+  resolvePosterRestorationId,
+  shouldPreferNavigationFocus,
+} from '@/features/media-browser/posterGridFocusPolicy';
 import { MovieToolbar } from '@/features/movies/components/MovieToolbar';
 import { SeriesPosterGrid } from './components/SeriesPosterGrid';
 import { launchSeriesEpisodePlayback } from './seriesPlayback';
@@ -43,31 +48,6 @@ import {
 import { getSeriesScreenMemory } from './seriesScreenMemory';
 import { useSeriesScreenModel } from './useSeriesScreenModel';
 
-const FOCUS_RESTORE_MAX_ATTEMPTS = 3;
-
-function focusNativeViewWhenReady(
-  getTarget: () => ElementRef<typeof View> | null | undefined,
-  onSettled: () => void,
-  attemptsLeft = FOCUS_RESTORE_MAX_ATTEMPTS,
-): () => void {
-  const target = getTarget();
-  if (target) {
-    target.focus();
-    onSettled();
-    return () => {};
-  }
-
-  if (attemptsLeft <= 0) {
-    onSettled();
-    return () => {};
-  }
-
-  requestAnimationFrame(() => {
-    focusNativeViewWhenReady(getTarget, onSettled, attemptsLeft - 1);
-  });
-  return () => {};
-}
-
 export function SeriesScreen() {
   const router = useRouter();
   const { theme } = useAppTheme();
@@ -76,7 +56,6 @@ export function SeriesScreen() {
   const navigationGateRef = useRef(createTvNavigationGate());
   const { selectedProvider, selectedProviderLabel } = useProviderStore();
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
-  const seriesLibrary = useMediaLibraryStore(activeProviderId);
   const catalogSyncPhase = useCatalogSyncStatus(activeProviderId);
   const discoverStatusMessage = isDiscoverCollectionsPending(catalogSyncPhase)
     ? 'Preparing Features collections…'
@@ -87,7 +66,7 @@ export function SeriesScreen() {
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof Pressable>>>(new Map());
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
-  const blurTargetRef = useRef<View | null>(null);
+  const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchOverlayReady, setSearchOverlayReady] = useState(false);
@@ -123,6 +102,8 @@ export function SeriesScreen() {
     detailError,
     loadSeriesDetail,
     continueWatching,
+    isSelectedFavorite,
+    isSelectedWatchlisted,
     hasDataSource,
     bundle,
     sortOption,
@@ -169,25 +150,72 @@ export function SeriesScreen() {
     syncCategoryFocusLeftHandle();
   }, [categories.length, selectedCategoryId, syncCategoryFocusLeftHandle]);
 
-  const focusSelectedPoster = useCallback(() => {
-    const selectedId = selectedItem?.id;
-    if (!selectedId) {
+  const focusSelectedPoster = useCallback((reason = 'restore-selected-poster') => {
+    const restoreId = resolvePosterRestorationId({
+      focusedId: getSeriesScreenMemory(activeProviderId).focusedSeriesId,
+      selectedId: selectedItem?.id ?? null,
+      availableIds: visibleItems.map((item) => item.id),
+    });
+    if (!restoreId) {
       return;
     }
 
-    requestAnimationFrame(() => {
-      focusNativeViewWhenReady(() => posterRefs.current.get(selectedId), () => {});
+    setRestoringBrowseFocus(true);
+    requestTvFocus({
+      screen: 'series',
+      source: 'SeriesScreen',
+      region: 'poster-grid',
+      itemId: restoreId,
+      reason,
+      getTarget: () => posterRefs.current.get(restoreId),
+      onSettled: () => {
+        setRestoringBrowseFocus(false);
+      },
     });
-  }, [selectedItem?.id]);
+  }, [activeProviderId, selectedItem?.id, visibleItems]);
 
   const closeDetail = useCallback(() => {
     setDetailOpen(false);
-    focusSelectedPoster();
+    focusSelectedPoster('restore-after-detail-close');
   }, [focusSelectedPoster]);
 
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setSearchOverlayReady(false);
+    focusSelectedPoster('restore-after-search-close');
+  }, [focusSelectedPoster]);
+
+  useEffect(() => {
+    tvPerfSetScreen('series');
+  }, []);
+
+  const handleFocusSeries = useCallback(
+    (series: Parameters<typeof focusSeries>[0]) => {
+      tvPerfSetFocus('SeriesPosterCard', series.id);
+      focusSeries(series);
+    },
+    [focusSeries],
+  );
+
+  const handleSelectSeries = useCallback(
+    (series: Parameters<typeof selectSeries>[0]) => {
+      if (detailOpen && selectedItem?.id === series.id) {
+        return;
+      }
+
+      selectSeries(series);
+      void loadSeriesDetail(series);
+      setDetailOpen(true);
+    },
+    [detailOpen, loadSeriesDetail, selectSeries, selectedItem?.id],
+  );
+
+  const handleRegisterPosterRef = useCallback((seriesId: string, instance: ElementRef<typeof View> | null) => {
+    if (instance) {
+      posterRefs.current.set(seriesId, instance);
+    } else {
+      posterRefs.current.delete(seriesId);
+    }
   }, []);
 
   const handleSearchSelect = useCallback(
@@ -308,25 +336,42 @@ export function SeriesScreen() {
 
     finishUnifiedPlaybackClose();
 
-    const selectedId = selectedItem?.id ?? null;
+    setRestoringBrowseFocus(true);
+    const restoreId = resolvePosterRestorationId({
+      focusedId: getSeriesScreenMemory(activeProviderId).focusedSeriesId,
+      selectedId: selectedItem?.id ?? null,
+      availableIds: visibleItems.map((item) => item.id),
+    });
     let cancelled = false;
 
     const task = InteractionManager.runAfterInteractions(() => {
-      if (cancelled) {
+      if (cancelled || !restoreId) {
+        setRestoringBrowseFocus(false);
         return;
       }
 
-      focusNativeViewWhenReady(
-        () => (selectedId ? posterRefs.current.get(selectedId) : null),
-        () => undefined,
-      );
+      requestTvFocus({
+        screen: 'series',
+        source: 'SeriesScreen',
+        region: 'poster-grid',
+        itemId: restoreId,
+        reason: 'restore-after-playback',
+        isActive: () => !cancelled,
+        getTarget: () => posterRefs.current.get(restoreId),
+        onSettled: () => {
+          if (!cancelled) {
+            setRestoringBrowseFocus(false);
+          }
+        },
+      });
     });
 
     return () => {
       cancelled = true;
       task.cancel();
+      setRestoringBrowseFocus(false);
     };
-  }, [didJustClose, selectedItem?.id]);
+  }, [activeProviderId, didJustClose, selectedItem?.id, visibleItems]);
 
   const executeSeriesSearch = useCallback(
     (request: Parameters<typeof searchSeries>[2]) => searchSeries(activeProviderId, bundle?.seriesDataSource, request),
@@ -391,14 +436,12 @@ export function SeriesScreen() {
       type: 'error',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleReload,
       duration: SERIES_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'series',
     });
-  }, [categories.length, dismissNotification, handleReload, hasDataSource, loadErrorMessage, loadStatus, showNotification]);
+  }, [categories.length, dismissNotification, hasDataSource, loadErrorMessage, loadStatus, showNotification]);
 
   useEffect(() => {
     if (!detailOpen || !detailError) {
@@ -412,14 +455,12 @@ export function SeriesScreen() {
       type: 'warning',
       title: spec.title,
       message: spec.message,
-      actionLabel: 'Retry',
-      onAction: handleDetailRetry,
       duration: SERIES_NOTIFICATION_DURATION_MS,
       persistent: spec.persistent,
       position: 'bottom-right',
       scope: 'series',
     });
-  }, [detailError, detailOpen, dismissNotification, handleDetailRetry, showNotification]);
+  }, [detailError, detailOpen, dismissNotification, showNotification]);
 
   useEffect(() => {
     return () => {
@@ -472,19 +513,21 @@ export function SeriesScreen() {
     <View style={styles.root}>
       {!playbackUiActive ? (
         <>
-      <BlurTargetView
-        ref={blurTargetRef}
-        style={styles.blurTarget}
-        pointerEvents={detailOverlayVisible || searchBlocksBrowse ? 'none' : 'auto'}>
-        <View
-          style={styles.browseLayer}
-          pointerEvents={detailOpen || searchBlocksBrowse ? 'none' : 'auto'}
-          importantForAccessibility={detailOpen || searchBlocksBrowse ? 'no-hide-descendants' : 'auto'}
-          accessibilityElementsHidden={detailOpen || searchBlocksBrowse}>
+      <View
+        style={styles.browseLayer}
+        pointerEvents={detailOpen || searchBlocksBrowse ? 'none' : 'auto'}
+        importantForAccessibility={detailOpen || searchBlocksBrowse ? 'no-hide-descendants' : 'auto'}
+        accessibilityElementsHidden={detailOpen || searchBlocksBrowse}>
         <NovaTvShell
           activeId="series"
           providerLabel={selectedProviderLabel}
-          preferActiveNavigationFocus={!playbackUiActive && !detailOverlayVisible && !searchBlocksBrowse}
+          preferActiveNavigationFocus={shouldPreferNavigationFocus({
+            playbackUiActive,
+            detailOverlayVisible,
+            searchBlocksBrowse,
+            restoringBrowseFocus,
+            gridEmpty: visibleItems.length === 0,
+          })}
           compactNavigationRail>
           <View style={styles.screen}>
             <View style={styles.topBar}>
@@ -540,26 +583,12 @@ export function SeriesScreen() {
               loading={loading}
               categoryLoading={categoryLoading}
               emptyNotice={gridEmptyNotice}
-              focusedSeriesId={focusedItem?.id ?? null}
+              focusedSeriesId={null}
               selectedSeriesId={selectedItem?.id ?? null}
               postersFocusable={!detailOpen && !playbackUiActive && !searchBlocksBrowse}
-              onFocusSeries={focusSeries}
-              onSelectSeries={(series) => {
-                if (detailOpen && selectedItem?.id === series.id) {
-                  return;
-                }
-
-                selectSeries(series);
-                void loadSeriesDetail(series);
-                setDetailOpen(true);
-              }}
-              registerPosterRef={(seriesId, instance) => {
-                if (instance) {
-                  posterRefs.current.set(seriesId, instance);
-                } else {
-                  posterRefs.current.delete(seriesId);
-                }
-              }}
+              onFocusSeries={handleFocusSeries}
+              onSelectSeries={handleSelectSeries}
+              registerPosterRef={handleRegisterPosterRef}
               sortOption={sortOption}
               onSortChange={setSort}
               showRatingSort={categoryHasRatings}
@@ -574,11 +603,9 @@ export function SeriesScreen() {
           </View>
         </NovaTvShell>
         </View>
-      </BlurTargetView>
 
       <MediaDetailOverlay
         visible={detailOverlayVisible}
-        blurTarget={blurTargetRef}
         detail={
           seriesDetail && seriesDetail.seriesId === selectedItem?.seriesId
             ? buildSeriesMediaDetail(seriesDetail)
@@ -588,8 +615,8 @@ export function SeriesScreen() {
         }
         detailError={null}
         detailLoading={detailLoading}
-        isFavorite={selectedItem ? seriesLibrary.isFavorite(selectedItem.seriesId) : false}
-        isWatchlisted={selectedItem ? seriesLibrary.isWatchlisted(selectedItem.seriesId) : false}
+        isFavorite={isSelectedFavorite}
+        isWatchlisted={isSelectedWatchlisted}
         continueWatchingLabel={continueWatching ? 'Resume' : 'Play'}
         onClose={closeDetail}
         onRetry={selectedItem ? handleDetailRetry : undefined}
@@ -629,7 +656,6 @@ export function SeriesScreen() {
         scope="series"
         providerId={activeProviderId}
         title="Search Series"
-        blurTarget={blurTargetRef}
         executeSearch={executeSeriesSearch}
         onReady={() => setSearchOverlayReady(true)}
         onClose={closeSearch}
@@ -658,10 +684,6 @@ function createSeriesStyles(theme: NovaTheme) {
     },
     browseLayer: {
       flex: 1,
-    },
-    blurTarget: {
-      flex: 1,
-      zIndex: 1,
     },
     screen: {
       flex: 1,

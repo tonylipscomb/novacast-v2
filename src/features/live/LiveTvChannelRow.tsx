@@ -3,6 +3,7 @@ import { memo, useCallback, useMemo, useState } from 'react';
 import { findNodeHandle, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
+import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -62,6 +63,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [isFocused, setIsFocused] = useState(false);
+  // Edge trap handles must be in state so nextFocus* props update after layout.
   const [focusTrapHandle, setFocusTrapHandle] = useState<number | undefined>(undefined);
 
   const displayName = displayStreamTitle(data.name);
@@ -74,8 +76,10 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
     (instance: ElementRef<typeof View> | null) => {
       registerRef(data.id, instance);
       if (Platform.OS === 'android' && instance && (trapFocusUp || trapFocusDown)) {
-        const handle = findNodeHandle(instance);
-        setFocusTrapHandle(handle ?? undefined);
+        const handle = findNodeHandle(instance) ?? undefined;
+        setFocusTrapHandle((current) => (current === handle ? current : handle));
+      } else if (!instance) {
+        setFocusTrapHandle((current) => (current === undefined ? current : undefined));
       }
     },
     [data.id, registerRef, trapFocusDown, trapFocusUp],
@@ -123,29 +127,22 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
 }, channelRowPropsAreEqual);
 
 function createStyles(theme: NovaTheme) {
-  const lightFocus = theme.scheme === 'light';
+  const focusText = createNovaTvFocusTextStyles(theme);
+  const focusChrome = createNovaTvFocusChrome(theme);
 
   return StyleSheet.create({
     channelRow: {
       minHeight: 52,
       borderBottomWidth: 1,
       borderBottomColor: theme.colors.borderSubtle,
-      borderWidth: 1,
-      borderColor: 'transparent',
       flexDirection: 'row',
       alignItems: 'center',
       gap: 7,
       paddingHorizontal: 7,
       paddingVertical: 4,
+      ...focusChrome.base,
     },
-    channelRowFocused: lightFocus
-      ? {
-          borderColor: theme.colors.focusRing,
-          backgroundColor: theme.colors.surfaceFocused,
-        }
-      : {
-          backgroundColor: 'transparent',
-        },
+    channelRowFocused: focusChrome.active,
     previewingRow: {
       backgroundColor: 'transparent',
     },
@@ -162,32 +159,16 @@ function createStyles(theme: NovaTheme) {
     },
     selectedRail: {
       backgroundColor: theme.colors.success,
-      shadowColor: theme.colors.success,
-      shadowOpacity: 0.85,
-      shadowRadius: 7,
     },
     focusRail: {
-      backgroundColor: theme.colors.accentHover,
-      shadowColor: theme.colors.accentHover,
-      shadowOpacity: lightFocus ? 0 : 0.9,
-      shadowRadius: lightFocus ? 0 : 9,
+      // Glass box carries focus; keep rail slot for layout only.
+      backgroundColor: 'transparent',
     },
     selectedText: {
       color: theme.colors.textPrimary,
     },
-    focusedText: lightFocus
-      ? {
-          color: theme.colors.accent,
-        }
-      : {
-          color: theme.colors.accentHover,
-          textShadowColor: theme.colors.accentHover,
-          textShadowOffset: { width: 0, height: 0 },
-          textShadowRadius: 9,
-        },
-    focusedSecondaryText: {
-      color: theme.colors.textPrimary,
-    },
+    focusedText: focusText.title,
+    focusedSecondaryText: focusText.secondary,
     channelCopy: {
       flex: 1,
       minWidth: 0,
@@ -217,7 +198,7 @@ function createStyles(theme: NovaTheme) {
       opacity: 0.72,
     },
     resolution: {
-      color: theme.colors.accentHover,
+      color: theme.colors.textSecondary,
       fontSize: 9,
       fontWeight: '900',
     },

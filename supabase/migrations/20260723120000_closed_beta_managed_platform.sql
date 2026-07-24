@@ -86,6 +86,10 @@ create policy device_commands_no_client_access on public.device_commands for all
 
 revoke all on public.managed_providers, public.device_provider_assignments, public.device_commands from anon, authenticated;
 
+-- PostgreSQL cannot change a function's return type via CREATE OR REPLACE.
+-- Drop the original (device_id, activation_status, expires_at) signature first.
+drop function if exists public.activate_device_with_invite(text, text, text);
+
 -- Activation uses server time for expiry. Prefer invite duration hours, then invite expires_at.
 create or replace function public.activate_device_with_invite(
   p_public_device_code text,

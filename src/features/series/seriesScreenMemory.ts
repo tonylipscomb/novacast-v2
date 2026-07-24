@@ -1,4 +1,4 @@
-import { DEFAULT_BROWSE_CATEGORY_ID } from '../media-browser/mediaCategoryUtils';
+import { DEFAULT_BROWSE_CATEGORY_ID } from '../media-browser/mediaCategoryUtils.ts';
 
 type SeriesScreenMemory = {
   selectedCategoryId: string;

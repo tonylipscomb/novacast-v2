@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useState } from 'react';
 
+import { novaTvFocus } from '@/components/nova/novaTvFocus';
 import { novaTheme } from '@/theme';
 
 type NovaFocusCardProps = {
@@ -27,7 +28,7 @@ export function NovaFocusCard({
       onFocus={() => setIsFocused(true)}
       onBlur={() => setIsFocused(false)}
       onPress={onPress}
-      style={[styles.card, isFocused && styles.focused]}>
+      style={[styles.card, novaTvFocus.base, isFocused && novaTvFocus.active]}>
       <View style={styles.iconWrap}>
         <Text style={styles.iconText}>{icon}</Text>
       </View>
@@ -41,19 +42,10 @@ const styles = StyleSheet.create({
   card: {
     width: 176,
     height: 220,
-    borderRadius: novaTheme.radius.md,
-    borderWidth: novaTheme.glow.borderWidth,
-    borderColor: 'transparent',
+    borderRadius: 0,
     backgroundColor: novaTheme.colors.surface,
     padding: novaTheme.spacing.md,
     justifyContent: 'space-between',
-  },
-  focused: {
-    borderColor: novaTheme.colors.focusRing,
-    backgroundColor: novaTheme.colors.surfaceFocused,
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOpacity: novaTheme.glow.focusShadowOpacity,
-    shadowRadius: novaTheme.glow.focusShadowRadius,
   },
   iconWrap: {
     width: 66,

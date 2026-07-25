@@ -34,6 +34,8 @@ import { isStartupReady, markStartupReady, subscribeStartupReadiness } from '@/f
 import { beforeSendNovaEvent, initializeNovaSentryContext, setNovaLifecycleContext, setNovaPlaybackContext, setNovaProviderContext, setNovaRouteContext, setNovaStartupContext } from '@/features/diagnostics/sentryDiagnostics';
 import { getOfflineSnapshot, subscribeOfflineStatus } from '@/features/resilience/offlineStatus';
 import { getUnifiedPlayerState, subscribeUnifiedPlayer } from '@/features/playback/unified/unifiedPlayerStore';
+import { initializeNovaAnalytics, setAnalyticsRoute, setAnalyticsState } from '@/features/analytics';
+import { sendNovaAnalyticsHeartbeat } from '@/features/analytics/analyticsHeartbeat';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
   // Fast refresh can call this more than once.
@@ -113,9 +115,14 @@ export default function RootLayout() {
   }, [providerStoreReady]);
 
   useEffect(() => {
-    void initializeDevice().then(() => sendDeviceHeartbeat()).catch(() => undefined);
+    void initializeNovaAnalytics();
+    void initializeDevice().then(() => sendDeviceHeartbeat()).finally(() => {
+      void sendNovaAnalyticsHeartbeat();
+    }).catch(() => undefined);
     const heartbeat = setInterval(() => {
-      void sendDeviceHeartbeat();
+      void sendDeviceHeartbeat().finally(() => {
+        void sendNovaAnalyticsHeartbeat();
+      });
     }, 20 * 60 * 1000);
     return () => clearInterval(heartbeat);
   }, []);
@@ -217,6 +224,7 @@ function ThemedAppRoot({
 
   useEffect(() => {
     setNovaRouteContext({ route: pathname || '/', area: pathname?.split('/')[1] || 'startup' });
+    setAnalyticsRoute(pathname || '/');
   }, [pathname]);
 
   useEffect(() => {
@@ -226,6 +234,9 @@ function ThemedAppRoot({
       type: selectedProvider.connection?.type,
       state: selectedProvider.connection ? 'connected' : 'disconnected',
     } : null);
+    setAnalyticsState({
+      providerState: selectedProvider?.connection ? 'connected' : 'disconnected',
+    });
   }, [selectedProvider]);
 
   useEffect(() => {
@@ -238,6 +249,10 @@ function ThemedAppRoot({
         providerId: snapshot.item.providerId,
         errorCode: snapshot.errorMessage,
       } : null);
+      setAnalyticsState({
+        currentActivity: snapshot.item ? 'playback' : 'browse',
+        playbackState: snapshot.machineState,
+      });
     };
     update();
     const unsubscribe = subscribeUnifiedPlayer(update);

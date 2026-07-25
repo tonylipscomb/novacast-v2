@@ -1,4 +1,4 @@
-import { Stack } from 'expo-router';
+import { Stack, usePathname } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -9,7 +9,7 @@ import { AppNotificationProvider } from '@/features/notifications/AppNotificatio
 import { TvPerfHud } from '@/features/perf/TvPerfHud';
 import { NovaErrorBoundary } from '@/features/resilience/NovaErrorBoundary';
 import { OfflineStatusBanner } from '@/features/resilience/OfflineStatusBanner';
-import { ensureAppLifecycleMonitor, subscribeAppLifecycle } from '@/features/resilience/appLifecycle';
+import { ensureAppLifecycleMonitor, getAppLifecycleState, subscribeAppLifecycle } from '@/features/resilience/appLifecycle';
 import { cancelAllPendingTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { AppThemeProvider, useAppTheme } from '@/theme/AppThemeProvider';
 import { UnifiedPlayerHost } from '@/features/playback/unified';
@@ -31,6 +31,9 @@ import { STARTUP_READY_TIMEOUT_MS } from '@/features/startup/startupLogic';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { initializeDevice, sendDeviceHeartbeat } from '@/features/device';
 import { isStartupReady, markStartupReady, subscribeStartupReadiness } from '@/features/startup/startupReadiness';
+import { beforeSendNovaEvent, initializeNovaSentryContext, setNovaLifecycleContext, setNovaPlaybackContext, setNovaProviderContext, setNovaRouteContext, setNovaStartupContext } from '@/features/diagnostics/sentryDiagnostics';
+import { getOfflineSnapshot, subscribeOfflineStatus } from '@/features/resilience/offlineStatus';
+import { getUnifiedPlayerState, subscribeUnifiedPlayer } from '@/features/playback/unified/unifiedPlayerStore';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
   // Fast refresh can call this more than once.
@@ -41,6 +44,7 @@ Sentry.init({
   enabled: !__DEV__,
   sendDefaultPii: false,
   tracesSampleRate: 0.1,
+  beforeSend: (event) => beforeSendNovaEvent(event),
 });
 
 export default function RootLayout() {
@@ -204,6 +208,55 @@ function ThemedAppRoot({
   onOverlayExitComplete: () => void;
 }) {
   const { theme } = useAppTheme();
+  const pathname = usePathname();
+  const { selectedProvider } = useProviderStore();
+
+  useEffect(() => {
+    void initializeNovaSentryContext();
+  }, []);
+
+  useEffect(() => {
+    setNovaRouteContext({ route: pathname || '/', area: pathname?.split('/')[1] || 'startup' });
+  }, [pathname]);
+
+  useEffect(() => {
+    setNovaProviderContext(selectedProvider ? {
+      id: selectedProvider.id,
+      displayName: selectedProvider.name,
+      type: selectedProvider.connection?.type,
+      state: selectedProvider.connection ? 'connected' : 'disconnected',
+    } : null);
+  }, [selectedProvider]);
+
+  useEffect(() => {
+    const update = () => {
+      const snapshot = getUnifiedPlayerState();
+      setNovaPlaybackContext(snapshot.item ? {
+        type: snapshot.item.mediaType,
+        state: snapshot.machineState,
+        contentId: snapshot.item.id,
+        providerId: snapshot.item.providerId,
+        errorCode: snapshot.errorMessage,
+      } : null);
+    };
+    update();
+    const unsubscribe = subscribeUnifiedPlayer(update);
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const update = () => {
+      setNovaLifecycleContext({ state: getAppLifecycleState() });
+      setNovaStartupContext({ ready: isStartupReady() });
+      const network = getOfflineSnapshot();
+      setNovaLifecycleContext({ network: network.status });
+    };
+    update();
+    const unsubscribeNetwork = subscribeOfflineStatus(update);
+    return () => unsubscribeNetwork();
+  }, []);
 
   return (
     <View style={[styles.root, { backgroundColor: theme.colors.background }]}>

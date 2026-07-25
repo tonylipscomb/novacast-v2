@@ -4,6 +4,7 @@ import { useRouter } from 'expo-router';
 
 import { novaTheme } from '@/theme';
 import { recordSanitizedDiagnostic } from './sanitizedDiagnostics';
+import { captureNovaError, getNovaRecentBreadcrumbs } from '@/features/diagnostics/sentryDiagnostics';
 
 type RecoveryAction = {
   id: string;
@@ -50,6 +51,22 @@ export class NovaErrorBoundary extends Component<NovaErrorBoundaryProps, NovaErr
       detail: typeof info.componentStack === 'string' ? info.componentStack.slice(0, 240) : undefined,
       outcome: 'boundary_caught',
     });
+    // Sentry's native/JS integrations may already have captured this exception.
+    // Keep the boundary report distinct and bounded, while preventing repeated
+    // renders of the same failure from creating a stream of duplicate issues.
+    const fingerprint = `${this.props.region}:${error?.name ?? 'Error'}:${error?.message ?? ''}`.slice(0, 240);
+    if (fingerprint !== lastBoundaryFingerprint) {
+      lastBoundaryFingerprint = fingerprint;
+      captureNovaError(error, {
+        severity: 'error',
+        fingerprint: ['nova-error-boundary', this.props.region, error?.name ?? 'Error'],
+        context: {
+          region: this.props.region,
+          componentStack: typeof info.componentStack === 'string' ? info.componentStack.slice(0, 240) : null,
+          recentBreadcrumbCount: getNovaRecentBreadcrumbs().length,
+        },
+      });
+    }
   }
 
   private handleRetry = () => {
@@ -77,6 +94,8 @@ export class NovaErrorBoundary extends Component<NovaErrorBoundaryProps, NovaErr
     );
   }
 }
+
+let lastBoundaryFingerprint: string | null = null;
 
 function NovaErrorRecoveryView({
   region,

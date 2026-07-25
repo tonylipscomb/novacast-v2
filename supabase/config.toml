@@ -28,6 +28,9 @@ verify_jwt = false
 [functions.device-heartbeat]
 verify_jwt = false
 
+[functions.analytics-ingest]
+verify_jwt = false
+
 [functions.device-provider-assignment]
 verify_jwt = false
 

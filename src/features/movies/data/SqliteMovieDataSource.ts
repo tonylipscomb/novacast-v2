@@ -58,6 +58,8 @@ export async function isSqliteMovieCatalogReady(providerId: string): Promise<boo
 
 export function createSqliteMovieDataSource(providerId: string): MovieDataSource {
   return {
+    sourceKind: 'sqlite',
+
     async getCategories(): Promise<MovieCategory[]> {
       const [categories, totalCount] = await Promise.all([
         getCatalogCategoryCounts(providerId, 'movie'),

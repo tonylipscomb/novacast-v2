@@ -3,6 +3,9 @@ import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 import type { MediaDetail } from '../../media-browser/mediaTypes.ts';
 
 export interface MovieDataSource {
+  /** Identifies the active read backend without changing the public data contract. */
+  sourceKind?: 'legacy' | 'sqlite';
+
   getCategories(): Promise<MovieCategory[]>;
 
   getMoviesPage(input: {

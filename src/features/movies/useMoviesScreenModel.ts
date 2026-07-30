@@ -4,11 +4,13 @@ import { useProviderStore } from '@/features/providers/providerStore';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 
 import type { MovieDataSource } from './data/MovieDataSource';
+import { createSqliteMovieDataSource } from './data/SqliteMovieDataSource';
 import { MOVIE_PAGE_SIZE } from './movieMockData';
 import type { MovieCategory, MovieSummary } from './movieTypes';
 import { resolvePlaybackMovieId, resolveSelectedMovie, type MoviesLoadStatus } from './moviesScreenLogic';
 import { getMoviesScreenMemory, rememberMoviesScreenMemory } from './moviesScreenMemory';
 import {
+  createSmartMovieDataSource,
   findDefaultCategoryId,
   refreshSmartCategoryCounts,
 } from './smart/SmartMovieDataSource';
@@ -33,6 +35,9 @@ import {
   shouldNetworkFetchCategoryCountOnWarm,
   shouldPrefetchMovieCategoryCount,
 } from './movieCategoryCountPolicy';
+
+const MOVIES_SQLITE_READS_ENABLED =
+  process.env.EXPO_PUBLIC_MOVIES_SQLITE_READS === 'true';
 
 export type MoviesScreenModelOptions = {
   initialSelectedCategoryId?: string;
@@ -118,12 +123,22 @@ export function useMoviesScreenModel(
       return dataSource;
     }
 
+    if (MOVIES_SQLITE_READS_ENABLED && selectedProvider?.id) {
+      console.info('[Movies SQLite] selected', {
+        providerId: selectedProvider.id,
+      });
+      return createSmartMovieDataSource(
+        createSqliteMovieDataSource(selectedProvider.id),
+        selectedProvider.id,
+      );
+    }
+
     if (activeBundle?.movies) {
       return activeBundle.movies;
     }
 
     return null;
-  }, [activeBundle?.movies, dataSource]);
+  }, [activeBundle?.movies, dataSource, selectedProvider?.id]);
   const providerMemory = getMoviesScreenMemory(activeProviderId);
   const [categories, setCategories] = useState<MovieCategory[]>([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState(
@@ -654,7 +669,7 @@ export function useMoviesScreenModel(
 
   const focusMovie = useCallback(
     (movie: MovieSummary) => {
-      // Keep D-pad focus out of React state — matching Series. Local poster chrome
+      // Keep D-pad focus out of React state â€” matching Series. Local poster chrome
       // handles highlight; writing focusedMovieId here re-renders the whole grid.
       focusedMovieIdRef.current = movie.id;
       rememberMoviesScreenMemory(activeProviderId, {

@@ -161,6 +161,7 @@ async function resolveSummariesFromCachedIds(
 }
 
 export function createSmartMovieDataSource(base: MovieDataSource, providerId: string): MovieDataSource {
+  const usesSqliteReads = base.sourceKind === 'sqlite';
   async function buildSmartCategories(providerCategories: MovieCategory[]) {
     const sortedProviderCategories = sortProviderCategoriesUsFirst(providerCategories, 'movie');
     const settings = await getMoviesSettings();
@@ -286,6 +287,8 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
   }
 
   return {
+    sourceKind: base.sourceKind,
+
     async getCategories() {
       const providerCategories = await base.getCategories();
       return buildSmartCategories(providerCategories);
@@ -304,6 +307,10 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
     },
 
     async searchMovies(input) {
+      if (usesSqliteReads) {
+        return base.searchMovies(input);
+      }
+
       const indexed = getMovieCatalogIndex(providerId);
       if (indexed.size > 0) {
         const page = await searchMoviesRepository(providerId, null, {

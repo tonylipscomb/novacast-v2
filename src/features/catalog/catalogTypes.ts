@@ -11,7 +11,7 @@ export type CatalogSyncStatus =
   | 'ready'
   | 'error';
 
-export type CatalogItemSort = 'title' | 'newest' | 'rating' | 'provider';
+export type CatalogItemSort = 'title' | 'title-desc' | 'newest' | 'oldest' | 'rating' | 'provider';
 
 export type CatalogProviderRecord = {
   providerId: string;
@@ -101,7 +101,7 @@ export type CatalogItemsPage = {
   hasMore: boolean;
 };
 
-/** Default UI page size band is 36–50; Stage 1 uses 48. */
+/** Default UI page size band is 36â€“50; Stage 1 uses 48. */
 export const CATALOG_DEFAULT_PAGE_SIZE = 48;
 
 export const CATALOG_SCHEMA_VERSION = 1;

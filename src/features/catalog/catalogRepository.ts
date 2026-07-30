@@ -136,6 +136,10 @@ function orderByClause(sort: CatalogItemSort | undefined) {
   switch (sort) {
     case 'newest':
       return 'release_year DESC NULLS LAST, normalized_title ASC, content_id ASC';
+    case 'oldest':
+      return 'release_year ASC NULLS LAST, normalized_title ASC, content_id ASC';
+    case 'title-desc':
+      return 'normalized_title DESC, content_id ASC';
     case 'rating':
       return 'rating DESC NULLS LAST, normalized_title ASC, content_id ASC';
     case 'provider':
@@ -151,6 +155,10 @@ function orderByClauseCompatible(sort: CatalogItemSort | undefined) {
   switch (sort) {
     case 'newest':
       return '(release_year IS NULL) ASC, release_year DESC, normalized_title ASC, content_id ASC';
+    case 'oldest':
+      return '(release_year IS NULL) ASC, release_year ASC, normalized_title ASC, content_id ASC';
+    case 'title-desc':
+      return 'normalized_title DESC, content_id ASC';
     case 'rating':
       return '(rating IS NULL) ASC, rating DESC, normalized_title ASC, content_id ASC';
     case 'provider':
@@ -201,7 +209,7 @@ async function resolveNextSyncGeneration(providerId: string, mediaType: CatalogM
 
 /**
  * Starts a sync generation for provider+mediaType.
- * Does not delete prior successful data — that happens on completeCatalogSync.
+ * Does not delete prior successful data â€” that happens on completeCatalogSync.
  */
 export async function beginCatalogSync(
   providerId: string,

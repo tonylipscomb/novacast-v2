@@ -1,0 +1,13 @@
+# Temporary APK inspection folders
+.apk-inspect-tmp/
+.apk-inspect-tmp2/
+.audit-tmp*/
+
+# Ignore generated build folders
+**/build/
+.gradle/
+
+# Android build outputs
+android/build/
+android/.gradle/android/build/
+android/.gradle/

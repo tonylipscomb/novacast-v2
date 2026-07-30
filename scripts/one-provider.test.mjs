@@ -12,6 +12,7 @@ import {
 import { formatProviderExpirationLabel } from '../src/features/providers/providerExpiration.ts';
 import { buildLiveChannelPlaybackUrl, buildMoviePlaybackUrl, buildEpisodePlaybackUrl } from '../src/features/providers/providerPlayback.ts';
 import { createXtreamProviderRepositories } from '../src/features/providers/providerRepositories.ts';
+import { XtreamClient } from '../src/features/providers/xtreamClient.ts';
 
 function makeFakeClient() {
   return {
@@ -109,6 +110,25 @@ test('Movies and episodes use the active bundle stream URL builder', async () =>
   assert.equal(movies.items[0]?.title, 'Action Movie');
   assert.match(buildMoviePlaybackUrl(bundle, movies.items[0].id), /\/movie\/101\.mp4$/);
   assert.match(buildEpisodePlaybackUrl(bundle, '901'), /\/series\/901\.ts$/);
+});
+
+test('Xtream movie and episode sources normalize API suffixes, extensions, and stream IDs', () => {
+  const client = new XtreamClient({
+    type: 'xtream',
+    baseUrl: 'http://provider.example:8080/player_api.php/',
+    username: 'user',
+    password: 'secret',
+  });
+
+  assert.equal(
+    client.buildVodStreamUrl('101', '.mp4?stale=1'),
+    'http://provider.example:8080/movie/user/secret/101.mp4',
+  );
+  assert.equal(
+    client.buildSeriesStreamUrl('901', 'episode.mkv'),
+    'http://provider.example:8080/series/user/secret/901.mkv',
+  );
+  assert.equal(client.buildLiveStreamUrl('201', 'ts.ts'), 'http://provider.example:8080/live/user/secret/201.ts');
 });
 
 test('Guide rows stay available without inventing EPG when listings are missing', async () => {

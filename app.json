@@ -44,7 +44,8 @@
           "project": "novacast-tv",
           "organization": "launchpoint-digital"
         }
-      ]
+      ],
+      "expo-sqlite"
     ],
     "experiments": {
       "typedRoutes": true,

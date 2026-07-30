@@ -1,8 +1,35 @@
-import type { VideoPlayer } from 'expo-video';
-import { useCallback, useEffect, useRef } from 'react';
+import {
+  type PlayingChangeEventPayload,
+  type StatusChangeEventPayload,
+  type TimeUpdateEventPayload,
+  type VideoPlayer,
+  type VideoSource,
+  useVideoPlayer,
+  VideoView,
+} from 'expo-video';
+import { type ComponentProps, useCallback, useEffect, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useEventListener } from 'expo';
-import { type VideoSource, useVideoPlayer, VideoView } from 'expo-video';
+
+let nextPlayerGenerationId = 1;
+const playerGenerationIds = new WeakMap<object, number>();
+
+function getPlayerGenerationId(player: VideoPlayer) {
+  const existing = playerGenerationIds.get(player);
+  if (existing) return existing;
+  const next = nextPlayerGenerationId++;
+  playerGenerationIds.set(player, next);
+  return next;
+}
+
+function normalizedNativeErrorCategory(message: unknown) {
+  const value = typeof message === 'string' ? message.toLowerCase() : '';
+  if (/decoder|decode|codec|format/.test(value)) return 'decoder';
+  if (/unsupported|not supported/.test(value)) return 'unsupported';
+  if (/timeout|timed out|stall/.test(value)) return 'timeout';
+  if (/network|connection|offline|unreachable|dns/.test(value)) return 'network';
+  return 'unknown';
+}
 
 type NovaStreamPlayerOptions = {
   autoPlay?: boolean;
@@ -21,7 +48,14 @@ type NovaStreamSurfaceProps = {
    */
   onFirstFrameRender?: () => void;
   contentFit?: 'contain' | 'cover' | 'fill';
+  surfaceType?: ComponentProps<typeof VideoView>['surfaceType'];
   style?: object;
+};
+
+type NovaStreamSurfaceEvents = {
+  onStatusChange?: (payload: StatusChangeEventPayload) => void;
+  onPlayingChange?: (payload: PlayingChangeEventPayload) => void;
+  onTimeUpdate?: (payload: TimeUpdateEventPayload) => void;
 };
 
 type NovaStreamPlayerProps = NovaStreamPlayerOptions & {
@@ -62,7 +96,23 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
     }
   });
 
+  const playerGenerationId = getPlayerGenerationId(player);
+
+  useEffect(() => {
+    console.info('[NovaCast Playback Player]', {
+      event: 'player instance',
+      playerGenerationId,
+      sourceObjectShape: streamUrl ? 'string' : 'null',
+    });
+  }, [player, playerGenerationId, streamUrl]);
+
   useEventListener(player, 'statusChange', ({ status, error }) => {
+    console.info('[NovaCast Playback Player]', {
+      event: 'player status',
+      status,
+      playerGenerationId,
+      errorCategory: status === 'error' ? normalizedNativeErrorCategory(error?.message) : undefined,
+    });
     if (status === 'error' && lastUrlRef.current) {
       onErrorRef.current?.(error?.message ?? 'Unable to play this stream right now.');
     }
@@ -112,7 +162,7 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
           onErrorRef.current?.('Unable to start playback for this stream.');
         }
       });
-  }, [autoPlay, muted, player, streamUrl]);
+  }, [autoPlay, muted, player, playerGenerationId, streamUrl]);
 
   useEffect(() => {
     return () => {
@@ -132,6 +182,11 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
     }
 
     const requestId = ++replaceRequestRef.current;
+    console.info('[NovaCast Playback Player]', {
+      event: 'player retry',
+      playerGenerationId,
+      retryCount: requestId,
+    });
     void replacePlayerSource(player, streamUrl)
       .then(() => {
         if (requestId !== replaceRequestRef.current) {
@@ -148,7 +203,7 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
           onErrorRef.current?.('Unable to restart playback for this stream.');
         }
       });
-  }, [autoPlay, muted, player, streamUrl]);
+  }, [autoPlay, muted, player, playerGenerationId, streamUrl]);
 
   return { player, retry, hasStream: Boolean(streamUrl) };
 }
@@ -156,9 +211,42 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
 export function NovaStreamSurface({
   player,
   onFirstFrameRender,
+  onStatusChange,
+  onPlayingChange,
+  onTimeUpdate,
   contentFit = 'contain',
+  surfaceType = 'surfaceView',
   style,
-}: NovaStreamSurfaceProps) {
+}: NovaStreamSurfaceProps & NovaStreamSurfaceEvents) {
+  const onFirstFrameRenderRef = useRef(onFirstFrameRender);
+  const onStatusChangeRef = useRef(onStatusChange);
+  const onPlayingChangeRef = useRef(onPlayingChange);
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  useEffect(() => {
+    onFirstFrameRenderRef.current = onFirstFrameRender;
+    onStatusChangeRef.current = onStatusChange;
+    onPlayingChangeRef.current = onPlayingChange;
+    onTimeUpdateRef.current = onTimeUpdate;
+  }, [onFirstFrameRender, onPlayingChange, onStatusChange, onTimeUpdate]);
+
+  useEffect(() => {
+    const statusSubscription = player.addListener('statusChange', (payload) => {
+      onStatusChangeRef.current?.(payload);
+    });
+    const playingSubscription = player.addListener('playingChange', (payload) => {
+      onPlayingChangeRef.current?.(payload);
+    });
+    const timeSubscription = player.addListener('timeUpdate', (payload) => {
+      onTimeUpdateRef.current?.(payload);
+    });
+
+    return () => {
+      statusSubscription.remove();
+      playingSubscription.remove();
+      timeSubscription.remove();
+    };
+  }, [player]);
+
   return (
     <View
       style={[styles.container, style]}
@@ -169,8 +257,10 @@ export function NovaStreamSurface({
         player={player}
         style={styles.video}
         contentFit={contentFit}
+        surfaceType={surfaceType}
+        useExoShutter={false}
         nativeControls={false}
-        onFirstFrameRender={onFirstFrameRender}
+        onFirstFrameRender={() => onFirstFrameRenderRef.current?.()}
       />
     </View>
   );

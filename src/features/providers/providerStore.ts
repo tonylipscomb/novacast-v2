@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { earlyBootMark, earlyBootTimed, earlyBootTimedSync } from '../diagnostics/earlyBootAudit.ts';
 
 import { classifyProviderFailure } from '../resilience/providerFailureClassifier.ts';
 import { getDevPairingPayload, type PairingConnectionPayload } from '../pairing/pairingBridge.ts';
@@ -293,9 +294,12 @@ async function ensureSavedProviderInitialized(state: ProviderState) {
 
   startupInitPromise = (async () => {
     try {
+      earlyBootMark('provider.ensureSaved_begin', { providerId: selected.id });
       // Cold launch can beat emulator DNS/network readiness by several seconds.
       await new Promise((resolve) => setTimeout(resolve, 2000));
+      earlyBootMark('provider.ensureSaved_after_delay');
       await initializeSavedProviderOnStartup(selected);
+      earlyBootMark('provider.ensureSaved_end');
       clearProviderSwitchError();
     } catch (error) {
       setRuntime({
@@ -357,12 +361,19 @@ async function loadStorageState() {
     return loadPromise;
   }
 
-  loadPromise = getProviderStateStorage().getItem(STORAGE_KEY).then(async (value) => {
+  loadPromise = earlyBootTimed('provider.loadStorageState', async () => {
+    earlyBootMark('provider.loadStorageState_begin');
+    const value = await getProviderStateStorage().getItem(STORAGE_KEY);
+    earlyBootMark('provider.storage_read_done', { payloadChars: value?.length ?? 0 });
     let parsed: Partial<ProviderState> | null = null;
 
     if (value) {
       try {
-        parsed = JSON.parse(value) as Partial<ProviderState>;
+        parsed = earlyBootTimedSync(
+          'provider.jsonParse',
+          () => JSON.parse(value) as Partial<ProviderState>,
+          { payloadChars: value.length },
+        );
       } catch {
         parsed = null;
       }
@@ -370,13 +381,16 @@ async function loadStorageState() {
 
     try {
       persistenceError = null;
-      cache = await migrateStoredProviderState(parsed);
+      cache = await earlyBootTimed('provider.migrateStoredProviderState', () => migrateStoredProviderState(parsed), {
+        hadStoredValue: Boolean(value),
+      });
     } catch {
       persistenceError = 'Unable to migrate saved provider credentials securely.';
       cache = normalizeProviderState(parsed);
       setRuntime({ ...runtime, lastError: persistenceError });
     }
-    return cache;
+    earlyBootMark('provider.loadStorageState_end', { providerCount: cache?.providers.length ?? 0 });
+    return cache!;
   });
 
   return loadPromise;

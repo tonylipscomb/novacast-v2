@@ -1,8 +1,8 @@
 import { deviceAuthHeaders, deviceMetadata, registerDevice } from './deviceRegistration.ts';
-import { clearCachedDeviceStatus, readCachedDeviceStatus, writeCachedDeviceStatus } from './deviceStorage';
-import type { ActivationStatus, DeviceHeartbeatResponse, DeviceState, DeviceStatusResponse } from './deviceTypes';
+import { clearCachedDeviceStatus, readCachedDeviceStatus, writeCachedDeviceStatus } from './deviceStorage.ts';
+import type { ActivationStatus, DeviceHeartbeatResponse, DeviceState, DeviceStatusResponse } from './deviceTypes.ts';
 import { useEffect, useState } from 'react';
-import { deviceFeatureFlags } from './deviceFeatureFlags';
+import { deviceFeatureFlags } from './deviceFeatureFlags.ts';
 import { reportNetworkOutcome } from '../resilience/offlineStatus.ts';
 import { recordSanitizedDiagnostic } from '../resilience/sanitizedDiagnostics.ts';
 import { withTimeout, STARTUP_NETWORK_TIMEOUT_MS } from '../startup/startupTimeouts.ts';

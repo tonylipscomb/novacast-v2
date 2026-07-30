@@ -166,3 +166,75 @@ test('Series navigation cannot auto-wire Search preferred focus from poster grid
   assert.doesNotMatch(seriesGrid, /Search/);
   assert.doesNotMatch(toolbar, /hasTVPreferredFocus/);
 });
+
+test('Discover category counts apply cache/index on open and load progressively on focus', async () => {
+  const {
+    formatMovieCategoryCount,
+    resolveSmartCategoryCountKnown,
+    shouldPrefetchMovieCategoryCount,
+    shouldNetworkFetchCategoryCountOnWarm,
+    categoriesNeedingCountWarm,
+    createSerialCategoryCountQueue,
+  } = await import('../src/features/movies/movieCategoryCountPolicy.ts');
+
+  assert.equal(formatMovieCategoryCount(12, false), '...');
+  assert.equal(formatMovieCategoryCount(12, true), '12');
+  assert.equal(formatMovieCategoryCount(0, true), '0');
+  assert.equal(resolveSmartCategoryCountKnown({ cacheEntryExists: true, syncCount: 0 }), true);
+  assert.equal(resolveSmartCategoryCountKnown({ cacheEntryExists: false, syncCount: 0 }), false);
+  assert.equal(resolveSmartCategoryCountKnown({ cacheEntryExists: false, syncCount: 4 }), true);
+  assert.equal(shouldPrefetchMovieCategoryCount({ categoryId: 'smart:features', kind: 'smart' }), true);
+  assert.equal(shouldPrefetchMovieCategoryCount({ categoryId: 'section:discover', kind: 'section' }), false);
+  assert.equal(shouldNetworkFetchCategoryCountOnWarm(), false);
+  assert.equal(
+    categoriesNeedingCountWarm([
+      { id: 'smart:features', renderKey: 'smart:features', name: 'Discover', count: 0, countKnown: false, kind: 'smart' },
+      { id: 'action', renderKey: 'action', name: 'Action', count: 9, countKnown: true, kind: 'provider' },
+    ]).map((category) => category.id).join(','),
+    'smart:features',
+  );
+
+  let generation = 1;
+  const fetches = [];
+  const resolved = [];
+  const queue = createSerialCategoryCountQueue({
+    concurrency: 1,
+    getGeneration: () => generation,
+    isAccepted: () => true,
+    fetchCount: async (categoryId) => {
+      fetches.push(categoryId);
+      await Promise.resolve();
+      return categoryId.length;
+    },
+    onCount: (categoryId, count) => {
+      resolved.push(`${categoryId}:${count}`);
+    },
+  });
+  assert.equal(queue.enqueue('a'), true);
+  assert.equal(queue.enqueue('a'), false);
+  assert.equal(queue.enqueue('b'), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(fetches, ['a', 'b']);
+  assert.deepEqual(resolved, ['a:1', 'b:1']);
+  generation += 1;
+  queue.reset();
+  assert.equal(queue.enqueue('c'), true);
+
+  const model = await fs.readFile(new URL('../src/features/movies/useMoviesScreenModel.ts', import.meta.url), 'utf8');
+  const smartSource = await fs.readFile(
+    new URL('../src/features/movies/smart/SmartMovieDataSource.ts', import.meta.url),
+    'utf8',
+  );
+  const rail = await fs.readFile(
+    new URL('../src/features/movies/components/MovieCategoryRail.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(model, /warmUnresolvedCategoryCounts/);
+  assert.match(model, /category_counts_warm_index_only/);
+  assert.match(model, /movies_page_gated_waiting_categories/);
+  assert.match(model, /applyIndexedProviderCounts/);
+  assert.doesNotMatch(model, /prefetchAllCategoryCounts\(smartIds/);
+  assert.match(smartSource, /querySmartCategoryOnIndex\(index, definition, ctx, 0, 1\)/);
+  assert.match(rail, /formatMovieCategoryCount/);
+  assert.doesNotMatch(rail, /item\.kind !== 'smart'/);
+});

@@ -5,12 +5,14 @@ import {
   AccessibilityInfo,
   Animated,
   Easing,
+  Platform,
   StyleSheet,
   Text,
   View,
   type LayoutChangeEvent,
 } from 'react-native';
 
+import { earlyBootMark } from '@/features/diagnostics/earlyBootAudit';
 import { getAppSettings, getAppSettingsSync } from '@/features/settings/appSettingsStore';
 import { logStartupPhase } from '@/features/startup/startupDiagnostics.ts';
 import {
@@ -25,6 +27,12 @@ import type { AppearanceThemeId } from '@/theme/variants';
 const STARTUP_VIDEO = require('@/assets/videos/novacast-startup.mp4');
 /** Android TV cold starts can take several seconds to decode the intro asset. */
 const VIDEO_FIRST_FRAME_TIMEOUT_MS = 5_000;
+/**
+ * Stage 2.95: expo-video player construction stalls the JS thread ~600ms on ONN.
+ * Prefer the existing logo intro on Android TV so first usable focus is not gated
+ * by splash media decode. Non-TV keeps the video path.
+ */
+const PREFER_STATIC_TV_INTRO = Platform.OS === 'android' && Platform.isTV === true;
 
 void getAppSettings();
 
@@ -37,6 +45,103 @@ type NovaCastLaunchSequenceProps = {
   onExitComplete: () => void;
   onLayout?: (event: LayoutChangeEvent) => void;
 };
+
+type LaunchIntroVideoProps = {
+  playVideo: boolean;
+  onFirstFrame: () => void;
+  onVideoFailed: () => void;
+  onPlayToEnd: () => void;
+  pauseToken: number;
+};
+
+/**
+ * Isolated so the parent can defer mounting past first paint / first usable shell
+ * without conditionally calling useVideoPlayer (Rules of Hooks).
+ */
+function LaunchIntroVideo({
+  playVideo,
+  onFirstFrame,
+  onVideoFailed,
+  onPlayToEnd,
+  pauseToken,
+}: LaunchIntroVideoProps) {
+  const firstFrameTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const firstFrameReportedRef = useRef(false);
+
+  const player = useVideoPlayer(STARTUP_VIDEO, (nextPlayer) => {
+    nextPlayer.loop = false;
+    nextPlayer.muted = true;
+    if (playVideo) {
+      nextPlayer.play();
+    }
+  });
+
+  useEffect(() => {
+    earlyBootMark('launch_video_player_created');
+    logStartupPhase('startup video play requested');
+    player.play();
+
+    firstFrameTimerRef.current = setTimeout(() => {
+      if (!firstFrameReportedRef.current) {
+        logStartupPhase('startup video first frame timeout');
+        onVideoFailed();
+      }
+    }, VIDEO_FIRST_FRAME_TIMEOUT_MS);
+
+    return () => {
+      if (firstFrameTimerRef.current) {
+        clearTimeout(firstFrameTimerRef.current);
+        firstFrameTimerRef.current = undefined;
+      }
+    };
+  }, [onVideoFailed, player]);
+
+  useEffect(() => {
+    if (pauseToken > 0) {
+      player.pause();
+    }
+  }, [pauseToken, player]);
+
+  useEventListener(player, 'playToEnd', () => {
+    logStartupPhase('startup video playToEnd');
+    onPlayToEnd();
+  });
+
+  useEventListener(player, 'statusChange', ({ status, error }) => {
+    logStartupPhase(`startup video status: ${status}`);
+    if (status === 'error') {
+      logStartupPhase(`startup video error: ${error?.message ?? 'unknown'}`);
+      onVideoFailed();
+    }
+  });
+
+  const handleVideoFirstFrame = useCallback(() => {
+    if (firstFrameReportedRef.current) {
+      return;
+    }
+    firstFrameReportedRef.current = true;
+    if (firstFrameTimerRef.current) {
+      clearTimeout(firstFrameTimerRef.current);
+      firstFrameTimerRef.current = undefined;
+    }
+    earlyBootMark('launch_video_first_frame');
+    logStartupPhase('startup video first frame');
+    onFirstFrame();
+  }, [onFirstFrame]);
+
+  return (
+    <View style={styles.videoStage}>
+      <VideoView
+        player={player}
+        style={styles.video}
+        contentFit="cover"
+        nativeControls={false}
+        allowsPictureInPicture={false}
+        onFirstFrameRender={handleVideoFirstFrame}
+      />
+    </View>
+  );
+}
 
 export function NovaCastLaunchSequence({
   exitRequested,
@@ -52,6 +157,8 @@ export function NovaCastLaunchSequence({
   const [motionChecked, setMotionChecked] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const [videoFailed, setVideoFailed] = useState(false);
+  const [allowVideoMount, setAllowVideoMount] = useState(false);
+  const [pauseToken, setPauseToken] = useState(0);
   const [screenOpacity] = useState(() => new Animated.Value(1));
   const [logoOpacity] = useState(() => new Animated.Value(0));
   const [statusOpacity] = useState(() => new Animated.Value(0));
@@ -59,11 +166,13 @@ export function NovaCastLaunchSequence({
   const introReportedRef = useRef(false);
   const exitStartedRef = useRef(false);
   const introTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const firstFrameTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const firstFrameReportedRef = useRef(false);
-  const shouldUseVideo = playVideo && !reducedMotion && !videoFailed;
+  const shouldUseVideo = playVideo && !reducedMotion && !videoFailed && !PREFER_STATIC_TV_INTRO;
 
   useEffect(() => {
+    earlyBootMark('launch_sequence_mounted', {
+      preferStaticTvIntro: PREFER_STATIC_TV_INTRO,
+      isTV: Platform.isTV === true,
+    });
     let mounted = true;
     void getAppSettings().then((settings) => {
       if (mounted) {
@@ -73,6 +182,21 @@ export function NovaCastLaunchSequence({
     return () => {
       mounted = false;
     };
+  }, []);
+
+  // Defer expo-video native player creation one macrotask past first paint so it
+  // cannot own the residual early-boot JS stall before Home focus wiring starts.
+  useEffect(() => {
+    if (PREFER_STATIC_TV_INTRO) {
+      earlyBootMark('launch_video_skipped_tv_static');
+      return;
+    }
+    earlyBootMark('launch_video_defer_scheduled');
+    const timer = setTimeout(() => {
+      earlyBootMark('launch_video_mount_allowed');
+      setAllowVideoMount(true);
+    }, 0);
+    return () => clearTimeout(timer);
   }, []);
 
   const reportIntroComplete = useCallback(() => {
@@ -88,14 +212,6 @@ export function NovaCastLaunchSequence({
     logStartupPhase('intro complete');
     onIntroComplete?.();
   }, [onIntroComplete]);
-
-  const player = useVideoPlayer(STARTUP_VIDEO, (nextPlayer) => {
-    nextPlayer.loop = false;
-    nextPlayer.muted = true;
-    if (playVideo) {
-      nextPlayer.play();
-    }
-  });
 
   const scheduleIntroCompletion = useCallback(() => {
     if (introTimerRef.current) {
@@ -144,49 +260,6 @@ export function NovaCastLaunchSequence({
   }, [motionChecked, scheduleIntroCompletion]);
 
   useEffect(() => {
-    if (!motionChecked || !shouldUseVideo) {
-      player.pause();
-      return;
-    }
-
-    logStartupPhase('startup video play requested');
-    player.play();
-
-    if (firstFrameTimerRef.current) {
-      clearTimeout(firstFrameTimerRef.current);
-    }
-
-    firstFrameTimerRef.current = setTimeout(() => {
-      if (!firstFrameReportedRef.current) {
-        logStartupPhase('startup video first frame timeout');
-        setVideoFailed(true);
-        onVideoReady?.();
-      }
-    }, VIDEO_FIRST_FRAME_TIMEOUT_MS);
-
-    return () => {
-      if (firstFrameTimerRef.current) {
-        clearTimeout(firstFrameTimerRef.current);
-        firstFrameTimerRef.current = undefined;
-      }
-    };
-  }, [motionChecked, onVideoReady, player, shouldUseVideo]);
-
-  useEventListener(player, 'playToEnd', () => {
-    logStartupPhase('startup video playToEnd');
-    reportIntroComplete();
-  });
-
-  useEventListener(player, 'statusChange', ({ status, error }) => {
-    logStartupPhase(`startup video status: ${status}`);
-    if (status === 'error') {
-      logStartupPhase(`startup video error: ${error?.message ?? 'unknown'}`);
-      setVideoFailed(true);
-      onVideoReady?.();
-    }
-  });
-
-  useEffect(() => {
     if (!motionChecked || shouldUseVideo) {
       return;
     }
@@ -221,7 +294,7 @@ export function NovaCastLaunchSequence({
     }
 
     exitStartedRef.current = true;
-    player.pause();
+    setPauseToken((value) => value + 1);
 
     Animated.timing(screenOpacity, {
       toValue: 0,
@@ -233,21 +306,12 @@ export function NovaCastLaunchSequence({
         onExitComplete();
       }
     });
-  }, [exitRequested, onExitComplete, player, screenOpacity]);
+  }, [exitRequested, onExitComplete, screenOpacity]);
 
   const statusLabel = resolveStartupStatusLabel(startupReady, exitRequested);
 
-  const handleVideoFirstFrame = useCallback(() => {
-    if (firstFrameReportedRef.current) {
-      return;
-    }
-
-    firstFrameReportedRef.current = true;
-    if (firstFrameTimerRef.current) {
-      clearTimeout(firstFrameTimerRef.current);
-      firstFrameTimerRef.current = undefined;
-    }
-    logStartupPhase('startup video first frame');
+  const handleVideoFailed = useCallback(() => {
+    setVideoFailed(true);
     onVideoReady?.();
   }, [onVideoReady]);
 
@@ -258,17 +322,16 @@ export function NovaCastLaunchSequence({
       onLayout={onLayout}
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants">
-      {shouldUseVideo ? (
-        <View style={styles.videoStage}>
-          <VideoView
-            player={player}
-            style={styles.video}
-            contentFit="cover"
-            nativeControls={false}
-            allowsPictureInPicture={false}
-            onFirstFrameRender={handleVideoFirstFrame}
-          />
-        </View>
+      {shouldUseVideo && allowVideoMount ? (
+        <LaunchIntroVideo
+          playVideo={playVideo}
+          onFirstFrame={() => onVideoReady?.()}
+          onVideoFailed={handleVideoFailed}
+          onPlayToEnd={reportIntroComplete}
+          pauseToken={pauseToken}
+        />
+      ) : shouldUseVideo ? (
+        <View style={styles.videoStage} />
       ) : (
         <View style={styles.fallbackStage}>
           <Animated.Image source={logoSource} style={[styles.fallbackLogo, { opacity: logoOpacity }]} resizeMode="contain" />

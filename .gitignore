@@ -92,3 +92,17 @@ artifacts/
 .env.local
 
 .env
+# NovaCast build artifacts
+**/build/
+# NovaCast temporary audit / inspection artifacts
+.apk-inspect-tmp/
+.apk-inspect-tmp2/
+.audit-tmp*/
+.tmp-*
+*.bak
+src.zip
+src (2).zip
+src (3).zip
+# Generated native / Android build output
+**/build/
+**/.gradle/

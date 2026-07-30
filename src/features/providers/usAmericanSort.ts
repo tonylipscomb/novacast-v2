@@ -5,11 +5,43 @@ import {
   sortProviderCategoriesByRegion,
   type CategorySortLabel,
 } from './categoryRegionalPipeline.ts';
-import { filterContentByPolicy } from '../content-policy/ContentPolicyService.ts';
 
 export { isUsAmericanLiveLabel } from './categoryRegionalPipeline.ts';
 
 export type UsAmericanSortLabel = CategorySortLabel;
+
+type ContentPolicyFilter = <T extends UsAmericanSortLabel>(
+  items: T[],
+  contentType?: ProviderCategoryContentType,
+) => T[];
+
+let contentPolicyFilter: ContentPolicyFilter | null | undefined;
+
+function getContentPolicyFilter(): ContentPolicyFilter | null {
+  if (contentPolicyFilter !== undefined) {
+    return contentPolicyFilter;
+  }
+  try {
+    // Lazy load so catalog sync node tests do not pull the device activation graph.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    // Extensionless for Metro; Node catalog tests catch and skip policy.
+    const mod = require('../content-policy/ContentPolicyService') as {
+      filterContentByPolicy: ContentPolicyFilter;
+    };
+    contentPolicyFilter = mod.filterContentByPolicy;
+  } catch {
+    contentPolicyFilter = null;
+  }
+  return contentPolicyFilter;
+}
+
+function withContentPolicy<T extends UsAmericanSortLabel>(
+  items: T[],
+  contentType?: ProviderCategoryContentType,
+): T[] {
+  const filter = getContentPolicyFilter();
+  return filter ? filter(items, contentType) : items;
+}
 
 /** Maps the regional pipeline priority into legacy 0/1/2 tiers for callers that still expect it. */
 export function providerRegionalSortRank(
@@ -35,13 +67,6 @@ export function usAmericanLiveRank(
   return providerRegionalSortRank(item, options) === 0 ? 0 : 1;
 }
 
-function withContentPolicy<T extends UsAmericanSortLabel>(
-  items: T[],
-  contentType?: ProviderCategoryContentType,
-): T[] {
-  return filterContentByPolicy(items, contentType);
-}
-
 /** Stable sort: smart region priority, then alphabetical within each group. */
 export function sortByRegionalPreference<T extends UsAmericanSortLabel>(
   items: T[],
@@ -57,13 +82,19 @@ export function sortByRegionalPreference<T extends UsAmericanSortLabel>(
   });
 }
 
-/** Stable partition: preferred regions first, preserving provider order within ties. */
+/** Stable partition: preferred regions first, preserving provider order within ties.
+ * Live TV only — Movies/Series must use vodRegionRank.ts instead.
+ */
 export function partitionLiveItemsUsFirst<T extends UsAmericanSortLabel>(
   items: T[],
   options?: { allowTitleParse?: boolean; contentType?: ProviderCategoryContentType },
 ): T[] {
-  return sortProviderCategoriesByRegion(withContentPolicy(items, options?.contentType ?? 'live'), {
-    contentType: options?.contentType ?? 'live',
+  const contentType = options?.contentType ?? 'live';
+  if (contentType !== 'live') {
+    throw new Error('partitionLiveItemsUsFirst is Live-TV only. Use computeVodRegionRank for Movies/Series.');
+  }
+  return sortProviderCategoriesByRegion(withContentPolicy(items, 'live'), {
+    contentType: 'live',
     alphabetizeWithinGroup: false,
   });
 }

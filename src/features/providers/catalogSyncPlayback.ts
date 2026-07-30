@@ -5,13 +5,16 @@ export const CATALOG_SYNC_PLAYBACK_POLL_MS = 500;
 export const CATALOG_SYNC_IDLE_TIMEOUT_MS = 250;
 const CATALOG_SYNC_IDLE_FALLBACK_MS = 40;
 
+let catalogSyncIdleTimeoutMs = CATALOG_SYNC_IDLE_TIMEOUT_MS;
+let catalogSyncResumeIdleMs = CATALOG_SYNC_RESUME_IDLE_MS;
+
 type IdleCallback = (callback: () => void, options?: { timeout: number }) => number;
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-export function waitForCatalogSyncIdleSlot(timeoutMs = CATALOG_SYNC_IDLE_TIMEOUT_MS) {
+export function waitForCatalogSyncIdleSlot(timeoutMs = catalogSyncIdleTimeoutMs) {
   const requestIdleCallback = (globalThis as typeof globalThis & { requestIdleCallback?: IdleCallback })
     .requestIdleCallback;
 
@@ -24,7 +27,7 @@ export function waitForCatalogSyncIdleSlot(timeoutMs = CATALOG_SYNC_IDLE_TIMEOUT
   return sleep(Math.min(CATALOG_SYNC_IDLE_FALLBACK_MS, timeoutMs));
 }
 
-export async function waitUntilPlaybackIdleForCatalogSync(idleMs = CATALOG_SYNC_RESUME_IDLE_MS) {
+export async function waitUntilPlaybackIdleForCatalogSync(idleMs = catalogSyncResumeIdleMs) {
   while (true) {
     while (isPlaybackActivityActive()) {
       await sleep(CATALOG_SYNC_PLAYBACK_POLL_MS);
@@ -46,7 +49,7 @@ let resumeTimer: ReturnType<typeof setTimeout> | null = null;
 let resumeCallback: (() => void) | null = null;
 let playbackListenerAttached = false;
 
-export function scheduleCatalogSyncResume(callback: () => void, idleMs = CATALOG_SYNC_RESUME_IDLE_MS) {
+export function scheduleCatalogSyncResume(callback: () => void, idleMs = catalogSyncResumeIdleMs) {
   resumeCallback = callback;
 
   if (!playbackListenerAttached) {
@@ -94,4 +97,11 @@ export function clearCatalogSyncResumeForTests() {
   }
   resumeCallback = null;
   playbackListenerAttached = false;
+  catalogSyncIdleTimeoutMs = 0;
+  catalogSyncResumeIdleMs = 50;
+}
+
+export function restoreCatalogSyncPlaybackDefaultsForTests() {
+  catalogSyncIdleTimeoutMs = CATALOG_SYNC_IDLE_TIMEOUT_MS;
+  catalogSyncResumeIdleMs = CATALOG_SYNC_RESUME_IDLE_MS;
 }

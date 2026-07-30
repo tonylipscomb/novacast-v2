@@ -119,6 +119,7 @@ export function buildMoviePreviewDetail(movie: MovieSummary): MediaDetail {
     subtitles: movie.subtitles,
     rating: toNumber(movie.rating),
     ratingSource: movie.rating ? 'Provider' : undefined,
+    containerExtension: movie.containerExtension,
     seasons: [],
     episodes: [],
   };

@@ -46,6 +46,13 @@ export type MovieSummary = {
   posterStyleKey: string;
   posterUrl?: string;
   containerExtension?: string;
+  /** Provider response order within the category (0-based). */
+  providerSortOrder?: number;
+  /**
+   * Derived US-first / regional rank. Lower is preferred.
+   * Computed once per unique item — not during per-category fetch.
+   */
+  regionRank?: number;
 };
 
 export type MoviePage = {

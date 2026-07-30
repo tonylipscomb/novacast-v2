@@ -53,13 +53,13 @@ test('lifecycle and heartbeat reuse existing sources without a second timer', ()
   assert.match(layout, /sendNovaAnalyticsHeartbeat/);
 });
 
-test('client foundation contains no product event hooks or session heartbeat event', () => {
+test('client foundation contains no non-playback product event hooks or session heartbeat event', () => {
   const source = fs.readdirSync(analyticsDir)
     .filter((name) => name.endsWith('.ts'))
     .map((name) => read(name))
     .join('\n');
   assert.doesNotMatch(source, /session_heartbeat/);
-  assert.doesNotMatch(source, /playback_requested|playback_started|search_results|catalog_sync_started|guide_load_started/);
+  assert.doesNotMatch(source, /search_results|catalog_sync_started|guide_load_started/);
 });
 
 test('route transitions enqueue sanitized, deduplicated screen views', () => {

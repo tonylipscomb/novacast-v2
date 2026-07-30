@@ -83,11 +83,13 @@ function noopUseTVEventHandler(_handler: (event: TvEventPayload) => void) {
 function UnifiedPlayerSeekRemoteListener({
   enabled,
   durationMs,
+  isSeekFocused,
   onSeekDelta,
   onFocusSeek,
 }: {
   enabled: boolean;
   durationMs: number;
+  isSeekFocused: () => boolean;
   onSeekDelta: (deltaMs: number) => void;
   onFocusSeek: () => void;
 }) {
@@ -118,7 +120,7 @@ function UnifiedPlayerSeekRemoteListener({
 
       if (!shouldHandleUnifiedSeekRemoteEvent({
         visible: enabled,
-        focusedControl: 'seek',
+        focusedControl: isSeekFocused() ? 'seek' : null,
         durationMs,
         eventType: event.eventType,
         eventKeyAction: event.eventKeyAction,
@@ -134,7 +136,7 @@ function UnifiedPlayerSeekRemoteListener({
       onFocusSeekRef.current();
       onSeekDeltaRef.current(deltaMs);
     },
-    [durationMs, enabled],
+    [durationMs, enabled, isSeekFocused],
   );
 
   // The TV event hook invokes this callback outside React's render cycle.
@@ -237,6 +239,7 @@ export function UnifiedPlayerControls({
   });
   const [androidFocusHandles, setAndroidFocusHandles] = useState<Partial<Record<UnifiedControlFocusId, number>>>({});
   const [focusedControl, setFocusedControl] = useState<UnifiedControlFocusId | null>(null);
+  const focusedControlRef = useRef<UnifiedControlFocusId | null>(null);
   const [seekTargetMs, setSeekTargetMs] = useState<number | null>(null);
   const lastKeyActivateAtRef = useRef(0);
   const lastSeekInputRef = useRef<{ deltaMs: number; at: number } | null>(null);
@@ -248,6 +251,7 @@ export function UnifiedPlayerControls({
 
   const handleControlFocus = useCallback(
     (controlId: UnifiedControlFocusId) => {
+      focusedControlRef.current = controlId;
       setFocusedControl(controlId);
       setUnifiedRemoteFocusedControl(controlId);
       if (controlId === 'seek') {
@@ -270,6 +274,9 @@ export function UnifiedPlayerControls({
   );
 
   const handleControlBlur = useCallback((controlId: UnifiedControlFocusId) => {
+    if (focusedControlRef.current === controlId) {
+      focusedControlRef.current = null;
+    }
     setFocusedControl((current) => (current === controlId ? null : current));
     if (controlId === 'seek') {
       seekTargetMsRef.current = null;
@@ -289,20 +296,23 @@ export function UnifiedPlayerControls({
       if (nextPositionMs == null) {
         return;
       }
+
       seekTargetMsRef.current = nextPositionMs;
       setSeekTargetMs(nextPositionMs);
+
       if (isUnifiedRemoteDebugEnabled()) {
         logUnifiedRemoteEvent({
           source: 'controls-control-key',
-          eventType: 'seek-adjust',
+          eventType: 'seek-preview',
           disposition: 'accepted',
-          actionTaken: `seek-adjust nextPositionMs=${nextPositionMs} deltaMs=${deltaMs}`,
+          actionTaken: `seek-preview nextPositionMs=${nextPositionMs} deltaMs=${deltaMs}`,
           controlId: 'seek',
         });
       }
-      onSeek(nextPositionMs);
+
+      onReveal();
     },
-    [durationMs, onSeek, positionMs],
+    [durationMs, onReveal, positionMs],
   );
 
   const applySeekDelta = useCallback(
@@ -364,7 +374,7 @@ export function UnifiedPlayerControls({
             // Android can deliver the key to the newly focused native view before
             // React has committed its onFocus state update. Trust the event target
             // for scrubbing, then bring the React focus mirror up to date.
-            if (focusedControl !== 'seek') {
+            if (focusedControlRef.current !== 'seek') {
               handleControlFocus('seek');
             }
             event.preventDefault?.();
@@ -387,7 +397,7 @@ export function UnifiedPlayerControls({
         event.stopPropagation?.();
         focusControl(nextControl);
       },
-    [applySeekDelta, focusControl, focusedControl, handleControlFocus, visible],
+    [applySeekDelta, focusControl, handleControlFocus, visible],
   );
 
   const handleControlPress = useCallback(
@@ -419,17 +429,25 @@ export function UnifiedPlayerControls({
   }, [opacity, visible]);
 
   useEffect(() => {
+    if (!visible) {
+      initialPlayerFocusAssignedRef.current = false;
+      previousVisibleRef.current = false;
+      return;
+    }
+
     if (!shouldAssignUnifiedPlayerInitialFocus({
       visible,
       initialFocusAssigned: initialPlayerFocusAssignedRef.current,
-      focusedControl,
+      focusedControl: focusedControlRef.current,
     })) {
+      previousVisibleRef.current = visible;
       return;
     }
 
     let cancelled = false;
     let focusCleanup: (() => void) | undefined;
     initialPlayerFocusAssignedRef.current = true;
+    previousVisibleRef.current = visible;
 
     const task = InteractionManager.runAfterInteractions(() => {
       if (cancelled) {
@@ -463,73 +481,65 @@ export function UnifiedPlayerControls({
       task.cancel();
       focusCleanup?.();
     };
-  }, [visible, focusedControl]);
+  }, [visible]);
 
-  useEffect(() => {
-    const becameVisible = visible && !previousVisibleRef.current;
-    previousVisibleRef.current = visible;
-    if (!becameVisible) {
+  // Stable ref callbacks are required on Android: a new function each render makes
+  // React detach/re-attach Pressable refs, which updates androidFocusHandles and
+  // immediately re-renders (Maximum update depth → black playback Modal).
+  const updateAndroidFocusHandle = useCallback((controlId: UnifiedControlFocusId, instance: ElementRef<typeof Pressable> | null) => {
+    if (Platform.OS !== 'android') {
       return;
     }
 
-    let cancelled = false;
-    let focusCleanup: (() => void) | undefined;
-    const task = InteractionManager.runAfterInteractions(() => {
-      if (cancelled) {
-        return;
+    const handle = instance ? findNodeHandle(instance) : null;
+    setAndroidFocusHandles((current) => {
+      const currentHandle = current[controlId];
+      // Ignore transient null during parent re-renders that recreate unstable refs.
+      if (handle == null) {
+        return current;
       }
-
-      focusCleanup = focusNativeViewWhenReady(
-        () => controlRefs.current.play,
-        () => {
-          if (cancelled) {
-            return;
-          }
-          setUnifiedRemoteFocusedControl('play');
-        },
-      );
+      if (currentHandle === handle) {
+        return current;
+      }
+      return { ...current, [controlId]: handle };
     });
+  }, []);
 
-    return () => {
-      cancelled = true;
-      task.cancel();
-      focusCleanup?.();
-    };
-  }, [visible]);
-
-  const registerControlRef = useCallback(
-    (controlId: UnifiedControlFocusId) => (instance: ElementRef<typeof Pressable> | null) => {
-      controlRefs.current[controlId] = instance;
-
-      if (Platform.OS !== 'android') {
-        return;
-      }
-
-      const handle = instance ? findNodeHandle(instance) : null;
-      setAndroidFocusHandles((current) => {
-        const currentHandle = current[controlId];
-        if ((handle == null && currentHandle == null) || currentHandle === handle) {
-          return current;
-        }
-
-        const next = { ...current };
-        if (handle == null) {
-          delete next[controlId];
-        } else {
-          next[controlId] = handle;
-        }
-        return next;
-      });
+  const assignBackRef = useCallback(
+    (instance: ElementRef<typeof Pressable> | null) => {
+      controlRefs.current.back = instance;
+      updateAndroidFocusHandle('back', instance);
     },
-    [],
+    [updateAndroidFocusHandle],
   );
-
-  const assignBackRef = registerControlRef('back');
-  const assignRewindRef = registerControlRef('rewind');
-  const assignPlayRef = registerControlRef('play');
-  const assignForwardRef = registerControlRef('forward');
-  const assignSeekRef = registerControlRef('seek');
-
+  const assignRewindRef = useCallback(
+    (instance: ElementRef<typeof Pressable> | null) => {
+      controlRefs.current.rewind = instance;
+      updateAndroidFocusHandle('rewind', instance);
+    },
+    [updateAndroidFocusHandle],
+  );
+  const assignPlayRef = useCallback(
+    (instance: ElementRef<typeof Pressable> | null) => {
+      controlRefs.current.play = instance;
+      updateAndroidFocusHandle('play', instance);
+    },
+    [updateAndroidFocusHandle],
+  );
+  const assignForwardRef = useCallback(
+    (instance: ElementRef<typeof Pressable> | null) => {
+      controlRefs.current.forward = instance;
+      updateAndroidFocusHandle('forward', instance);
+    },
+    [updateAndroidFocusHandle],
+  );
+  const assignSeekRef = useCallback(
+    (instance: ElementRef<typeof Pressable> | null) => {
+      controlRefs.current.seek = instance;
+      updateAndroidFocusHandle('seek', instance);
+    },
+    [updateAndroidFocusHandle],
+  );
   const backFocusProps = Platform.OS === 'android' ? buildAndroidControlFocusProps('back', androidFocusHandles) : null;
   const rewindFocusProps =
     Platform.OS === 'android' ? buildAndroidControlFocusProps('rewind', androidFocusHandles) : null;
@@ -541,10 +551,11 @@ export function UnifiedPlayerControls({
   return (
     <View style={styles.host} pointerEvents="box-none">
       <UnifiedPlayerSeekRemoteListener
-        enabled={visible && focusedControl === 'seek'}
+        enabled={visible}
         durationMs={durationMs}
+        isSeekFocused={() => focusedControlRef.current === 'seek'}
         onSeekDelta={applySeekDelta}
-        onFocusSeek={() => focusControl('seek')}
+        onFocusSeek={() => handleControlFocus('seek')}
       />
       <Animated.View
         pointerEvents={visible ? 'auto' : 'none'}
@@ -591,7 +602,21 @@ export function UnifiedPlayerControls({
               onPress={() => {
                 const commitTargetMs = seekTargetMsRef.current ?? activeSeekPositionMs;
                 const nextPositionMs = clampSeekPosition(commitTargetMs);
-                handleControlPress('seek', 'commit-seek', () => onSeek(nextPositionMs));
+
+                handleControlPress('seek', 'commit-seek', () => {
+                  onSeek(nextPositionMs);
+
+                  if (isUnifiedRemoteDebugEnabled()) {
+                    logUnifiedRemoteEvent({
+                      source: 'controls-onPress',
+                      eventType: 'seek-commit',
+                      disposition: 'accepted',
+                      actionTaken: `seek-commit nextPositionMs=${nextPositionMs}`,
+                      controlId: 'seek',
+                    });
+                  }
+                });
+
                 seekTargetMsRef.current = null;
                 setSeekTargetMs(null);
               }}
@@ -665,12 +690,12 @@ const styles = StyleSheet.create({
   host: {
     ...StyleSheet.absoluteFill,
     zIndex: 3,
-    elevation: 8,
+    // Elevation above SurfaceView hides video on Android TV when this host
+    // remains mounted (even with opacity-0 children). Keep zIndex only.
     justifyContent: 'flex-end',
   },
   panelWrap: {
     zIndex: 3,
-    elevation: 8,
   },
   panel: {
     paddingHorizontal: 20,

@@ -35,4 +35,10 @@ export interface SeriesDataSource {
   ): Promise<void>;
 
   listCategorySeries?(categoryId: string): Promise<SeriesSummary[]>;
+
+  /**
+   * Absolute Xtream player_api URL for native off-JS catalog decode.
+   * Must never be logged. Returns null when native decode cannot be used.
+   */
+  getCatalogListRequestUrl?(categoryId: string): string | null;
 }

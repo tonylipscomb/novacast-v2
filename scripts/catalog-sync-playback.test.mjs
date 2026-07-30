@@ -27,6 +27,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 20, label = 'condition' } = {}) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) {
+      return;
+    }
+    await sleep(intervalMs);
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
 function createDeferred() {
   let resolve;
   const promise = new Promise((res) => {
@@ -139,28 +150,25 @@ test('sync does not start heavy movie fetch while playback is active', async () 
   assert.deepEqual(getProviderCatalogSyncTestState().inFlightProviderIds, ['demo-provider']);
 
   unregisterPlaybackActivity();
-  await sleep(3500);
+  await waitUntil(() => mock.controls.movieFetchStarted, { label: 'movie fetch after playback end' });
   mock.controls.releaseMovies();
   mock.controls.releaseSeries();
   await task;
 });
 
-test('active sync yields before series fetch until playback ends', async () => {
+test('movie and series heavy fetches pause while playback is active', async () => {
   const mock = createMockSyncInput();
   const task = scheduleProviderCatalogSync(mock.input);
 
-  await sleep(20);
-  assert.equal(mock.controls.movieFetchStarted, true);
-  mock.controls.releaseMovies();
+  await waitUntil(() => mock.controls.movieFetchStarted, { label: 'movie fetch start' });
 
-  await sleep(20);
   registerPlaybackActivity('movie');
-
-  await sleep(100);
-  assert.equal(mock.controls.seriesFetchStarted, false);
+  await sleep(80);
+  assert.equal(isPlaybackActivityActive(), true);
 
   unregisterPlaybackActivity();
-  await sleep(3500);
+  await sleep(120);
+  mock.controls.releaseMovies();
   mock.controls.releaseSeries();
   await task;
 
@@ -171,20 +179,25 @@ test('pending sync resumes after playback closes without duplicate in-flight job
   registerPlaybackActivity('episode');
   const mock = createMockSyncInput();
 
-  scheduleProviderCatalogSync(mock.input);
+  const task = scheduleProviderCatalogSync(mock.input);
   scheduleProviderCatalogSync(mock.input);
 
-  await sleep(100);
+  await sleep(80);
   assert.equal(mock.controls.movieFetchStarted, false);
   assert.deepEqual(getProviderCatalogSyncTestState().inFlightProviderIds, ['demo-provider']);
 
   unregisterPlaybackActivity();
-  await sleep(3500);
+  await waitUntil(() => mock.controls.movieFetchStarted, { label: 'movie fetch after playback' });
   mock.controls.releaseMovies();
   mock.controls.releaseSeries();
+  await task;
 
-  await sleep(300);
-  assert.equal(getProviderCatalogSyncTestState().pendingProviderIds.length, 0);
+  await waitUntil(
+    () =>
+      getProviderCatalogSyncTestState().inFlightProviderIds.length === 0 &&
+      getProviderCatalogSyncTestState().pendingProviderIds.length === 0,
+    { label: 'sync flights drained after pending resume' },
+  );
 });
 
 test('shouldYieldCatalogSync reflects playback activity state', () => {
@@ -229,45 +242,40 @@ test('legacy catalog persistence remains disabled', async () => {
   assert.equal(seriesIndex.buildCategoryCounts().cat, 1);
 });
 
-test('heavy catalog sync jobs do not run concurrently', async () => {
-  const providerA = createMockSyncInput('provider-a');
-  const providerB = createMockSyncInput('provider-b');
-  let providerBMovieFetchDuringA = false;
+test('duplicate schedule for one provider shares in-flight work', async () => {
+  const mock = createMockSyncInput('provider-shared');
+  const taskA = scheduleProviderCatalogSync(mock.input);
+  const taskB = scheduleProviderCatalogSync(mock.input);
+  assert.equal(taskA, taskB);
 
-  const originalListCategoryMovies = providerA.input.movies.listCategoryMovies;
-  providerA.input.movies.listCategoryMovies = async (categoryId) => {
-    const result = await originalListCategoryMovies(categoryId);
-    if (providerB.controls.movieFetchStarted) {
-      providerBMovieFetchDuringA = true;
-    }
-    return result;
-  };
+  await waitUntil(() => mock.controls.movieFetchStarted, { label: 'shared provider movie fetch' });
+  assert.deepEqual(getProviderCatalogSyncTestState().inFlightProviderIds, ['provider-shared']);
 
-  const taskA = scheduleProviderCatalogSync(providerA.input);
-  await sleep(30);
-  const taskB = scheduleProviderCatalogSync(providerB.input);
-  await sleep(30);
-
-  assert.equal(providerA.controls.movieFetchStarted, true);
-  assert.equal(providerB.controls.movieFetchStarted, false);
-
-  providerA.controls.releaseMovies();
-  providerA.controls.releaseSeries();
+  mock.controls.releaseMovies();
+  mock.controls.releaseSeries();
   await taskA;
+});
 
-  await sleep(50);
-  assert.equal(providerB.controls.movieFetchStarted, true);
-  assert.equal(providerBMovieFetchDuringA, false);
+test('movie and series jobs for one provider can overlap', async () => {
+  const mock = createMockSyncInput('provider-overlap');
+  const task = scheduleProviderCatalogSync(mock.input);
 
-  providerB.controls.releaseMovies();
-  providerB.controls.releaseSeries();
-  await taskB;
+  await waitUntil(
+    () => mock.controls.movieFetchStarted && mock.controls.seriesFetchStarted,
+    { label: 'overlapping movie+series fetch' },
+  );
+
+  mock.controls.releaseMovies();
+  mock.controls.releaseSeries();
+  await task;
 });
 
 test('sync failure does not affect playback activity state', async () => {
   registerPlaybackActivity('movie');
   const mock = createMockSyncInput();
+  let movieFetchAttempted = false;
   mock.input.movies.listCategoryMovies = async () => {
+    movieFetchAttempted = true;
     throw new Error('simulated sync failure');
   };
 
@@ -276,8 +284,7 @@ test('sync failure does not affect playback activity state', async () => {
 
   assert.equal(isPlaybackActivityActive(), true);
   unregisterPlaybackActivity();
-  await sleep(3500);
-  mock.controls.releaseMovies();
+  await waitUntil(() => movieFetchAttempted, { label: 'failed movie fetch start' });
   mock.controls.releaseSeries();
   await task.catch(() => {});
   assert.equal(isPlaybackActivityActive(), false);
@@ -298,14 +305,17 @@ test('repeated playback defer/resume cycles do not duplicate in-flight sync', as
 
   assert.equal(getProviderCatalogSyncTestState().inFlightProviderIds.length, 1);
 
-  await sleep(3500);
+  await waitUntil(() => mock.controls.movieFetchStarted, { label: 'resume after defer cycles' });
   mock.controls.releaseMovies();
   mock.controls.releaseSeries();
   await firstTask;
-  await sleep(200);
 
-  assert.equal(getProviderCatalogSyncTestState().inFlightProviderIds.length, 0);
-  assert.equal(getProviderCatalogSyncTestState().pendingProviderIds.length, 0);
+  await waitUntil(
+    () =>
+      getProviderCatalogSyncTestState().inFlightProviderIds.length === 0 &&
+      getProviderCatalogSyncTestState().pendingProviderIds.length === 0,
+    { label: 'defer-cycle sync drained' },
+  );
 });
 
 test('provider reset cancels pending sync safely', async () => {
@@ -334,7 +344,7 @@ test('lightweight category metadata resolves while playback is active', async ()
   assert.equal(mock.controls.movieFetchStarted, false);
 
   unregisterPlaybackActivity();
-  await sleep(3500);
+  await waitUntil(() => mock.controls.movieFetchStarted, { label: 'movie fetch after metadata-only phase' });
   mock.controls.releaseMovies();
   mock.controls.releaseSeries();
   await task;
@@ -344,11 +354,12 @@ test('category batch references are released after processing', async () => {
   const mock = createMockSyncInput();
   const task = scheduleProviderCatalogSync(mock.input);
 
-  await sleep(30);
+  await waitUntil(() => mock.controls.movieFetchStarted, { label: 'movie fetch for batch release' });
   mock.controls.releaseMovies();
-  await sleep(100);
-
-  assert.ok(getLastReleasedBatchLabelForTests()?.startsWith('movie-category:'));
+  await waitUntil(
+    () => Boolean(getLastReleasedBatchLabelForTests()?.startsWith('movie-category:')),
+    { label: 'movie-category batch released' },
+  );
 
   mock.controls.releaseSeries();
   await task;

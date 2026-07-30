@@ -13,7 +13,7 @@ import {
 import { findDefaultBrowseCategoryId } from '../../media-browser/mediaCategoryUtils.ts';
 import { getCategoryCountFromIndex } from '../../providers/categoryCountIndexStore.ts';
 import { fallbackProviderCategoryId } from '../../providers/categoryNormalization.ts';
-import { sortProviderCategoriesUsFirst, partitionMediaSummariesUsFirst } from '../../providers/usAmericanSort.ts';
+import { sortProviderCategoriesUsFirst } from '../../providers/usAmericanSort.ts';
 import {
   getSmartCategoryCountSync,
   getSmartCategoryEntrySync,
@@ -22,6 +22,7 @@ import {
 import { loadAllMoviesForCatalogIndex } from '../../providers/catalogCategoryLoader.ts';
 import { logSmartCategoryCatalogAudit } from '../../providers/catalogSyncAudit.ts';
 import { searchMovies as searchMoviesRepository } from '../../search/repositories/movieSearchRepository.ts';
+import { resolveSmartCategoryCountKnown } from '../movieCategoryCountPolicy.ts';
 import { entryToSummary, getMovieCatalogIndex, type MovieCatalogEntry } from './movieCatalogIndex.ts';
 import {
   getContinueWatchingIds,
@@ -176,19 +177,25 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
     const definitions = getActiveSmartCategoryDefinitions();
     const smartCache = await readSmartCategoryCache(providerId, 'movie');
 
-    const smartCategories: MovieCategory[] = definitions.map((definition) => ({
-      id: `${SMART_CATEGORY_PREFIX}${definition.key}`,
-      renderKey: `${SMART_CATEGORY_PREFIX}${definition.key}`,
-      name: `${definition.icon} ${definition.name}`,
-      icon: definition.icon,
-      smartKey: definition.key,
-      kind: 'smart' as const,
-      section: 'discover' as const,
-      count: smartCache.entries[definition.key]?.count ?? getSmartCategoryCountSync(providerId, 'movie', definition.key),
-      countKnown:
+    const smartCategories: MovieCategory[] = definitions.map((definition) => {
+      const syncCount =
+        smartCache.entries[definition.key]?.count ?? getSmartCategoryCountSync(providerId, 'movie', definition.key);
+      const cacheEntryExists =
         smartCache.entries[definition.key] !== undefined ||
-        getSmartCategoryCountSync(providerId, 'movie', definition.key) > 0,
-    }));
+        getSmartCategoryEntrySync(providerId, 'movie', definition.key) !== undefined;
+
+      return {
+        id: `${SMART_CATEGORY_PREFIX}${definition.key}`,
+        renderKey: `${SMART_CATEGORY_PREFIX}${definition.key}`,
+        name: `${definition.icon} ${definition.name}`,
+        icon: definition.icon,
+        smartKey: definition.key,
+        kind: 'smart' as const,
+        section: 'discover' as const,
+        count: syncCount,
+        countKnown: resolveSmartCategoryCountKnown({ cacheEntryExists, syncCount }),
+      };
+    });
 
     const providerWithKind: MovieCategory[] = sortedProviderCategories.map((category) => ({
       ...category,
@@ -270,7 +277,7 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
     }
 
     const allItems = await loadAllSmartMovieSummaries(definition);
-    const sorted = sortContentItems(partitionMediaSummariesUsFirst(allItems), sort, 'movie') as MovieSummary[];
+    const sorted = sortContentItems(allItems, sort, 'movie') as MovieSummary[];
     const page = paginateSortedItems(sorted, offset, limit);
     return {
       ...page,
@@ -330,16 +337,69 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
           return 0;
         }
 
-        const count = getSmartCategoryCountSync(providerId, 'movie', definition.key);
-        return definition.maxItems ? Math.min(count, definition.maxItems) : count;
+        const cachedEntry = getSmartCategoryEntrySync(providerId, 'movie', definition.key);
+        if (cachedEntry) {
+          return definition.maxItems ? Math.min(cachedEntry.count, definition.maxItems) : cachedEntry.count;
+        }
+
+        const syncCount = getSmartCategoryCountSync(providerId, 'movie', definition.key);
+        if (syncCount > 0) {
+          return definition.maxItems ? Math.min(syncCount, definition.maxItems) : syncCount;
+        }
+
+        const index = getMovieCatalogIndex(providerId);
+        if (index.size > 0) {
+          const ctx = await buildLibraryContext(providerId);
+          const result = querySmartCategoryOnIndex(index, definition, ctx, 0, 1) as { totalCount: number };
+          return definition.maxItems ? Math.min(result.totalCount, definition.maxItems) : result.totalCount;
+        }
+
+        return 0;
       }
 
-      return getCategoryCountFromIndex(providerId, 'movie', categoryId) ?? base.getCategoryCount?.(categoryId) ?? 0;
+      return getCategoryCountFromIndex(providerId, 'movie', categoryId) ?? (await base.getCategoryCount?.(categoryId)) ?? 0;
     },
 
     async prefetchAllCategoryCounts(categoryIds, onCategoryCount) {
+      const smartIds = categoryIds.filter(isSmartCategoryId);
+      for (const categoryId of smartIds) {
+        const definition = resolveSmartCategoryDefinition(categoryId);
+        if (!definition) {
+          onCategoryCount(categoryId, 0);
+          continue;
+        }
+
+        const cachedEntry = getSmartCategoryEntrySync(providerId, 'movie', definition.key);
+        if (cachedEntry) {
+          onCategoryCount(
+            categoryId,
+            definition.maxItems ? Math.min(cachedEntry.count, definition.maxItems) : cachedEntry.count,
+          );
+          continue;
+        }
+
+        const syncCount = getSmartCategoryCountSync(providerId, 'movie', definition.key);
+        if (syncCount > 0) {
+          onCategoryCount(categoryId, definition.maxItems ? Math.min(syncCount, definition.maxItems) : syncCount);
+          continue;
+        }
+
+        const index = getMovieCatalogIndex(providerId);
+        if (index.size > 0) {
+          const ctx = await buildLibraryContext(providerId);
+          const result = querySmartCategoryOnIndex(index, definition, ctx, 0, 1) as { totalCount: number };
+          onCategoryCount(
+            categoryId,
+            definition.maxItems ? Math.min(result.totalCount, definition.maxItems) : result.totalCount,
+          );
+          continue;
+        }
+
+        onCategoryCount(categoryId, 0);
+      }
+
       const providerIds = categoryIds.filter(isProviderCategoryId);
-      if (!base.prefetchAllCategoryCounts) {
+      if (!base.prefetchAllCategoryCounts || providerIds.length === 0) {
         return;
       }
 
@@ -366,30 +426,47 @@ export async function refreshSmartCategoryCounts(
 ): Promise<MovieCategory[]> {
   const settings = await getMoviesSettings();
   if (settings.hideSmartCategories) {
-    return categories;
+    return categories.map((category) => {
+      if (category.kind !== 'provider') {
+        return category;
+      }
+      const indexed = getCategoryCountFromIndex(providerId, 'movie', category.id);
+      return {
+        ...category,
+        count: indexed ?? category.count,
+        countKnown: indexed !== undefined || category.countKnown !== false,
+      };
+    });
   }
 
   const smartCache = await readSmartCategoryCache(providerId, 'movie');
 
   return categories.map((category) => {
+    if (category.kind === 'provider') {
+      const indexed = getCategoryCountFromIndex(providerId, 'movie', category.id);
+      return {
+        ...category,
+        count: indexed ?? category.count,
+        countKnown: indexed !== undefined || category.countKnown !== false,
+      };
+    }
+
     if (category.kind !== 'smart' || !category.smartKey) {
-      if (category.kind === 'provider') {
-        return {
-          ...category,
-          count: getCategoryCountFromIndex(providerId, 'movie', category.id) ?? category.count,
-          countKnown: getCategoryCountFromIndex(providerId, 'movie', category.id) !== undefined || category.countKnown !== false,
-        };
-      }
       return category;
     }
 
+    const syncCount =
+      smartCache.entries[category.smartKey]?.count ??
+      getSmartCategoryCountSync(providerId, 'movie', category.smartKey) ??
+      category.count;
+    const cacheEntryExists =
+      smartCache.entries[category.smartKey] !== undefined ||
+      getSmartCategoryEntrySync(providerId, 'movie', category.smartKey) !== undefined;
+
     return {
       ...category,
-      count: smartCache.entries[category.smartKey]?.count ?? category.count,
-      countKnown:
-        smartCache.entries[category.smartKey] !== undefined ||
-        category.countKnown !== false ||
-        category.count > 0,
+      count: syncCount,
+      countKnown: resolveSmartCategoryCountKnown({ cacheEntryExists, syncCount }),
     };
   });
 }

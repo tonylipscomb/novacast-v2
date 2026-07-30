@@ -35,6 +35,10 @@ import { getThemeHeroSource } from '@/theme/brandingAssets';
 import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
 import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
 import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
+import { markCatalogAuditFocus, markCatalogAuditRender } from '@/features/diagnostics/novaCastCatalogAudit';
+import { noteFocusLatencyFocus } from '@/features/diagnostics/focusLatencyAudit';
+import { waitOutCatalogWriteQuietPeriod } from '@/features/catalog/catalogWriteQuietPeriod';
+import { processTimeBudgeted } from '@/features/catalog/jsChunkBudget';
 
 /**
  * Resolves a channel's category type for accent-color purposes. Prefers an
@@ -52,6 +56,7 @@ function resolveChannelCategoryType(
 }
 
 export function MainMenuScreen() {
+  markCatalogAuditRender('MainMenuScreen');
   const { theme, themeId } = useAppTheme();
   const styles = useMemo(() => createHomeStyles(theme), [theme]);
   const heroArtwork = useMemo(() => getThemeHeroSource(themeId), [themeId]);
@@ -105,21 +110,48 @@ export function MainMenuScreen() {
     }
 
     let cancelled = false;
-    void bundle.live
-      .getCategories()
-      .then((categories) => {
-        if (cancelled) {
-          return;
-        }
+    // Wait until Movies/Series category SQLite upserts finish before even starting
+    // the live-categories HTTP call — full getCategories() mapping previously stalled
+    // JS ~2s after parse; accent hints avoid that path entirely.
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          await waitOutCatalogWriteQuietPeriod({ maxWaitMs: 30_000 });
+          if (cancelled) {
+            return;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          const categories = bundle.live.getCategoryAccentHints
+            ? await bundle.live.getCategoryAccentHints()
+            : await bundle.live.getCategories();
+          if (cancelled) {
+            return;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-        const next = new Map<string, ProviderCategoryType>();
-        categories.forEach((category) => next.set(category.id, classifyProviderCategoryType(category.name)));
-        setCategoryTypeById(next);
-      })
-      .catch(() => undefined);
+          const next = new Map<string, ProviderCategoryType>();
+          await processTimeBudgeted(
+            categories,
+            (category) => {
+              if (!category.id) {
+                return;
+              }
+              next.set(category.id, classifyProviderCategoryType(category.name));
+            },
+            { minItems: 8, maxItems: 48, kind: 'generic', targetMs: 35 },
+          );
+          if (!cancelled) {
+            setCategoryTypeById(next);
+          }
+        } catch {
+          // ignore accent-map failures
+        }
+      })();
+    }, 8000);
 
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [activeProviderId, bundle]);
 
@@ -311,7 +343,12 @@ export function MainMenuScreen() {
   return (
     <View style={styles.root}>
       <View style={styles.browseLayer} pointerEvents={playbackActive || playbackClosing ? 'none' : 'auto'}>
-        <NovaTvShell activeId="home" title="Home" subtitle="Your entertainment. One place.">
+        <NovaTvShell
+          activeId="home"
+          title="Home"
+          subtitle="Your entertainment. One place."
+          preferActiveNavigationFocus={!firstHomeFocusId}
+        >
           <ScrollView
             style={styles.screenScroll}
             contentContainerStyle={styles.screen}
@@ -495,17 +532,24 @@ const HomeMediaCard = memo(function HomeMediaCard({
   onPress,
   onRemove,
 }: HomeMediaCardProps) {
+  markCatalogAuditRender('HomeMediaCard');
   const { theme } = useAppTheme();
   const styles = useMemo(() => createHomeStyles(theme), [theme]);
   const [focused, setFocused] = useState(false);
   const [removeFocused, setRemoveFocused] = useState(false);
+  const preferredFocusConsumedRef = useRef(false);
 
   return (
     <View style={styles.mediaCardWrap}>
       <Pressable
         focusable
-        hasTVPreferredFocus={preferredFocus}
-        onFocus={() => setFocused(true)}
+        hasTVPreferredFocus={preferredFocus && !preferredFocusConsumedRef.current}
+        onFocus={() => {
+          preferredFocusConsumedRef.current = true;
+          markCatalogAuditFocus('home-card');
+          noteFocusLatencyFocus('home-card');
+          setFocused(true);
+        }}
         onBlur={() => setFocused(false)}
         onPress={onPress}
         style={[styles.mediaCard, novaTvFocus.base, focused && styles.mediaCardFocused]}>

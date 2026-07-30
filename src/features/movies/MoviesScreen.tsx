@@ -1,13 +1,18 @@
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, findNodeHandle, InteractionManager, Linking, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
 
+import { MediaDetailOverlay } from '@/components/media/MediaDetailOverlay';
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
-import { MediaDetailOverlay } from '@/components/media/MediaDetailOverlay';
 import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
+import { useAppNotification } from '@/features/notifications/useAppNotification';
+import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
+import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
+import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
+import { tvPerfSetFocus, tvPerfSetScreen } from '@/features/perf/tvPerfStore';
 import {
   finishUnifiedPlaybackClose,
   useUnifiedPlayer,
@@ -16,29 +21,34 @@ import {
   isUnifiedRemoteDebugEnabled,
   logUnifiedRemoteEvent,
 } from '@/features/playback/unified/unifiedRemoteDebug';
-import { buildMoviePlaybackUrl } from '@/features/providers/providerPlayback';
-import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
-import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
-import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
-import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
 import { useProviderStore } from '@/features/providers/providerStore';
-import { useAppNotification } from '@/features/notifications/useAppNotification';
-import { tvPerfSetFocus, tvPerfSetScreen } from '@/features/perf/tvPerfStore';
+import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 
+import { isFeaturesSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
+import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
+import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
+import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
+import { buildMoviePlaybackUrlResolved } from '@/features/providers/providerPlayback';
+import { useAppTheme } from '@/theme/AppThemeProvider';
+import type { NovaTheme } from '@/theme/tokens';
 import { MovieCategoryRail } from './components/MovieCategoryRail';
 import { MoviePosterGrid } from './components/MoviePosterGrid';
 import { MovieToolbar } from './components/MovieToolbar';
 import { getMoviesScreenMemory, rememberMoviesScreenMemory } from './moviesScreenMemory';
 import { useMoviesScreenModel } from './useMoviesScreenModel';
-import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
-import { isFeaturesSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
-import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
-import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
-import { useAppTheme } from '@/theme/AppThemeProvider';
-import type { NovaTheme } from '@/theme/tokens';
 
-import { decideMoviesBackAction } from './moviesPlaybackLogic';
+import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
+import {
+  resolvePosterRestorationId,
+  shouldPreferNavigationFocus,
+} from '@/features/media-browser/posterGridFocusPolicy';
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
+import { PLAYBACK_NOTIFICATION_DURATION_MS, PLAYBACK_NOTIFICATION_ID } from '@/features/playback/unified/unifiedPlayerLogic';
+import { SearchOverlay } from '@/features/search/SearchOverlay';
+import { searchMovies } from '@/features/search/repositories/movieSearchRepository';
+import type { SearchResult } from '@/features/search/searchTypes';
 import { logMoviesPlayback } from './moviesPlaybackDiagnostics';
+import { decideMoviesBackAction, shouldHandleMoviesDetailBack } from './moviesPlaybackLogic';
 import {
   MOVIES_DETAIL_NOTIFICATION_ID,
   MOVIES_LOAD_NOTIFICATION_ID,
@@ -46,17 +56,7 @@ import {
   resolveMoviesDetailNotification,
   resolveMoviesNotificationForStatus,
 } from './moviesScreenLogic';
-import { PLAYBACK_NOTIFICATION_DURATION_MS, PLAYBACK_NOTIFICATION_ID } from '@/features/playback/unified/unifiedPlayerLogic';
 import { toggleFavorite, toggleWatchlist, useMovieLibraryStore } from './smart/movieLibraryStore';
-import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
-import { SearchOverlay } from '@/features/search/SearchOverlay';
-import { searchMovies } from '@/features/search/repositories/movieSearchRepository';
-import type { SearchResult } from '@/features/search/searchTypes';
-import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
-import {
-  resolvePosterRestorationId,
-  shouldPreferNavigationFocus,
-} from '@/features/media-browser/posterGridFocusPolicy';
 
 export function MoviesScreen() {
   const router = useRouter();
@@ -76,6 +76,7 @@ export function MoviesScreen() {
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.movies.key);
   const posterRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof Pressable>>>(new Map());
+  const categoryFocusPendingRef = useRef<string | null>(null);
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
   const isRestoringPlaybackFocusRef = useRef(false);
@@ -90,6 +91,8 @@ export function MoviesScreen() {
   const lastRetryAtRef = useRef(0);
   const lastPlaybackLaunchAtRef = useRef(0);
   const playbackLaunchInFlightRef = useRef(false);
+  /** Captures the in-flight loadMovieDetail promise so startPlayback can await it. */
+  const pendingDetailPromiseRef = useRef<Promise<void> | null>(null);
   const [launchingPlayback, setLaunchingPlayback] = useState(false);
   const playFocusGuardUntilRef = useRef(0);
   const { isActive: playbackActive, isClosing: playbackClosing, didJustClose, launchPlayback, closePlayback } =
@@ -163,7 +166,13 @@ export function MoviesScreen() {
       }
 
       selectMovie(movie);
-      void loadMovieDetail(movie);
+      const detailPromise = loadMovieDetail(movie);
+      pendingDetailPromiseRef.current = detailPromise;
+      detailPromise.finally(() => {
+        if (pendingDetailPromiseRef.current === detailPromise) {
+          pendingDetailPromiseRef.current = null;
+        }
+      });
       setDetailSuppressedForPlayback(false);
       setDetailOpen(true);
     },
@@ -178,9 +187,7 @@ export function MoviesScreen() {
     }
   }, []);
 
-  const handleLoadMore = useCallback(() => {
-    void loadMore();
-  }, [loadMore]);
+  const handleLoadMore = useCallback(() => loadMore(), [loadMore]);
 
   useEffect(() => {
     if (!searchOpen || playbackUiActive) {
@@ -240,6 +247,12 @@ export function MoviesScreen() {
   useEffect(() => {
     selectedMovieRef.current = selectedMovie;
   }, [selectedMovie]);
+
+  const movieDetailRef = useRef(movieDetail);
+
+  useEffect(() => {
+    movieDetailRef.current = movieDetail;
+  }, [movieDetail]);
 
   const selectedCategory = categories.find((category) => category.id === selectedCategoryId);
   const selectedCategoryLabel = selectedCategory
@@ -317,25 +330,28 @@ export function MoviesScreen() {
         return true;
       }
 
-      if (detailOpen) {
+      if (playbackClosing || launchingPlayback || playbackActive) {
+        if (isUnifiedRemoteDebugEnabled()) {
+          logUnifiedRemoteEvent({
+            source: 'BackHandler',
+            eventType: 'hardwareBackPress',
+            disposition: 'consumed',
+            actionTaken: playbackClosing || launchingPlayback ? 'ignored-playback-closing' : 'movies-shell-close-playback',
+          });
+        }
+        if (playbackActive && !playbackClosing) {
+          closePlayback();
+        }
+        return true;
+      }
+
+      if (shouldHandleMoviesDetailBack({ playbackUiActive: false, detailOpen })) {
         closeDetail();
         return true;
       }
 
       if (searchOpen) {
         closeSearch();
-        return true;
-      }
-
-      if (playbackClosing) {
-        if (isUnifiedRemoteDebugEnabled()) {
-          logUnifiedRemoteEvent({
-            source: 'BackHandler',
-            eventType: 'hardwareBackPress',
-            disposition: 'consumed',
-            actionTaken: 'ignored-playback-closing',
-          });
-        }
         return true;
       }
 
@@ -368,7 +384,7 @@ export function MoviesScreen() {
     });
 
     return () => subscription.remove();
-  }, [closeDetail, closePlayback, closeSearch, detailOpen, guide.visible, playbackActive, playbackClosing, router, searchOpen]);
+  }, [closeDetail, closePlayback, closeSearch, detailOpen, guide.visible, launchingPlayback, playbackActive, playbackClosing, router, searchOpen]);
 
   useEffect(() => {
     if (!didJustClose) {
@@ -430,17 +446,18 @@ export function MoviesScreen() {
     });
   }, [activeProviderId, selectedCategoryId, selectedMovie?.id]);
 
-  const startPlayback = useCallback(() => {
-    const movie = selectedMovieRef.current;
+  const startPlayback = useCallback(async () => {
+    const requestedMovie = selectedMovieRef.current;
+
     logMoviesPlayback('play-requested', {
       hasBundle: Boolean(bundle),
-      movieId: movie?.id ?? null,
+      movieId: requestedMovie?.id ?? null,
       playbackActive,
       playbackClosing,
       inFlight: playbackLaunchInFlightRef.current,
     });
 
-    if (!bundle || !movie) {
+    if (!bundle || !requestedMovie) {
       logMoviesPlayback('play-blocked', { reason: 'missing-movie-or-bundle' });
       return;
     }
@@ -456,65 +473,123 @@ export function MoviesScreen() {
       return;
     }
 
-    const streamUrl = buildMoviePlaybackUrl(
-      bundle,
-      movie.id,
-      movie.containerExtension ?? 'mp4',
-    );
-    if (!streamUrl) {
-      showNotification({
-        id: PLAYBACK_NOTIFICATION_ID,
-        type: 'error',
-        title: 'Playback unavailable',
-        message: 'This movie stream URL could not be built.',
-        duration: PLAYBACK_NOTIFICATION_DURATION_MS,
-        position: 'bottom-right',
-        scope: 'movies',
-      });
-      return;
-    }
-
-    lastPlaybackLaunchAtRef.current = now;
     playbackLaunchInFlightRef.current = true;
-    playFocusGuardUntilRef.current = Date.now() + 2000;
     setLaunchingPlayback(true);
-    setDetailSuppressedForPlayback(true);
-    dismissNotification(PLAYBACK_NOTIFICATION_ID);
-    logMoviesPlayback('launch-start', { movieId: movie.id });
 
-    void launchPlayback(
-      {
-        id: movie.id,
-        mediaType: 'movie',
-        title: movie.title,
-        streamUrl,
-        artworkUrl: movie.posterUrl,
-        isLive: false,
-        providerId: activeProviderId,
-      },
-      {
-        launchSource: 'play',
-        contentFit: 'cover',
-      },
-    )
-      .catch(() => {
-        logMoviesPlayback('launch-failed', { movieId: movie.id });
-        setDetailSuppressedForPlayback(false);
+    try {
+      const pendingDetailPromise = pendingDetailPromiseRef.current;
+
+      if (pendingDetailPromise) {
+        logMoviesPlayback('detail-wait-start', {
+          movieId: requestedMovie.id,
+        });
+
+        let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+        await Promise.race([
+          pendingDetailPromise,
+          new Promise<void>((resolve) => {
+            timeoutHandle = setTimeout(resolve, 4000);
+          }),
+        ]);
+
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
+
+        logMoviesPlayback('detail-wait-finished', {
+          movieId: requestedMovie.id,
+        });
+      }
+
+      const currentMovie = selectedMovieRef.current;
+
+      if (!currentMovie || currentMovie.id !== requestedMovie.id) {
+        logMoviesPlayback('play-blocked', {
+          reason: 'movie-selection-changed',
+        });
+        return;
+      }
+
+      const latestMovieDetail = movieDetailRef.current;
+      const matchingDetail =
+        latestMovieDetail?.id === currentMovie.id
+          ? latestMovieDetail
+          : null;
+
+      const streamUrl = buildMoviePlaybackUrlResolved(
+        bundle,
+        currentMovie.id,
+        matchingDetail?.containerExtension,
+        currentMovie.containerExtension,
+      );
+
+      if (!streamUrl) {
         showNotification({
           id: PLAYBACK_NOTIFICATION_ID,
           type: 'error',
           title: 'Playback unavailable',
-          message: 'This movie could not start playing right now.',
+          message: 'This movie stream URL could not be built.',
           duration: PLAYBACK_NOTIFICATION_DURATION_MS,
           position: 'bottom-right',
           scope: 'movies',
         });
-      })
-      .finally(() => {
-        playbackLaunchInFlightRef.current = false;
-        setLaunchingPlayback(false);
+        return;
+      }
+
+      lastPlaybackLaunchAtRef.current = Date.now();
+      playFocusGuardUntilRef.current = Date.now() + 2000;
+      setDetailSuppressedForPlayback(true);
+      dismissNotification(PLAYBACK_NOTIFICATION_ID);
+
+      logMoviesPlayback('launch-start', {
+        movieId: currentMovie.id,
       });
-  }, [activeProviderId, bundle, dismissNotification, launchPlayback, playbackActive, playbackClosing, showNotification]);
+
+      await launchPlayback(
+        {
+          id: currentMovie.id,
+          mediaType: 'movie',
+          title: currentMovie.title,
+          streamUrl,
+          artworkUrl: currentMovie.posterUrl,
+          isLive: false,
+          providerId: activeProviderId,
+        },
+        {
+          launchSource: 'play',
+          contentFit: 'cover',
+        },
+      );
+    } catch {
+      logMoviesPlayback('launch-failed', {
+        movieId: requestedMovie.id,
+      });
+
+      setDetailSuppressedForPlayback(false);
+
+      showNotification({
+        id: PLAYBACK_NOTIFICATION_ID,
+        type: 'error',
+        title: 'Playback unavailable',
+        message: 'This movie could not start playing right now.',
+        duration: PLAYBACK_NOTIFICATION_DURATION_MS,
+        position: 'bottom-right',
+        scope: 'movies',
+      });
+    } finally {
+      playbackLaunchInFlightRef.current = false;
+      setLaunchingPlayback(false);
+    }
+  }, [
+    activeProviderId,
+    bundle,
+    dismissNotification,
+    launchPlayback,
+    playbackActive,
+    playbackClosing,
+    showNotification,
+  ]);
 
   const handleSearchSelect = useCallback(
     (result: SearchResult) => {
@@ -575,12 +650,63 @@ export function MoviesScreen() {
   const handleSelectCategory = useCallback(
     (categoryId: string) => {
       moviesRetryAttemptedRef.current = false;
+      categoryFocusPendingRef.current = categoryId;
+      setRestoringBrowseFocus(true);
       selectCategory(categoryId);
     },
     [selectCategory],
   );
 
+
   useEffect(() => {
+    const pendingCategoryId = categoryFocusPendingRef.current;
+    if (!pendingCategoryId || pendingCategoryId !== selectedCategoryId) {
+      return;
+    }
+
+    if (categoryLoading || loadStatus === 'loading') {
+      return;
+    }
+
+    const targetId = visibleMovies[0]?.id ?? null;
+    if (!targetId) {
+      categoryFocusPendingRef.current = null;
+      setRestoringBrowseFocus(false);
+      return;
+    }
+
+    let cancelled = false;
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (cancelled || categoryFocusPendingRef.current !== selectedCategoryId) {
+        return;
+      }
+
+      requestTvFocus({
+        screen: 'movies',
+        source: 'MoviesScreen',
+        region: 'poster-grid',
+        itemId: targetId,
+        reason: 'focus-first-movies-after-category',
+        isActive: () =>
+          !cancelled &&
+          categoryFocusPendingRef.current === selectedCategoryId,
+        getTarget: () => posterRefs.current.get(targetId),
+        onSettled: () => {
+          if (cancelled) {
+            return;
+          }
+          categoryFocusPendingRef.current = null;
+          setRestoringBrowseFocus(false);
+        },
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      task.cancel();
+    };
+  }, [categoryLoading || loadStatus === 'loading', selectedCategoryId, visibleMovies]);
+useEffect(() => {
     if (loadStatus === 'ready') {
       moviesRetryAttemptedRef.current = false;
     }
@@ -684,13 +810,14 @@ export function MoviesScreen() {
 
   return (
     <View style={styles.root}>
-      {!playbackUiActive ? (
-        <>
+      <>
       <View
-        style={styles.browseLayer}
-        pointerEvents={detailOpen || searchBlocksBrowse ? 'none' : 'auto'}
-        importantForAccessibility={detailOpen || searchBlocksBrowse ? 'no-hide-descendants' : 'auto'}
-        accessibilityElementsHidden={detailOpen || searchBlocksBrowse}>
+        style={[styles.browseLayer, playbackUiActive && styles.browseLayerHidden]}
+        pointerEvents={detailOpen || searchBlocksBrowse || playbackUiActive ? 'none' : 'auto'}
+        importantForAccessibility={
+          detailOpen || searchBlocksBrowse || playbackUiActive ? 'no-hide-descendants' : 'auto'
+        }
+        accessibilityElementsHidden={detailOpen || searchBlocksBrowse || playbackUiActive}>
       <NovaTvShell
         activeId="movies"
         providerLabel={selectedProviderLabel}
@@ -747,6 +874,10 @@ export function MoviesScreen() {
                 <View style={styles.initialLoadingPanel}>
                   <NovaSpaceLoader label="Loading movie categories…" />
                 </View>
+              ) : (categoryLoading || loadStatus === 'loading') && visibleMovies.length === 0 ? (
+                <View style={styles.initialLoadingPanel}>
+                  <NovaSpaceLoader label="Loading movies…" />
+                </View>
               ) : (
               <MoviePosterGrid
                 movies={visibleMovies}
@@ -755,7 +886,7 @@ export function MoviesScreen() {
                 columns={posterColumns}
                 hasMore={hasMore}
                 loading={loading}
-                categoryLoading={categoryLoading}
+                categoryLoading={categoryLoading || loadStatus === 'loading'}
                 emptyNotice={gridEmptyNotice}
                 selectedMovieId={selectedMovie?.id ?? null}
                 postersFocusable={!detailOpen && !playbackUiActive && !searchBlocksBrowse}
@@ -817,7 +948,6 @@ export function MoviesScreen() {
         }
       />
         </>
-      ) : null}
 
       <SearchOverlay
         visible={searchOpen && !playbackUiActive}
@@ -852,6 +982,10 @@ function createMoviesStyles(theme: NovaTheme) {
     },
     browseLayer: {
       flex: 1,
+    },
+    browseLayerHidden: {
+      display: 'none',
+      opacity: 0,
     },
     screen: {
       flex: 1,

@@ -3,13 +3,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { buildSearchHaystack } from '../../search/searchRanking.ts';
 import { normalizeSearchQuery } from '../../search/searchQuery.ts';
 import type { MovieSummary } from '../movieTypes.ts';
-import { normalizeMediaTitle } from '../../series/metadata/titleNormalization.ts';
 import {
   buildCatalogCompleteness,
   MAX_CATALOG_INDEX_ITEMS,
   type CatalogCompletenessMetadata,
 } from '../../providers/catalogCompleteness.ts';
-import { inferGenreTags, parseAddedTimestamp, parseRatingNumber, parseYearFromTitle } from './movieMetadata.ts';
+import { parseRatingNumber } from './movieMetadata.ts';
 
 export type MovieCatalogEntry = {
   id: string;
@@ -29,14 +28,19 @@ export type MovieCatalogEntry = {
   containerExtension?: string;
   posterStyleKey: string;
   genreTags: string[];
+  providerSortOrder?: number;
+  /** Derived once per unique id; undefined until ranked. */
+  regionRank?: number;
 };
 
 export const MAX_MOVIE_CATALOG_INDEX_ENTRIES = MAX_CATALOG_INDEX_ITEMS;
 
 function toEntry(movie: MovieSummary, added = 0): MovieCatalogEntry {
-  const title = normalizeMediaTitle(movie.title) || movie.title;
-  const year = movie.year ?? parseYearFromTitle(title);
-  const genreTags = inferGenreTags(title, movie.genres);
+  // Keep ingestion light: trust summary fields from the provider mapper.
+  // Heavy regional ranking and genre inference are not done here.
+  const title = movie.title;
+  const year = movie.year;
+  const genreTags = movie.genres?.length ? movie.genres : ['Movies'];
   const normalizedTitle = normalizeSearchQuery(title);
   const searchHaystack = buildSearchHaystack([title, genreTags.join(' '), year, movie.rating]);
   return {
@@ -47,7 +51,7 @@ function toEntry(movie: MovieSummary, added = 0): MovieCatalogEntry {
     countryCode: movie.countryCode,
     categoryId: movie.categoryId,
     rating: parseRatingNumber(movie.rating),
-    added: added || parseAddedTimestamp(typeof movie.addedAt === 'number' ? String(movie.addedAt) : undefined),
+    added: added || (typeof movie.addedAt === 'number' ? movie.addedAt : 0),
     releaseDate: movie.releaseDate,
     popularity: movie.popularity,
     year,
@@ -55,6 +59,8 @@ function toEntry(movie: MovieSummary, added = 0): MovieCatalogEntry {
     containerExtension: movie.containerExtension,
     posterStyleKey: movie.posterStyleKey,
     genreTags,
+    providerSortOrder: movie.providerSortOrder,
+    regionRank: movie.regionRank,
   };
 }
 
@@ -75,6 +81,8 @@ export function entryToSummary(entry: MovieCatalogEntry): MovieSummary {
     posterUrl: entry.posterUrl,
     containerExtension: entry.containerExtension,
     score: entry.rating > 0 ? entry.rating : undefined,
+    providerSortOrder: entry.providerSortOrder,
+    regionRank: entry.regionRank,
   };
 }
 
@@ -152,10 +160,30 @@ export class MovieCatalogIndex {
         this.indexTruncated = true;
         break;
       }
+      const existing = this.entries.get(movie.id);
       const added = typeof movie.addedAt === 'number' ? movie.addedAt : 0;
-      this.entries.set(movie.id, toEntry(movie, added));
+      const next = toEntry(movie, added);
+      // Preserve a previously computed regionRank when re-ingesting the same id.
+      if (existing && typeof existing.regionRank === 'number' && typeof next.regionRank !== 'number') {
+        next.regionRank = existing.regionRank;
+      }
+      this.entries.set(movie.id, next);
     }
     scheduleCatalogPersist(this.providerId, this);
+  }
+
+  setRegionRank(id: string, regionRank: number) {
+    const entry = this.entries.get(id);
+    if (!entry || typeof entry.regionRank === 'number') {
+      return false;
+    }
+    this.entries.set(id, { ...entry, regionRank });
+    return true;
+  }
+
+  hasRegionRank(id: string) {
+    const entry = this.entries.get(id);
+    return typeof entry?.regionRank === 'number';
   }
 
   ingestEntry(entry: MovieCatalogEntry) {

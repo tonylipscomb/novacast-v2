@@ -24,4 +24,25 @@ config.resolver.blockList = [
   /^[^\\/]+\.(?:png|jpe?g|gif|apk|xml|log|txt)$/,
 ];
 
+// Stage 2.9: Node unit tests import `nativeCatalogDecode.ts` (stub). Android
+// release builds must use the Expo-native implementation instead.
+const upstreamResolveRequest = config.resolver.resolveRequest;
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (
+    platform === 'android' &&
+    typeof moduleName === 'string' &&
+    /nativeCatalogDecode(?:\.ts)?$/.test(moduleName) &&
+    !moduleName.includes('nativeCatalogDecode.android') &&
+    !moduleName.includes('nativeCatalogDecodeTypes') &&
+    !moduleName.includes('nativeCatalogDecodeShared')
+  ) {
+    const redirected = moduleName.replace(/nativeCatalogDecode(?:\.ts)?$/, 'nativeCatalogDecode.android.ts');
+    return context.resolveRequest(context, redirected, platform);
+  }
+  if (typeof upstreamResolveRequest === 'function') {
+    return upstreamResolveRequest(context, moduleName, platform);
+  }
+  return context.resolveRequest(context, moduleName, platform);
+};
+
 module.exports = config;

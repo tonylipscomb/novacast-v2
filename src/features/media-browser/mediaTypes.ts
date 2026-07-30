@@ -2,7 +2,7 @@ export type {
   MovieCategory as MediaCategory,
   MovieCategoryKind as MediaCategoryKind,
   MovieCategorySection as MediaCategorySection,
-  MovieSummary as MovieMediaItem,
+  MovieSummary as MovieMediaItem
 } from '../movies/movieTypes.ts';
 
 export { SMART_CATEGORY_PREFIX as MEDIA_SMART_CATEGORY_PREFIX } from '../movies/movieTypes.ts';
@@ -158,6 +158,8 @@ export type MediaDetail = {
   ratingSource?: string;
   contentRating?: string;
   trailerUrl?: string;
+  /** Provider-reported container extension for VOD streams (e.g. mp4, mkv, ts). */
+  containerExtension?: string;
   seasons: MediaDetailSeason[];
   episodes: MediaDetailEpisode[];
 };

@@ -59,6 +59,9 @@ function retryDelay(attempt: number) {
 
 export async function enqueueAnalyticsEvent(eventName: AnalyticsEventName, input: {
   route?: string;
+  providerId?: string;
+  contentId?: string;
+  contentType?: string;
   outcome?: string;
   durationMs?: number;
   countValue?: number;
@@ -74,6 +77,9 @@ export async function enqueueAnalyticsEvent(eventName: AnalyticsEventName, input
         eventName,
         occurredAt: new Date().toISOString(),
         route: input.route ?? currentRoute ?? undefined,
+        providerId: input.providerId,
+        contentId: input.contentId,
+        contentType: input.contentType,
         outcome: input.outcome,
         durationMs: input.durationMs,
         countValue: input.countValue,

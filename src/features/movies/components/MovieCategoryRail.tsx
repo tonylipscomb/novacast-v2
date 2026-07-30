@@ -12,6 +12,7 @@ import type { NovaTheme } from '@/theme/tokens';
 import type { ProviderCategoryContentType } from '@/features/providers/categoryNormalization';
 
 import type { MovieCategory } from '../movieTypes';
+import { formatMovieCategoryCount } from '../movieCategoryCountPolicy';
 
 const PROVIDER_SECTION_ID = 'section:provider';
 const DISCOVER_SECTION_ID = 'section:discover';
@@ -23,7 +24,7 @@ type MovieCategoryRailProps = {
   discoverStatusMessage?: string | null;
   contentType?: ProviderCategoryContentType;
   onSelectCategory: (categoryId: string) => void;
-  onPrefetchCategoryCount?: (categoryId: string) => void;
+  onPrefetchCategoryCount?: (categoryId: string, kind?: MovieCategory['kind']) => void;
   registerItemRef?: (categoryId: string, instance: ElementRef<typeof Pressable> | null) => void;
   nextFocusRightHandle?: number;
 };
@@ -67,9 +68,9 @@ export function MovieCategoryRail({
         contentContainerStyle={styles.list}
         style={styles.listContainer}
         removeClippedSubviews={false}
-        initialNumToRender={Math.min(categories.length, 16)}
-        maxToRenderPerBatch={8}
-        windowSize={5}
+        initialNumToRender={Math.min(categories.length, 10)}
+        maxToRenderPerBatch={6}
+        windowSize={3}
         renderItem={({ item }) => {
           if (item.kind === 'section') {
             if (item.id === PROVIDER_SECTION_ID) {
@@ -114,9 +115,7 @@ export function MovieCategoryRail({
               onFocus={() => {
                 preferredFocusConsumedRef.current = true;
                 setFocusedCategoryId(item.id);
-                if (item.kind !== 'smart' && item.kind !== 'section') {
-                  onPrefetchCategoryCount?.(item.id);
-                }
+                onPrefetchCategoryCount?.(item.id, item.kind);
               }}
               onBlur={() => setFocusedCategoryId(null)}
               onPress={() => onSelectCategory(item.id)}
@@ -149,7 +148,7 @@ export function MovieCategoryRail({
                   selected && styles.countSelected,
                   focused && styles.countFocused,
                 ]}>
-                {item.countKnown === false ? '-' : item.count.toLocaleString()}
+                {formatMovieCategoryCount(item.count, item.countKnown)}
               </Text>
             </Pressable>
           );

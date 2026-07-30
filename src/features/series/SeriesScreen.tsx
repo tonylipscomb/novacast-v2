@@ -64,6 +64,7 @@ export function SeriesScreen() {
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.series.key);
   const posterRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof Pressable>>>(new Map());
+  const categoryFocusPendingRef = useRef<string | null>(null);
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
   const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
@@ -402,12 +403,63 @@ export function SeriesScreen() {
   const handleSelectCategory = useCallback(
     (categoryId: string) => {
       seriesRetryAttemptedRef.current = false;
+      categoryFocusPendingRef.current = categoryId;
+      setRestoringBrowseFocus(true);
       selectCategory(categoryId);
     },
     [selectCategory],
   );
 
+
   useEffect(() => {
+    const pendingCategoryId = categoryFocusPendingRef.current;
+    if (!pendingCategoryId || pendingCategoryId !== selectedCategoryId) {
+      return;
+    }
+
+    if (categoryLoading || loadStatus === 'loading') {
+      return;
+    }
+
+    const targetId = visibleItems[0]?.id ?? null;
+    if (!targetId) {
+      categoryFocusPendingRef.current = null;
+      setRestoringBrowseFocus(false);
+      return;
+    }
+
+    let cancelled = false;
+    const task = InteractionManager.runAfterInteractions(() => {
+      if (cancelled || categoryFocusPendingRef.current !== selectedCategoryId) {
+        return;
+      }
+
+      requestTvFocus({
+        screen: 'series',
+        source: 'SeriesScreen',
+        region: 'poster-grid',
+        itemId: targetId,
+        reason: 'focus-first-series-after-category',
+        isActive: () =>
+          !cancelled &&
+          categoryFocusPendingRef.current === selectedCategoryId,
+        getTarget: () => posterRefs.current.get(targetId),
+        onSettled: () => {
+          if (cancelled) {
+            return;
+          }
+          categoryFocusPendingRef.current = null;
+          setRestoringBrowseFocus(false);
+        },
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      task.cancel();
+    };
+  }, [categoryLoading || loadStatus === 'loading', selectedCategoryId, visibleItems]);
+useEffect(() => {
     if (loadStatus === 'ready') {
       seriesRetryAttemptedRef.current = false;
     }

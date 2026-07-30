@@ -27,7 +27,7 @@ type MoviePosterGridProps = {
   onFocusMovie: (movie: MovieSummary) => void;
   onSelectMovie: (movie: MovieSummary) => void;
   registerPosterRef?: (movieId: string, instance: ElementRef<typeof View> | null) => void;
-  loadMore: () => void;
+  loadMore: () => void | Promise<void>;
   sortOption: ContentSortOption;
   onSortChange: (value: ContentSortOption) => void;
   showRatingSort?: boolean;
@@ -104,8 +104,10 @@ export function MoviePosterGrid({
     }
 
     loadMoreInFlightRef.current = true;
-    Promise.resolve()
-      .then(loadMore)
+    Promise.resolve(loadMore())
+      .catch(() => {
+        // The screen model owns user-facing pagination errors.
+      })
       .finally(() => {
         loadMoreInFlightRef.current = false;
       });
@@ -184,19 +186,10 @@ export function MoviePosterGrid({
 
   const keyExtractor = useCallback((item: MovieSummary) => item.id, []);
 
-  const loadingLabel = `Loading ${selectedCategoryLabel}…`;
+  const loadingLabel = `Loading ${selectedCategoryLabel}â€¦`;
   const showInitialLoader = categoryLoading && movies.length === 0 && !emptyNotice;
-  const showLoadingOverlay = categoryLoading && movies.length > 0;
-  const showFooterLoader = loading && !categoryLoading && movies.length > 0;
-  const listFooter = useMemo(
-    () =>
-      showFooterLoader ? (
-        <View style={styles.footerLoader}>
-          <NovaSpaceLoader label="Loading more…" variant="inline" />
-        </View>
-      ) : null,
-    [showFooterLoader, styles.footerLoader],
-  );
+  const showCategoryLoadingOverlay = categoryLoading && movies.length > 0;
+  const showPaginationOverlay = loading && !categoryLoading && movies.length > 0;
 
   return (
     <View style={styles.panel}>
@@ -244,16 +237,20 @@ export function MoviePosterGrid({
             windowSize={TV_POSTER_LIST_TUNING.windowSize}
             maxToRenderPerBatch={TV_POSTER_LIST_TUNING.maxToRenderPerBatch}
             updateCellsBatchingPeriod={TV_POSTER_LIST_TUNING.updateCellsBatchingPeriod}
-            initialNumToRender={columns * 3}
+            initialNumToRender={columns * TV_POSTER_LIST_TUNING.initialRows}
             getItemLayout={getItemLayout}
             onEndReachedThreshold={TV_POSTER_LIST_TUNING.onEndReachedThreshold}
             onEndReached={requestMore}
-            ListFooterComponent={listFooter}
             renderItem={renderItem}
           />
-          {showLoadingOverlay ? (
+          {showCategoryLoadingOverlay ? (
             <View style={styles.loadingOverlay} pointerEvents="none">
               <NovaSpaceLoader label={loadingLabel} />
+            </View>
+          ) : null}
+          {showPaginationOverlay ? (
+            <View style={styles.paginationOverlay} pointerEvents="none">
+              <NovaSpaceLoader label="Loading more movies..." />
             </View>
           ) : null}
         </View>
@@ -336,12 +333,19 @@ function createStyles(theme: NovaTheme) {
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor:
-        theme.colors.background === '#F3EEE4' ? 'rgba(26,21,16,0.45)' : 'rgba(0,0,0,0.35)',
+        String(theme.colors.background) === '#F3EEE4' ? 'rgba(26,21,16,0.45)' : 'rgba(0,0,0,0.35)',
     },
-    footerLoader: {
+    paginationOverlay: {
+      position: 'absolute',
+      left: '25%',
+      right: '25%',
+      bottom: 28,
+      minHeight: 96,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingVertical: 16,
+      borderRadius: 12,
+      backgroundColor:
+        String(theme.colors.background) === '#F3EEE4' ? 'rgba(243,238,228,0.92)' : 'rgba(5,9,15,0.88)',
     },
   });
 }

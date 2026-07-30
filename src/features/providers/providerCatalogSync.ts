@@ -20,6 +20,7 @@ import {
   shouldYieldCatalogSync,
   waitForCatalogSyncIdleSlot,
   waitUntilPlaybackIdleForCatalogSync,
+  CATALOG_SYNC_IDLE_TIMEOUT_MS,
 } from './catalogSyncPlayback.ts';
 import {
   getCategoryCountIndexSync,
@@ -47,24 +48,74 @@ import {
 import { createProviderSeriesDataSource } from '../series/data/ProviderSeriesDataSource.ts';
 import { getMoviesSettings } from '../movies/smart/moviesSettingsStore.ts';
 import {
+  markCatalogAuditCategory,
+  markCatalogAuditItems,
+  markCatalogAuditNotifyPhase,
+  markCatalogAuditProgressWrite,
+  markCatalogAuditSync,
+  beginVodCategoryPhaseProfile,
+  finishVodCategoryPhaseProfile,
+  addVodCategoryPhaseMs,
+} from '../diagnostics/novaCastCatalogAudit.ts';
+import { rankUniqueItemsInBatches, VOD_REGION_RANK_BATCH_SIZE } from './vodRegionRank.ts';
+import { SMART_CATEGORY_KEY_NEW_RELEASES, curateSeriesNewReleases, curateMovieNewReleases } from '../media-browser/newReleasesCuration.ts';
+import {
   buildSmartSeriesCategoryContext,
   getActiveSmartSeriesCategoryDefinitions,
   querySmartSeriesCategoryOnIndex,
 } from '../series/smart/smartSeriesCategoryDefinitions.ts';
 import { loadAllMoviesForCatalogIndex, loadAllSeriesForCatalogIndex } from './catalogCategoryLoader.ts';
 import { logSmartCategoryCatalogAudit } from './catalogSyncAudit.ts';
+import { earlyBootMark, earlyBootTimed } from '../diagnostics/earlyBootAudit.ts';
+import {
+  buildCatalogSyncKey,
+  cancelCatalogSync,
+  clearCatalogSyncCoordinatorForTests,
+  createCatalogProgressThrottle,
+  getCatalogSyncCancelToken,
+  invalidateCatalogSyncForProvider,
+  processTimeBudgeted,
+  scheduleCatalogSync,
+  type CatalogProgressThrottle,
+} from '../catalog/index.ts';
+import {
+  awaitSeriesCategoryGateForProvider,
+  finishCatalogSqliteMediaSync,
+  mapMovieSummaryToCatalogItem,
+  mapNativeRecordToCatalogItem,
+  mapSeriesSummaryToCatalogItem,
+  startCatalogSqliteMediaSync,
+  writeCatalogItemsFromSourceBudgeted,
+  writeCategoriesFromSourceBudgeted,
+  type CatalogSqliteMediaSyncHandle,
+} from '../catalog/catalogSqliteSyncWriter.ts';
+import {
+  isCatalogSqliteWriterOnlyDiagnosticEnabled,
+  isNativeCatalogDecodeAvailable,
+  nativeRecordToMovieSummary,
+  nativeRecordToSeriesSummary,
+  streamXtreamCategoryDecode,
+} from '../catalog/nativeCatalogDecode.ts';
+import type { MovieSummary } from '../movies/movieTypes.ts';
+import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 
 const PERF_LOG_PREFIX = '[NovaCast CatalogSync]';
 const CATALOG_SYNC_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const CATALOG_SYNC_CHECKPOINT_VERSION = 2;
+const CATALOG_SYNC_CHECKPOINT_VERSION = 10;
 const CATALOG_SYNC_CHECKPOINT_PREFIX = '@novacast/catalog-sync-checkpoint/';
 const syncInFlight = new Map<string, Promise<void>>();
+
+/** Shell-settle delays before automatic catalog work (ms). Zeroed in unit tests. */
+let movieCatalogScheduleDelayMs = 2500;
+let seriesCatalogScheduleDelayMs = 4000;
 const pendingSyncInputs = new Map<string, ProviderCatalogSyncInput>();
 const syncListeners = new Map<string, Set<(phase: CatalogSyncPhase) => void>>();
+const catalogSyncSetupCache = new Map<string, Promise<CatalogSyncSetup>>();
 
-let heavyCatalogChain: Promise<void> = Promise.resolve();
 let syncGeneration = 0;
 let lastReleasedBatchLabel: string | null = null;
+let checkpointWriteChain: Promise<void> = Promise.resolve();
+const mediaJobCompletion = new Map<string, { movie: boolean; series: boolean }>();
 
 export type CatalogSyncPhase = 'idle' | 'syncing' | 'smart-building' | 'ready' | 'error';
 
@@ -87,7 +138,9 @@ declare const __DEV__: boolean | undefined;
 function isCatalogSyncDebugEnabled() {
   return (
     (typeof __DEV__ !== 'undefined' && __DEV__) ||
-    (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_DEBUG === 'true')
+    (typeof process !== 'undefined' &&
+      (process.env?.EXPO_PUBLIC_NOVACAST_DEBUG === 'true' ||
+        process.env?.EXPO_PUBLIC_NOVACAST_CATALOG_AUDIT === '1'))
   );
 }
 
@@ -95,11 +148,38 @@ function isSyncRunStale(runToken: number) {
   return runToken !== syncGeneration;
 }
 
+function isCatalogJobCancelled(runToken: number, coordinatorKey: string) {
+  return isSyncRunStale(runToken) || getCatalogSyncCancelToken(coordinatorKey).isStale();
+}
+
+function catalogSyncSetupKey(providerId: string, runToken: number) {
+  return `${providerId}::${runToken}`;
+}
+
+async function withCheckpointWriteMutex<T>(fn: () => Promise<T>) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const previous = checkpointWriteChain;
+  checkpointWriteChain = previous.then(() => gate);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
 function releaseBatch(label: string, batch: unknown[] | null | undefined) {
   lastReleasedBatchLabel = label;
   if (Array.isArray(batch)) {
     batch.length = 0;
   }
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 function logSync(providerId: string, message: string, payload: Record<string, unknown> = {}) {
@@ -191,6 +271,7 @@ async function clearLegacyCatalogBlobs(providerId: string) {
 }
 
 function notifyPhase(providerId: string, phase: CatalogSyncPhase) {
+  markCatalogAuditNotifyPhase(phase);
   syncListeners.get(providerId)?.forEach((listener) => listener(phase));
 }
 
@@ -206,18 +287,240 @@ export function subscribeCatalogSyncPhase(providerId: string, listener: (phase: 
   };
 }
 
-async function withHeavyCatalogMutex<T>(fn: () => Promise<T>) {
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
+type CatalogSyncSetup = {
+  input: ProviderCatalogSyncInput;
+  runToken: number;
+  smartCategoriesEnabled: boolean;
+  movieCategories: Awaited<ReturnType<MovieDataSource['getCategories']>>;
+  seriesCategories: Awaited<ReturnType<ProviderSeriesRepository['getCategories']>>;
+  liveCategories: Awaited<ReturnType<ProviderLiveRepository['getCategories']>>;
+  liveChannelCount: number;
+  movieCategoryIds: string[];
+  seriesCategoryIds: string[];
+  movieHintCounts: Record<string, number>;
+  seriesHintCounts: Record<string, number>;
+  movieCountMap: Record<string, number>;
+  seriesCountMap: Record<string, number>;
+  checkpoint: CatalogSyncCheckpoint | null;
+  checkpointMatches: boolean;
+  resumeMovieIndex: number;
+  resumeSeriesIndex: number;
+  progressThrottle: CatalogProgressThrottle;
+};
+
+async function buildCatalogSyncSetup(input: ProviderCatalogSyncInput, runToken: number): Promise<CatalogSyncSetup> {
+  const { providerId, movies, series, live } = input;
+
+  await earlyBootTimed('clearLegacyCatalogBlobs', () => clearLegacyCatalogBlobs(providerId));
+
+  const settings = await earlyBootTimed('getMoviesSettings', () => getMoviesSettings());
+  const smartCategoriesEnabled = !settings.hideSmartCategories;
+
+  const movieCategories = await earlyBootTimed(
+    'movies.getCategories',
+    async () => {
+      const moviesWithSyncOpt = movies as MovieDataSource & {
+        getCategories: (options?: { forCatalogSync?: boolean }) => Promise<
+          Awaited<ReturnType<MovieDataSource['getCategories']>>
+        >;
+      };
+      return moviesWithSyncOpt.getCategories({ forCatalogSync: true });
+    },
+    { mediaType: 'movie' },
+  );
+  // Yield a macrotask between large category list parses so Home focus can run.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const seriesCategories = await earlyBootTimed(
+    'series.getCategories',
+    async () => {
+      const seriesWithSyncOpt = series as ProviderSeriesRepository & {
+        getCategories: (
+          signal?: AbortSignal,
+          options?: { forCatalogSync?: boolean },
+        ) => Promise<Awaited<ReturnType<ProviderSeriesRepository['getCategories']>>>;
+      };
+      return seriesWithSyncOpt.getCategories(undefined, { forCatalogSync: true });
+    },
+    { mediaType: 'series' },
+  );
+  // Live category list + US-first sort is not required to start Movies/Series sync.
+  // Home/Live screens fetch their own live categories. Defer sync-time live refresh.
+  const liveCategories: Awaited<ReturnType<ProviderLiveRepository['getCategories']>> = [];
+  let liveChannelCount = resolveLiveChannelCount(providerId);
+  earlyBootMark('catalog_setup_live_categories_deferred', {
+    liveChannelCount,
+    reason: 'avoid-early-boot-json-sort-stall',
   });
-  const previous = heavyCatalogChain;
-  heavyCatalogChain = previous.then(() => gate);
-  await previous;
-  try {
-    return await fn();
-  } finally {
-    release();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  const movieHintCounts = sumProviderCategoryHints(movieCategories);
+  const seriesHintCounts = sumProviderCategoryHints(seriesCategories);
+  const movieCategoryIds = movieCategories.map((category) => category.id);
+  const seriesCategoryIds = seriesCategories.map((category) => category.id);
+  const checkpoint = await readCatalogSyncCheckpoint(providerId);
+  const checkpointMatches = Boolean(
+    checkpoint &&
+      checkpoint.smartCategoriesEnabled === smartCategoriesEnabled &&
+      categoryIdsMatch(checkpoint.movieCategoryIds, movieCategoryIds) &&
+      categoryIdsMatch(checkpoint.seriesCategoryIds, seriesCategoryIds),
+  );
+
+  const canResumeCheckpoint = Boolean(checkpointMatches && checkpoint);
+  const resumeMovieIndex = canResumeCheckpoint
+    ? checkpoint?.stage === 'movies'
+      ? checkpoint.movieIndex
+      : checkpoint?.stage === 'series' || checkpoint?.stage === 'smart' || checkpoint?.stage === 'complete'
+        ? movieCategories.length
+        : 0
+    : 0;
+  const resumeSeriesIndex =
+    canResumeCheckpoint && (checkpoint?.stage === 'series' || checkpoint?.stage === 'smart')
+      ? checkpoint.seriesIndex
+      : checkpoint?.stage === 'complete'
+        ? seriesCategories.length
+        : 0;
+
+  const movieCountMap: Record<string, number> = canResumeCheckpoint ? { ...checkpoint?.movieCountMap } : {};
+  const seriesCountMap: Record<string, number> = canResumeCheckpoint ? { ...checkpoint?.seriesCountMap } : {};
+
+  const progressThrottle = createCatalogProgressThrottle({
+    intervalMs: 900,
+    write: async (snapshot) => {
+      markCatalogAuditProgressWrite('library_summary');
+      await writePartialCountIndexes(
+        providerId,
+        (snapshot.movieCountMap as Record<string, number>) ?? {},
+        (snapshot.seriesCountMap as Record<string, number>) ?? {},
+      );
+
+      const movieCountMapSnapshot = (snapshot.movieCountMap as Record<string, number>) ?? {};
+      const seriesCountMapSnapshot = (snapshot.seriesCountMap as Record<string, number>) ?? {};
+      const movieTotal = sumCategoryCounts({
+        providerId,
+        mediaType: 'movie',
+        counts: movieCountMapSnapshot,
+        updatedAt: Date.now(),
+      });
+      const seriesTotal = sumCategoryCounts({
+        providerId,
+        mediaType: 'series',
+        counts: seriesCountMapSnapshot,
+        updatedAt: Date.now(),
+      });
+
+      const patch: Parameters<typeof writeProviderLibrarySummary>[1] = {
+        movieCategoryCount: Number(snapshot.movieCategoryCount ?? movieCategories.length),
+        seriesCategoryCount: Number(snapshot.seriesCategoryCount ?? seriesCategories.length),
+        lastProviderSyncAt: Date.now(),
+      };
+
+      if (movieTotal > 0 || Object.keys(movieCountMapSnapshot).length > 0) {
+        patch.movieCount = movieTotal;
+      }
+      if (seriesTotal > 0 || Object.keys(seriesCountMapSnapshot).length > 0) {
+        patch.seriesCount = seriesTotal;
+      }
+      const liveCount = Number(snapshot.liveChannelCount ?? 0);
+      if (liveCount > 0) {
+        patch.liveChannelCount = liveCount;
+      }
+
+      await writeProviderLibrarySummary(providerId, patch);
+    },
+  });
+
+  const setup: CatalogSyncSetup = {
+    input,
+    runToken,
+    smartCategoriesEnabled,
+    movieCategories,
+    seriesCategories,
+    liveCategories,
+    liveChannelCount,
+    movieCategoryIds,
+    seriesCategoryIds,
+    movieHintCounts,
+    seriesHintCounts,
+    movieCountMap,
+    seriesCountMap,
+    checkpoint,
+    checkpointMatches,
+    resumeMovieIndex,
+    resumeSeriesIndex,
+    progressThrottle,
+  };
+
+  publishCatalogProgress(setup);
+  return setup;
+}
+
+async function ensureCatalogSyncSetup(input: ProviderCatalogSyncInput, runToken: number) {
+  const key = catalogSyncSetupKey(input.providerId, runToken);
+  let existing = catalogSyncSetupCache.get(key);
+  if (!existing) {
+    existing = buildCatalogSyncSetup(input, runToken);
+    catalogSyncSetupCache.set(key, existing);
+  }
+  return existing;
+}
+
+function publishCatalogProgress(setup: CatalogSyncSetup) {
+  setup.progressThrottle.publish({
+    providerId: setup.input.providerId,
+    movieCountMap: setup.movieCountMap,
+    seriesCountMap: setup.seriesCountMap,
+    liveChannelCount: setup.liveChannelCount,
+    movieCategoryCount: setup.movieCategories.length,
+    seriesCategoryCount: setup.seriesCategories.length,
+  });
+}
+
+let lastCheckpointWriteAt = 0;
+const CATALOG_CHECKPOINT_MIN_INTERVAL_MS = 900;
+
+async function writeCatalogSyncCheckpointSafe(
+  setup: CatalogSyncSetup,
+  runToken: number,
+  stage: CatalogSyncCheckpoint['stage'],
+  movieIndexPosition: number,
+  seriesIndexPosition: number,
+  options?: { force?: boolean },
+) {
+  if (isSyncRunStale(runToken)) {
+    return;
+  }
+
+  const now = Date.now();
+  const force = options?.force || stage === 'complete' || stage === 'smart';
+  if (!force && now - lastCheckpointWriteAt < CATALOG_CHECKPOINT_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  lastCheckpointWriteAt = now;
+  await withCheckpointWriteMutex(async () => {
+    await writeCatalogSyncCheckpoint({
+      version: CATALOG_SYNC_CHECKPOINT_VERSION,
+      providerId: setup.input.providerId,
+      smartCategoriesEnabled: setup.smartCategoriesEnabled,
+      movieCategoryIds: setup.movieCategoryIds,
+      seriesCategoryIds: setup.seriesCategoryIds,
+      movieIndex: movieIndexPosition,
+      seriesIndex: seriesIndexPosition,
+      movieCountMap: setup.movieCountMap,
+      seriesCountMap: setup.seriesCountMap,
+      stage,
+      updatedAt: now,
+    });
+  });
+}
+
+function markMediaJobComplete(providerId: string, mediaType: 'movie' | 'series') {
+  const state = mediaJobCompletion.get(providerId) ?? { movie: false, series: false };
+  state[mediaType] = true;
+  mediaJobCompletion.set(providerId, state);
+  if (state.movie && state.series) {
+    notifyPhase(providerId, 'ready');
+    mediaJobCompletion.delete(providerId);
   }
 }
 
@@ -227,7 +530,12 @@ async function yieldForPlaybackIfNeeded(
   jobType: string,
   runToken: number,
 ): Promise<boolean> {
+  // Always give the JS event loop a chance to service Home focus/input.
+  // When playback is active we fully pause; otherwise take a short idle slot
+  // plus one macrotask so D-pad handlers can run between heavy category jobs.
   if (!shouldYieldCatalogSync()) {
+    await waitForCatalogSyncIdleSlot(CATALOG_SYNC_IDLE_TIMEOUT_MS);
+    await sleep(0);
     return !isSyncRunStale(runToken);
   }
 
@@ -278,7 +586,7 @@ function schedulePendingHeavySync(providerId: string, input: ProviderCatalogSync
     }
     pendingSyncInputs.delete(providerId);
     logSync(providerId, 'sync-resumed', { checkpoint: 'deferred-request' });
-    void startProviderCatalogSync(pending);
+    void scheduleProviderCatalogSync(pending);
   });
 }
 
@@ -331,32 +639,104 @@ async function buildMovieSmartCache(providerId: string, runToken: number) {
   const ctx = await buildMovieLibraryContext(providerId);
   const cacheEntries: Record<string, SmartCategoryCacheEntry> = {};
   const catalogCompleteness = index.getCompleteness();
+  const isCancelled = () => isSyncRunStale(runToken);
+
+  const snapshot = index.listAllEntries();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  logSync(providerId, 'movie-smart-snapshot', { snapshotSize: snapshot.length });
 
   for (const definition of getActiveSmartCategoryDefinitions()) {
     if (!(await yieldForPlaybackIfNeeded(providerId, `movie-smart:${definition.key}`, 'movies-smart', runToken))) {
       return;
     }
+    if (isCancelled()) {
+      return;
+    }
 
     let items: ReturnType<typeof querySmartCategoryOnIndex>['items'] | null = null;
+    const queryStarted = Date.now();
     try {
-      const result = querySmartCategoryOnIndex(index, definition, ctx, 0, 240);
-      items = result.items;
-      cacheEntries[definition.key] = {
-        categoryKey: definition.key,
-        title: definition.name,
-        count: result.totalCount,
-        itemIds: result.items.map((entry) => entry.id),
-      };
+      if (definition.key === SMART_CATEGORY_KEY_NEW_RELEASES) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const curated = curateMovieNewReleases(snapshot);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        items = curated.slice(0, 240);
+        cacheEntries[definition.key] = {
+          categoryKey: definition.key,
+          title: definition.name,
+          count: curated.length,
+          itemIds: items.map((entry) => entry.id),
+        };
+      } else if (definition.idOrder) {
+        const orderedIds = definition.idOrder(ctx);
+        const rank = new Map(orderedIds.map((id, order) => [id, order]));
+        const filtered: typeof snapshot = [];
+        await processTimeBudgeted(
+          snapshot,
+          (entry) => {
+            if (definition.predicate(entry, ctx) && rank.has(entry.id)) {
+              filtered.push(entry);
+            }
+          },
+          { isCancelled, minItems: 40, maxItems: 120, kind: 'generic', targetMs: 35 },
+        );
+        filtered.sort(
+          (left, right) =>
+            (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
+        );
+        const capped = definition.maxItems ? filtered.slice(0, definition.maxItems) : filtered;
+        items = capped.slice(0, 240);
+        cacheEntries[definition.key] = {
+          categoryKey: definition.key,
+          title: definition.name,
+          count: capped.length,
+          itemIds: items.map((entry) => entry.id),
+        };
+      } else {
+        const maxItems = definition.maxItems ?? 240;
+        const top: typeof snapshot = [];
+        await processTimeBudgeted(
+          snapshot,
+          (entry) => {
+            if (!definition.predicate(entry, ctx)) {
+              return;
+            }
+            top.push(entry);
+            if (top.length > maxItems * 4) {
+              top.sort(definition.sort);
+              top.length = maxItems;
+            }
+          },
+          { isCancelled, minItems: 40, maxItems: 80, kind: 'generic', targetMs: 30 },
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        top.sort(definition.sort);
+        const capped = top.slice(0, maxItems);
+        items = capped.slice(0, 240);
+        cacheEntries[definition.key] = {
+          categoryKey: definition.key,
+          title: definition.name,
+          count: capped.length,
+          itemIds: items.map((entry) => entry.id),
+        };
+      }
       logSmartCategoryCatalogAudit({
         providerId,
         mediaType: 'movie',
         categoryKey: definition.key,
-        candidateTotal: result.totalCount,
+        candidateTotal: cacheEntries[definition.key]?.count ?? 0,
         catalogCompleteness,
+      });
+      logSync(providerId, 'movie-smart-query', {
+        key: definition.key,
+        queryMs: Date.now() - queryStarted,
+        snapshotSize: snapshot.length,
+        count: cacheEntries[definition.key]?.count ?? 0,
       });
     } finally {
       releaseBatch(`movie-smart:${definition.key}`, items);
     }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
   await writeSmartCategoryCache({
@@ -388,32 +768,108 @@ async function buildSeriesSmartCache(providerId: string, runToken: number) {
   const ctx = await buildSeriesLibraryContext(providerId);
   const cacheEntries: Record<string, SmartCategoryCacheEntry> = {};
   const catalogCompleteness = index.getCompleteness();
+  const isCancelled = () => isSyncRunStale(runToken);
+
+  // Snapshot once, then time-budget each smart query — full sync forEach+predicate
+  // over ~40k entries per definition previously stalled JS for ~60s.
+  const snapshot = index.listAllEntries();
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  logSync(providerId, 'series-smart-snapshot', { snapshotSize: snapshot.length });
 
   for (const definition of getActiveSmartSeriesCategoryDefinitions()) {
     if (!(await yieldForPlaybackIfNeeded(providerId, `series-smart:${definition.key}`, 'series-smart', runToken))) {
       return;
     }
+    if (isCancelled()) {
+      return;
+    }
 
     let items: ReturnType<typeof querySmartSeriesCategoryOnIndex>['items'] | null = null;
+    const queryStarted = Date.now();
     try {
-      const result = querySmartSeriesCategoryOnIndex(index, definition, ctx, 0, 240);
-      items = result.items;
-      cacheEntries[definition.key] = {
-        categoryKey: definition.key,
-        title: definition.name,
-        count: result.totalCount,
-        itemIds: result.items.map((entry) => entry.id),
-      };
+      if (definition.key === SMART_CATEGORY_KEY_NEW_RELEASES) {
+        // Use the already-budgeted snapshot; never re-walk the live index synchronously.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const curated = curateSeriesNewReleases(snapshot);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        items = curated.slice(0, 240);
+        cacheEntries[definition.key] = {
+          categoryKey: definition.key,
+          title: definition.name,
+          count: curated.length,
+          itemIds: items.map((entry) => entry.id),
+        };
+      } else if (definition.idOrder) {
+        const orderedIds = definition.idOrder(ctx);
+        const rank = new Map(orderedIds.map((id, order) => [id, order]));
+        const filtered: typeof snapshot = [];
+        await processTimeBudgeted(
+          snapshot,
+          (entry) => {
+            if (definition.predicate(entry, ctx) && rank.has(entry.id)) {
+              filtered.push(entry);
+            }
+          },
+          { isCancelled, minItems: 40, maxItems: 120, kind: 'generic', targetMs: 35 },
+        );
+        filtered.sort(
+          (left, right) =>
+            (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
+        );
+        const capped = definition.maxItems ? filtered.slice(0, definition.maxItems) : filtered;
+        items = capped.slice(0, 240);
+        cacheEntries[definition.key] = {
+          categoryKey: definition.key,
+          title: definition.name,
+          count: capped.length,
+          itemIds: items.map((entry) => entry.id),
+        };
+      } else {
+        const maxItems = definition.maxItems ?? 240;
+        // Bounded top-N during the scan — avoid sorting tens of thousands of rows on JS.
+        const top: typeof snapshot = [];
+        await processTimeBudgeted(
+          snapshot,
+          (entry) => {
+            if (!definition.predicate(entry, ctx)) {
+              return;
+            }
+            top.push(entry);
+            if (top.length > maxItems * 4) {
+              top.sort(definition.sort);
+              top.length = maxItems;
+            }
+          },
+          { isCancelled, minItems: 40, maxItems: 80, kind: 'generic', targetMs: 30 },
+        );
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        top.sort(definition.sort);
+        const capped = top.slice(0, maxItems);
+        items = capped.slice(0, 240);
+        cacheEntries[definition.key] = {
+          categoryKey: definition.key,
+          title: definition.name,
+          count: capped.length,
+          itemIds: items.map((entry) => entry.id),
+        };
+      }
       logSmartCategoryCatalogAudit({
         providerId,
         mediaType: 'series',
         categoryKey: definition.key,
-        candidateTotal: result.totalCount,
+        candidateTotal: cacheEntries[definition.key]?.count ?? 0,
         catalogCompleteness,
+      });
+      logSync(providerId, 'series-smart-query', {
+        key: definition.key,
+        queryMs: Date.now() - queryStarted,
+        snapshotSize: snapshot.length,
+        count: cacheEntries[definition.key]?.count ?? 0,
       });
     } finally {
       releaseBatch(`series-smart:${definition.key}`, items);
     }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
   await writeSmartCategoryCache({
@@ -554,6 +1010,7 @@ async function writeCatalogProgressSummary(
   }
 
   await writeProviderLibrarySummary(providerId, patch);
+  markCatalogAuditProgressWrite('library_summary');
 }
 
 function sumProviderCategoryHints(
@@ -575,353 +1032,684 @@ export async function refreshProviderLiveChannelCount(providerId: string, live: 
 
 export type ProviderCatalogSyncInput = {
   providerId: string;
+  providerType?: string;
+  displayName?: string;
   movies: MovieDataSource;
   series: ProviderSeriesRepository;
   live: ProviderLiveRepository;
 };
 
-export async function runProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: number) {
-  return withHeavyCatalogMutex(async () => {
-    const { providerId, movies, series, live } = input;
-    const started = Date.now();
+async function shouldSkipMovieSync(setup: CatalogSyncSetup, runToken: number) {
+  const { smartCategoriesEnabled, movieCategoryIds, seriesCategoryIds } = setup;
+  const providerId = setup.input.providerId;
+  const now = Date.now();
 
-    notifyPhase(providerId, 'syncing');
-    logSync(providerId, 'sync-started');
+  if (
+    !setup.checkpointMatches ||
+    setup.checkpoint?.stage !== 'complete' ||
+    !setup.checkpoint ||
+    now - setup.checkpoint.updatedAt > CATALOG_SYNC_CACHE_TTL_MS ||
+    !hasFreshCategoryCache(providerId, 'movie', movieCategoryIds, smartCategoriesEnabled, now) ||
+    !hasFreshCategoryCache(providerId, 'series', seriesCategoryIds, smartCategoriesEnabled, now)
+  ) {
+    return false;
+  }
 
-    await clearLegacyCatalogBlobs(providerId);
+  const movieIndexSize = smartCategoriesEnabled ? getMovieCatalogIndex(providerId).size : 1;
+  if (smartCategoriesEnabled && movieIndexSize <= 0) {
+    logSync(providerId, 'movie-sync-resumed-empty-index', { movieIndexSize });
+    return false;
+  }
 
-    const settings = await getMoviesSettings();
-    const smartCategoriesEnabled = !settings.hideSmartCategories;
-
-    const movieCategories = await movies.getCategories();
-    const seriesCategories = await series.getCategories();
-    const liveCategories = await live.getCategories().catch(() => []);
-    let liveChannelCount = resolveLiveChannelCount(providerId);
-
-    // Fast dump-based live total first so movie/series sync is not blocked by a
-    // per-category recount when the provider has more than 10k channels.
-    if (liveCategories.length && !isSyncRunStale(runToken)) {
-      try {
-        const approximate =
-          (await live.getApproximateTotalChannelCount?.()) ??
-          (await live.getTotalChannelCount?.()) ??
-          0;
-        if (approximate > 0) {
-          liveChannelCount = approximate;
-        }
-      } catch {
-        // Keep any persisted live total.
-      }
-    }
-
-    const movieHintCounts = sumProviderCategoryHints(movieCategories);
-    const seriesHintCounts = sumProviderCategoryHints(seriesCategories);
-    await writeCatalogProgressSummary(
+  if (setup.liveCategories.length && !isSyncRunStale(runToken)) {
+    setup.liveChannelCount = await resolveAndRefreshLiveChannelCount(
       providerId,
-      movieHintCounts,
-      seriesHintCounts,
-      liveChannelCount,
-      movieCategories.length,
-      seriesCategories.length,
+      setup.input.live,
+      setup.liveCategories,
+      runToken,
     );
+  }
 
-    if (isSyncRunStale(runToken)) {
-      logSync(providerId, 'sync-cancelled', { reason: 'provider-reset' });
-      return;
-    }
+  publishCatalogProgress(setup);
+  setup.progressThrottle.flush();
+  logSync(providerId, 'movie-sync-skipped-cached', {
+    movieCategories: movieCategoryIds.length,
+    liveChannelCount: setup.liveChannelCount,
+  });
+  return true;
+}
 
-    const movieCategoryIds = movieCategories.map((category) => category.id);
-    const seriesCategoryIds = seriesCategories.map((category) => category.id);
-    const checkpoint = await readCatalogSyncCheckpoint(providerId);
-    const checkpointMatches = Boolean(
-      checkpoint &&
-        checkpoint.smartCategoriesEnabled === smartCategoriesEnabled &&
-        categoryIdsMatch(checkpoint.movieCategoryIds, movieCategoryIds) &&
-        categoryIdsMatch(checkpoint.seriesCategoryIds, seriesCategoryIds),
-    );
+async function shouldSkipSeriesSync(setup: CatalogSyncSetup, runToken: number) {
+  const { smartCategoriesEnabled, movieCategoryIds, seriesCategoryIds } = setup;
+  const providerId = setup.input.providerId;
+  const now = Date.now();
 
-    if (
-      checkpointMatches &&
-      checkpoint?.stage === 'complete' &&
-      Date.now() - checkpoint.updatedAt <= CATALOG_SYNC_CACHE_TTL_MS &&
-      hasFreshCategoryCache(providerId, 'movie', movieCategoryIds, smartCategoriesEnabled, Date.now()) &&
-      hasFreshCategoryCache(providerId, 'series', seriesCategoryIds, smartCategoriesEnabled, Date.now())
-    ) {
-      const movieIndexSize = smartCategoriesEnabled ? getMovieCatalogIndex(providerId).size : 1;
-      const seriesIndexSize = smartCategoriesEnabled ? getSeriesCatalogIndex(providerId).size : 1;
-      const indexesReady = !smartCategoriesEnabled || (movieIndexSize > 0 && seriesIndexSize > 0);
+  if (
+    !setup.checkpointMatches ||
+    setup.checkpoint?.stage !== 'complete' ||
+    !setup.checkpoint ||
+    now - setup.checkpoint.updatedAt > CATALOG_SYNC_CACHE_TTL_MS ||
+    !hasFreshCategoryCache(providerId, 'movie', movieCategoryIds, smartCategoriesEnabled, now) ||
+    !hasFreshCategoryCache(providerId, 'series', seriesCategoryIds, smartCategoriesEnabled, now)
+  ) {
+    return false;
+  }
 
-      if (indexesReady) {
-        if (liveCategories.length && !isSyncRunStale(runToken)) {
-          liveChannelCount = await resolveAndRefreshLiveChannelCount(providerId, live, liveCategories, runToken);
-        }
-        const movieCounts = getCategoryCountIndexSync(providerId, 'movie');
-        const seriesCounts = getCategoryCountIndexSync(providerId, 'series');
-        await writeCatalogProgressSummary(
+  const seriesIndexSize = smartCategoriesEnabled ? getSeriesCatalogIndex(providerId).size : 1;
+  if (smartCategoriesEnabled && seriesIndexSize <= 0) {
+    logSync(providerId, 'series-sync-resumed-empty-index', { seriesIndexSize });
+    return false;
+  }
+
+  publishCatalogProgress(setup);
+  setup.progressThrottle.flush();
+  logSync(providerId, 'series-sync-skipped-cached', {
+    seriesCategories: seriesCategoryIds.length,
+  });
+  return true;
+}
+
+export async function runMovieCatalogSync(
+  input: ProviderCatalogSyncInput,
+  runToken: number,
+  coordinatorKey: string,
+) {
+  const { providerId, movies } = input;
+  const started = Date.now();
+  const isCancelled = () => isCatalogJobCancelled(runToken, coordinatorKey);
+  const setup = await ensureCatalogSyncSetup(input, runToken);
+
+  notifyPhase(providerId, 'syncing');
+  markCatalogAuditSync('started', { providerId, mediaType: 'movie' });
+  logSync(providerId, 'movie-sync-started');
+
+  if (isCancelled()) {
+    logSync(providerId, 'movie-sync-cancelled', { reason: 'provider-reset' });
+    return;
+  }
+
+  if (await shouldSkipMovieSync(setup, runToken)) {
+    markMediaJobComplete(providerId, 'movie');
+    markCatalogAuditSync('completed', { providerId, mediaType: 'movie', skipped: true });
+    return;
+  }
+
+  if (!(await waitForHeavyCatalogWindow(providerId, runToken))) {
+    publishCatalogProgress(setup);
+    setup.progressThrottle.flush();
+    schedulePendingHeavySync(providerId, input);
+    return;
+  }
+
+  const { smartCategoriesEnabled, movieCategories } = setup;
+  const movieIndex = smartCategoriesEnabled ? getMovieCatalogIndex(providerId) : null;
+  const canResumeCheckpoint = setup.checkpointMatches && Boolean(setup.checkpoint);
+  if (smartCategoriesEnabled && !canResumeCheckpoint) {
+    movieIndex?.beginSync();
+  }
+
+  let sqliteHandle: CatalogSqliteMediaSyncHandle | null = null;
+  try {
+    sqliteHandle = await startCatalogSqliteMediaSync({
+      providerId,
+      mediaType: 'movie',
+      providerType: input.providerType ?? 'unknown',
+      displayName: input.displayName ?? null,
+    });
+
+    if (sqliteHandle.enabled) {
+      await writeCategoriesFromSourceBudgeted(
+        sqliteHandle,
+        movieCategories,
+        (category, index) => ({
           providerId,
-          Object.keys(movieCounts.counts).length ? movieCounts.counts : movieHintCounts,
-          Object.keys(seriesCounts.counts).length ? seriesCounts.counts : seriesHintCounts,
-          liveChannelCount,
-          movieCategories.length,
-          seriesCategories.length,
-        );
-        logSync(providerId, 'sync-skipped-cached', {
-          movieCategories: movieCategoryIds.length,
-          seriesCategories: seriesCategoryIds.length,
-          liveChannelCount,
-        });
-        notifyPhase(providerId, 'ready');
-        return;
-      }
-
-      logSync(providerId, 'sync-resumed-empty-index', {
-        movieIndexSize,
-        seriesIndexSize,
-      });
-    }
-
-    if (!(await waitForHeavyCatalogWindow(providerId, runToken))) {
-      await writeCatalogProgressSummary(
-        providerId,
-        movieHintCounts,
-        seriesHintCounts,
-        liveChannelCount,
-        movieCategories.length,
-        seriesCategories.length,
+          mediaType: 'movie' as const,
+          categoryId: category.id,
+          categoryName: category.name,
+          sortOrder: index,
+          syncGeneration: sqliteHandle!.generation,
+        }),
+        { isCancelled },
       );
-      schedulePendingHeavySync(providerId, input);
-      return;
     }
 
-    const movieIndex = smartCategoriesEnabled ? getMovieCatalogIndex(providerId) : null;
-    const seriesIndex = smartCategoriesEnabled ? getSeriesCatalogIndex(providerId) : null;
-    const canResumeCheckpoint = Boolean(checkpointMatches && checkpoint);
-    if (smartCategoriesEnabled && !canResumeCheckpoint) {
-      movieIndex?.beginSync();
-      seriesIndex?.beginSync();
-    }
-    const resumeMovieIndex = canResumeCheckpoint
-      ? checkpoint?.stage === 'movies'
-        ? checkpoint.movieIndex
-        : checkpoint?.stage === 'series'
-          ? movieCategories.length
-          : 0
-      : 0;
-    const resumeSeriesIndex = canResumeCheckpoint && checkpoint?.stage === 'series' ? checkpoint.seriesIndex : 0;
-    const movieCountMap: Record<string, number> = canResumeCheckpoint ? { ...checkpoint?.movieCountMap } : {};
-    const seriesCountMap: Record<string, number> = canResumeCheckpoint ? { ...checkpoint?.seriesCountMap } : {};
+    // Let Series finish category SQLite upserts before Movies begins item ingest/writes.
+    // Prevents multi-second mutex/JS stalls from overlapping category + item writers.
+    await awaitSeriesCategoryGateForProvider(providerId);
 
-    const writeCheckpoint = (
-      stage: CatalogSyncCheckpoint['stage'],
-      movieIndexPosition: number,
-      seriesIndexPosition: number,
-    ) => {
-      if (isSyncRunStale(runToken)) {
-        return Promise.resolve();
-      }
-
-      return writeCatalogSyncCheckpoint({
-        version: CATALOG_SYNC_CHECKPOINT_VERSION,
-        providerId,
-        smartCategoriesEnabled,
-        movieCategoryIds,
-        seriesCategoryIds,
-        movieIndex: movieIndexPosition,
-        seriesIndex: seriesIndexPosition,
-        movieCountMap,
-        seriesCountMap,
-        stage,
-        updatedAt: Date.now(),
-      });
-    };
-
-    await writeCheckpoint(
-      resumeMovieIndex < movieCategories.length ? 'movies' : 'series',
-      resumeMovieIndex,
-      resumeSeriesIndex,
+    await writeCatalogSyncCheckpointSafe(
+      setup,
+      runToken,
+      setup.resumeMovieIndex < movieCategories.length ? 'movies' : 'series',
+      setup.resumeMovieIndex,
+      setup.resumeSeriesIndex,
     );
 
-    if (Object.keys(movieCountMap).length || Object.keys(seriesCountMap).length) {
-      await writeCatalogProgressSummary(
-        providerId,
-        movieCountMap,
-        seriesCountMap,
-        liveChannelCount,
-        movieCategories.length,
-        seriesCategories.length,
-      );
-    }
-
-    for (let movieCategoryIndex = resumeMovieIndex; movieCategoryIndex < movieCategories.length; movieCategoryIndex += 1) {
+    for (
+      let movieCategoryIndex = setup.resumeMovieIndex;
+      movieCategoryIndex < movieCategories.length;
+      movieCategoryIndex += 1
+    ) {
       const category = movieCategories[movieCategoryIndex];
       if (!(await yieldForPlaybackIfNeeded(providerId, `movie-category:${category.id}`, 'movies', runToken))) {
-        await writeCatalogProgressSummary(
-          providerId,
-          movieCountMap,
-          seriesCountMap,
-          liveChannelCount,
-          movieCategories.length,
-          seriesCategories.length,
-        );
+        publishCatalogProgress(setup);
+        setup.progressThrottle.flush();
         schedulePendingHeavySync(providerId, input);
+        return;
+      }
+      if (isCancelled()) {
         return;
       }
 
       const categoryStarted = Date.now();
+      markCatalogAuditCategory('movie', 'fetch_start', { categoryId: category.id });
+      beginVodCategoryPhaseProfile(category.id);
       let items: Awaited<ReturnType<NonNullable<MovieDataSource['listCategoryMovies']>>> | null = null;
 
       try {
         if (smartCategoriesEnabled) {
-          const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
-          items = loaded.items;
+          const requestUrl = movies.getCatalogListRequestUrl?.(category.id) ?? null;
+          const useNative = Boolean(requestUrl) && isNativeCatalogDecodeAvailable();
+          const writerOnly = isCatalogSqliteWriterOnlyDiagnosticEnabled();
 
-          if (loaded.truncated && movieIndex) {
-            movieIndex.markCategoryLoadTruncated();
+          if (!useNative && requestUrl) {
+            logSync(providerId, 'movie-category-native-decode-skipped', {
+              categoryId: category.id,
+              reason: 'module-unavailable',
+            });
           }
 
-          if (items.length && movieIndex) {
-            movieIndex.ingest(items);
-          }
+          if (useNative && requestUrl) {
+            let matched = 0;
+            const decodeResult = await streamXtreamCategoryDecode({
+              requestUrl,
+              mediaType: 'movie',
+              filterCategoryId: category.id,
+              providerId,
+              isCancelled,
+              onBatch: async (records) => {
+                try {
+                  matched += records.length;
+                  if (writerOnly) {
+                    if (sqliteHandle?.enabled && records.length) {
+                      await writeCatalogItemsFromSourceBudgeted(
+                        sqliteHandle,
+                        records,
+                        (record) =>
+                          mapNativeRecordToCatalogItem(
+                            record,
+                            providerId,
+                            'movie',
+                            category.id,
+                            sqliteHandle!.generation,
+                          ),
+                        { isCancelled, mapKind: 'movieMapping' },
+                      );
+                    }
+                    return;
+                  }
+                  const mapped = records.map(
+                    (record) => nativeRecordToMovieSummary(record, category.id) as MovieSummary,
+                  );
+                  if (movieIndex && mapped.length) {
+                    const ingestStarted = Date.now();
+                    await processTimeBudgeted(
+                      mapped,
+                      (movie) => {
+                        movieIndex.ingest([movie]);
+                      },
+                      { isCancelled },
+                    );
+                    addVodCategoryPhaseMs('ingestMs', Date.now() - ingestStarted);
+                  }
+                  if (sqliteHandle?.enabled && mapped.length) {
+                    await writeCatalogItemsFromSourceBudgeted(
+                      sqliteHandle,
+                      mapped,
+                      (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
+                      { isCancelled, mapKind: 'movieMapping' },
+                    );
+                  }
+                  releaseBatch(`movie-native-mapped:${category.id}`, mapped);
+                } finally {
+                  releaseBatch(`movie-native-raw:${category.id}`, records);
+                }
+              },
+            });
+            if (decodeResult.cancelled || isCancelled()) {
+              return;
+            }
+            matched = decodeResult.matched;
+            setup.movieCountMap[category.id] = matched;
+            markCatalogAuditItems(matched, 'processed');
+            addVodCategoryPhaseMs('jsonParseMs', Number(decodeResult.stats.downloadParseMs ?? 0));
+            logSync(providerId, 'movie-category-native-decode', {
+              categoryId: category.id,
+              matched,
+              batches: decodeResult.batches,
+              maxBatchSize: decodeResult.maxBatchSize,
+              rawSeen: decodeResult.stats.rawSeen,
+              writerOnly,
+            });
+          } else {
+            const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
+            items = loaded.items;
 
-          movieCountMap[category.id] = items.length;
+            if (loaded.truncated && movieIndex) {
+              movieIndex.markCategoryLoadTruncated();
+            }
+
+            if (items.length && movieIndex && !writerOnly) {
+              const ingestStarted = Date.now();
+              await processTimeBudgeted(
+                items,
+                (movie) => {
+                  movieIndex.ingest([movie]);
+                },
+                { isCancelled },
+              );
+              addVodCategoryPhaseMs('ingestMs', Date.now() - ingestStarted);
+            }
+
+            if (items.length && sqliteHandle?.enabled) {
+              await writeCatalogItemsFromSourceBudgeted(
+                sqliteHandle,
+                items,
+                (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
+                { isCancelled, mapKind: 'movieMapping' },
+              );
+            }
+
+            setup.movieCountMap[category.id] = items.length;
+            markCatalogAuditItems(items.length, 'processed');
+          }
         } else if (movies.getCategoryCount) {
-          movieCountMap[category.id] = await movies.getCategoryCount(category.id);
+          setup.movieCountMap[category.id] = await movies.getCategoryCount(category.id);
         }
 
+        const durationMs = Date.now() - categoryStarted;
+        finishVodCategoryPhaseProfile({
+          mode: smartCategoriesEnabled ? 'full' : 'count-only',
+          durationMs,
+        });
+        markCatalogAuditCategory('movie', 'fetch_done', {
+          categoryId: category.id,
+          count: setup.movieCountMap[category.id] ?? 0,
+          durationMs,
+        });
         logSync(providerId, 'movie-category-synced', {
           categoryId: category.id,
-          count: movieCountMap[category.id] ?? 0,
-          durationMs: Date.now() - categoryStarted,
+          count: setup.movieCountMap[category.id] ?? 0,
+          durationMs,
           mode: smartCategoriesEnabled ? 'full' : 'count-only',
         });
+      } catch (error) {
+        finishVodCategoryPhaseProfile({
+          failed: true,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
       } finally {
         releaseBatch(`movie-category:${category.id}`, items);
       }
 
-      await writeCheckpoint('movies', movieCategoryIndex + 1, 0);
-      if (movieCategoryIndex === resumeMovieIndex || (movieCategoryIndex + 1) % 5 === 0) {
-        await writeCatalogProgressSummary(
-          providerId,
-          movieCountMap,
-          seriesCountMap,
-          liveChannelCount,
-          movieCategories.length,
-          seriesCategories.length,
-        );
+      await writeCatalogSyncCheckpointSafe(setup, runToken, 'movies', movieCategoryIndex + 1, setup.resumeSeriesIndex);
+      if (movieCategoryIndex === setup.resumeMovieIndex || (movieCategoryIndex + 1) % 5 === 0) {
+        publishCatalogProgress(setup);
       }
       await waitForCatalogSyncIdleSlot();
     }
 
-    const seriesDataSource = createProviderSeriesDataSource(series);
-    await writeCheckpoint('series', movieCategories.length, resumeSeriesIndex);
-    await writeCatalogProgressSummary(
-      providerId,
-      movieCountMap,
-      seriesCountMap,
-      liveChannelCount,
+    if (movieIndex && smartCategoriesEnabled && !isCancelled()) {
+      if (!(await yieldForPlaybackIfNeeded(providerId, 'movie-region-rank', 'movies', runToken))) {
+        schedulePendingHeavySync(providerId, input);
+        return;
+      }
+      const rankStarted = Date.now();
+      const rankResult = await rankUniqueItemsInBatches(movieIndex.listAllEntries(), {
+        contentType: 'movie',
+        batchSize: VOD_REGION_RANK_BATCH_SIZE,
+        isCancelled,
+        hasRank: (id) => movieIndex.hasRegionRank(id),
+        apply: (id, regionRank) => {
+          movieIndex.setRegionRank(id, regionRank);
+        },
+      });
+      logSync(providerId, 'movie-region-rank-complete', {
+        ...rankResult,
+        durationMs: Date.now() - rankStarted,
+        batchSize: VOD_REGION_RANK_BATCH_SIZE,
+      });
+    }
+
+    if (smartCategoriesEnabled) {
+      notifyPhase(providerId, 'smart-building');
+      await writeCatalogSyncCheckpointSafe(
+        setup,
+        runToken,
+        'smart',
+        movieCategories.length,
+        setup.resumeSeriesIndex,
+      );
+      if (!(await yieldForPlaybackIfNeeded(providerId, 'smart-building:movies', 'movies-smart', runToken))) {
+        schedulePendingHeavySync(providerId, input);
+        return;
+      }
+      await buildMovieSmartCache(providerId, runToken);
+    }
+
+    if (isCancelled()) {
+      logSync(providerId, 'movie-sync-cancelled', { reason: 'provider-reset' });
+      await finishCatalogSqliteMediaSync({
+        handle: sqliteHandle ?? {
+          enabled: false,
+          providerId,
+          mediaType: 'movie',
+          generation: 0,
+        },
+        ok: false,
+        errorCode: 'cancelled',
+      });
+      return;
+    }
+
+    publishCatalogProgress(setup);
+    setup.progressThrottle.flush();
+    movieIndex?.commitSync();
+
+    await finishCatalogSqliteMediaSync({
+      handle: sqliteHandle ?? {
+        enabled: false,
+        providerId,
+        mediaType: 'movie',
+        generation: 0,
+      },
+      ok: true,
+      processedCount: Object.values(setup.movieCountMap).reduce((sum, count) => sum + count, 0),
+    });
+
+    await writeCatalogSyncCheckpointSafe(
+      setup,
+      runToken,
+      'complete',
       movieCategories.length,
-      seriesCategories.length,
+      setup.resumeSeriesIndex,
     );
 
-    for (let seriesCategoryIndex = resumeSeriesIndex; seriesCategoryIndex < seriesCategories.length; seriesCategoryIndex += 1) {
+    logSync(providerId, 'movie-sync-completed', {
+      durationMs: Date.now() - started,
+      smartCategoriesEnabled,
+      movieCatalog: movieIndex?.getCompleteness(),
+    });
+    markCatalogAuditSync('completed', { providerId, mediaType: 'movie', durationMs: Date.now() - started });
+    markMediaJobComplete(providerId, 'movie');
+  } catch (error) {
+    movieIndex?.abortSync();
+    if (sqliteHandle?.enabled) {
+      await finishCatalogSqliteMediaSync({
+        handle: sqliteHandle,
+        ok: false,
+        errorCode: error instanceof Error ? error.message : 'movie_sync_failed',
+      });
+    }
+    throw error;
+  }
+}
+
+export async function runSeriesCatalogSync(
+  input: ProviderCatalogSyncInput,
+  runToken: number,
+  coordinatorKey: string,
+) {
+  const { providerId, series, live } = input;
+  const started = Date.now();
+  const isCancelled = () => isCatalogJobCancelled(runToken, coordinatorKey);
+  const setup = await ensureCatalogSyncSetup(input, runToken);
+
+  notifyPhase(providerId, 'syncing');
+  markCatalogAuditSync('started', { providerId, mediaType: 'series' });
+  logSync(providerId, 'series-sync-started');
+
+  if (isCancelled()) {
+    logSync(providerId, 'series-sync-cancelled', { reason: 'provider-reset' });
+    return;
+  }
+
+  if (await shouldSkipSeriesSync(setup, runToken)) {
+    markMediaJobComplete(providerId, 'series');
+    markCatalogAuditSync('completed', { providerId, mediaType: 'series', skipped: true });
+    return;
+  }
+
+  if (!(await waitForHeavyCatalogWindow(providerId, runToken))) {
+    publishCatalogProgress(setup);
+    setup.progressThrottle.flush();
+    schedulePendingHeavySync(providerId, input);
+    return;
+  }
+
+  const { smartCategoriesEnabled, seriesCategories, liveCategories } = setup;
+  const seriesIndex = smartCategoriesEnabled ? getSeriesCatalogIndex(providerId) : null;
+  const canResumeCheckpoint = setup.checkpointMatches && Boolean(setup.checkpoint);
+  if (smartCategoriesEnabled && !canResumeCheckpoint) {
+    seriesIndex?.beginSync();
+  }
+
+  const seriesDataSource = createProviderSeriesDataSource(series);
+  let sqliteHandle: CatalogSqliteMediaSyncHandle | null = null;
+
+  try {
+    sqliteHandle = await startCatalogSqliteMediaSync({
+      providerId,
+      mediaType: 'series',
+      providerType: input.providerType ?? 'unknown',
+      displayName: input.displayName ?? null,
+    });
+
+    if (sqliteHandle.enabled) {
+      await writeCategoriesFromSourceBudgeted(
+        sqliteHandle,
+        seriesCategories,
+        (category, index) => ({
+          providerId,
+          mediaType: 'series' as const,
+          categoryId: category.id,
+          categoryName: category.name,
+          sortOrder: index,
+          syncGeneration: sqliteHandle!.generation,
+        }),
+        { isCancelled },
+      );
+    }
+
+    await writeCatalogSyncCheckpointSafe(
+      setup,
+      runToken,
+      setup.resumeMovieIndex < setup.movieCategories.length ? 'movies' : 'series',
+      setup.resumeMovieIndex,
+      setup.resumeSeriesIndex,
+    );
+
+    for (
+      let seriesCategoryIndex = setup.resumeSeriesIndex;
+      seriesCategoryIndex < seriesCategories.length;
+      seriesCategoryIndex += 1
+    ) {
       const category = seriesCategories[seriesCategoryIndex];
       if (!(await yieldForPlaybackIfNeeded(providerId, `series-category:${category.id}`, 'series', runToken))) {
-        await writeCatalogProgressSummary(
-          providerId,
-          movieCountMap,
-          seriesCountMap,
-          liveChannelCount,
-          movieCategories.length,
-          seriesCategories.length,
-        );
+        publishCatalogProgress(setup);
+        setup.progressThrottle.flush();
         schedulePendingHeavySync(providerId, input);
+        return;
+      }
+      if (isCancelled()) {
         return;
       }
 
       const categoryStarted = Date.now();
+      markCatalogAuditCategory('series', 'fetch_start', { categoryId: category.id });
       let items: Awaited<ReturnType<NonNullable<typeof seriesDataSource.listCategorySeries>>> | null = null;
 
       try {
         if (smartCategoriesEnabled) {
-          const loaded = await loadAllSeriesForCatalogIndex(seriesDataSource, category.id);
-          items = loaded.items;
+          const requestUrl = seriesDataSource.getCatalogListRequestUrl?.(category.id) ?? null;
+          const useNative = Boolean(requestUrl) && isNativeCatalogDecodeAvailable();
+          const writerOnly = isCatalogSqliteWriterOnlyDiagnosticEnabled();
 
-          if (loaded.truncated && seriesIndex) {
-            seriesIndex.markCategoryLoadTruncated();
+          if (!useNative && requestUrl) {
+            logSync(providerId, 'series-category-native-decode-skipped', {
+              categoryId: category.id,
+              reason: 'module-unavailable',
+            });
           }
 
-          if (items.length && seriesIndex) {
-            seriesIndex.ingest(items);
-            notifySeriesCatalogReady(providerId);
-          }
+          if (useNative && requestUrl) {
+            const decodeResult = await streamXtreamCategoryDecode({
+              requestUrl,
+              mediaType: 'series',
+              filterCategoryId: category.id,
+              providerId,
+              isCancelled,
+              onBatch: async (records) => {
+                try {
+                  if (writerOnly) {
+                    if (sqliteHandle?.enabled && records.length) {
+                      await writeCatalogItemsFromSourceBudgeted(
+                        sqliteHandle,
+                        records,
+                        (record, index) => ({
+                          ...mapNativeRecordToCatalogItem(
+                            record,
+                            providerId,
+                            'series',
+                            category.id,
+                            sqliteHandle!.generation,
+                          ),
+                          providerSortOrder: index,
+                        }),
+                        { isCancelled, mapKind: 'seriesMapping' },
+                      );
+                    }
+                    return;
+                  }
+                  const mapped = records.map(
+                    (record) => nativeRecordToSeriesSummary(record, category.id) as SeriesSummary,
+                  );
+                  if (seriesIndex && mapped.length) {
+                    await processTimeBudgeted(
+                      mapped,
+                      (entry) => {
+                        seriesIndex.ingest([entry]);
+                      },
+                      { isCancelled },
+                    );
+                    notifySeriesCatalogReady(providerId);
+                  }
+                  if (sqliteHandle?.enabled && mapped.length) {
+                    await writeCatalogItemsFromSourceBudgeted(
+                      sqliteHandle,
+                      mapped,
+                      (entry, index) =>
+                        mapSeriesSummaryToCatalogItem(entry, providerId, sqliteHandle!.generation, index),
+                      { isCancelled, mapKind: 'seriesMapping' },
+                    );
+                  }
+                  releaseBatch(`series-native-mapped:${category.id}`, mapped);
+                } finally {
+                  releaseBatch(`series-native-raw:${category.id}`, records);
+                }
+              },
+            });
+            if (decodeResult.cancelled || isCancelled()) {
+              return;
+            }
+            setup.seriesCountMap[category.id] = decodeResult.matched;
+            markCatalogAuditItems(decodeResult.matched, 'processed');
+            logSync(providerId, 'series-category-native-decode', {
+              categoryId: category.id,
+              matched: decodeResult.matched,
+              batches: decodeResult.batches,
+              maxBatchSize: decodeResult.maxBatchSize,
+              rawSeen: decodeResult.stats.rawSeen,
+              downloadParseMs: decodeResult.stats.downloadParseMs,
+              writerOnly,
+            });
+          } else {
+            const loaded = await loadAllSeriesForCatalogIndex(seriesDataSource, category.id);
+            items = loaded.items;
 
-          seriesCountMap[category.id] = items.length;
+            if (loaded.truncated && seriesIndex) {
+              seriesIndex.markCategoryLoadTruncated();
+            }
+
+            if (items.length && seriesIndex && !writerOnly) {
+              await processTimeBudgeted(
+                items,
+                (entry) => {
+                  seriesIndex.ingest([entry]);
+                },
+                { isCancelled },
+              );
+              notifySeriesCatalogReady(providerId);
+            }
+
+            if (items.length && sqliteHandle?.enabled) {
+              await writeCatalogItemsFromSourceBudgeted(
+                sqliteHandle,
+                items,
+                (entry, index) =>
+                  mapSeriesSummaryToCatalogItem(entry, providerId, sqliteHandle!.generation, index),
+                { isCancelled, mapKind: 'seriesMapping' },
+              );
+            }
+
+            setup.seriesCountMap[category.id] = items.length;
+            markCatalogAuditItems(items.length, 'processed');
+          }
         } else if (seriesDataSource.getCategoryCount) {
-          seriesCountMap[category.id] = await seriesDataSource.getCategoryCount(category.id);
+          setup.seriesCountMap[category.id] = await seriesDataSource.getCategoryCount(category.id);
         }
 
+        const durationMs = Date.now() - categoryStarted;
+        markCatalogAuditCategory('series', 'fetch_done', {
+          categoryId: category.id,
+          count: setup.seriesCountMap[category.id] ?? 0,
+          durationMs,
+        });
         logSync(providerId, 'series-category-synced', {
           categoryId: category.id,
-          count: seriesCountMap[category.id] ?? 0,
-          durationMs: Date.now() - categoryStarted,
+          count: setup.seriesCountMap[category.id] ?? 0,
+          durationMs,
           mode: smartCategoriesEnabled ? 'full' : 'count-only',
         });
       } finally {
         releaseBatch(`series-category:${category.id}`, items);
       }
 
-      await writeCheckpoint('series', movieCategories.length, seriesCategoryIndex + 1);
-      if (seriesCategoryIndex === resumeSeriesIndex || (seriesCategoryIndex + 1) % 5 === 0) {
-        await writeCatalogProgressSummary(
-          providerId,
-          movieCountMap,
-          seriesCountMap,
-          liveChannelCount,
-          movieCategories.length,
-          seriesCategories.length,
-        );
+      await writeCatalogSyncCheckpointSafe(
+        setup,
+        runToken,
+        'series',
+        setup.movieCategories.length,
+        seriesCategoryIndex + 1,
+      );
+      if (seriesCategoryIndex === setup.resumeSeriesIndex || (seriesCategoryIndex + 1) % 5 === 0) {
+        publishCatalogProgress(setup);
       }
       await waitForCatalogSyncIdleSlot();
     }
 
-    if (!(await yieldForPlaybackIfNeeded(providerId, 'post-category-sync', 'catalog-summary', runToken))) {
-      await writeCatalogProgressSummary(
+    if (liveCategories.length && !isCancelled()) {
+      setup.liveChannelCount = await resolveAndRefreshLiveChannelCount(
         providerId,
-        movieCountMap,
-        seriesCountMap,
-        liveChannelCount,
-        movieCategories.length,
-        seriesCategories.length,
+        live,
+        liveCategories,
+        runToken,
       );
-      schedulePendingHeavySync(providerId, input);
-      return;
     }
-
-    if (liveCategories.length) {
-      liveChannelCount = await resolveAndRefreshLiveChannelCount(providerId, live, liveCategories, runToken);
-    }
-
-    await writeCatalogProgressSummary(
-      providerId,
-      movieCountMap,
-      seriesCountMap,
-      liveChannelCount,
-      movieCategories.length,
-      seriesCategories.length,
-    );
 
     if (smartCategoriesEnabled) {
       notifyPhase(providerId, 'smart-building');
-      await writeCheckpoint('smart', movieCategories.length, seriesCategories.length);
-      if (!(await yieldForPlaybackIfNeeded(providerId, 'smart-building:movies', 'movies-smart', runToken))) {
-        schedulePendingHeavySync(providerId, input);
-        return;
-      }
-      await buildMovieSmartCache(providerId, runToken);
-      if (isSyncRunStale(runToken)) {
-        logSync(providerId, 'sync-cancelled', { reason: 'provider-reset' });
-        return;
-      }
       if (!(await yieldForPlaybackIfNeeded(providerId, 'smart-building:series', 'series-smart', runToken))) {
         schedulePendingHeavySync(providerId, input);
         return;
@@ -934,80 +1722,152 @@ export async function runProviderCatalogSync(input: ProviderCatalogSyncInput, ru
       });
     }
 
-    if (isSyncRunStale(runToken)) {
-      logSync(providerId, 'sync-cancelled', { reason: 'provider-reset' });
+    if (isCancelled()) {
+      logSync(providerId, 'series-sync-cancelled', { reason: 'provider-reset' });
+      await finishCatalogSqliteMediaSync({
+        handle: sqliteHandle ?? {
+          enabled: false,
+          providerId,
+          mediaType: 'series',
+          generation: 0,
+        },
+        ok: false,
+        errorCode: 'cancelled',
+      });
       return;
     }
 
-    logSync(providerId, 'sync-completed', {
+    publishCatalogProgress(setup);
+    setup.progressThrottle.flush();
+    seriesIndex?.commitSync();
+
+    await finishCatalogSqliteMediaSync({
+      handle: sqliteHandle ?? {
+        enabled: false,
+        providerId,
+        mediaType: 'series',
+        generation: 0,
+      },
+      ok: true,
+      processedCount: Object.values(setup.seriesCountMap).reduce((sum, count) => sum + count, 0),
+    });
+
+    await writeCatalogSyncCheckpointSafe(
+      setup,
+      runToken,
+      'complete',
+      setup.movieCategories.length,
+      seriesCategories.length,
+    );
+
+    logSync(providerId, 'series-sync-completed', {
       durationMs: Date.now() - started,
       smartCategoriesEnabled,
-      movieCatalog: movieIndex?.getCompleteness(),
       seriesCatalog: seriesIndex?.getCompleteness(),
     });
-    await writeCheckpoint('complete', movieCategories.length, seriesCategories.length);
-    movieIndex?.commitSync();
-    seriesIndex?.commitSync();
-    notifyPhase(providerId, 'ready');
-  });
+    markCatalogAuditSync('completed', { providerId, mediaType: 'series', durationMs: Date.now() - started });
+    markMediaJobComplete(providerId, 'series');
+  } catch (error) {
+    seriesIndex?.abortSync();
+    if (sqliteHandle?.enabled) {
+      await finishCatalogSqliteMediaSync({
+        handle: sqliteHandle,
+        ok: false,
+        errorCode: error instanceof Error ? error.message : 'series_sync_failed',
+      });
+    }
+    throw error;
+  }
 }
 
-function startProviderCatalogSync(input: ProviderCatalogSyncInput) {
-  const runToken = syncGeneration;
-  const task = runProviderCatalogSync(input, runToken)
+export async function runProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: number) {
+  const providerId = input.providerId;
+  const movieKey = buildCatalogSyncKey(providerId, 'movie');
+  const seriesKey = buildCatalogSyncKey(providerId, 'series');
+  await Promise.all([
+    runMovieCatalogSync(input, runToken, movieKey),
+    runSeriesCatalogSync(input, runToken, seriesKey),
+  ]);
+}
+
+function startProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: number) {
+  const providerId = input.providerId;
+  const movieKey = buildCatalogSyncKey(providerId, 'movie');
+  const seriesKey = buildCatalogSyncKey(providerId, 'series');
+
+  const task = Promise.all([
+    scheduleCatalogSync(
+      movieKey,
+      () => runMovieCatalogSync(input, runToken, movieKey),
+      { delayMs: movieCatalogScheduleDelayMs },
+    ),
+    scheduleCatalogSync(
+      seriesKey,
+      () => runSeriesCatalogSync(input, runToken, seriesKey),
+      { delayMs: seriesCatalogScheduleDelayMs },
+    ),
+  ])
+    .then(() => {})
     .catch((error) => {
       try {
-        getMovieCatalogIndex(input.providerId)?.abortSync();
-        getSeriesCatalogIndex(input.providerId)?.abortSync();
+        getMovieCatalogIndex(providerId)?.abortSync();
+        getSeriesCatalogIndex(providerId)?.abortSync();
       } catch {
         // Preserve browse state best-effort.
       }
-      notifyPhase(input.providerId, 'error');
-      logSync(input.providerId, 'sync-failed', {
+      notifyPhase(providerId, 'error');
+      markCatalogAuditSync('failed', {
+        providerId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      logSync(providerId, 'sync-failed', {
         error: error instanceof Error ? error.message : String(error),
         cachedDataPreserved: true,
       });
     })
     .finally(() => {
-      syncInFlight.delete(input.providerId);
+      syncInFlight.delete(providerId);
+      catalogSyncSetupCache.delete(catalogSyncSetupKey(providerId, runToken));
       if (runToken !== syncGeneration) {
         return;
       }
-      const pending = pendingSyncInputs.get(input.providerId);
+      const pending = pendingSyncInputs.get(providerId);
       if (pending) {
-        pendingSyncInputs.delete(input.providerId);
+        pendingSyncInputs.delete(providerId);
         scheduleProviderCatalogSync(pending);
       }
     });
 
-  syncInFlight.set(input.providerId, task);
+  syncInFlight.set(providerId, task);
   return task;
 }
 
 export function scheduleProviderCatalogSync(input: ProviderCatalogSyncInput) {
+  markCatalogAuditSync('requested', { providerId: input.providerId });
   logSync(input.providerId, 'sync-requested');
 
   const existing = syncInFlight.get(input.providerId);
   if (existing) {
+    // Keep the latest request; resume once the in-flight job finishes.
     pendingSyncInputs.set(input.providerId, input);
     return existing;
   }
 
-  if (pendingSyncInputs.has(input.providerId)) {
-    pendingSyncInputs.set(input.providerId, input);
-    return Promise.resolve();
-  }
-
-  return startProviderCatalogSync(input);
+  const runToken = syncGeneration;
+  return startProviderCatalogSync(input, runToken);
 }
 
 export function cancelProviderCatalogSync(providerId?: string) {
   syncGeneration += 1;
   if (providerId) {
     pendingSyncInputs.delete(providerId);
+    invalidateCatalogSyncForProvider(providerId);
   } else {
     pendingSyncInputs.clear();
+    cancelCatalogSync();
   }
+  catalogSyncSetupCache.clear();
+  mediaJobCompletion.clear();
 }
 
 export async function hydrateProviderLibraryCaches(providerId: string) {
@@ -1015,25 +1875,51 @@ export async function hydrateProviderLibraryCaches(providerId: string) {
   const { readCategoryCountIndex } = await import('./categoryCountIndexStore.ts');
   const { readSmartCategoryCache } = await import('./smartCategoryCacheStore.ts');
 
-  await Promise.all([
-    readProviderLibrarySummary(providerId),
-    readCategoryCountIndex(providerId, 'movie'),
-    readCategoryCountIndex(providerId, 'series'),
-    readCategoryCountIndex(providerId, 'live'),
-    readSmartCategoryCache(providerId, 'movie'),
-    readSmartCategoryCache(providerId, 'series'),
-    Promise.resolve(getMovieCatalogIndex(providerId)),
-    Promise.resolve(getSeriesCatalogIndex(providerId)),
-  ]);
+  // Keep summary + counts on the first-focus path; defer large smart-cache JSON.parse.
+  await earlyBootTimed('hydrate.summary_and_counts', () =>
+    Promise.all([
+      readProviderLibrarySummary(providerId),
+      readCategoryCountIndex(providerId, 'movie'),
+      readCategoryCountIndex(providerId, 'series'),
+      readCategoryCountIndex(providerId, 'live'),
+      Promise.resolve(getMovieCatalogIndex(providerId)),
+      Promise.resolve(getSeriesCatalogIndex(providerId)),
+    ]),
+  );
+
+  void earlyBootTimed('hydrate.smart_caches_deferred', () =>
+    Promise.all([
+      readSmartCategoryCache(providerId, 'movie'),
+      readSmartCategoryCache(providerId, 'series'),
+    ]),
+  );
 }
 
 export function clearProviderCatalogSyncForTests() {
   syncInFlight.clear();
   pendingSyncInputs.clear();
   syncListeners.clear();
-  heavyCatalogChain = Promise.resolve();
+  catalogSyncSetupCache.clear();
+  mediaJobCompletion.clear();
+  checkpointWriteChain = Promise.resolve();
   syncGeneration = 0;
   lastReleasedBatchLabel = null;
+  movieCatalogScheduleDelayMs = 0;
+  seriesCatalogScheduleDelayMs = 0;
+  lastCheckpointWriteAt = 0;
+  clearCatalogSyncCoordinatorForTests();
+}
+
+export function setCatalogSyncShellDelaysForTests(delays: {
+  movieMs?: number;
+  seriesMs?: number;
+}) {
+  if (typeof delays.movieMs === 'number') {
+    movieCatalogScheduleDelayMs = delays.movieMs;
+  }
+  if (typeof delays.seriesMs === 'number') {
+    seriesCatalogScheduleDelayMs = delays.seriesMs;
+  }
 }
 
 export function getProviderCatalogSyncTestState() {

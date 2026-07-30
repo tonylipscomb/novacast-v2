@@ -11,6 +11,7 @@ import {
 } from './providerRepositories.ts';
 import { XtreamClient, normalizeXtreamAccountMetadata } from './xtreamClient.ts';
 import { cancelProviderCatalogSync } from './providerCatalogSync.ts';
+import { invalidateCatalogSyncForProvider } from '../catalog/catalogSyncCoordinator.ts';
 
 export type ProviderRepositoryBundle = ProviderRepositories & {
   providerId: string;
@@ -61,6 +62,8 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
       import('./providerCatalogSync.ts').then(({ scheduleProviderCatalogSync }) =>
         scheduleProviderCatalogSync({
           providerId: provider.id,
+          providerType: provider.connection?.type ?? 'unknown',
+          displayName: provider.name,
           movies: base.movies,
           series: base.series,
           live: base.live,
@@ -134,6 +137,7 @@ export function activateRepositoryBundle(bundle: ProviderRepositoryBundle) {
   const previousBundle = activeBundle;
   if (previousBundle && previousBundle !== bundle) {
     cancelProviderCatalogSync(previousBundle.providerId);
+    invalidateCatalogSyncForProvider(previousBundle.providerId);
     previousBundle.invalidate();
   }
 
@@ -146,6 +150,7 @@ export function activateRepositoryBundle(bundle: ProviderRepositoryBundle) {
       if (activeBundle !== bundle || bundleGeneration !== bundle.generation) {
         return;
       }
+      // Keep catalog sync off the first usable Home focus path.
       void bundle.syncCatalog();
     });
   });

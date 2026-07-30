@@ -2,7 +2,7 @@ import { Stack, usePathname } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LogBox, Platform, StyleSheet, View } from 'react-native';
+import { LogBox, Platform, StyleSheet, View, DeviceEventEmitter } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AppNotificationProvider } from '@/features/notifications/AppNotificationProvider';
@@ -32,22 +32,44 @@ import { useProviderStore } from '@/features/providers/providerStore';
 import { initializeDevice, sendDeviceHeartbeat } from '@/features/device';
 import { isStartupReady, markStartupReady, subscribeStartupReadiness } from '@/features/startup/startupReadiness';
 import { beforeSendNovaEvent, initializeNovaSentryContext, setNovaLifecycleContext, setNovaPlaybackContext, setNovaProviderContext, setNovaRouteContext, setNovaStartupContext } from '@/features/diagnostics/sentryDiagnostics';
+import { initializeCatalogAudit, markCatalogAuditFocus } from '@/features/diagnostics/novaCastCatalogAudit';
+import { initializeEarlyBootAudit, earlyBootMark, earlyBootTimed } from '@/features/diagnostics/earlyBootAudit';
+import {
+  initializeFocusLatencyAudit,
+  noteFocusLatencyFocus,
+  noteFocusLatencyKeyEvent,
+  setFocusLatencyPhase,
+  logFocusLatencySummary,
+} from '@/features/diagnostics/focusLatencyAudit';
 import { getOfflineSnapshot, subscribeOfflineStatus } from '@/features/resilience/offlineStatus';
 import { getUnifiedPlayerState, subscribeUnifiedPlayer } from '@/features/playback/unified/unifiedPlayerStore';
 import { initializeNovaAnalytics, setAnalyticsRoute, setAnalyticsState } from '@/features/analytics';
 import { sendNovaAnalyticsHeartbeat } from '@/features/analytics/analyticsHeartbeat';
 
+const CATALOG_BUILD_MARKER = 'stage295-native-completion-v1';
+
 SplashScreen.preventAutoHideAsync().catch(() => {
   // Fast refresh can call this more than once.
 });
+initializeCatalogAudit();
+initializeEarlyBootAudit();
+initializeFocusLatencyAudit();
+console.info(`[NovaCast Catalog] ${CATALOG_BUILD_MARKER}`);
+earlyBootMark('root_layout_init');
 
-Sentry.init({
-  dsn: process.env.EXPO_PUBLIC_SENTRY_DSN,
-  enabled: !__DEV__,
-  sendDefaultPii: false,
-  tracesSampleRate: 0.1,
-  beforeSend: (event) => beforeSendNovaEvent(event),
-});
+// Defer Sentry init one macrotask so first paint/focus wiring is not competing with
+// SDK bootstrap on the cold JS thread (Stage 2.95 early-boot isolation).
+setTimeout(() => {
+  earlyBootMark('sentry_init_begin');
+  Sentry.init({
+    dsn: process.env.EXPO_PUBLIC_SENTRY_DSN,
+    enabled: !__DEV__,
+    sendDefaultPii: false,
+    tracesSampleRate: 0.1,
+    beforeSend: (event) => beforeSendNovaEvent(event),
+  });
+  earlyBootMark('sentry_init_end');
+}, 0);
 
 export default function RootLayout() {
   const [showBrandSplash, setShowBrandSplash] = useState(true);
@@ -62,6 +84,79 @@ export default function RootLayout() {
     return Date.now();
   });
   const { ready: providerStoreReady } = useProviderStore();
+
+  useEffect(() => {
+    // Diagnostics only: detect first HW remote event without changing focus routing.
+    const subscription = (globalThis as typeof globalThis & {
+      __NOVACAST_AUDIT_TV?: boolean;
+    });
+    if (subscription.__NOVACAST_AUDIT_TV) {
+      return;
+    }
+    subscription.__NOVACAST_AUDIT_TV = true;
+
+    const onRemote = (eventType?: string) => {
+      if (!eventType || eventType === 'blur' || eventType === 'focus') {
+        return;
+      }
+      noteFocusLatencyKeyEvent(eventType);
+      markCatalogAuditFocus(`tv:${eventType}`);
+    };
+
+    const sub = DeviceEventEmitter.addListener('onTVRemoteEvent', (event: { eventType?: string }) => {
+      onRemote(event?.eventType);
+    });
+
+    let disableTvHandler: (() => void) | null = null;
+    try {
+      const reactNative = require('react-native') as {
+        TVEventHandler?: new () => {
+          enable: (
+            component: unknown,
+            handler: (_component: unknown, event: { eventType?: string }) => void,
+          ) => void;
+          disable: () => void;
+        };
+      };
+      if (typeof reactNative.TVEventHandler === 'function') {
+        const handler = new reactNative.TVEventHandler();
+        handler.enable(null, (_component, event) => onRemote(event?.eventType));
+        disableTvHandler = () => handler.disable();
+      }
+    } catch {
+      // TVEventHandler unavailable on this runtime.
+    }
+
+    return () => {
+      sub.remove();
+      disableTvHandler?.();
+      subscription.__NOVACAST_AUDIT_TV = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setFocusLatencyPhase('A_first_30s');
+    console.info('[NovaCast FocusLatency]', 'physical_remote_required', {
+      phases: ['A_first_30s', 'B_sync_active', 'C_series_sync', 'D_post_complete'],
+      note: 'Use the ONN Bluetooth/IR remote — adb keyevents do not drive TVEventHandler',
+    });
+    const timers = [
+      setTimeout(() => {
+        logFocusLatencySummary();
+        setFocusLatencyPhase('B_sync_active');
+      }, 30_000),
+      setTimeout(() => {
+        logFocusLatencySummary();
+        setFocusLatencyPhase('C_series_sync');
+      }, 120_000),
+      setTimeout(() => {
+        setFocusLatencyPhase('D_post_complete');
+        logFocusLatencySummary();
+      }, 300_000),
+      setTimeout(() => logFocusLatencySummary(), 420_000),
+    ];
+    return () => timers.forEach((timer) => clearTimeout(timer));
+  }, []);
 
   const requestExit = useCallback(() => {
     if (exitRequestedRef.current) {
@@ -114,17 +209,42 @@ export default function RootLayout() {
     }
   }, [providerStoreReady]);
 
+  // Device registration is required for beta access; keep it early but timed.
   useEffect(() => {
-    void initializeNovaAnalytics();
-    void initializeDevice().then(() => sendDeviceHeartbeat()).finally(() => {
-      void sendNovaAnalyticsHeartbeat();
-    }).catch(() => undefined);
+    earlyBootMark('device_init_scheduled');
+    void earlyBootTimed('device.initializeDevice', () =>
+      initializeDevice()
+        .then(() => sendDeviceHeartbeat())
+        .catch(() => undefined),
+    );
     const heartbeat = setInterval(() => {
       void sendDeviceHeartbeat().finally(() => {
         void sendNovaAnalyticsHeartbeat();
       });
     }, 20 * 60 * 1000);
     return () => clearInterval(heartbeat);
+  }, []);
+
+  // Analytics is not required for first usable Home focus — defer until shell exit
+  // or a safety timeout so it cannot own the residual ~500 ms early-boot stall.
+  useEffect(() => {
+    if (!exitRequested && showBrandSplash) {
+      return;
+    }
+    earlyBootMark('analytics_init_scheduled');
+    void earlyBootTimed('analytics.initializeNovaAnalytics', () => initializeNovaAnalytics()).finally(() => {
+      void sendNovaAnalyticsHeartbeat();
+    });
+  }, [exitRequested, showBrandSplash]);
+
+  useEffect(() => {
+    const fallback = setTimeout(() => {
+      if (!exitRequestedRef.current) {
+        earlyBootMark('analytics_init_fallback_timeout');
+        void earlyBootTimed('analytics.initializeNovaAnalytics_fallback', () => initializeNovaAnalytics());
+      }
+    }, 6_000);
+    return () => clearTimeout(fallback);
   }, []);
 
   useEffect(() => {

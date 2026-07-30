@@ -1,5 +1,5 @@
 /* eslint-disable react-hooks/immutability -- expo-video requires imperative player control. */
-import { useEventListener } from 'expo';
+import type { PlayingChangeEventPayload, StatusChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import { BackHandler, Platform } from 'react-native';
 
@@ -18,6 +18,7 @@ import {
 } from './playbackProgressStore.ts';
 import type { PlaybackItem } from './types.ts';
 import {
+  clampUnifiedSeekTarget,
   derivePlaybackActivityType,
   isUnifiedPlaybackActive,
   mapPlayerStatusToMachineState,
@@ -35,6 +36,8 @@ import {
   UNIFIED_PLAYER_BUFFERING_TIMEOUT_MS,
   UNIFIED_PLAYER_LOADING_TIMEOUT_MS,
   UNIFIED_SEEK_FLUSH_DEBOUNCE_MS,
+  UNIFIED_SEEK_GUARD_MS,
+  UNIFIED_SEEK_SETTLE_TOLERANCE_MS,
 } from './unifiedPlayerLogic.ts';
 import {
   clearUnifiedPlayerError,
@@ -57,6 +60,8 @@ import {
   logUnifiedRemoteEvent,
 } from './unifiedRemoteDebug.ts';
 import { recordRecentItem } from '@/features/personalization/personalizationStore';
+import { normalizePlaybackFailure, playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
+import { endMoviePlaybackAttemptDiag } from '@/features/providers/playbackSourceDiagnostics';
 
 function useUnifiedPlayerSnapshot() {
   return useSyncExternalStore(subscribeUnifiedPlayer, getUnifiedPlayerState, getUnifiedPlayerState);
@@ -77,6 +82,7 @@ export function UnifiedPlayerController() {
   const lastToggleAtRef = useRef(0);
   const resumeAppliedRef = useRef<string | null>(null);
   const appliedPlayingRef = useRef<boolean | null>(null);
+  const previousAnalyticsSnapshotRef = useRef(snapshot);
   const seekQueueRef = useRef<{
     inFlight: boolean;
     pendingMs: number | null;
@@ -85,6 +91,13 @@ export function UnifiedPlayerController() {
     inFlight: false,
     pendingMs: null,
     flushTimer: null,
+  });
+  const seekGuardRef = useRef<{
+    targetMs: number | null;
+    expiresAt: number;
+  }>({
+    targetMs: null,
+    expiresAt: 0,
   });
 
   const clearChromeTimer = useCallback(() => {
@@ -117,6 +130,15 @@ export function UnifiedPlayerController() {
       if (!current.item) {
         return;
       }
+      if (current.item.mediaType === 'movie') {
+        endMoviePlaybackAttemptDiag({
+          streamId: current.item.id,
+          nativeStatus: 'error',
+          errorCategory: normalizePlaybackFailure(message),
+          outcome: 'error',
+        });
+      }
+      playbackAnalyticsTracker.failure(message);
       setUnifiedPlayerError(sanitizePlaybackErrorMessage(message));
     },
     onReady: () => {
@@ -140,6 +162,47 @@ export function UnifiedPlayerController() {
   });
 
   const playbackActive = isUnifiedPlaybackActive(snapshot.machineState, snapshot.item);
+  const applyNativeSeek = useCallback(
+    (requestedMs: number, source: 'rewind' | 'forward' | 'scrubber' | 'resume') => {
+      const current = getUnifiedPlayerState();
+      const durationMs =
+        current.durationMs > 0 ? current.durationMs : secondsToMs(player.duration);
+      const clampedMs = clampUnifiedSeekTarget(requestedMs, durationMs);
+
+      if (clampedMs == null) {
+        return null;
+      }
+
+      seekGuardRef.current = {
+        targetMs: clampedMs,
+        expiresAt: Date.now() + UNIFIED_SEEK_GUARD_MS,
+      };
+
+      try {
+        const nativeSeconds = msToSeconds(clampedMs);
+        player.currentTime = nativeSeconds;
+        setUnifiedPlayerProgress(clampedMs, durationMs);
+
+        if (__DEV__) {
+          console.info('[NovaCast Seek]', {
+            source,
+            requestedMs,
+            clampedMs,
+            nativeSeconds,
+            durationMs,
+            machineState: current.machineState,
+          });
+        }
+
+        return clampedMs;
+      } catch {
+        seekGuardRef.current = { targetMs: null, expiresAt: 0 };
+        return null;
+      }
+    },
+    [player],
+  );
+
 
   const handleFirstFrameRender = useCallback(() => {
     const current = getUnifiedPlayerState();
@@ -147,10 +210,35 @@ export function UnifiedPlayerController() {
       return;
     }
 
+    if (current.item?.mediaType === 'movie') {
+      endMoviePlaybackAttemptDiag({
+        streamId: current.item.id,
+        nativeStatus: 'readyToPlay',
+        outcome: 'started',
+      });
+    }
+    playbackAnalyticsTracker.firstFrame();
     if (current.machineState === 'loading' || current.machineState === 'buffering') {
       setUnifiedPlayerMachineState(mapPlayerStatusToMachineState(player.status, player.playing));
     }
   }, [player]);
+
+  useEffect(() => {
+    const previous = previousAnalyticsSnapshotRef.current;
+    if (!previous.item && snapshot.item && snapshot.machineState === 'loading') {
+      playbackAnalyticsTracker.request(snapshot.item, snapshot.launchSource);
+    }
+    if (snapshot.machineState !== previous.machineState) {
+      playbackAnalyticsTracker.stateChanged(snapshot.machineState);
+    }
+    if (snapshot.machineState === 'error' && previous.machineState !== 'error') {
+      playbackAnalyticsTracker.failure(snapshot.errorMessage);
+    }
+    if (snapshot.machineState === 'closing' && previous.machineState !== 'closing') {
+      playbackAnalyticsTracker.stop('user_back');
+    }
+    previousAnalyticsSnapshotRef.current = snapshot;
+  }, [snapshot]);
 
   useEffect(() => {
     if (!playbackActive || snapshot.machineState !== 'loading') {
@@ -160,6 +248,14 @@ export function UnifiedPlayerController() {
     const timer = setTimeout(() => {
       const current = getUnifiedPlayerState();
       if (current.machineState === 'loading' && current.item) {
+        if (current.item.mediaType === 'movie') {
+          endMoviePlaybackAttemptDiag({
+            streamId: current.item.id,
+            nativeStatus: 'loading',
+            errorCategory: 'timeout',
+            outcome: 'timeout',
+          });
+        }
         setUnifiedPlayerError('Playback timed out while loading.');
       }
     }, UNIFIED_PLAYER_LOADING_TIMEOUT_MS);
@@ -191,6 +287,7 @@ export function UnifiedPlayerController() {
       }
       queue.pendingMs = null;
       queue.inFlight = false;
+      seekGuardRef.current = { targetMs: null, expiresAt: 0 };
     };
   }, [playbackActive, snapshot.item?.id]);
 
@@ -247,14 +344,13 @@ export function UnifiedPlayerController() {
     ).then((resumePositionMs) => {
       if (resumePositionMs > 0) {
         try {
-          player.currentTime = msToSeconds(resumePositionMs);
-          setUnifiedPlayerProgress(resumePositionMs, secondsToMs(player.duration));
+          applyNativeSeek(resumePositionMs, 'resume');
         } catch {
           // Player may not be ready yet; resume is best-effort.
         }
       }
     });
-  }, [player, snapshot.item]);
+  }, [applyNativeSeek, snapshot.item]);
 
   useEffect(() => {
     const item = snapshot.item;
@@ -282,12 +378,13 @@ export function UnifiedPlayerController() {
     }
   }, [player]);
 
-  useEventListener(player, 'statusChange', ({ status }) => {
-    if (!playbackActive) {
+  const handleNativeStatusChange = useCallback(({ status }: StatusChangeEventPayload) => {
+    const current = getUnifiedPlayerState();
+    if (!isUnifiedPlaybackActive(current.machineState, current.item)) {
       return;
     }
     const nextState = mapPlayerStatusToMachineState(status, player.playing);
-    if (snapshot.machineState !== 'error' && snapshot.machineState !== 'closing') {
+    if (current.machineState !== 'error' && current.machineState !== 'closing') {
       setUnifiedPlayerMachineState(nextState);
     }
     const durationMs = secondsToMs(player.duration);
@@ -297,9 +394,9 @@ export function UnifiedPlayerController() {
         durationMs,
       );
     }
-  });
+  }, [player]);
 
-  useEventListener(player, 'playingChange', ({ isPlaying }) => {
+  const handleNativePlayingChange = useCallback(({ isPlaying }: PlayingChangeEventPayload) => {
     const current = getUnifiedPlayerState();
     if (!isUnifiedPlaybackActive(current.machineState, current.item)) {
       return;
@@ -311,17 +408,46 @@ export function UnifiedPlayerController() {
     if (current.machineState !== 'error' && current.machineState !== 'closing') {
       setUnifiedPlayerMachineState(mapPlayerStatusToMachineState(player.status, isPlaying));
     }
-  });
+    // expo-video's Android first-frame event can remain pending when the ONN
+    // SurfaceView never reports a valid layout. Media3's isPlaying=true is the
+    // earliest stable native transition after the player is ready and actually
+    // advancing playback, so use it only as the fallback source.
+    if (isPlaying && player.status === 'readyToPlay') {
+      playbackAnalyticsTracker.firstFrame('playing_transition');
+    }
+  }, [player]);
 
-  useEventListener(player, 'timeUpdate', ({ currentTime }) => {
-    if (!playbackActive) {
+  const handleNativeTimeUpdate = useCallback(({ currentTime }: TimeUpdateEventPayload) => {
+    const current = getUnifiedPlayerState();
+    if (!isUnifiedPlaybackActive(current.machineState, current.item)) {
       return;
     }
     const positionMs = secondsToMs(currentTime);
     const durationMs = secondsToMs(player.duration);
+    const seekGuard = seekGuardRef.current;
+
+    if (seekGuard.targetMs != null) {
+      const reachedTarget =
+        Math.abs(positionMs - seekGuard.targetMs) <= UNIFIED_SEEK_SETTLE_TOLERANCE_MS;
+      const expired = Date.now() >= seekGuard.expiresAt;
+
+      if (reachedTarget || expired) {
+        seekGuardRef.current = { targetMs: null, expiresAt: 0 };
+      } else {
+        return;
+      }
+    }
+
     setUnifiedPlayerProgress(positionMs, durationMs);
 
-    const item = snapshot.item;
+    if (currentTime > 0 && player.status === 'readyToPlay' && player.playing) {
+      playbackAnalyticsTracker.firstFrame('current_time_progress');
+      if (current.machineState === 'loading' || current.machineState === 'buffering') {
+        setUnifiedPlayerMachineState('playing');
+      }
+    }
+
+    const item = current.item;
     if (!item?.providerId || item.mediaType === 'live') {
       return;
     }
@@ -337,7 +463,7 @@ export function UnifiedPlayerController() {
       positionMs,
       durationMs,
     }, item);
-  });
+  }, [player]);
 
   useEffect(() => {
     if (!playbackActive) {
@@ -387,37 +513,19 @@ export function UnifiedPlayerController() {
     revealControls();
   }, [revealControls, snapshot.isPlaying]);
 
-  const handleRewind = useCallback(() => {
-    if (isUnifiedRemoteDebugEnabled()) {
-      logUnifiedRemoteEvent({
-        source: 'controls-onPress',
-        eventType: 'handler-invoke',
-        disposition: 'accepted',
-        actionTaken: 'controller-rewind-10s',
-        controlId: 'rewind',
-      });
-    }
-    const nextMs = Math.max(0, snapshot.positionMs - SEEK_BACK_MS);
-    player.currentTime = msToSeconds(nextMs);
-    setUnifiedPlayerProgress(nextMs, snapshot.durationMs);
+    const handleRewind = useCallback(() => {
+    const current = getUnifiedPlayerState();
+    applyNativeSeek(current.positionMs - SEEK_BACK_MS, 'rewind');
     revealControls();
-  }, [player, revealControls, snapshot.durationMs, snapshot.positionMs]);
+  }, [applyNativeSeek, revealControls]);
 
-  const handleForward = useCallback(() => {
-    if (isUnifiedRemoteDebugEnabled()) {
-      logUnifiedRemoteEvent({
-        source: 'controls-onPress',
-        eventType: 'handler-invoke',
-        disposition: 'accepted',
-        actionTaken: 'controller-forward-30s',
-        controlId: 'forward',
-      });
-    }
-    const nextMs = snapshot.positionMs + SEEK_FORWARD_MS;
-    player.currentTime = msToSeconds(nextMs);
-    setUnifiedPlayerProgress(nextMs, snapshot.durationMs);
+
+    const handleForward = useCallback(() => {
+    const current = getUnifiedPlayerState();
+    applyNativeSeek(current.positionMs + SEEK_FORWARD_MS, 'forward');
     revealControls();
-  }, [player, revealControls, snapshot.durationMs, snapshot.positionMs]);
+  }, [applyNativeSeek, revealControls]);
+
 
   // This callback owns the bounded native seek flush and intentionally keeps its imperative queue stable.
   // eslint-disable-next-line react-hooks/preserve-manual-memoization
@@ -433,7 +541,7 @@ export function UnifiedPlayerController() {
     }
 
     try {
-      player.currentTime = msToSeconds(pendingMs);
+      applyNativeSeek(pendingMs, 'scrubber');
       if (isUnifiedRemoteDebugEnabled()) {
         logUnifiedRemoteEvent({
           source: 'controls-onPress',
@@ -544,6 +652,8 @@ export function UnifiedPlayerController() {
 
     lastPlaybackRetryAtRef.current = now;
     playbackRetryAttemptedRef.current = true;
+    const current = getUnifiedPlayerState();
+    if (current.item) playbackAnalyticsTracker.request(current.item, current.launchSource, true);
     clearUnifiedPlayerError();
     retry();
     revealControls();
@@ -613,6 +723,9 @@ export function UnifiedPlayerController() {
       player={player}
       state={snapshot}
       onFirstFrameRender={handleFirstFrameRender}
+      onStatusChange={handleNativeStatusChange}
+      onPlayingChange={handleNativePlayingChange}
+      onTimeUpdate={handleNativeTimeUpdate}
       onTogglePlay={handleTogglePlay}
       onRewind={handleRewind}
       onForward={handleForward}

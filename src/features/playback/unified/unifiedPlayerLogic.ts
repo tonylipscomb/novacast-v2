@@ -74,6 +74,23 @@ export function decideUnifiedBackAction(
   return 'leave-screen';
 }
 
+/** Ignore duplicate Back → close signals within one physical key press window. */
+export const UNIFIED_PLAYBACK_CLOSE_DEDUPE_MS = 400;
+
+export function shouldAcceptUnifiedPlaybackClose(input: {
+  machineState: UnifiedPlayerMachineState;
+  lastCloseAtMs: number;
+  nowMs: number;
+}): boolean {
+  if (input.machineState === 'idle' || input.machineState === 'closing') {
+    return false;
+  }
+  if (input.nowMs - input.lastCloseAtMs < UNIFIED_PLAYBACK_CLOSE_DEDUPE_MS) {
+    return false;
+  }
+  return true;
+}
+
 export function shouldShowUnifiedPlayerSurface(machineState: UnifiedPlayerMachineState): boolean {
   return machineState !== 'idle';
 }
@@ -98,6 +115,8 @@ export function shouldAutoHideUnifiedControls(machineState: UnifiedPlayerMachine
 export const UNIFIED_CONTROL_ACTIVATE_DEBOUNCE_MS = 120;
 export const UNIFIED_SEEK_STEP_MS = 10_000;
 export const UNIFIED_SEEK_FLUSH_DEBOUNCE_MS = 120;
+export const UNIFIED_SEEK_GUARD_MS = 1500;
+export const UNIFIED_SEEK_SETTLE_TOLERANCE_MS = 1750;
 
 export function isUnifiedControlActivateKey(key: string, keyCode?: number | null): boolean {
   return (
@@ -249,6 +268,17 @@ export function resolveUnifiedControlFocusMove(
   }
 
   return null;
+}
+
+export function clampUnifiedSeekTarget(
+  requestedMs: number,
+  durationMs: number,
+): number | null {
+  if (!Number.isFinite(requestedMs) || !Number.isFinite(durationMs) || durationMs <= 0) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(requestedMs, durationMs));
 }
 
 export function resolveUnifiedSeekPosition(

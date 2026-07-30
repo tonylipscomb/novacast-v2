@@ -5,9 +5,11 @@
  */
 export const TV_POSTER_LIST_TUNING = {
   windowSize: 5,
-  maxToRenderPerBatch: 8,
-  updateCellsBatchingPeriod: 50,
-  onEndReachedThreshold: 0.35,
+    initialRows: 3,
+  lookAheadRows: 2,
+maxToRenderPerBatch: 8,
+  updateCellsBatchingPeriod: 32,
+  onEndReachedThreshold: 0.65,
   removeClippedSubviews: false as const,
 };
 

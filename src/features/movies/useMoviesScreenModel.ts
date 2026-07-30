@@ -23,10 +23,16 @@ import type { ContentSortOption } from '@/features/media-browser/contentSorting'
 import { buildContentSortRequestKey } from '@/features/media-browser/contentSortRequest';
 import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
 import type { MediaDetail } from '@/features/media-browser/mediaTypes';
-import { subscribeCategoryCountIndex } from '@/features/providers/categoryCountIndexStore';
+import { subscribeCategoryCountIndex, getCategoryCountFromIndex } from '@/features/providers/categoryCountIndexStore';
 import { subscribeCatalogSyncPhase } from '@/features/providers/providerCatalogSync';
 import { subscribeSmartCategoryCache } from '@/features/providers/smartCategoryCacheStore';
 import { isSmartCategoryId, normalizeSelectedSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
+import {
+  categoriesNeedingCountWarm,
+  createSerialCategoryCountQueue,
+  shouldNetworkFetchCategoryCountOnWarm,
+  shouldPrefetchMovieCategoryCount,
+} from './movieCategoryCountPolicy';
 
 export type MoviesScreenModelOptions = {
   initialSelectedCategoryId?: string;
@@ -43,6 +49,26 @@ function logMoviesAction(action: string, payload: Record<string, unknown> = {}) 
   if (typeof __DEV__ !== 'undefined' && __DEV__) {
     console.info('[NovaCast Movies UI]', { action, ...payload });
   }
+}
+
+function logMoviesPerf(action: string, payload: Record<string, unknown> = {}) {
+  console.info('[NovaCast Movies]', { action, ...payload });
+}
+
+function applyIndexedProviderCounts(providerId: string, categories: MovieCategory[]): MovieCategory[] {
+  let changed = false;
+  const next = categories.map((category) => {
+    if (category.kind !== 'provider' || category.countKnown) {
+      return category;
+    }
+    const indexed = getCategoryCountFromIndex(providerId, 'movie', category.id);
+    if (indexed == null) {
+      return category;
+    }
+    changed = true;
+    return { ...category, count: indexed, countKnown: true };
+  });
+  return changed ? next : categories;
 }
 
 function applyCategoryCount(categories: MovieCategory[], categoryId: string, count: number) {
@@ -127,7 +153,8 @@ export function useMoviesScreenModel(
   const loadStatusRef = useRef<MoviesLoadStatus>(loadStatus);
   loadStatusRef.current = loadStatus;
   const focusedMovieIdRef = useRef<string | null>(null);
-  const categoryCountRequestRef = useRef(new Set<string>());
+  const categoryCountGenerationRef = useRef(0);
+  const categoryCountQueueRef = useRef<ReturnType<typeof createSerialCategoryCountQueue> | null>(null);
   const detailRequestIdRef = useRef(0);
   const [reloadToken, setReloadToken] = useState(0);
   const selectedCategoryIdRef = useRef(selectedCategoryId);
@@ -156,25 +183,89 @@ export function useMoviesScreenModel(
     setCategories((current) => applyCategoryCount(current, categoryId, count));
   }, []);
 
+  useEffect(() => {
+    categoryCountGenerationRef.current += 1;
+    categoryCountQueueRef.current?.reset();
+
+    if (!resolvedDataSource?.getCategoryCount) {
+      categoryCountQueueRef.current = null;
+      return;
+    }
+
+    const getCategoryCount = resolvedDataSource.getCategoryCount.bind(resolvedDataSource);
+    categoryCountQueueRef.current = createSerialCategoryCountQueue({
+      concurrency: 1,
+      getGeneration: () => categoryCountGenerationRef.current,
+      isAccepted: (categoryId) => {
+        const category = categoriesRef.current.find((entry) => entry.id === categoryId);
+        if (!category || category.countKnown) {
+          return false;
+        }
+        return shouldPrefetchMovieCategoryCount({ categoryId, kind: category.kind });
+      },
+      fetchCount: getCategoryCount,
+      onCount: (categoryId, count) => {
+        syncCategoryCount(categoryId, count);
+        logMoviesPerf('category_count_resolved', {
+          categoryId,
+          count,
+          stats: categoryCountQueueRef.current?.getStats(),
+        });
+      },
+    });
+
+    logMoviesPerf('category_count_queue_ready', {
+      providerId: activeProviderId,
+      generation: categoryCountGenerationRef.current,
+      networkWarmEnabled: shouldNetworkFetchCategoryCountOnWarm(),
+    });
+
+    return () => {
+      categoryCountGenerationRef.current += 1;
+      categoryCountQueueRef.current?.reset();
+      categoryCountQueueRef.current = null;
+    };
+  }, [activeProviderId, resolvedDataSource, syncCategoryCount]);
+
   const prefetchCategoryCount = useCallback(
-    (categoryId: string) => {
+    (categoryId: string, kind?: MovieCategory['kind']) => {
+      const category = categoriesRef.current.find((entry) => entry.id === categoryId);
+      const resolvedKind = kind ?? category?.kind;
       if (
         !resolvedDataSource?.getCategoryCount ||
-        !categoryId ||
-        categoryId.startsWith('section:') ||
-        categoryId.startsWith('smart:') ||
-        categoryCountRequestRef.current.has(categoryId)
+        !shouldPrefetchMovieCategoryCount({ categoryId, kind: resolvedKind }) ||
+        category?.countKnown
       ) {
         return;
       }
 
-      categoryCountRequestRef.current.add(categoryId);
-      void resolvedDataSource.getCategoryCount(categoryId).then((count) => {
-        syncCategoryCount(categoryId, count);
-      });
+      const queued = categoryCountQueueRef.current?.enqueue(categoryId) ?? false;
+      if (queued) {
+        logMoviesPerf('category_count_enqueued', {
+          categoryId,
+          kind: resolvedKind ?? null,
+          stats: categoryCountQueueRef.current?.getStats(),
+        });
+      }
     },
-    [resolvedDataSource, syncCategoryCount],
+    [resolvedDataSource],
   );
+
+  const warmUnresolvedCategoryCounts = useCallback((nextCategories: MovieCategory[]) => {
+    const unresolvedBefore = categoriesNeedingCountWarm(nextCategories);
+    const withIndex = applyIndexedProviderCounts(activeProviderId, nextCategories);
+    const unresolvedAfter = categoriesNeedingCountWarm(withIndex);
+
+    logMoviesPerf('category_counts_warm_index_only', {
+      providerId: activeProviderId,
+      unresolvedBefore: unresolvedBefore.length,
+      appliedFromIndex: unresolvedBefore.length - unresolvedAfter.length,
+      leftUnresolved: unresolvedAfter.length,
+      networkWarmEnabled: shouldNetworkFetchCategoryCountOnWarm(),
+    });
+
+    return withIndex;
+  }, [activeProviderId]);
 
   const queryMode = searchQuery.trim();
   const isSearchMode = queryMode.length > 0;
@@ -194,30 +285,58 @@ export function useMoviesScreenModel(
     let indexDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
     const loadCategories = async () => {
+      const startedAt = Date.now();
+      logMoviesPerf('categories_load_start', { providerId: activeProviderId });
       try {
         const nextCategories = await resolvedDataSource.getCategories();
         if (!mounted) {
           return;
         }
 
-        setCategories((current) => mergeCategoriesPreservingCounts(current, nextCategories));
+        const warmedCategories = warmUnresolvedCategoryCounts(nextCategories);
+        setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
+        scheduleSmartCountRefresh();
         setSelectedCategoryId((current) => {
-          if (current && current !== 'all' && nextCategories.some((category) => category.id === current && isSelectableCategory(category))) {
-            return current;
+          let nextId = current;
+          if (current && current !== 'all' && warmedCategories.some((category) => category.id === current && isSelectableCategory(category))) {
+            nextId = current;
+          } else {
+            const remembered = options.initialSelectedCategoryId ?? providerMemory.selectedCategoryId;
+            if (remembered && warmedCategories.some((category) => category.id === remembered && isSelectableCategory(category))) {
+              nextId = remembered;
+            } else {
+              nextId = findDefaultCategoryId(warmedCategories);
+            }
           }
 
-          const remembered = options.initialSelectedCategoryId ?? providerMemory.selectedCategoryId;
-          if (remembered && nextCategories.some((category) => category.id === remembered && isSelectableCategory(category))) {
-            return remembered;
+          const selected = warmedCategories.find((category) => category.id === nextId);
+          const indexedSelected =
+            selected?.kind === 'provider'
+              ? getCategoryCountFromIndex(activeProviderId, 'movie', selected.id)
+              : undefined;
+          if (selected && selected.countKnown === false && indexedSelected == null) {
+            // Progressive: only the first selected category may enqueue a network count.
+            queueMicrotask(() => prefetchCategoryCount(selected.id, selected.kind));
           }
 
-          return findDefaultCategoryId(nextCategories);
+          return nextId;
+        });
+        logMoviesPerf('categories_load_ready', {
+          providerId: activeProviderId,
+          categoryCount: warmedCategories.length,
+          elapsedMs: Date.now() - startedAt,
+          countQueue: categoryCountQueueRef.current?.getStats() ?? null,
         });
       } catch (error) {
         if (!mounted) {
           return;
         }
 
+        logMoviesPerf('categories_load_error', {
+          providerId: activeProviderId,
+          elapsedMs: Date.now() - startedAt,
+          message: error instanceof Error ? error.message : String(error),
+        });
         setCategories([]);
         setLoadStatus('error');
         setLoadErrorMessage(error instanceof Error ? error.message : 'Unable to load movie categories.');
@@ -305,7 +424,7 @@ export function useMoviesScreenModel(
       unsubscribeLibrary();
       unsubscribeSettings();
     };
-  }, [activeProviderId, options.initialSelectedCategoryId, providerMemory.selectedCategoryId, resolvedDataSource]);
+  }, [activeProviderId, options.initialSelectedCategoryId, prefetchCategoryCount, providerMemory.selectedCategoryId, resolvedDataSource, warmUnresolvedCategoryCounts]);
 
   useEffect(() => {
     focusedMovieIdRef.current = focusedMovieId;
@@ -313,6 +432,15 @@ export function useMoviesScreenModel(
 
   useEffect(() => {
     if (!resolvedDataSource || (!isSearchMode && (!selectedCategoryId || selectedCategoryId.startsWith('section:')))) {
+      return;
+    }
+
+    // Let the category rail paint before competing with poster/page fetches.
+    if (!isSearchMode && categories.length === 0) {
+      logMoviesPerf('movies_page_gated_waiting_categories', {
+        providerId: activeProviderId,
+        categoryId: selectedCategoryId,
+      });
       return;
     }
 
@@ -334,6 +462,7 @@ export function useMoviesScreenModel(
     previousListScopeRef.current = { providerId: activeProviderId, categoryId: selectedCategoryId };
 
     const loadInitialPage = async () => {
+      const pageStartedAt = Date.now();
       await Promise.resolve();
 
       setLoading(true);
@@ -350,6 +479,11 @@ export function useMoviesScreenModel(
         categoryId: selectedCategoryId,
         offset: 0,
         limit: MOVIE_PAGE_SIZE,
+      });
+      logMoviesPerf('movies_page_start', {
+        providerId: activeProviderId,
+        categoryId: selectedCategoryId,
+        search: isSearchMode,
       });
 
       try {
@@ -385,6 +519,14 @@ export function useMoviesScreenModel(
           setCategoryHasRatings(Boolean(page.hasValidRatings));
         }
         syncCategoryCount(selectedCategoryId, page.totalCount);
+        logMoviesPerf('movies_page_ready', {
+          providerId: activeProviderId,
+          categoryId: selectedCategoryId,
+          itemCount: page.items.length,
+          totalCount: page.totalCount,
+          elapsedMs: Date.now() - pageStartedAt,
+          countQueue: categoryCountQueueRef.current?.getStats() ?? null,
+        });
         const restoredFocusId =
           page.items.find((movie) => movie.id === previousFocusedMovieId)?.id ?? page.items[0]?.id ?? null;
         setFocusedMovieId(restoredFocusId);
@@ -440,7 +582,7 @@ export function useMoviesScreenModel(
     return () => {
       cancelled = true;
     };
-  }, [activeProviderId, isSearchMode, queryMode, reloadToken, resolvedDataSource, selectedCategoryId, sortOption, syncCategoryCount]);
+  }, [activeProviderId, categories.length, isSearchMode, queryMode, reloadToken, resolvedDataSource, selectedCategoryId, sortOption, syncCategoryCount]);
 
   const focusedMovie = useMemo(
     () => visibleMovies.find((movie) => movie.id === focusedMovieId) ?? visibleMovies[0] ?? null,
@@ -501,6 +643,10 @@ export function useMoviesScreenModel(
     setSelectedCategoryId(categoryId);
     setLoadStatus('loading');
     setLoadErrorMessage(null);
+    const selected = categoriesRef.current.find((category) => category.id === categoryId);
+    if (selected?.countKnown === false) {
+      prefetchCategoryCount(categoryId, selected.kind);
+    }
     rememberMoviesScreenMemory(activeProviderId, {
       selectedCategoryId: categoryId,
     });

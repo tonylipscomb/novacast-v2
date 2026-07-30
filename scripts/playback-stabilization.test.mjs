@@ -170,6 +170,41 @@ test('Movies Back leaves the screen only after playback is closed and focus rest
   assert.equal(decideMoviesBackAction(false, false), 'leave-screen');
 });
 
+test('Movies detail Back is deferred while playback UI owns the screen', async () => {
+  const { shouldHandleMoviesDetailBack } = await import('../src/features/movies/moviesPlaybackLogic.ts');
+  assert.equal(shouldHandleMoviesDetailBack({ playbackUiActive: true, detailOpen: true }), false);
+  assert.equal(shouldHandleMoviesDetailBack({ playbackUiActive: false, detailOpen: true }), true);
+  assert.equal(shouldHandleMoviesDetailBack({ playbackUiActive: false, detailOpen: false }), false);
+});
+
+test('duplicate unified playback close signals are ignored', async () => {
+  const {
+    shouldAcceptUnifiedPlaybackClose,
+    UNIFIED_PLAYBACK_CLOSE_DEDUPE_MS,
+  } = await import('../src/features/playback/unified/unifiedPlayerLogic.ts');
+
+  assert.equal(
+    shouldAcceptUnifiedPlaybackClose({ machineState: 'playing', lastCloseAtMs: 0, nowMs: 1000 }),
+    true,
+  );
+  assert.equal(
+    shouldAcceptUnifiedPlaybackClose({
+      machineState: 'playing',
+      lastCloseAtMs: 1000,
+      nowMs: 1000 + UNIFIED_PLAYBACK_CLOSE_DEDUPE_MS - 1,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAcceptUnifiedPlaybackClose({ machineState: 'closing', lastCloseAtMs: 0, nowMs: 5000 }),
+    false,
+  );
+  assert.equal(
+    shouldAcceptUnifiedPlaybackClose({ machineState: 'idle', lastCloseAtMs: 0, nowMs: 5000 }),
+    false,
+  );
+});
+
 test('Live TV duplicate OK on the same channel within the dedup window is ignored', () => {
   assert.equal(shouldAcceptLiveTvOkPress('chan-1', null, 1_000), true);
   assert.equal(shouldAcceptLiveTvOkPress('chan-1', { channelId: 'chan-1', at: 1_000 }, 1_200), false);
@@ -216,4 +251,44 @@ test('Movies detail notifications carry retry persistence and custom copy', () =
   const custom = resolveMoviesDetailNotification(true, 'Metadata timed out.');
   assert.equal(custom.message, 'Metadata timed out.');
   assert.equal(custom.persistent, true);
+});
+
+test('unified playback control refs are stable and do not clear Android focus handles on null', async () => {
+  const fs = await import('node:fs');
+  const controls = fs.readFileSync(
+    new URL('../src/features/playback/unified/UnifiedPlayerControls.tsx', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(controls, /Stable ref callbacks are required on Android/);
+  assert.match(controls, /Ignore transient null/);
+  assert.doesNotMatch(controls, /const assignBackRef = registerControlRef\('back'\)/);
+  assert.match(controls, /const assignBackRef = useCallback/);
+});
+
+test('unified movie playback overlay keeps SurfaceView and never mounts a full-screen cover Pressable', async () => {
+  const fs = await import('node:fs');
+  const overlay = fs.readFileSync(
+    new URL('../src/features/playback/unified/UnifiedPlayerOverlay.tsx', import.meta.url),
+    'utf8',
+  );
+  const interaction = fs.readFileSync(
+    new URL('../src/features/playback/unified/UnifiedPlayerInteractionLayer.tsx', import.meta.url),
+    'utf8',
+  );
+  const host = fs.readFileSync(
+    new URL('../src/features/playback/unified/UnifiedPlayerHost.tsx', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(overlay, /surfaceType="surfaceView"/);
+  assert.doesNotMatch(overlay, /surfaceType="textureView"/);
+  assert.match(overlay, /playback-recovery-phase1-textureview/);
+  assert.match(overlay, /backgroundColor: 'transparent'/);
+  assert.match(overlay, /collapsable=\{false\}/);
+  assert.doesNotMatch(overlay, /UnifiedPlayerInteractionLayer/);
+  assert.match(interaction, /return null/);
+  assert.doesNotMatch(interaction, /StyleSheet\.absoluteFill/);
+  assert.match(host, /<Modal/);
+  assert.match(host, /presentationStyle="overFullScreen"/);
 });

@@ -19,7 +19,10 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { getTvDensity, NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusChrome } from '@/components/nova';
 import { usePlaybackActivity } from '@/features/playback/usePlaybackActivity';
+import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
+import type { PlaybackItem } from '@/features/playback/unified/types';
+import { playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
@@ -282,6 +285,31 @@ export function LiveTvScreen() {
     () => channels.find((channel) => channel.id === liveState?.fullscreenChannelId) ?? null,
     [channels, liveState?.fullscreenChannelId],
   );
+  const livePlaybackItem = useMemo<PlaybackItem | null>(() => {
+    if (!fullscreenChannel || !previewStreamUrl) {
+      return null;
+    }
+    return {
+      id: fullscreenChannel.id,
+      mediaType: 'live',
+      title: fullscreenChannel.name,
+      streamUrl: previewStreamUrl,
+      isLive: true,
+      providerId: activeProviderId,
+    };
+  }, [activeProviderId, fullscreenChannel, previewStreamUrl]);
+  const previousAnalyticsFullscreenIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const currentId = liveState?.fullscreenChannelId ?? null;
+    const previousId = previousAnalyticsFullscreenIdRef.current;
+    if (currentId && currentId !== previousId && livePlaybackItem) {
+      playbackAnalyticsTracker.request(livePlaybackItem, 'channel');
+    }
+    if (!currentId && previousId) {
+      playbackAnalyticsTracker.stop('user_back');
+    }
+    previousAnalyticsFullscreenIdRef.current = currentId;
+  }, [livePlaybackItem, liveState?.fullscreenChannelId]);
   const categoriesRef = useRef<FlatList<ProviderLiveCategory>>(null);
   const channelsRef = useRef<FlatList<LiveTvChannelRowShellData>>(null);
   // Native refs for imperative focus restoration when fullscreen closes.
@@ -521,10 +549,31 @@ export function LiveTvScreen() {
     return () => clearTimeout(timer);
   }, [liveState?.fullscreenChannelId, fullscreenFrameStatus]);
 
-  const handleFullscreenFirstFrame = () => setFullscreenFrameStatus('ready');
+  const handleFullscreenFirstFrame = () => {
+    playbackAnalyticsTracker.firstFrame();
+    setFullscreenFrameStatus('ready');
+  };
+  const handleLivePlayerPlayingChange = useCallback(({ isPlaying }: PlayingChangeEventPayload) => {
+    if (liveStateRef.current?.fullscreenChannelId && isPlaying && liveStreamPlayer.status === 'readyToPlay') {
+      playbackAnalyticsTracker.firstFrame('playing_transition');
+    }
+  }, [liveStreamPlayer]);
+  const handleLivePlayerTimeUpdate = useCallback(({ currentTime }: TimeUpdateEventPayload) => {
+    if (
+      liveStateRef.current?.fullscreenChannelId &&
+      currentTime > 0 &&
+      liveStreamPlayer.status === 'readyToPlay' &&
+      liveStreamPlayer.playing
+    ) {
+      playbackAnalyticsTracker.firstFrame('current_time_progress');
+    }
+  }, [liveStreamPlayer]);
   const retryFullscreenPlayback = () => {
     setFullscreenFrameStatus('pending');
     setFullscreenChromeVisible(true);
+    if (livePlaybackItem) {
+      playbackAnalyticsTracker.request(livePlaybackItem, 'channel', true);
+    }
     retryLiveStream();
   };
 
@@ -1263,6 +1312,8 @@ export function LiveTvScreen() {
             contentFit="cover"
             style={[styles.fullscreenPlayer, fullscreenFrameStatus !== 'ready' && styles.hiddenStreamSurface]}
             onFirstFrameRender={handleFullscreenFirstFrame}
+            onPlayingChange={handleLivePlayerPlayingChange}
+            onTimeUpdate={handleLivePlayerTimeUpdate}
           />
           {shouldShowFullscreenLoadingOverlay(fullscreenFrameStatus) ? (
             <View style={styles.fullscreenStatusOverlay}>

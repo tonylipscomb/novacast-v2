@@ -97,7 +97,8 @@ test('Xtream repositories map provider content from the active client', async ()
   assert.equal(liveCategories[0]?.name, 'News');
   assert.deepEqual(liveCategoryCounts, { '10': 1 });
   assert.equal(liveChannelTotal, 1);
-  assert.equal(liveChannels[0]?.current, 'News Live');
+  assert.equal(liveChannels[0]?.name, 'News Live');
+  assert.equal(liveChannels[0]?.current, '');
   assert.equal(liveChannels[0]?.description, 'No program information available.');
   assert.equal(liveEpg[0]?.title, 'Morning News');
   assert.equal(liveEpg[0]?.description, 'Start of the day.');
@@ -154,7 +155,7 @@ test('Guide loads channel pages with bounded EPG concurrency and preserves the r
 
   assert.equal(firstPage.length, XTREAM_GUIDE_CHANNEL_PAGE_SIZE);
   assert.equal(secondPage.length, XTREAM_GUIDE_CHANNEL_PAGE_SIZE);
-  assert.equal(secondPage[0]?.channel.name, 'Channel 41');
+  assert.equal(secondPage[0]?.channel.name, `Channel ${XTREAM_GUIDE_CHANNEL_PAGE_SIZE + 1}`);
   assert.equal(maxActiveEpgRequests <= 6, true);
   assert.equal(requestedLimits.every((limit) => limit === 24), true);
 });
@@ -381,7 +382,7 @@ test('Xtream repository retains full oversized provider categories for global so
   assert.equal(liveStreamRequests, 0);
 });
 
-test('Guide 40-channel page is a page size, not a cap: three pages within one category yield 120 unique channels', async () => {
+test('Guide page size is not a catalog cap: three contiguous pages within one category yield unique channels', async () => {
   const channels = Array.from({ length: 120 }, (_, index) => ({
     stream_id: String(1000 + index),
     name: `News ${index + 1}`,
@@ -402,19 +403,22 @@ test('Guide 40-channel page is a page size, not a cap: three pages within one ca
 
   await repositories.live.getCategories();
 
+  const pageSize = XTREAM_GUIDE_CHANNEL_PAGE_SIZE;
+  const pageCount = 3;
   const seenChannelIds = new Map();
-  for (const offset of [0, 40, 80]) {
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    const offset = pageIndex * pageSize;
     const page = await repositories.guide.getRows(undefined, {
       categoryId: '10',
       channelOffset: offset,
-      channelLimit: XTREAM_GUIDE_CHANNEL_PAGE_SIZE,
+      channelLimit: pageSize,
     });
-    assert.equal(page.length, XTREAM_GUIDE_CHANNEL_PAGE_SIZE);
+    assert.equal(page.length, pageSize);
     page.forEach((row) => seenChannelIds.set(row.channel.id, row));
   }
 
-  // 40 channels is a page size: three pages of a 120-channel category yield 120 unique channels, not 40.
-  assert.equal(seenChannelIds.size, 120);
+  // Page size is not a hard catalog cap: contiguous pages cover pageSize * pageCount unique channels.
+  assert.equal(seenChannelIds.size, pageSize * pageCount);
   assert.equal(await repositories.guide.getChannelCount('10'), 120);
 });
 

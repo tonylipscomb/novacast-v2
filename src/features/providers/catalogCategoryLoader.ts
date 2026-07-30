@@ -36,6 +36,8 @@ export async function loadAllMoviesForCatalogIndex(
     if (collected.length >= MAX_CATALOG_INDEX_ITEMS) {
       return { items: collected.slice(0, MAX_CATALOG_INDEX_ITEMS), truncated: true };
     }
+    // Yield between pages so Home D-pad/focus can run during long category sync.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
   return { items: collected.slice(0, MAX_CATALOG_INDEX_ITEMS), truncated: true };
@@ -66,6 +68,7 @@ export async function loadAllSeriesForCatalogIndex(
     if (collected.length >= MAX_CATALOG_INDEX_ITEMS) {
       return { items: collected.slice(0, MAX_CATALOG_INDEX_ITEMS), truncated: true };
     }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
   return { items: collected.slice(0, MAX_CATALOG_INDEX_ITEMS), truncated: true };

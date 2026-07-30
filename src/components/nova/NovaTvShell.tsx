@@ -11,7 +11,10 @@ import { NovaScreen } from '@/components/nova/NovaScreen';
 import { getTvDensity } from '@/components/nova/tvDensity';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { useProviderChrome } from '@/features/providers/providerStore';
+import { isClosedBetaManagedFlow } from '@/features/device/deviceFeatureFlags';
 import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
+import { markCatalogAuditFocus, markCatalogAuditRender } from '@/features/diagnostics/novaCastCatalogAudit';
+import { noteFocusLatencyFocus } from '@/features/diagnostics/focusLatencyAudit';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import { themeLogoIncludesWordmark } from '@/theme/brandingAssets';
 import type { NovaTheme } from '@/theme/tokens';
@@ -74,6 +77,41 @@ function ShellHeaderClock({ style }: { style: { color?: string; fontSize?: numbe
   return <Text style={style}>{formatClock(clock)}</Text>;
 }
 
+/** Isolated so the 1s beta countdown tick does not re-render the navbar or screen children. */
+function ShellBetaExpiration({
+  captionStyle,
+  valueStyle,
+  boxStyle,
+  divider,
+}: {
+  captionStyle: { color?: string; fontSize?: number; fontWeight?: '600' | '700' | '800' | '900'; textTransform?: 'uppercase'; letterSpacing?: number };
+  valueStyle: { color?: string; fontSize?: number; fontWeight?: '600' | '700' | '800' | '900' };
+  boxStyle: { alignItems?: 'flex-end' | 'center' | 'flex-start'; gap?: number };
+  divider: ReactNode;
+}) {
+  const {
+    selectedProvider,
+  } = useProviderChrome();
+  const accessExpiration = useAccessExpirationDisplay({
+    provider: selectedProvider,
+    account: selectedProvider?.account ?? null,
+  });
+
+  if (!accessExpiration.closedBeta || !accessExpiration.value) {
+    return null;
+  }
+
+  return (
+    <>
+      <View style={boxStyle}>
+        <Text style={captionStyle}>{accessExpiration.caption}</Text>
+        <Text style={valueStyle}>{accessExpiration.value}</Text>
+      </View>
+      {divider}
+    </>
+  );
+}
+
 export function NovaTvShell({
   activeId,
   title,
@@ -90,6 +128,7 @@ export function NovaTvShell({
   compactNavigationRail = false,
   children,
 }: NovaTvShellProps) {
+  markCatalogAuditRender('NovaTvShell');
   const { theme, themeId } = useAppTheme();
   const styles = useMemo(() => createShellStyles(theme), [theme]);
   const router = useRouter();
@@ -100,19 +139,11 @@ export function NovaTvShell({
   const navItemRefs = useRef<Partial<Record<NavigationId, View | null>>>({});
   const lastNavHandlesJson = useRef('');
   const {
-    selectedProvider,
     selectedProviderName,
     selectedProviderExpiration,
   } = useProviderChrome();
-  const accessExpiration = useAccessExpirationDisplay({
-    provider: selectedProvider,
-    account: selectedProvider?.account ?? null,
-  });
   const resolvedProviderLabel = providerLabel ?? selectedProviderName;
-  const resolvedExpirationLabel = accessExpiration.closedBeta
-    ? accessExpiration.value
-    : (expirationLabel ?? selectedProviderExpiration);
-  const expirationCaption = accessExpiration.caption;
+  const nonBetaExpirationLabel = expirationLabel ?? selectedProviderExpiration;
   const density = getTvDensity(width);
   const compactNavWidth = density === 'compact' ? 60 : 68;
   const safeHorizontal = density === 'compact' ? 28 : density === 'normal' ? 38 : 46;
@@ -241,7 +272,11 @@ export function NovaTvShell({
                     }}
                     focusable
                     hasTVPreferredFocus={preferActiveNavigationFocus && active}
-                    onFocus={() => setFocusedId(item.id)}
+                    onFocus={() => {
+                      markCatalogAuditFocus(`nav:${item.id}`);
+                      noteFocusLatencyFocus(`nav:${item.id}`);
+                      setFocusedId(item.id);
+                    }}
                     onBlur={() => setFocusedId(null)}
                     {...(navigationNextFocusRight?.[item.id]
                       ? { nextFocusRight: navigationNextFocusRight[item.id] }
@@ -282,11 +317,18 @@ export function NovaTvShell({
                     {resolvedProviderLabel}
                   </Text>
                 ) : null}
-                {resolvedExpirationLabel ? (
+                {isClosedBetaManagedFlow() ? (
+                  <ShellBetaExpiration
+                    captionStyle={styles.expirationLabel}
+                    valueStyle={styles.expirationValue}
+                    boxStyle={styles.expirationBox}
+                    divider={<View style={styles.metaDivider} />}
+                  />
+                ) : nonBetaExpirationLabel ? (
                   <>
                     <View style={styles.expirationBox}>
-                      <Text style={styles.expirationLabel}>{expirationCaption}</Text>
-                      <Text style={styles.expirationValue}>{resolvedExpirationLabel}</Text>
+                      <Text style={styles.expirationLabel}>Expires</Text>
+                      <Text style={styles.expirationValue}>{nonBetaExpirationLabel}</Text>
                     </View>
                     <View style={styles.metaDivider} />
                   </>

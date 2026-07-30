@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { Image, type ImageResizeMode, type ImageStyle, StyleSheet } from 'react-native';
+import { Image, type ImageContentFit } from 'expo-image';
+import { type ImageResizeMode, type ImageStyle, StyleSheet } from 'react-native';
 
 import {
   getTvImageObservability,
@@ -25,6 +26,22 @@ let pendingImageCount = 0;
 function bumpPending(delta: number) {
   pendingImageCount = Math.max(0, pendingImageCount + delta);
   tvImageSetPending(pendingImageCount);
+}
+
+function toContentFit(resizeMode: ImageResizeMode): ImageContentFit {
+  switch (resizeMode) {
+    case 'contain':
+      return 'contain';
+    case 'stretch':
+      return 'fill';
+    case 'center':
+      return 'none';
+    case 'repeat':
+      return 'cover';
+    case 'cover':
+    default:
+      return 'cover';
+  }
 }
 
 function TvRemoteImageComponent({ uri, style, resizeMode = 'cover', onError }: TvRemoteImageProps) {
@@ -69,7 +86,10 @@ function TvRemoteImageComponent({ uri, style, resizeMode = 'cover', onError }: T
     <Image
       source={source}
       style={[styles.image, style]}
-      resizeMode={resizeMode}
+      contentFit={toContentFit(resizeMode)}
+      cachePolicy="disk"
+      recyclingKey={normalizedUri}
+      transition={0}
       onLoadEnd={() => {
         if (pendingRef.current) {
           pendingRef.current = false;

@@ -4,6 +4,11 @@ export type AnalyticsMetadata = Record<string, AnalyticsPrimitive>;
 
 export type AnalyticsEventName =
   | 'screen_view'
+  | 'playback_requested'
+  | 'playback_started'
+  | 'playback_failed'
+  | 'playback_recovered'
+  | 'playback_stopped'
   | 'session_started'
   | 'session_backgrounded'
   | 'session_resumed'
@@ -14,6 +19,8 @@ export type AnalyticsEvent = {
   eventName: AnalyticsEventName;
   occurredAt?: string;
   route?: string;
+  providerId?: string;
+  contentId?: string;
   contentType?: string;
   outcome?: string;
   durationMs?: number;

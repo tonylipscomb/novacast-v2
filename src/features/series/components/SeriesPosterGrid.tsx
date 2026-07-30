@@ -187,7 +187,7 @@ export function SeriesPosterGrid({
 
   const keyExtractor = useCallback((item: SeriesSummary) => item.id, []);
 
-  const loadingLabel = `Loading ${selectedCategoryLabel}…`;
+  const loadingLabel = `Loading ${selectedCategoryLabel}â€¦`;
   const showInitialLoader = categoryLoading && series.length === 0 && !emptyNotice;
   const showLoadingOverlay = categoryLoading && series.length > 0;
   const showFooterLoader = loading && !categoryLoading && series.length > 0;
@@ -195,7 +195,7 @@ export function SeriesPosterGrid({
     () =>
       showFooterLoader ? (
         <View style={styles.footerLoader}>
-          <NovaSpaceLoader label="Loading more…" variant="inline" />
+          <NovaSpaceLoader label="Loading moreâ€¦" variant="inline" />
         </View>
       ) : null,
     [showFooterLoader, styles.footerLoader],
@@ -339,7 +339,7 @@ function createStyles(theme: NovaTheme) {
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor:
-        theme.colors.background === '#F3EEE4' ? 'rgba(26,21,16,0.45)' : 'rgba(0,0,0,0.35)',
+        String(theme.colors.background) === '#F3EEE4' ? 'rgba(26,21,16,0.45)' : 'rgba(0,0,0,0.35)',
     },
     footerLoader: {
       alignItems: 'center',

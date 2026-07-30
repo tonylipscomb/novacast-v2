@@ -1,4 +1,6 @@
 import type { ProviderCredentialRecord } from './providerModel.ts';
+import { normalizePlaybackExtension } from './playbackSourceDiagnostics.ts';
+import { markCatalogAuditHttp, getActiveVodCategoryPhaseProfile, addVodCategoryPhaseMs } from '../diagnostics/novaCastCatalogAudit.ts';
 
 export type XtreamUserInfo = {
   username?: string;
@@ -151,11 +153,12 @@ function mediaList<T>(value: T[] | null | undefined) {
 
 function normalizeBaseUrl(baseUrl: string) {
   const trimmed = baseUrl.trim().replace(/\/+$/, '');
-  if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed;
+  const withoutApiFile = trimmed.replace(/\/(?:player|panel)_api\.php$/i, '');
+  if (/^https?:\/\//i.test(withoutApiFile)) {
+    return withoutApiFile;
   }
 
-  return `https://${trimmed}`;
+  return `https://${withoutApiFile}`;
 }
 
 function toSearchParamValue(value: string | number | boolean | null | undefined) {
@@ -232,14 +235,31 @@ async function parseJsonResponse<T>(response: Response) {
     throw new Error('Xtream provider response is too large to process safely.');
   }
 
+  const bodyStarted = Date.now();
   const text = await response.text();
+  const bodyDownloadMs = Date.now() - bodyStarted;
+  const profile = getActiveVodCategoryPhaseProfile();
+  if (profile) {
+    addVodCategoryPhaseMs('bodyDownloadMs', bodyDownloadMs);
+    profile.responseBytes = text.length;
+  }
+
   if (text.length > MAX_XTREAM_RESPONSE_BYTES) {
     throw new Error('Xtream provider response is too large to process safely.');
   }
 
+  const parseStarted = Date.now();
   try {
-    return JSON.parse(text) as T;
+    const parsed = JSON.parse(text) as T;
+    const jsonParseMs = Date.now() - parseStarted;
+    if (profile) {
+      addVodCategoryPhaseMs('jsonParseMs', jsonParseMs);
+    }
+    return parsed;
   } catch {
+    if (profile) {
+      addVodCategoryPhaseMs('jsonParseMs', Date.now() - parseStarted);
+    }
     throw new Error('Xtream provider returned a non-JSON response.');
   }
 }
@@ -278,7 +298,19 @@ export class XtreamClient {
     return url;
   }
 
+  /** Absolute player_api URL for catalog native decode. Callers must never log this value. */
+  buildPlayerApiUrl(
+    action?: string,
+    query: Record<string, string | number | boolean | null | undefined> = {},
+  ) {
+    return this.buildUrl(action, query).toString();
+  }
+
   private async request<T>(url: URL, init: XtreamRequestInit = {}) {
+    const action = url.searchParams.get('action') ?? 'account';
+    const startedAt = Date.now();
+    markCatalogAuditHttp('start', { action });
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
@@ -291,16 +323,42 @@ export class XtreamClient {
     }
 
     try {
+      const fetchStarted = Date.now();
       const response = await this.fetchImpl(url, {
         ...init,
         signal: controller.signal,
       });
+      const fetchHeadersMs = Date.now() - fetchStarted;
+      const profile = getActiveVodCategoryPhaseProfile();
+      if (profile && action === 'get_vod_streams') {
+        addVodCategoryPhaseMs('fetchHeadersMs', fetchHeadersMs);
+      }
 
       if (!response.ok) {
         throw new Error(`Xtream request failed with status ${response.status}.`);
       }
 
-      return parseJsonResponse<T>(response);
+      const payload = await parseJsonResponse<T>(response);
+      const httpWallMs = Date.now() - startedAt;
+      if (profile && action === 'get_vod_streams') {
+        profile.httpWallMs = httpWallMs;
+      }
+      markCatalogAuditHttp('end', {
+        action,
+        ok: true,
+        durationMs: httpWallMs,
+        fetchHeadersMs,
+        responseBytes: profile?.responseBytes,
+      });
+      return payload;
+    } catch (error) {
+      markCatalogAuditHttp('end', {
+        action,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        error: true,
+      });
+      throw error;
     } finally {
       clearTimeout(timeout);
     }
@@ -328,12 +386,18 @@ export class XtreamClient {
   }
 
   async getVodStreams(categoryId?: string | number, signal?: AbortSignal) {
-    return mediaList(
-      await this.request<XtreamVodStreamResponse[]>(
-        this.buildUrl('get_vod_streams', categoryId ? { category_id: categoryId } : {}),
-        { signal },
-      ),
+    const raw = await this.request<XtreamVodStreamResponse[]>(
+      this.buildUrl('get_vod_streams', categoryId ? { category_id: categoryId } : {}),
+      { signal },
     );
+    const boundStarted = Date.now();
+    const bounded = mediaList(raw);
+    const profile = getActiveVodCategoryPhaseProfile();
+    if (profile) {
+      addVodCategoryPhaseMs('mediaListBoundMs', Date.now() - boundStarted);
+      profile.rawStreamCount = Array.isArray(raw) ? raw.length : 0;
+    }
+    return bounded;
   }
 
   async getVodInfo(vodId: string | number, signal?: AbortSignal) {
@@ -374,18 +438,18 @@ export class XtreamClient {
   }
 
   buildLiveStreamUrl(streamId: string | number, extension?: string) {
-    const resolvedExtension = extension ?? 'ts';
-    return `${this.baseUrl}/live/${encodeURIComponent(this.username)}/${encodeURIComponent(this.password)}/${streamId}.${resolvedExtension}`;
+    const resolvedExtension = normalizePlaybackExtension(extension, 'ts');
+    return `${this.baseUrl}/live/${encodeURIComponent(this.username)}/${encodeURIComponent(this.password)}/${encodeURIComponent(String(streamId).trim())}.${resolvedExtension}`;
   }
 
   buildVodStreamUrl(streamId: string | number, extension?: string) {
-    const resolvedExtension = extension ?? 'mp4';
-    return `${this.baseUrl}/movie/${encodeURIComponent(this.username)}/${encodeURIComponent(this.password)}/${streamId}.${resolvedExtension}`;
+    const resolvedExtension = normalizePlaybackExtension(extension, 'mp4');
+    return `${this.baseUrl}/movie/${encodeURIComponent(this.username)}/${encodeURIComponent(this.password)}/${encodeURIComponent(String(streamId).trim())}.${resolvedExtension}`;
   }
 
   buildSeriesStreamUrl(streamId: string | number, extension?: string) {
-    const resolvedExtension = extension ?? 'ts';
-    return `${this.baseUrl}/series/${encodeURIComponent(this.username)}/${encodeURIComponent(this.password)}/${streamId}.${resolvedExtension}`;
+    const resolvedExtension = normalizePlaybackExtension(extension, 'ts');
+    return `${this.baseUrl}/series/${encodeURIComponent(this.username)}/${encodeURIComponent(this.password)}/${encodeURIComponent(String(streamId).trim())}.${resolvedExtension}`;
   }
 }
 

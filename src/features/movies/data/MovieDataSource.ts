@@ -39,4 +39,10 @@ export interface MovieDataSource {
 
   /** Load all movies for a provider category (used by background catalog sync). */
   listCategoryMovies?(categoryId: string): Promise<MovieSummary[]>;
+
+  /**
+   * Absolute Xtream player_api URL for native off-JS catalog decode.
+   * Must never be logged. Returns null when native decode cannot be used.
+   */
+  getCatalogListRequestUrl?(categoryId: string): string | null;
 }

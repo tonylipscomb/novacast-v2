@@ -1,9 +1,12 @@
 import type { LaunchPlaybackOptions, PlaybackItem, UnifiedPlayerState } from './types.ts';
 import { normalizeMediaTitle } from '../../series/metadata/titleNormalization.ts';
+import { shouldAcceptUnifiedPlaybackClose } from './unifiedPlayerLogic.ts';
 
 function logUnifiedStore(event: string, payload: Record<string, unknown> = {}) {
   console.info('[NovaCast Unified Player]', event, payload);
 }
+
+let lastCloseAcceptedAtMs = 0;
 
 type UnifiedPlayerStoreSnapshot = UnifiedPlayerState & {
   onCloseCallback: (() => void) | null;
@@ -17,7 +20,7 @@ const initialState: UnifiedPlayerStoreSnapshot = {
   controlsVisible: true,
   positionMs: 0,
   durationMs: 0,
-  isPlaying: true,
+  isPlaying: false,
   contentFit: 'contain',
   onCloseCallback: null,
 };
@@ -118,6 +121,22 @@ export function launchUnifiedPlayback(item: PlaybackItem, options: LaunchPlaybac
 }
 
 export function closeUnifiedPlayback() {
+  const nowMs = Date.now();
+  if (
+    !shouldAcceptUnifiedPlaybackClose({
+      machineState: state.machineState,
+      lastCloseAtMs: lastCloseAcceptedAtMs,
+      nowMs,
+    })
+  ) {
+    logUnifiedStore('close-ignored-duplicate', {
+      id: state.item?.id ?? null,
+      machineState: state.machineState,
+    });
+    return;
+  }
+
+  lastCloseAcceptedAtMs = nowMs;
   const callback = state.onCloseCallback;
   logUnifiedStore('close', { id: state.item?.id ?? null, machineState: 'closing' });
   setState({
@@ -193,6 +212,7 @@ export function setUnifiedPlayerPlaying(isPlaying: boolean) {
 
 export function resetUnifiedPlayerForTests() {
   state = { ...initialState };
+  lastCloseAcceptedAtMs = 0;
   syncPublicSnapshot();
   listeners.clear();
 }

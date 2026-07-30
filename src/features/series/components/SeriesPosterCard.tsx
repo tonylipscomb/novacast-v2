@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
-import { createNovaTvGlassOverlayStyle, NOVA_TV_GLASS } from '@/components/nova/novaTvFocus';
+import { NOVA_TV_GLASS } from '@/components/nova/novaTvFocus';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { displayStreamTitle, formatMediaMetaLabel } from '@/features/series/metadata/titleNormalization';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -159,11 +159,10 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
               ) : null}
             </>
           )}
-          {isFocused ? <View pointerEvents="none" style={styles.focusGlass} /> : null}
-        </View>
+</View>
       </View>
 
-      <Text numberOfLines={1} style={styles.title}>
+      <Text numberOfLines={1} style={[styles.title, isFocused && styles.titleFocused]}>
         {displayStreamTitle(series.title)}
       </Text>
       <View style={styles.metaRow}>
@@ -182,12 +181,14 @@ function createStyles(theme: NovaTheme) {
       flex: 1,
       minWidth: 0,
       borderRadius: 0,
-      padding: 4,
+      padding: 6,
     },
     posterShell: {
       borderRadius: 2,
     },
-    posterShellFocused: {},
+    posterShellFocused: {
+      transform: [{ scale: 1.025 }],
+    },
     poster: {
       aspectRatio: 2 / 3,
       borderRadius: 2,
@@ -197,9 +198,10 @@ function createStyles(theme: NovaTheme) {
       padding: 10,
     },
     posterFocused: {
-      borderColor: light ? theme.colors.focusRing : NOVA_TV_GLASS.border,
+      borderColor: light ? theme.colors.focusRing : '#8FE9FF',
+      borderWidth: 4,
+      backgroundColor: 'rgba(7,15,24,0.96)',
     },
-    focusGlass: createNovaTvGlassOverlayStyle(theme),
     posterWithArt: {
       padding: 0,
       backgroundColor: '#0B1018',
@@ -282,6 +284,13 @@ function createStyles(theme: NovaTheme) {
       color: theme.colors.textPrimary,
       fontSize: 11,
       fontWeight: '700',
+    },
+    titleFocused: {
+      color: '#BFF4FF',
+      fontWeight: '900',
+      textShadowColor: 'rgba(143,233,255,0.65)',
+      textShadowOffset: { width: 0, height: 0 },
+      textShadowRadius: 4,
     },
     metaRow: {
       marginTop: 1,

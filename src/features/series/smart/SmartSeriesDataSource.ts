@@ -17,7 +17,7 @@ import {
 } from '../../media-browser/mediaLibraryStore.ts';
 import { getCategoryCountFromIndex } from '../../providers/categoryCountIndexStore.ts';
 import { fallbackProviderCategoryId } from '../../providers/categoryNormalization.ts';
-import { sortProviderCategoriesUsFirst, partitionMediaSummariesUsFirst } from '../../providers/usAmericanSort.ts';
+import { sortProviderCategoriesUsFirst } from '../../providers/usAmericanSort.ts';
 import {
   getSmartCategoryCacheSync,
   getSmartCategoryCountSync,
@@ -288,7 +288,7 @@ export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: 
     }
 
     const allItems = await loadAllSmartSeriesSummaries(definition);
-    const sorted = sortContentItems(partitionMediaSummariesUsFirst(allItems), sort, 'series') as SeriesSummary[];
+    const sorted = sortContentItems(allItems, sort, 'series') as SeriesSummary[];
     const page = paginateSortedItems(sorted, offset, limit);
     return {
       ...page,

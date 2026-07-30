@@ -1,26 +1,18 @@
-import {
-  partitionLiveItemsUsFirst,
-  partitionMediaSummariesUsFirst,
-  sortLiveCategoriesUsFirst,
-  sortLiveChannelsUsFirst,
-  sortMediaCategoriesUsFirst,
-  sortProviderCategoriesUsFirst,
-} from './usAmericanSort.ts';
-import type { MovieCategory, MovieSummary } from '../movies/movieTypes.ts';
+import { logContentSortAuditPayload } from '../media-browser/contentSortAudit.ts';
 import {
   buildContentSortPageMetadata,
   categoryHasValidRatings,
   normalizeAddedTimestamp,
   normalizeRating,
   sortAuditField,
-  type ContentSortOption,
   sortContentItems,
+  type ContentSortOption,
 } from '../media-browser/contentSorting.ts';
-import { logContentSortAuditPayload } from '../media-browser/contentSortAudit.ts';
+import { MockMovieDataSource } from '../movies/data/MockMovieDataSource.ts';
 import type { MovieDataSource } from '../movies/data/MovieDataSource.ts';
 import { MOCK_ALL_MOVIES, matchesMovie, normalizeQuery } from '../movies/movieMockData.ts';
-import { MockMovieDataSource } from '../movies/data/MockMovieDataSource.ts';
-import { inferGenreTags, parseAddedTimestamp, parseYearFromStreamFields } from '../movies/smart/movieMetadata.ts';
+import type { MovieCategory, MovieSummary } from '../movies/movieTypes.ts';
+import { parseAddedTimestamp, parseYearFromStreamFields } from '../movies/smart/movieMetadata.ts';
 import {
   parseProviderCategoryLabel,
   parseProviderTitlePrefix,
@@ -33,7 +25,21 @@ import {
   normalizeProviderCategoryId,
   type ProviderCategoryType,
 } from './categoryNormalization.ts';
+import {
+  partitionLiveItemsUsFirst,
+  sortLiveCategoriesUsFirst,
+  sortLiveChannelsUsFirst,
+  sortMediaCategoriesUsFirst,
+  sortProviderCategoriesUsFirst,
+} from './usAmericanSort.ts';
 
+import { normalizeCast, normalizeStringList, normalizeTrailerUrl } from '../media-browser/mediaDetail.ts';
+import type { MediaDetail } from '../media-browser/mediaTypes.ts';
+import {
+  addVodCategoryPhaseMs,
+  getActiveVodCategoryPhaseProfile,
+} from '../diagnostics/novaCastCatalogAudit.ts';
+import { mapTimeBudgeted } from '../catalog/jsChunkBudget.ts';
 import {
   XTREAM_MAX_ITEMS_PER_RESPONSE,
   type XtreamCategoryResponse,
@@ -45,8 +51,6 @@ import {
   type XtreamVodInfoResponse,
   type XtreamVodStreamResponse,
 } from './xtreamClient.ts';
-import type { MediaDetail } from '../media-browser/mediaTypes.ts';
-import { normalizeCast, normalizeStringList, normalizeTrailerUrl } from '../media-browser/mediaDetail.ts';
 const POSTER_STYLE_KEYS = ['ember', 'signal', 'glacier', 'orbit', 'midnight', 'onyx', 'aurora', 'dune'] as const;
 
 /** Xtream has no portable pagination contract; keep fallback indexing bounded. */
@@ -151,8 +155,18 @@ export type ProviderSearchHit =
   | ({ kind: 'live'; id: string; title: string; subtitle: string; tone: string })
   | ({ kind: 'series'; id: string; title: string; subtitle: string; tone: string });
 
+export type ProviderLiveCategoryAccentHint = {
+  id: string;
+  name: string;
+};
+
 export interface ProviderLiveRepository {
   getCategories(signal?: AbortSignal): Promise<ProviderLiveCategory[]>;
+  /**
+   * Home accent-map only: id+name without US-first sort, icon/type parse, or live-index
+   * cache invalidation. Must not be used as a Live TV category list.
+   */
+  getCategoryAccentHints?(signal?: AbortSignal): Promise<ProviderLiveCategoryAccentHint[]>;
   /** Optional full live index used to populate category counts without opening each category. */
   getCategoryCounts?(signal?: AbortSignal): Promise<Record<string, number>>;
   /** Total unique live channels (deduped by stream id). */
@@ -176,6 +190,8 @@ export interface ProviderSeriesRepository {
   getCategories(signal?: AbortSignal): Promise<ProviderSeriesCategory[]>;
   getSeries(categoryId: string, signal?: AbortSignal): Promise<ProviderSeriesPoster[]>;
   getSeriesInfo(seriesId: string, signal?: AbortSignal): Promise<XtreamSeriesInfoResponse | null>;
+  /** Absolute Xtream list URL for native catalog decode. Never log. */
+  getCatalogListRequestUrl?(categoryId: string): string | null;
 }
 
 export interface ProviderGuideRepository {
@@ -838,6 +854,12 @@ export function createMockProviderRepositories(providerId: string): ProviderRepo
       async getCategories() {
         return sortLiveCategoriesUsFirst(buildMockLiveCategories());
       },
+      async getCategoryAccentHints() {
+        return buildMockLiveCategories().map((category) => ({
+          id: category.id,
+          name: category.name,
+        }));
+      },
       async getChannels(categoryId: string) {
         return sortLiveChannelsUsFirst(buildMockLiveChannels(categoryId));
       },
@@ -933,35 +955,7 @@ function partitionXtreamLiveStreamsUsFirst(streams: XtreamLiveStreamResponse[]):
       stream,
       name: stream.name?.trim() || `Channel ${index + 1}`,
     })),
-    { allowTitleParse: false },
-  ).map(({ stream }) => stream);
-}
-
-function partitionXtreamSeriesStreamsUsFirst(streams: XtreamSeriesResponse[]): XtreamSeriesResponse[] {
-  if (streams.length <= 1) {
-    return streams;
-  }
-
-  return partitionLiveItemsUsFirst(
-    streams.map((stream, index) => ({
-      stream,
-      name: stream.name?.trim() || `Series ${index + 1}`,
-    })),
-    { allowTitleParse: true },
-  ).map(({ stream }) => stream);
-}
-
-function partitionXtreamVodStreamsUsFirst(streams: XtreamVodStreamResponse[]): XtreamVodStreamResponse[] {
-  if (streams.length <= 1) {
-    return streams;
-  }
-
-  return partitionLiveItemsUsFirst(
-    streams.map((stream, index) => ({
-      stream,
-      name: stream.name?.trim() || `Movie ${index + 1}`,
-    })),
-    { allowTitleParse: true },
+    { allowTitleParse: false, contentType: 'live' },
   ).map(({ stream }) => stream);
 }
 
@@ -1045,13 +1039,13 @@ function mapVodStream(
   baseUrl: string,
 ): MovieSummary {
   const rawTitle = stream.name?.trim() || `Movie ${index + 1}`;
+  // Minimal hot-path normalization — no regional ranking / content-policy here.
   const parsedPrefix = parseProviderTitlePrefix(rawTitle);
   const title = stripProviderStreamTitlePrefix(rawTitle) || rawTitle;
   const year = parseYearFromStreamFields(title, stream);
   const addedAt = parseAddedTimestamp(stream.added);
   const rating =
     typeof stream.rating === 'number' ? `${stream.rating}` : typeof stream.rating === 'string' ? stream.rating : undefined;
-  const genres = inferGenreTags(title, [categoryId.replace(/-/g, ' ') || 'Movies']);
 
   return {
     id: String(stream.stream_id ?? `${categoryId}-${index}`),
@@ -1065,7 +1059,7 @@ function mapVodStream(
     year,
     durationMinutes: undefined,
     rating,
-    genres: genres.length ? genres : [categoryId.replace(/-/g, ' ') || 'Movies'],
+    genres: [categoryId.replace(/-/g, ' ') || 'Movies'],
     description: undefined,
     director: undefined,
     cast: undefined,
@@ -1077,6 +1071,7 @@ function mapVodStream(
     posterStyleKey: POSTER_STYLE_KEYS[index % POSTER_STYLE_KEYS.length],
     posterUrl: pickVodPosterUrl(stream, baseUrl),
     containerExtension: stream.container_extension?.trim() || undefined,
+    providerSortOrder: index,
   };
 }
 
@@ -1172,6 +1167,7 @@ function mapVodInfo(movieId: string, response: XtreamVodInfoResponse | null, bas
     ratingSource: rating && rating > 0 ? 'Provider' : undefined,
     contentRating: readText(fields, 'content_rating', 'mpaa', 'age_rating'),
     trailerUrl: normalizeTrailerUrl(fields.youtube_trailer),
+    containerExtension: readText(fields, 'container_extension'),
     seasons: [],
     episodes: [],
   };
@@ -1276,9 +1272,11 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     return categoryCountCache.get(categoryId) ?? vodStreamCache.get(categoryId)?.length ?? null;
   }
 
-  function mapVodCategories(categories: XtreamCategoryResponse[]): MovieCategory[] {
-    return sortMediaCategoriesUsFirst(
-      removeExactProviderCategoryDuplicates(categories.map((category, index) => {
+  function mapVodCategories(
+    categories: XtreamCategoryResponse[],
+    options?: { forCatalogSync?: boolean },
+  ): MovieCategory[] {
+    const mapped = categories.map((category, index) => {
       const normalized = normalizeProviderCategory({
         contentType: 'movie',
         id: category.category_id,
@@ -1292,7 +1290,9 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       if (providerCount !== null) {
         categoryCountCache.set(normalized.id, providerCount);
       }
-      logCategoryNormalization('movie', category.category_id, category.category_name, normalized);
+      if (!options?.forCatalogSync) {
+        logCategoryNormalization('movie', category.category_id, category.category_name, normalized);
+      }
       return {
         id: normalized.id,
         renderKey: buildCategoryRenderKey(normalized.id, index),
@@ -1303,8 +1303,13 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
         count: providerCount ?? categoryCount(normalized.id) ?? 0,
         countKnown: providerCount !== null || categoryCountCache.has(normalized.id),
       };
-    })),
-    );
+    });
+
+    // Catalog sync only needs ids/names/counts in provider order — skip US-first sort cost on boot.
+    if (options?.forCatalogSync) {
+      return mapped;
+    }
+    return sortMediaCategoriesUsFirst(removeExactProviderCategoryDuplicates(mapped));
   }
 
   async function fetchCategoryCount(resolvedId: string, options: { cacheStreams?: boolean } = {}): Promise<number> {
@@ -1315,9 +1320,10 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     const allStreams = resolvedId === fallbackProviderCategoryId('movie')
       ? await client.getVodStreams(undefined).catch(() => [])
       : await client.getVodStreams(resolvedId).catch(() => []);
-      const streams = partitionXtreamVodStreamsUsFirst(allStreams.filter(
-        (stream) => resolveProviderStreamCategoryId(stream.category_id, 'movie', vodCategoryIds) === resolvedId,
-      ));
+    // Preserve provider order. Do not run US-first / content-policy on the ingestion hot path.
+    const streams = allStreams.filter(
+      (stream) => resolveProviderStreamCategoryId(stream.category_id, 'movie', vodCategoryIds) === resolvedId,
+    );
     categoryCountCache.set(resolvedId, streams.length);
     if (options.cacheStreams !== false && streams.length <= MAX_VOD_CATEGORY_CACHE_ITEMS) {
       vodStreamCache.set(resolvedId, streams);
@@ -1354,9 +1360,16 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     const allStreams = resolvedId === fallbackProviderCategoryId('movie')
       ? await client.getVodStreams(undefined)
       : await client.getVodStreams(resolvedId);
-      const streams = partitionXtreamVodStreamsUsFirst(allStreams.filter(
-        (stream) => resolveProviderStreamCategoryId(stream.category_id, 'movie', vodCategoryIds) === resolvedId,
-      ));
+    const filterStarted = Date.now();
+    // Preserve provider order — no US-first partition / content-policy on this path.
+    const streams = allStreams.filter(
+      (stream) => resolveProviderStreamCategoryId(stream.category_id, 'movie', vodCategoryIds) === resolvedId,
+    );
+    addVodCategoryPhaseMs('filterPartitionMs', Date.now() - filterStarted);
+    const profile = getActiveVodCategoryPhaseProfile();
+    if (profile) {
+      profile.rawStreamCount = allStreams.length;
+    }
     categoryCountCache.set(resolvedId, streams.length);
     if (streams.length <= MAX_VOD_CATEGORY_CACHE_ITEMS) {
       vodStreamCache.set(resolvedId, streams);
@@ -1365,10 +1378,10 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
   }
 
   const movies: MovieDataSource = {
-    async getCategories() {
+    async getCategories(options?: { forCatalogSync?: boolean }) {
       const categories = await client.getVodCategories();
       vodCategoryIds.clear();
-      return mapVodCategories(categories);
+      return mapVodCategories(categories, options);
     },
     async getMovieInfo(movieId: string) {
       return mapVodInfo(movieId, await client.getVodInfo(movieId).catch(() => null), client.baseUrl);
@@ -1404,9 +1417,8 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       const itemsConsideredForSort = streams.length;
       const start = Math.max(0, offset);
       const end = Math.min(itemsConsideredForSort, start + limit);
-      const mapped = partitionMediaSummariesUsFirst(
-        streams.map((stream, index) => mapVodStream(stream, index, resolvedId, client.baseUrl)),
-      );
+      // Provider order by default. US-first is a derived regionRank for later local sorts — not an in-memory repartition here.
+      const mapped = streams.map((stream, index) => mapVodStream(stream, index, resolvedId, client.baseUrl));
       const sorted = sortContentItems(mapped, sort, 'movie');
       logContentSortAuditPayload({
         providerId: 'xtream',
@@ -1472,7 +1484,23 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       }
 
       const streams = await loadVodStreamsForCategory(resolvedId);
-      return streams.map((stream, index) => mapVodStream(stream, index, resolvedId, client.baseUrl));
+      const mapStarted = Date.now();
+      const mapped = await mapTimeBudgeted(
+        streams,
+        (stream, index) => mapVodStream(stream, index, resolvedId, client.baseUrl),
+      );
+      addVodCategoryPhaseMs('mapObjectsMs', Date.now() - mapStarted);
+      const profile = getActiveVodCategoryPhaseProfile();
+      if (profile) {
+        profile.mappedCount = mapped.length;
+      }
+      return mapped;
+    },
+    getCatalogListRequestUrl(categoryId: string) {
+      if (!categoryId || categoryId === 'all') {
+        return null;
+      }
+      return client.buildPlayerApiUrl('get_vod_streams', { category_id: categoryId });
     },
   };
 
@@ -1576,6 +1604,15 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
         count: category.count ?? liveCategoryCountCache.get(category.id) ?? null,
       }));
     },
+    async getCategoryAccentHints(signal) {
+      // Intentionally skip invalidateLiveStreamOrderCache, US-first sort, icon/type
+      // parse, and count attachment — Home only needs id→name for accent classify.
+      const categories = await client.getLiveCategories(signal);
+      return categories.map((category) => ({
+        id: String(category.category_id ?? ''),
+        name: String(category.category_name ?? ''),
+      }));
+    },
     async getCategoryCounts(signal) {
       await loadLiveStreamIndex(signal, { accurate: true });
       return Object.fromEntries(liveCategoryCountCache);
@@ -1617,44 +1654,56 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     movies,
     live: liveRepository,
     series: {
-      async getCategories(signal) {
+      async getCategories(signal?: AbortSignal, options?: { forCatalogSync?: boolean }) {
         const categories = await client.getSeriesCategories(signal);
         seriesCategoryIds.clear();
-        return sortMediaCategoriesUsFirst(
-          removeExactProviderCategoryDuplicates(categories.map((category, index) => {
-          const normalized = normalizeProviderCategory({
-            contentType: 'series',
-            id: category.category_id,
-            name: category.category_name,
-          });
-          if (normalized.hasProviderId) {
-            seriesCategoryIds.add(normalized.id);
-          }
-          const parsed = parseProviderCategoryFields(category.category_name, normalized.name);
-          const providerCount = readXtreamCategoryCount(category);
-          logCategoryNormalization('series', category.category_id, category.category_name, normalized);
-          return {
-            id: normalized.id,
-            renderKey: buildCategoryRenderKey(normalized.id, index),
-            name: normalized.name,
-            rawName: parsed.rawLabel,
-            countryCode: parsed.countryCode,
-            regionMarker: parsed.regionMarker,
-            count: providerCount ?? 0,
-            countKnown: providerCount !== null,
-          };
-        })),
+        const mapped = removeExactProviderCategoryDuplicates(
+          categories.map((category, index) => {
+            const normalized = normalizeProviderCategory({
+              contentType: 'series',
+              id: category.category_id,
+              name: category.category_name,
+            });
+            if (normalized.hasProviderId) {
+              seriesCategoryIds.add(normalized.id);
+            }
+            const parsed = parseProviderCategoryFields(category.category_name, normalized.name);
+            const providerCount = readXtreamCategoryCount(category);
+            if (!options?.forCatalogSync) {
+              logCategoryNormalization('series', category.category_id, category.category_name, normalized);
+            }
+            return {
+              id: normalized.id,
+              renderKey: buildCategoryRenderKey(normalized.id, index),
+              name: normalized.name,
+              rawName: parsed.rawLabel,
+              countryCode: parsed.countryCode,
+              regionMarker: parsed.regionMarker,
+              count: providerCount ?? 0,
+              countKnown: providerCount !== null,
+            };
+          }),
         );
+        if (options?.forCatalogSync) {
+          return mapped;
+        }
+        return sortMediaCategoriesUsFirst(mapped);
       },
       async getSeries(categoryId: string, signal) {
         const allStreams = await client.getSeries(
           categoryId === 'all' || categoryId === fallbackProviderCategoryId('series') ? undefined : categoryId,
           signal,
         );
-        const streams = partitionXtreamSeriesStreamsUsFirst(allStreams.filter(
+        const streams = allStreams.filter(
           (stream) => resolveProviderStreamCategoryId(stream.category_id, 'series', seriesCategoryIds) === categoryId,
-        ));
+        );
         return streams.map((stream, index) => mapSeriesPoster(stream, index, categoryId, client.baseUrl));
+      },
+      getCatalogListRequestUrl(categoryId: string) {
+        if (!categoryId || categoryId === 'all' || categoryId === fallbackProviderCategoryId('series')) {
+          return null;
+        }
+        return client.buildPlayerApiUrl('get_series', { category_id: categoryId });
       },
       async getSeriesInfo(seriesId: string, signal) {
         return client.getSeriesInfo(seriesId, signal).catch(() => null);

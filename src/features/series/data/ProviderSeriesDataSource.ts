@@ -5,7 +5,6 @@ import type { SeriesDetail, SeriesEpisodeSummary, SeriesSeasonSummary, SeriesSum
 import { inferGenreTags, parseRatingNumber, parseYearFromStreamFields } from '../../movies/smart/movieMetadata.ts';
 import { normalizeStringList, normalizeTrailerUrl } from '../../media-browser/mediaDetail.ts';
 import { stripProviderStreamTitlePrefix } from '../metadata/titleNormalization.ts';
-import { partitionMediaSummariesUsFirst } from '../../providers/usAmericanSort.ts';
 import { compareSearchCandidates, matchesSearchQuery } from '../../search/searchRanking.ts';
 import { normalizeSearchQuery } from '../../search/searchQuery.ts';
 import { logContentSortAuditPayload } from '../../media-browser/contentSortAudit.ts';
@@ -190,7 +189,7 @@ export function createProviderSeriesDataSource(
         }
       }
 
-      const sorted = sortContentItems(partitionMediaSummariesUsFirst(items), sort, 'series');
+      const sorted = sortContentItems(items, sort, 'series');
       logContentSortAuditPayload({
         providerId: 'provider-series',
         section: 'series',
@@ -238,6 +237,10 @@ export function createProviderSeriesDataSource(
         categoryCache.set(categoryId, items);
       }
       return items;
+    },
+
+    getCatalogListRequestUrl(categoryId) {
+      return repository.getCatalogListRequestUrl?.(categoryId) ?? null;
     },
 
     async searchSeries({ query, offset, limit }) {

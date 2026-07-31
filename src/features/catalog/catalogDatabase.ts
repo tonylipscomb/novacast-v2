@@ -17,6 +17,7 @@ let catalogTransactionChain: Promise<unknown> = Promise.resolve();
 let mutexWaitTotalMs = 0;
 let mutexWaitSamples = 0;
 let mutexMaxWaitMs = 0;
+let activeCatalogTransactions = 0;
 
 function reportCatalogDatabaseError(action: string, error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
@@ -91,7 +92,12 @@ export async function withCatalogTransaction<T>(fn: () => Promise<T>): Promise<T
       });
     }
     const db = await getCatalogDatabase();
-    return db.withTransaction(fn);
+    activeCatalogTransactions += 1;
+    try {
+      return await db.withTransaction(fn);
+    } finally {
+      activeCatalogTransactions = Math.max(0, activeCatalogTransactions - 1);
+    }
   }) as Promise<T>;
 
   catalogTransactionChain = run.then(
@@ -107,6 +113,7 @@ export function getCatalogMutexStatsForTests() {
     waitTotalMs: mutexWaitTotalMs,
     waitSamples: mutexWaitSamples,
     maxWaitMs: mutexMaxWaitMs,
+    activeTransactions: activeCatalogTransactions,
   };
 }
 
@@ -142,6 +149,7 @@ export async function resetCatalogDatabaseForTests(): Promise<void> {
   mutexWaitTotalMs = 0;
   mutexWaitSamples = 0;
   mutexMaxWaitMs = 0;
+  activeCatalogTransactions = 0;
 }
 
 export async function getCatalogSchemaVersion(): Promise<number> {

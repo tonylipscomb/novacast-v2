@@ -4,6 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
+import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { NOVA_TV_GLASS } from '@/components/nova/novaTvFocus';
 import { displayStreamTitle, formatMediaMetaLabel } from '@/features/series/metadata/titleNormalization';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -11,12 +12,14 @@ import type { NovaTheme } from '@/theme/tokens';
 
 import type { MovieSummary } from '../movieTypes';
 
+let posterInstanceSequence = 0;
+
 type MoviePosterCardProps = {
   movie: MovieSummary;
   hasPreferredFocus?: boolean;
   onFocus: (movie: MovieSummary) => void;
   onPress?: (movie: MovieSummary) => void;
-  registerRef?: (instance: ElementRef<typeof Pressable> | null) => void;
+  registerRef?: (instance: ElementRef<typeof Pressable> | null, instanceToken: string) => void;
   isDiscover?: boolean;
   focusable?: boolean;
   /** When true, Down stays on this card (last row) instead of jumping to categories/nav. */
@@ -79,6 +82,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
   const [isFocused, setIsFocused] = useState(false);
   const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
   const [selfFocusHandle, setSelfFocusHandle] = useState<number | undefined>();
+  const instanceToken = useMemo(() => `movie-poster-${++posterInstanceSequence}-${movie.id}`, [movie.id]);
   const posterColors = getPosterColors(movie.posterStyleKey);
   const initials = makeInitials(movie.title);
   const posterKey = `${movie.id}:${movie.posterUrl ?? ''}`;
@@ -95,9 +99,19 @@ export const MoviePosterCard = memo(function MoviePosterCard({
     setIsFocused(false);
   }, [movie.id]);
 
+  useEffect(() => {
+    if (hasPreferredFocus) {
+      recordFocusAudit({
+        component: 'MoviePosterCard',
+        action: 'hasTVPreferredFocus',
+        itemId: movie.id,
+      });
+    }
+  }, [hasPreferredFocus, movie.id]);
+
   const bindRef = useCallback(
     (instance: ElementRef<typeof Pressable> | null) => {
-      registerRef?.(instance);
+      registerRef?.(instance, instanceToken);
       if (!trapFocusDown) {
         setSelfFocusHandle((prev) => (prev === undefined ? prev : undefined));
         return;
@@ -105,7 +119,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
       const handle = instance ? findNodeHandle(instance) ?? undefined : undefined;
       setSelfFocusHandle((prev) => (prev === handle ? prev : handle));
     },
-    [registerRef, trapFocusDown],
+    [instanceToken, registerRef, trapFocusDown],
   );
 
   return (
@@ -116,6 +130,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
       hasTVPreferredFocus={hasPreferredFocus}
       {...(trapFocusDown && selfFocusHandle != null ? { nextFocusDown: selfFocusHandle } : null)}
       onFocus={() => {
+        recordFocusAudit({ component: 'MoviePosterCard', action: 'focus-received', itemId: movie.id });
         setIsFocused(true);
         onFocus(movie);
       }}

@@ -13,6 +13,8 @@ const suites = [
   'us-american-sort.test.mjs',
   'catalog-sync-playback.test.mjs',
   'catalog-sync-smart.test.mjs',
+  'catalog-stage3b-completion-barrier.test.mjs',
+  'catalog-stage3b1-writer-pressure.test.mjs',
   'content-sorting.test.mjs',
   'content-hub-notifications.test.mjs',
   'hub-format.test.mjs',

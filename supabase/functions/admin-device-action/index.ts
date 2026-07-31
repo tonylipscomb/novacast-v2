@@ -1,7 +1,8 @@
 import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
 import { requireAdmin } from '../_shared/admin.ts';
 
-const EXTENSION_HOURS = new Set([24, 72, 168]);
+const MIN_EXTENSION_HOURS = 1;
+const MAX_EXTENSION_HOURS = 24 * 365 * 100;
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return optionsResponse();
@@ -16,17 +17,81 @@ Deno.serve(async (request) => {
 
     if (action === 'extend') {
       const hours = Number(body?.hours);
-      if (!EXTENSION_HOURS.has(hours)) {
+      if (
+        !Number.isInteger(hours) ||
+        hours < MIN_EXTENSION_HOURS ||
+        hours > MAX_EXTENSION_HOURS
+      ) {
         return jsonResponse({ errorCategory: 'invalid_extension' }, 400);
       }
       const { data, error } = await client.rpc('extend_device_activation', {
         p_device_id: deviceId,
         p_hours: hours,
       });
-      if (error || !data?.[0]) {
-        return jsonResponse({ errorCategory: 'admin_update_failed' }, 500);
+
+      if (!error && data?.[0]) {
+        return jsonResponse({ ok: true, expiresAt: data[0].expires_at, mode: 'rpc' });
       }
-      return jsonResponse({ ok: true, expiresAt: data[0].expires_at });
+
+      const { data: activations, error: activationReadError } = await client
+        .from('device_activations')
+        .select('id, expires_at, status')
+        .eq('device_id', deviceId)
+        .in('status', ['active', 'expired'])
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (activationReadError || !activations?.[0]) {
+        return jsonResponse(
+          {
+            errorCategory: 'activation_not_found',
+            detail: activationReadError?.message ?? error?.message ?? null,
+          },
+          400,
+        );
+      }
+
+      const currentExpiration = Date.parse(String(activations[0].expires_at ?? ''));
+      const baseTime = Number.isFinite(currentExpiration)
+        ? Math.max(Date.now(), currentExpiration)
+        : Date.now();
+      const expiresAt = new Date(baseTime + hours * 60 * 60 * 1000).toISOString();
+
+      const { error: activationUpdateError } = await client
+        .from('device_activations')
+        .update({
+          status: 'active',
+          expires_at: expiresAt,
+          revoked_at: null,
+          revoked_reason: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', activations[0].id);
+
+      if (activationUpdateError) {
+        return jsonResponse(
+          { errorCategory: 'activation_update_failed', detail: activationUpdateError.message },
+          500,
+        );
+      }
+
+      const { error: deviceUpdateError } = await client
+        .from('devices')
+        .update({
+          status: 'registered',
+          activation_status: 'active',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', deviceId);
+
+      if (deviceUpdateError) {
+        return jsonResponse(
+          { errorCategory: 'device_update_failed', detail: deviceUpdateError.message },
+          500,
+        );
+      }
+
+      return jsonResponse({ ok: true, expiresAt, mode: 'fallback' });
     }
 
     if (action === 'revoke' || action === 'restore') {

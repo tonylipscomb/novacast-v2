@@ -12,6 +12,7 @@ import {
   beginCatalogSync,
   completeCatalogSync,
   failCatalogSync,
+  getCatalogGenerationItemStats,
   upsertCatalogProvider,
   writeCatalogCategoriesBatch,
   writeCatalogItemsBatch,
@@ -31,7 +32,69 @@ export type CatalogSqliteMediaSyncHandle = {
   providerId: string;
   mediaType: CatalogMediaType;
   generation: number;
+  accounting: CatalogSqliteWriterAccounting;
+  pendingCategories: CatalogCategoryInput[];
 };
+
+export type CatalogSqliteWriterAccounting = {
+  decodedCount: number;
+  normalizedCount: number;
+  queuedCount: number;
+  committedCount: number;
+  duplicateCount: number;
+  pendingWriteCount: number;
+  peakBatchMs: number;
+  pressurePauseCount: number;
+  nativeDone: boolean;
+  writerDrained: boolean;
+};
+
+function createWriterAccounting(): CatalogSqliteWriterAccounting {
+  return {
+    decodedCount: 0,
+    normalizedCount: 0,
+    queuedCount: 0,
+    committedCount: 0,
+    duplicateCount: 0,
+    pendingWriteCount: 0,
+    peakBatchMs: 0,
+    pressurePauseCount: 0,
+    nativeDone: false,
+    writerDrained: true,
+  };
+}
+
+export function createDisabledCatalogSqliteMediaSyncHandle(
+  providerId: string,
+  mediaType: CatalogMediaType,
+): CatalogSqliteMediaSyncHandle {
+  return {
+    enabled: false,
+    providerId,
+    mediaType,
+    generation: 0,
+    accounting: createWriterAccounting(),
+    pendingCategories: [],
+  };
+}
+
+export function recordCatalogSqliteDecoded(
+  handle: CatalogSqliteMediaSyncHandle,
+  count: number,
+) {
+  if (handle.enabled && count > 0) {
+    handle.accounting.decodedCount += count;
+  }
+}
+
+export async function waitForCatalogSqliteWriterDrain(
+  handle: CatalogSqliteMediaSyncHandle,
+): Promise<void> {
+  while (handle.accounting.pendingWriteCount > 0) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+  handle.accounting.writerDrained = true;
+}
 
 type CatalogItemInput = Omit<CatalogItemRecord, 'normalizedTitle' | 'updatedAt'>;
 type CatalogCategoryInput = Omit<CatalogCategoryRecord, 'itemCount' | 'updatedAt'>;
@@ -114,7 +177,7 @@ function logSqliteError(message: string, error: unknown, payload: Record<string,
   console.error(PERF_LOG_PREFIX, { message, error: errorMessage, ...payload });
 }
 
-function parseReleaseYear(value: string | number | undefined): number | null {
+function parseReleaseYear(value: string | number | null | undefined): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
   }
@@ -169,7 +232,7 @@ export function mapNativeRecordToCatalogItem(
     backdropUrl: record.backdropUrl ?? null,
     releaseDate: record.releaseDate != null ? String(record.releaseDate) : null,
     releaseYear: parseReleaseYear(record.releaseDate),
-    rating: typeof record.rating === 'number' ? record.rating : parseRatingNumber(record.rating),
+    rating: typeof record.rating === 'number' ? record.rating : parseRatingNumber(record.rating ?? undefined),
     description: null,
     streamExtension: record.streamExtension ?? null,
     seriesId: mediaType === 'series' ? contentId : null,
@@ -238,13 +301,18 @@ export async function startCatalogSqliteMediaSync(input: {
       providerId: input.providerId,
       mediaType: input.mediaType,
       generation,
-      marker: 'stage295-native-completion-v1',
+      marker:
+        input.mediaType === 'movie'
+          ? 'stage3b1-onn-writer-pressure-v1'
+          : 'stage295-native-completion-v1',
     });
     return {
       enabled: true,
       providerId: input.providerId,
       mediaType: input.mediaType,
       generation,
+      accounting: createWriterAccounting(),
+      pendingCategories: [],
     };
   } catch (error) {
     logSqliteError('sqlite-sync-start-failed', error, {
@@ -256,6 +324,8 @@ export async function startCatalogSqliteMediaSync(input: {
       providerId: input.providerId,
       mediaType: input.mediaType,
       generation: 0,
+      accounting: createWriterAccounting(),
+      pendingCategories: [],
     };
   }
 }
@@ -278,6 +348,14 @@ export async function writeCategoriesFromSourceBudgeted<T>(
       releaseSeriesCategoryGate(handle.providerId);
     }
     return 0;
+  }
+
+  // Keep the previous successful category rows readable while a movie
+  // generation is being built. They are committed atomically with readiness.
+  if (handle.mediaType === 'movie') {
+    handle.pendingCategories = categories.map(mapCategory);
+    releaseMovieCategoryGate(handle.providerId);
+    return handle.pendingCategories.length;
   }
 
   try {
@@ -337,11 +415,7 @@ export async function writeCategoriesFromSourceBudgeted<T>(
     return 0;
   } finally {
     endCatalogWriteQuietPeriod();
-    if (handle.mediaType === 'movie') {
-      releaseMovieCategoryGate(handle.providerId);
-    } else if (handle.mediaType === 'series') {
-      releaseSeriesCategoryGate(handle.providerId);
-    }
+    releaseSeriesCategoryGate(handle.providerId);
   }
 }
 
@@ -388,6 +462,8 @@ export async function writeCatalogItemsFromSourceBudgeted<T>(
     return { written: 0, timing: null };
   }
 
+  handle.accounting.pendingWriteCount += 1;
+  handle.accounting.writerDrained = false;
   try {
     if (handle.mediaType === 'movie') {
       const gate = seriesCategoryWriteGates.get(handle.providerId);
@@ -402,18 +478,44 @@ export async function writeCatalogItemsFromSourceBudgeted<T>(
     let written = 0;
     const timing = await processStreamingBatches(
       items,
-      (item, index) => mapItem(item, index),
+      async (item, index) => {
+        const mapped = await mapItem(item, index);
+        handle.accounting.normalizedCount += 1;
+        handle.accounting.queuedCount += 1;
+        return mapped;
+      },
       async (batch) => {
-        written += await writeCatalogItemsBatch(batch);
+        const batchWritten = await writeCatalogItemsBatch(batch);
+        written += batchWritten;
       },
       {
-        kind: options?.mapKind ?? 'itemWrites',
-        writeKind: 'itemWrites',
-        minItems: 4,
-        maxItems: 24,
+        kind: options?.mapKind ?? (handle.mediaType === 'movie' ? 'movieMapping' : 'itemWrites'),
+        writeKind: handle.mediaType === 'movie' ? 'movieItemWrites' : 'itemWrites',
+        minItems: handle.mediaType === 'movie' ? 8 : 4,
+        maxItems: handle.mediaType === 'movie' ? 12 : 24,
+        hardMs: handle.mediaType === 'movie' ? 100 : undefined,
+        pressureMode: handle.mediaType === 'movie',
         isCancelled: options?.isCancelled,
+        onChunk: (info) => {
+          if (
+            handle.mediaType === 'movie' &&
+            (info.chunkMs >= 75 || (info.eventLoopLagMs ?? 0) >= 250)
+          ) {
+            console.info('[Catalog Writer Pressure]', {
+              mediaType: handle.mediaType,
+              generation: handle.generation,
+              batchSize: info.chunkItems,
+              transactionMs: Math.round(info.chunkMs),
+              eventLoopLagMs: Math.round(info.eventLoopLagMs ?? 0),
+              nextBatchSize: info.batchSize,
+              pauseMs: info.pauseMs ?? 0,
+            });
+          }
+        },
       },
     );
+    handle.accounting.peakBatchMs = Math.max(handle.accounting.peakBatchMs, timing.peakBatchMs);
+    handle.accounting.pressurePauseCount += timing.pressurePauseCount;
     logSqlite('sqlite-items-streamed', {
       providerId: handle.providerId,
       mediaType: handle.mediaType,
@@ -433,6 +535,9 @@ export async function writeCatalogItemsFromSourceBudgeted<T>(
       itemCount: items.length,
     });
     return { written: 0, timing: null };
+  } finally {
+    handle.accounting.pendingWriteCount = Math.max(0, handle.accounting.pendingWriteCount - 1);
+    handle.accounting.writerDrained = handle.accounting.pendingWriteCount === 0;
   }
 }
 
@@ -451,14 +556,63 @@ export async function finishCatalogSqliteMediaSync(input: {
   ok: boolean;
   processedCount?: number;
   errorCode?: string;
-}): Promise<void> {
+  nativeDone?: boolean;
+}): Promise<boolean> {
   const { handle, ok, processedCount, errorCode } = input;
   if (!handle.enabled) {
-    return;
+    return true;
   }
 
   try {
     if (ok) {
+      if (handle.mediaType === 'movie') {
+        handle.accounting.nativeDone = input.nativeDone === true;
+        await waitForCatalogSqliteWriterDrain(handle);
+        const itemStats = await getCatalogGenerationItemStats(
+          handle.providerId,
+          handle.mediaType,
+          handle.generation,
+        );
+        const dbRowCount = itemStats.rowCount;
+        handle.accounting.committedCount = itemStats.distinctContentCount;
+        const barrierPassed =
+          handle.accounting.nativeDone &&
+          handle.accounting.pendingWriteCount === 0 &&
+          handle.accounting.writerDrained &&
+          handle.accounting.committedCount > 0 &&
+          dbRowCount === handle.accounting.committedCount;
+
+        console.info('[Catalog Completion Barrier]', {
+          providerId: handle.providerId,
+          generation: handle.generation,
+          decodedCount: handle.accounting.decodedCount,
+          committedCount: handle.accounting.committedCount,
+          dbRowCount,
+          pendingWriteCount: handle.accounting.pendingWriteCount,
+          peakBatchMs: Math.round(handle.accounting.peakBatchMs),
+          pressurePauseCount: handle.accounting.pressurePauseCount,
+          nativeDone: handle.accounting.nativeDone,
+          writerDrained: handle.accounting.writerDrained,
+        });
+
+        if (!barrierPassed) {
+          await failCatalogSync(handle.providerId, handle.mediaType, 'completion_barrier_failed');
+          return false;
+        }
+
+        await completeCatalogSync(handle.providerId, handle.mediaType, handle.generation, {
+          processedCount,
+          categories: handle.pendingCategories,
+        });
+        logSqlite('sqlite-sync-completed', {
+          providerId: handle.providerId,
+          mediaType: handle.mediaType,
+          generation: handle.generation,
+          processedCount,
+        });
+        return true;
+      }
+
       await completeCatalogSync(handle.providerId, handle.mediaType, handle.generation, {
         processedCount,
       });
@@ -468,7 +622,7 @@ export async function finishCatalogSqliteMediaSync(input: {
         generation: handle.generation,
         processedCount,
       });
-      return;
+      return true;
     }
 
     await failCatalogSync(handle.providerId, handle.mediaType, errorCode ?? 'sync_failed');
@@ -478,6 +632,7 @@ export async function finishCatalogSqliteMediaSync(input: {
       generation: handle.generation,
       errorCode: errorCode ?? 'sync_failed',
     });
+    return true;
   } catch (error) {
     logSqliteError('sqlite-sync-finish-failed', error, {
       providerId: handle.providerId,
@@ -485,6 +640,7 @@ export async function finishCatalogSqliteMediaSync(input: {
       generation: handle.generation,
       ok,
     });
+    return false;
   } finally {
     if (handle.mediaType === 'movie') {
       releaseMovieCategoryGate(handle.providerId);

@@ -17,6 +17,7 @@ import { BlurView } from 'expo-blur';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
+import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { MediaArtworkFallback } from '@/features/media-browser/MediaArtworkFallback';
 import type { MediaCastMember, MediaDetail, MediaDetailEpisode } from '@/features/media-browser/mediaTypes';
@@ -416,6 +417,7 @@ export function MediaDetailOverlay({
       return;
     }
 
+    const detailId = detail?.id ?? null;
     let cancelled = false;
     let frame: number | null = null;
     let attempt = 0;
@@ -436,6 +438,13 @@ export function MediaDetailOverlay({
 
       attempt += 1;
       const target = playRef.current ?? actionRefs.current.get(firstAction);
+      recordFocusAudit({
+        component: 'MediaDetailOverlay',
+        action: 'requestFocus',
+        itemId: detailId,
+        reason: 'detail-open-action',
+        detail: { attempt },
+      });
       target?.focus();
 
       if (attempt >= maxAttempts) {
@@ -478,6 +487,16 @@ export function MediaDetailOverlay({
 
     return () => cancelAnimationFrame(frame);
   }, [actionGraphKey, visible]);
+
+  useEffect(() => {
+    if (visible && Platform.OS === 'android') {
+      recordFocusAudit({
+        component: 'MediaDetailOverlay.TVFocusGuideView',
+        action: 'autoFocus',
+        itemId: detail?.id ?? null,
+      });
+    }
+  }, [detail?.id, visible]);
 
   if (!detail) {
     return null;

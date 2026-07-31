@@ -1,5 +1,6 @@
 import { tvPerfRecordFocusRequest, tvPerfSetLatestFocusRequest } from '../perf/tvPerfStore.ts';
 import { isAppForegroundActive } from '../resilience/appForegroundGate.ts';
+import { recordFocusAudit } from './focusRequestAudit.ts';
 
 /**
  * Development-only TV focus request ledger + guarded focus helper.
@@ -111,6 +112,13 @@ function markStatus(id: string, status: TvFocusRequestStatus, cancelReason: TvFo
  * Performs at most one `.focus()` call when the target is ready.
  */
 export function requestTvFocus(input: RequestTvFocusInput): () => void {
+  recordFocusAudit({
+    component: input.source,
+    action: 'requestTvFocus',
+    itemId: input.itemId ?? null,
+    reason: input.reason,
+    detail: { screen: input.screen, region: input.region },
+  });
   if (!isAppForegroundActive()) {
     pushRecord({
       id: `tv-focus-${Date.now()}-${++requestCounter}`,
@@ -201,6 +209,13 @@ export function requestTvFocus(input: RequestTvFocusInput): () => void {
 
     const target = input.getTarget();
     if (target) {
+      recordFocusAudit({
+        component: input.source,
+        action: 'native-focus',
+        itemId,
+        reason: input.reason,
+        detail: { screen: input.screen, region: input.region },
+      });
       target.focus();
       cleanup();
       settle('executed');

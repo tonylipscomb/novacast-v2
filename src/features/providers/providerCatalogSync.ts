@@ -80,6 +80,7 @@ import {
 } from '../catalog/index.ts';
 import {
   awaitSeriesCategoryGateForProvider,
+  createDisabledCatalogSqliteMediaSyncHandle,
   finishCatalogSqliteMediaSync,
   mapMovieSummaryToCatalogItem,
   mapNativeRecordToCatalogItem,
@@ -87,6 +88,7 @@ import {
   startCatalogSqliteMediaSync,
   writeCatalogItemsFromSourceBudgeted,
   writeCategoriesFromSourceBudgeted,
+  recordCatalogSqliteDecoded,
   type CatalogSqliteMediaSyncHandle,
 } from '../catalog/catalogSqliteSyncWriter.ts';
 import {
@@ -110,6 +112,8 @@ let movieCatalogScheduleDelayMs = 2500;
 let seriesCatalogScheduleDelayMs = 4000;
 const pendingSyncInputs = new Map<string, ProviderCatalogSyncInput>();
 const syncListeners = new Map<string, Set<(phase: CatalogSyncPhase) => void>>();
+const movieReadyListeners = new Map<string, Set<(generation: number) => void>>();
+let movieReadySubscriptionInstance = 0;
 const catalogSyncSetupCache = new Map<string, Promise<CatalogSyncSetup>>();
 
 let syncGeneration = 0;
@@ -285,6 +289,38 @@ export function subscribeCatalogSyncPhase(providerId: string, listener: (phase: 
       syncListeners.delete(providerId);
     }
   };
+}
+
+export function subscribeMovieCatalogReady(providerId: string, listener: (generation: number) => void) {
+  const listeners = movieReadyListeners.get(providerId) ?? new Set();
+  listeners.add(listener);
+  const subscriptionInstance = ++movieReadySubscriptionInstance;
+  movieReadyListeners.set(providerId, listeners);
+  console.info('[NovaCast Movies] catalog_subscription_added', {
+    providerId,
+    subscriptionInstance,
+  });
+  return () => {
+    listeners.delete(listener);
+    console.info('[NovaCast Movies] catalog_subscription_removed', {
+      providerId,
+      subscriptionInstance,
+    });
+    if (!listeners.size) {
+      movieReadyListeners.delete(providerId);
+    }
+  };
+}
+
+function notifyMovieCatalogReady(providerId: string, generation: number) {
+  const listeners = movieReadyListeners.get(providerId);
+  console.info('[Movies Catalog Publication]', {
+    event: 'ready-published',
+    providerId,
+    generation,
+    listenerCount: listeners?.size ?? 0,
+  });
+  listeners?.forEach((listener) => listener(generation));
 }
 
 type CatalogSyncSetup = {
@@ -1230,6 +1266,9 @@ export async function runMovieCatalogSync(
               onBatch: async (records) => {
                 try {
                   matched += records.length;
+                  if (sqliteHandle) {
+                    recordCatalogSqliteDecoded(sqliteHandle, records.length);
+                  }
                   if (writerOnly) {
                     if (sqliteHandle?.enabled && records.length) {
                       await writeCatalogItemsFromSourceBudgeted(
@@ -1294,6 +1333,9 @@ export async function runMovieCatalogSync(
           } else {
             const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
             items = loaded.items;
+            if (sqliteHandle) {
+              recordCatalogSqliteDecoded(sqliteHandle, items.length);
+            }
 
             if (loaded.truncated && movieIndex) {
               movieIndex.markCategoryLoadTruncated();
@@ -1400,13 +1442,8 @@ export async function runMovieCatalogSync(
 
     if (isCancelled()) {
       logSync(providerId, 'movie-sync-cancelled', { reason: 'provider-reset' });
-      await finishCatalogSqliteMediaSync({
-        handle: sqliteHandle ?? {
-          enabled: false,
-          providerId,
-          mediaType: 'movie',
-          generation: 0,
-        },
+      const movieFinishOk = await finishCatalogSqliteMediaSync({
+        handle: sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'movie'),
         ok: false,
         errorCode: 'cancelled',
       });
@@ -1417,16 +1454,15 @@ export async function runMovieCatalogSync(
     setup.progressThrottle.flush();
     movieIndex?.commitSync();
 
-    await finishCatalogSqliteMediaSync({
-      handle: sqliteHandle ?? {
-        enabled: false,
-        providerId,
-        mediaType: 'movie',
-        generation: 0,
-      },
+    const movieFinishOk = await finishCatalogSqliteMediaSync({
+      handle: sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'movie'),
       ok: true,
       processedCount: Object.values(setup.movieCountMap).reduce((sum, count) => sum + count, 0),
+      nativeDone: true,
     });
+    if (!movieFinishOk) {
+      throw new Error('movie_completion_barrier_failed');
+    }
 
     await writeCatalogSyncCheckpointSafe(
       setup,
@@ -1442,6 +1478,7 @@ export async function runMovieCatalogSync(
       movieCatalog: movieIndex?.getCompleteness(),
     });
     markCatalogAuditSync('completed', { providerId, mediaType: 'movie', durationMs: Date.now() - started });
+    notifyMovieCatalogReady(providerId, sqliteHandle?.generation ?? 0);
     markMediaJobComplete(providerId, 'movie');
   } catch (error) {
     movieIndex?.abortSync();
@@ -1450,6 +1487,7 @@ export async function runMovieCatalogSync(
         handle: sqliteHandle,
         ok: false,
         errorCode: error instanceof Error ? error.message : 'movie_sync_failed',
+        nativeDone: false,
       });
     }
     throw error;
@@ -1573,6 +1611,9 @@ export async function runSeriesCatalogSync(
               onBatch: async (records) => {
                 try {
                   if (writerOnly) {
+                    if (sqliteHandle) {
+                      recordCatalogSqliteDecoded(sqliteHandle, records.length);
+                    }
                     if (sqliteHandle?.enabled && records.length) {
                       await writeCatalogItemsFromSourceBudgeted(
                         sqliteHandle,
@@ -1637,6 +1678,9 @@ export async function runSeriesCatalogSync(
           } else {
             const loaded = await loadAllSeriesForCatalogIndex(seriesDataSource, category.id);
             items = loaded.items;
+            if (sqliteHandle) {
+              recordCatalogSqliteDecoded(sqliteHandle, items.length);
+            }
 
             if (loaded.truncated && seriesIndex) {
               seriesIndex.markCategoryLoadTruncated();
@@ -1725,12 +1769,7 @@ export async function runSeriesCatalogSync(
     if (isCancelled()) {
       logSync(providerId, 'series-sync-cancelled', { reason: 'provider-reset' });
       await finishCatalogSqliteMediaSync({
-        handle: sqliteHandle ?? {
-          enabled: false,
-          providerId,
-          mediaType: 'series',
-          generation: 0,
-        },
+        handle: sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'series'),
         ok: false,
         errorCode: 'cancelled',
       });
@@ -1742,12 +1781,7 @@ export async function runSeriesCatalogSync(
     seriesIndex?.commitSync();
 
     await finishCatalogSqliteMediaSync({
-      handle: sqliteHandle ?? {
-        enabled: false,
-        providerId,
-        mediaType: 'series',
-        generation: 0,
-      },
+      handle: sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'series'),
       ok: true,
       processedCount: Object.values(setup.seriesCountMap).reduce((sum, count) => sum + count, 0),
     });

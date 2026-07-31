@@ -5,7 +5,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { useAppTheme, type NovaTheme } from '@/theme';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
-import { shouldAutoFocusSortControl, shouldClaimPreferredPosterFocus, isLastPosterRow } from '@/features/media-browser/posterGridFocusPolicy';
+import { shouldAutoFocusSortControl, shouldClaimPreferredPosterFocus, isLastPosterRow, type MoviesFocusOwner } from '@/features/media-browser/posterGridFocusPolicy';
 import { ContentSortControl, type ContentSortControlHandle } from '@/features/media-browser/ContentSortControl';
 import type { ContentSortOption } from '@/features/media-browser/contentSorting';
 import { estimatePosterRowHeight, TV_POSTER_LIST_TUNING } from '@/features/media-browser/tvPosterListTuning';
@@ -13,6 +13,7 @@ import { tvPerfRecordPosterRender, tvPerfSetVisiblePosters } from '@/features/pe
 
 import type { MovieSummary } from '../movieTypes';
 import { MoviePosterCard } from './MoviePosterCard';
+import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 
 type MoviePosterGridProps = {
   movies: MovieSummary[];
@@ -26,7 +27,7 @@ type MoviePosterGridProps = {
   postersFocusable?: boolean;
   onFocusMovie: (movie: MovieSummary) => void;
   onSelectMovie: (movie: MovieSummary) => void;
-  registerPosterRef?: (movieId: string, instance: ElementRef<typeof View> | null) => void;
+  registerPosterRef?: (movieId: string, instance: ElementRef<typeof View> | null, instanceToken: string, renderedIndex: number) => void;
   loadMore: () => void | Promise<void>;
   sortOption: ContentSortOption;
   onSortChange: (value: ContentSortOption) => void;
@@ -35,6 +36,10 @@ type MoviePosterGridProps = {
   emptyNotice?: string | null;
   sortFocusLeftHandle?: number;
   onSortFocusHandleReady?: (handle: number | undefined) => void;
+  restoreMovieId?: string | null;
+  restoreMovieIndex?: number | null;
+  suppressPreferredFocus?: boolean;
+  focusOwner?: MoviesFocusOwner;
 };
 
 export function MoviePosterGrid({
@@ -58,8 +63,12 @@ export function MoviePosterGrid({
   emptyNotice = null,
   sortFocusLeftHandle,
   onSortFocusHandleReady,
+  restoreMovieId = null,
+  restoreMovieIndex = null,
+  suppressPreferredFocus = false,
+  focusOwner = 'poster',
 }: MoviePosterGridProps) {
-  const gridHeaderSuffix = loading ? 'Loading' : hasMore ? 'More available' : `${movies.length} items`;
+  const gridHeaderSuffix = `${movies.length} items`;
   const firstMovieId = movies[0]?.id;
   const focusSeedRef = useRef<string | null>(null);
   const focusClaimedRef = useRef(false);
@@ -70,7 +79,9 @@ export function MoviePosterGrid({
   const onFocusMovieRef = useRef(onFocusMovie);
   const onSelectMovieRef = useRef(onSelectMovie);
   const registerPosterRefRef = useRef(registerPosterRef);
+  const previousMoviesDataRef = useRef<MovieSummary[] | null>(null);
   const { width } = useWindowDimensions();
+  const listRef = useRef<FlatList<MovieSummary> | null>(null);
 
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -78,6 +89,26 @@ export function MoviePosterGrid({
   onFocusMovieRef.current = onFocusMovie;
   onSelectMovieRef.current = onSelectMovie;
   registerPosterRefRef.current = registerPosterRef;
+
+  useEffect(() => {
+    const previous = previousMoviesDataRef.current;
+    console.info('[NovaCast Movies FlatList Data]', {
+      event: previous == null ? 'initial-data' : previous === movies ? 'same-array-render' : 'data-array-replaced',
+      arrayChanged: previous != null && previous !== movies,
+      rowCount: movies.length,
+      firstMovieId: movies[0]?.id ?? null,
+      lastMovieId: movies[movies.length - 1]?.id ?? null,
+      flatListKey: columns,
+    });
+    previousMoviesDataRef.current = movies;
+  }, [columns, movies]);
+
+  useEffect(() => {
+    console.info('[NovaCast Movies FlatList]', { event: 'mounted', flatListKey: columns });
+    return () => {
+      console.info('[NovaCast Movies FlatList]', { event: 'unmounted', flatListKey: columns });
+    };
+  }, [columns]);
 
   const handleFocusMovie = useCallback((movie: MovieSummary) => {
     focusClaimedRef.current = true;
@@ -89,11 +120,11 @@ export function MoviePosterGrid({
   }, []);
 
   const handleRegisterRef = useCallback(
-    (movieId: string, instance: ElementRef<typeof View> | null) => {
+    (movieId: string, renderedIndex: number, instance: ElementRef<typeof View> | null, instanceToken: string) => {
       if (movieId === firstMovieId) {
         firstCardRef.current = instance;
       }
-      registerPosterRefRef.current?.(movieId, instance);
+      registerPosterRefRef.current?.(movieId, instance, instanceToken, renderedIndex);
     },
     [firstMovieId],
   );
@@ -128,7 +159,10 @@ export function MoviePosterGrid({
       return;
     }
 
-    requestAnimationFrame(() => sortControlRef.current?.focus());
+    requestAnimationFrame(() => {
+      recordFocusAudit({ component: 'MoviePosterGrid', action: 'requestFocus', reason: 'sort-option-changed' });
+      sortControlRef.current?.focus();
+    });
   }, [sortOption]);
 
   useEffect(() => {
@@ -141,6 +175,18 @@ export function MoviePosterGrid({
   useEffect(() => {
     tvPerfSetVisiblePosters(Math.min(movies.length, columns * TV_POSTER_LIST_TUNING.windowSize));
   }, [columns, movies.length]);
+
+  useEffect(() => {
+    if (!restoreMovieId || restoreMovieIndex == null || restoreMovieIndex < 0) {
+      return;
+    }
+
+    try {
+      listRef.current?.scrollToIndex({ index: restoreMovieIndex, animated: false, viewPosition: 0.35 });
+    } catch {
+      // The list may not have measured yet; the focus coordinator will retry.
+    }
+  }, [restoreMovieId, restoreMovieIndex]);
 
   const columnWidth = useMemo(() => {
     const usable = Math.max(240, width - 320);
@@ -171,17 +217,19 @@ export function MoviePosterGrid({
           focusable={postersFocusable}
           trapFocusDown={isLastPosterRow({ index, itemCount: movies.length, columns })}
           hasPreferredFocus={shouldClaimPreferredPosterFocus({
-            focusClaimed: focusClaimedRef.current,
+            // Explicit selection owns focus while detail is open/closing.
+            // Do not let the first card compete with exact restoration.
+            focusClaimed: focusOwner !== 'poster' || focusClaimedRef.current || selectedMovieId != null || suppressPreferredFocus,
             itemId: item.id,
             seedId: focusSeedRef.current,
           })}
           onFocus={handleFocusMovie}
           onPress={handleSelectMovie}
-          registerRef={(instance) => handleRegisterRef(item.id, instance)}
+          registerRef={(instance, instanceToken) => handleRegisterRef(item.id, index, instance, instanceToken)}
         />
       );
     },
-    [columns, handleFocusMovie, handleRegisterRef, handleSelectMovie, isDiscover, movies.length, postersFocusable],
+    [columns, focusOwner, handleFocusMovie, handleRegisterRef, handleSelectMovie, isDiscover, movies.length, postersFocusable, selectedMovieId, suppressPreferredFocus],
   );
 
   const keyExtractor = useCallback((item: MovieSummary) => item.id, []);
@@ -189,7 +237,6 @@ export function MoviePosterGrid({
   const loadingLabel = `Loading ${selectedCategoryLabel}â€¦`;
   const showInitialLoader = categoryLoading && movies.length === 0 && !emptyNotice;
   const showCategoryLoadingOverlay = categoryLoading && movies.length > 0;
-  const showPaginationOverlay = loading && !categoryLoading && movies.length > 0;
 
   return (
     <View style={styles.panel}>
@@ -211,7 +258,9 @@ export function MoviePosterGrid({
 
       {showInitialLoader ? (
         <View style={styles.loadingStage}>
-          <NovaSpaceLoader label={loadingLabel} />
+          <View style={styles.largeLoader}>
+            <NovaSpaceLoader label={loadingLabel} />
+          </View>
         </View>
       ) : emptyNotice ? (
         <View style={styles.emptyNotice}>
@@ -225,6 +274,7 @@ export function MoviePosterGrid({
       ) : (
         <View style={styles.listStage}>
           <FlatList
+            ref={listRef}
             data={movies}
             key={columns}
             numColumns={columns}
@@ -245,12 +295,9 @@ export function MoviePosterGrid({
           />
           {showCategoryLoadingOverlay ? (
             <View style={styles.loadingOverlay} pointerEvents="none">
-              <NovaSpaceLoader label={loadingLabel} />
-            </View>
-          ) : null}
-          {showPaginationOverlay ? (
-            <View style={styles.paginationOverlay} pointerEvents="none">
-              <NovaSpaceLoader label="Loading more movies..." />
+              <View style={styles.largeLoader}>
+                <NovaSpaceLoader label={loadingLabel} />
+              </View>
             </View>
           ) : null}
         </View>
@@ -310,7 +357,7 @@ function createStyles(theme: NovaTheme) {
       justifyContent: 'center',
       gap: 8,
       paddingHorizontal: 24,
-      paddingBottom: 24,
+      paddingBottom: 0,
     },
     emptyNoticeText: {
       color: theme.colors.textSecondary,
@@ -322,7 +369,7 @@ function createStyles(theme: NovaTheme) {
       flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingBottom: 24,
+      paddingBottom: 0,
     },
     listStage: {
       flex: 1,
@@ -332,20 +379,10 @@ function createStyles(theme: NovaTheme) {
       ...StyleSheet.absoluteFillObject,
       alignItems: 'center',
       justifyContent: 'center',
-      backgroundColor:
-        String(theme.colors.background) === '#F3EEE4' ? 'rgba(26,21,16,0.45)' : 'rgba(0,0,0,0.35)',
+      backgroundColor: 'transparent',
     },
-    paginationOverlay: {
-      position: 'absolute',
-      left: '25%',
-      right: '25%',
-      bottom: 28,
-      minHeight: 96,
-      alignItems: 'center',
-      justifyContent: 'center',
-      borderRadius: 12,
-      backgroundColor:
-        String(theme.colors.background) === '#F3EEE4' ? 'rgba(243,238,228,0.92)' : 'rgba(5,9,15,0.88)',
+    largeLoader: {
+      transform: [{ scale: 1.25 }],
     },
   });
 }

@@ -24,5 +24,6 @@ test('SQLite Movies data source preserves provider-scoped paging and search', ()
 
 test('SQLite Movies data source exposes an explicit readiness check', () => {
   assert.match(file, /isSqliteMovieCatalogReady/);
-  assert.match(file, /state\?\.status === 'ready'/);
+  assert.match(file, /resolveReadableCatalogGeneration/);
+  assert.match(file, /getCatalogTotalCount/);
 });

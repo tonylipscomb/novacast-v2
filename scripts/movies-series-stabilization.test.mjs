@@ -10,6 +10,7 @@ import {
   shouldAutoFocusSortControl,
   shouldClaimPreferredPosterFocus,
   shouldPreferNavigationFocus,
+  deriveMoviesFocusOwner,
 } from '../src/features/media-browser/posterGridFocusPolicy.ts';
 import { shouldMoveFocusToChannelsOnCategoryOk } from '../src/features/live/liveTvFocusPreview.ts';
 import {
@@ -70,6 +71,30 @@ test('detail/playback restoration prefers focused id and never navbar first', ()
   assert.equal(resolvePosterFocusFallbackRegion({ gridEmpty: true }), 'categories');
 });
 
+test('exact restoration stays pending when the target is temporarily unavailable', () => {
+  assert.equal(
+    resolvePosterRestorationId({
+      focusedId: 'movie-9',
+      selectedId: 'movie-9',
+      targetMovieId: 'movie-9',
+      restorationActive: true,
+      availableIds: ['movie-1', 'movie-2'],
+    }),
+    null,
+  );
+  assert.equal(
+    resolvePosterRestorationId({
+      focusedId: 'movie-9',
+      selectedId: 'movie-9',
+      targetMovieId: 'movie-9',
+      targetConclusiveAbsent: true,
+      restorationActive: true,
+      availableIds: ['movie-1', 'movie-2'],
+    }),
+    'movie-1',
+  );
+});
+
 test('navbar preferred focus is blocked while restoring browse focus', () => {
   assert.equal(
     shouldPreferNavigationFocus({
@@ -100,6 +125,45 @@ test('navbar preferred focus is blocked while restoring browse focus', () => {
     }),
     true,
   );
+});
+
+test('Movies focus owner gives restoration and child focus precedence over navbar', () => {
+  assert.equal(deriveMoviesFocusOwner({
+    detailOpen: false,
+    searchOpen: false,
+    restoringBrowseFocus: true,
+    categoryLoading: false,
+    loadStatus: 'ready',
+    hasPosters: true,
+    hasCategories: true,
+  }), 'restoring');
+  assert.equal(deriveMoviesFocusOwner({
+    detailOpen: false,
+    searchOpen: false,
+    restoringBrowseFocus: false,
+    categoryLoading: false,
+    loadStatus: 'ready',
+    hasPosters: true,
+    hasCategories: true,
+  }), 'poster');
+  assert.equal(deriveMoviesFocusOwner({
+    detailOpen: false,
+    searchOpen: false,
+    restoringBrowseFocus: false,
+    categoryLoading: true,
+    loadStatus: 'loading',
+    hasPosters: false,
+    hasCategories: true,
+  }), 'loading-anchor');
+  assert.equal(deriveMoviesFocusOwner({
+    detailOpen: false,
+    searchOpen: false,
+    restoringBrowseFocus: false,
+    categoryLoading: false,
+    loadStatus: 'ready',
+    hasPosters: false,
+    hasCategories: true,
+  }), 'category');
 });
 
 test('Search Close does not bounce back to field', () => {

@@ -17,6 +17,7 @@ export type ChunkWorkKind =
   | 'categories'
   | 'movieMapping'
   | 'seriesMapping'
+  | 'movieItemWrites'
   | 'itemWrites'
   | 'regionRanking'
   | 'generic';
@@ -36,7 +37,10 @@ export type TimeBudgetOptions = {
     chunkItems: number;
     batchSize: number;
     overrun: boolean;
+    eventLoopLagMs?: number;
+    pauseMs?: number;
   }) => void;
+  pressureMode?: boolean;
 };
 
 export type TimeBudgetResult = {
@@ -46,12 +50,15 @@ export type TimeBudgetResult = {
   totalMs: number;
   overruns: number;
   singleItemOverruns: number;
+  peakBatchMs: number;
+  pressurePauseCount: number;
 };
 
 const DEFAULT_BATCH: Record<ChunkWorkKind, number> = {
   categories: 8,
   movieMapping: 32,
   seriesMapping: 32,
+  movieItemWrites: 10,
   itemWrites: 16,
   regionRanking: 64,
   generic: 24,
@@ -62,6 +69,7 @@ const safeStreak: Record<ChunkWorkKind, number> = {
   categories: 0,
   movieMapping: 0,
   seriesMapping: 0,
+  movieItemWrites: 0,
   itemWrites: 0,
   regionRanking: 0,
   generic: 0,
@@ -77,6 +85,13 @@ export function nowMs(): number {
 export function yieldMacrotask(): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, 0);
+  });
+}
+
+export function yieldMacrotaskMeasured(): Promise<number> {
+  const startedAt = nowMs();
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(Math.max(0, nowMs() - startedAt)), 0);
   });
 }
 
@@ -249,6 +264,8 @@ export async function processTimeBudgeted<T>(
     totalMs: nowMs() - totalStart,
     overruns,
     singleItemOverruns,
+    peakBatchMs: 0,
+    pressurePauseCount: 0,
   };
 }
 
@@ -281,6 +298,8 @@ export async function processStreamingBatches<T, R>(
   let maxChunkMs = 0;
   let overruns = 0;
   let singleItemOverruns = 0;
+  let peakBatchMs = 0;
+  let pressurePauseCount = 0;
   const totalStart = nowMs();
   let buffer: R[] = [];
   let chunkStart = nowMs();
@@ -300,24 +319,42 @@ export async function processStreamingBatches<T, R>(
 
     const chunkMs = nowMs() - chunkStart;
     const effectiveBusyMs = writeMs;
+    peakBatchMs = Math.max(peakBatchMs, effectiveBusyMs);
     maxChunkMs = Math.max(maxChunkMs, effectiveBusyMs);
     chunks += 1;
     if (effectiveBusyMs >= softMs) {
       overruns += 1;
     }
-    if (effectiveBusyMs >= hardMs && diagnostic) {
-      recordCatalogWritePhase('native.overrun', {
-        wallMs: effectiveBusyMs,
-        itemCount: batchLen,
-        meta: { kind: writeKind, includesMutexWait: true },
-      });
+    if (effectiveBusyMs >= hardMs) {
+      if (diagnostic) {
+        recordCatalogWritePhase('native.overrun', {
+          wallMs: effectiveBusyMs,
+          itemCount: batchLen,
+          meta: { kind: writeKind, includesMutexWait: true },
+        });
+      }
       singleItemOverruns += 1;
       // Collapse batch size hard — a single native/mutex span exceeded budget.
       learnedBatchSizes[writeKind] = minItems;
       writeBatchSize = minItems;
+    } else if (options?.pressureMode && effectiveBusyMs >= softMs) {
+      learnedBatchSizes[writeKind] = Math.max(minItems, Math.floor(writeBatchSize / 2));
     } else {
       adjustBatchSize(writeKind, effectiveBusyMs, targetMs, softMs, hardMs, minItems, maxItems, diagnostic);
-      writeBatchSize = learnedBatchSizes[writeKind];
+    }
+    writeBatchSize = learnedBatchSizes[writeKind];
+    const eventLoopLagMs = Math.max(effectiveBusyMs, await yieldMacrotaskMeasured());
+    let pauseMs = 0;
+    if (eventLoopLagMs >= 1000) {
+      pauseMs = 150;
+    } else if (eventLoopLagMs >= 250) {
+      pauseMs = 35;
+    } else if (effectiveBusyMs >= 100) {
+      pauseMs = 12;
+    }
+    if (pauseMs > 0) {
+      pressurePauseCount += 1;
+      await new Promise<void>((resolve) => setTimeout(resolve, pauseMs));
     }
     options?.onChunk?.({
       processed,
@@ -325,8 +362,12 @@ export async function processStreamingBatches<T, R>(
       chunkItems: batchLen,
       batchSize: writeBatchSize,
       overrun: effectiveBusyMs >= softMs,
+      eventLoopLagMs,
+      pauseMs,
     });
-    await yieldMacrotask();
+    if (effectiveBusyMs >= 100) {
+      await yieldMacrotaskMeasured();
+    }
     chunkStart = nowMs();
   };
 
@@ -374,6 +415,8 @@ export async function processStreamingBatches<T, R>(
     totalMs: nowMs() - totalStart,
     overruns,
     singleItemOverruns,
+    peakBatchMs,
+    pressurePauseCount,
   };
 }
 

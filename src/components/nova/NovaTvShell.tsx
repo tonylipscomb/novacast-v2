@@ -10,6 +10,7 @@ import { createNovaTvFocusTextStyles, createNovaTvFocusChrome, novaTvFocus } fro
 import { NovaScreen } from '@/components/nova/NovaScreen';
 import { getTvDensity } from '@/components/nova/tvDensity';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
+import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { useProviderChrome } from '@/features/providers/providerStore';
 import { isClosedBetaManagedFlow } from '@/features/device/deviceFeatureFlags';
 import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
@@ -51,6 +52,8 @@ type NovaTvShellProps = PropsWithChildren<{
   expirationLabel?: string;
   headerSupplement?: ReactNode;
   preferActiveNavigationFocus?: boolean;
+  /** Explicitly suppress native preferred focus while a child owns Movies focus. */
+  suppressNavbarPreferredFocus?: boolean;
   /** When false, the left navigation rail cannot receive D-pad focus. */
   navigationFocusable?: boolean;
   /** Native focus handles for navigation items (focusable mode only). */
@@ -120,6 +123,7 @@ export function NovaTvShell({
   expirationLabel,
   headerSupplement,
   preferActiveNavigationFocus = true,
+  suppressNavbarPreferredFocus = false,
   navigationFocusable = true,
   onNavigationFocusHandles,
   navigationNextFocusRight,
@@ -144,6 +148,16 @@ export function NovaTvShell({
   } = useProviderChrome();
   const resolvedProviderLabel = providerLabel ?? selectedProviderName;
   const nonBetaExpirationLabel = expirationLabel ?? selectedProviderExpiration;
+  const navbarPreferredFocus = preferActiveNavigationFocus && !suppressNavbarPreferredFocus;
+  useEffect(() => {
+    if (navbarPreferredFocus) {
+      recordFocusAudit({
+        component: 'NovaTvShell.navbar',
+        action: 'hasTVPreferredFocus',
+        itemId: activeId,
+      });
+    }
+  }, [activeId, navbarPreferredFocus]);
   const density = getTvDensity(width);
   const compactNavWidth = density === 'compact' ? 60 : 68;
   const safeHorizontal = density === 'compact' ? 28 : density === 'normal' ? 38 : 46;
@@ -271,8 +285,9 @@ export function NovaTvShell({
                       navItemRefs.current[item.id] = node;
                     }}
                     focusable
-                    hasTVPreferredFocus={preferActiveNavigationFocus && active}
+                    hasTVPreferredFocus={navbarPreferredFocus && active}
                     onFocus={() => {
+                      recordFocusAudit({ component: 'NovaTvShell.navbar', action: 'focus-received', itemId: item.id });
                       markCatalogAuditFocus(`nav:${item.id}`);
                       noteFocusLatencyFocus(`nav:${item.id}`);
                       setFocusedId(item.id);

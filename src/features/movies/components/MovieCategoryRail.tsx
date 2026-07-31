@@ -3,6 +3,7 @@ import { useMemo, useRef, useState, type ElementRef } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { isProviderCategory } from '@/features/media-browser/mediaCategoryUtils';
+import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
@@ -13,6 +14,7 @@ import type { ProviderCategoryContentType } from '@/features/providers/categoryN
 
 import type { MovieCategory } from '../movieTypes';
 import { formatMovieCategoryCount } from '../movieCategoryCountPolicy';
+import type { MoviesFocusOwner } from '@/features/media-browser/posterGridFocusPolicy';
 
 const PROVIDER_SECTION_ID = 'section:provider';
 const DISCOVER_SECTION_ID = 'section:discover';
@@ -21,6 +23,7 @@ type MovieCategoryRailProps = {
   categories: MovieCategory[];
   selectedCategoryId: string;
   preferredCategoryId?: string | null;
+  focusOwner?: MoviesFocusOwner;
   discoverStatusMessage?: string | null;
   contentType?: ProviderCategoryContentType;
   onSelectCategory: (categoryId: string) => void;
@@ -33,6 +36,7 @@ export function MovieCategoryRail({
   categories,
   selectedCategoryId,
   preferredCategoryId,
+  focusOwner = 'category',
   discoverStatusMessage,
   contentType = 'movie',
   onSelectCategory,
@@ -102,9 +106,18 @@ export function MovieCategoryRail({
           const showMarker = isProviderCategory(item) && (Boolean(countryCode) || regionMarker === 'multi');
 
           const preferInitialFocus =
+            focusOwner === 'category' &&
             !preferredFocusConsumedRef.current &&
             Boolean(initialPreferredCategoryIdRef.current && item.id === initialPreferredCategoryIdRef.current);
           const isSmartCategory = item.kind === 'smart';
+
+          if (preferInitialFocus) {
+            recordFocusAudit({
+              component: 'MovieCategoryRail',
+              action: 'hasTVPreferredFocus',
+              itemId: item.id,
+            });
+          }
 
           return (
             <Pressable
@@ -113,6 +126,7 @@ export function MovieCategoryRail({
               hasTVPreferredFocus={preferInitialFocus}
               {...(selected && nextFocusRightHandle ? { nextFocusRight: nextFocusRightHandle } : null)}
               onFocus={() => {
+                recordFocusAudit({ component: 'MovieCategoryRail', action: 'focus-received', itemId: item.id });
                 preferredFocusConsumedRef.current = true;
                 setFocusedCategoryId(item.id);
                 onPrefetchCategoryCount?.(item.id, item.kind);

@@ -25,12 +25,14 @@ export {
   getCatalogCategoryCounts,
   getCatalogItemsPage,
   getCatalogTotalCount,
+  resolveReadableCatalogGeneration,
   deleteStaleCatalogGeneration,
   clearProviderCatalog,
   listCatalogItemsForGeneration,
   listCatalogCategoriesForGeneration,
   listCatalogSeasonsForGeneration,
   recomputeCategoryCounts,
+  getCatalogGenerationItemStats,
 } from './catalogRepository.ts';
 
 export {
@@ -68,6 +70,7 @@ export {
   CATALOG_CHUNK_MIN_ITEMS,
   nowMs,
   yieldMacrotask,
+  yieldMacrotaskMeasured,
   processTimeBudgeted,
   processStreamingBatches,
   mapTimeBudgeted,

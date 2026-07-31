@@ -1,8 +1,9 @@
 import {
   getCatalogCategoryCounts,
+  getCatalogDiagnosticSnapshot,
   getCatalogItemsPage,
-  getCatalogSyncState,
   getCatalogTotalCount,
+  resolveReadableCatalogGeneration,
 } from '../../catalog/catalogRepository.ts';
 import type { CatalogItemRecord, CatalogItemSort } from '../../catalog/catalogTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
@@ -11,6 +12,30 @@ import type { MovieDataSource } from './MovieDataSource.ts';
 import type { MovieCategory, MovieSummary } from '../movieTypes.ts';
 
 const SQLITE_MOVIES_DISCOVER_ID = 'all';
+const SQLITE_MOVIES_DIAGNOSTICS_ENABLED =
+  process.env.EXPO_PUBLIC_MOVIES_SQLITE_DIAGNOSTICS === 'true';
+
+async function logSqliteMovieDiagnostic(providerId: string, phase: string) {
+  if (!SQLITE_MOVIES_DIAGNOSTICS_ENABLED) {
+    return;
+  }
+
+  try {
+    const snapshot = await getCatalogDiagnosticSnapshot(providerId, 'movie');
+    console.info(
+      '[Movies SQLite Diagnostic]',
+      JSON.stringify({ phase, ...snapshot }),
+    );
+  } catch (error) {
+    console.info(
+      '[Movies SQLite Diagnostic]',
+      JSON.stringify({
+        phase,
+        diagnosticError: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
 
 function mapSort(sort: ContentSortOption | undefined): CatalogItemSort {
   switch (sort) {
@@ -52,8 +77,16 @@ function mapCatalogItemToMovie(item: CatalogItemRecord): MovieSummary {
 }
 
 export async function isSqliteMovieCatalogReady(providerId: string): Promise<boolean> {
-  const state = await getCatalogSyncState(providerId, 'movie');
-  return state?.status === 'ready' && state.generation > 0;
+  await logSqliteMovieDiagnostic(providerId, 'readiness-check');
+  const generation = await resolveReadableCatalogGeneration(providerId, 'movie');
+  if (generation <= 0) {
+    return false;
+  }
+
+  const totalCount = await getCatalogTotalCount(providerId, 'movie', {
+    generation,
+  });
+  return totalCount > 0;
 }
 
 export function createSqliteMovieDataSource(providerId: string): MovieDataSource {
@@ -61,6 +94,7 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
     sourceKind: 'sqlite',
 
     async getCategories(): Promise<MovieCategory[]> {
+      await logSqliteMovieDiagnostic(providerId, 'get-categories-before-query');
       const [categories, totalCount] = await Promise.all([
         getCatalogCategoryCounts(providerId, 'movie'),
         getCatalogTotalCount(providerId, 'movie'),
@@ -74,6 +108,7 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
       console.info('[Movies SQLite] category-counts', {
         providerId,
         categoryCount: categories.length,
+        providerCategoryCount: categories.length,
         totalCount,
       });
 
@@ -115,6 +150,7 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
         sort: mapSort(input.sort),
       });
 
+      await logSqliteMovieDiagnostic(providerId, 'first-page-after-query');
       console.info('[Movies SQLite] first-page', {
         providerId,
         categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,

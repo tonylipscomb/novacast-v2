@@ -39,10 +39,11 @@ import { useMoviesScreenModel } from './useMoviesScreenModel';
 
 import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
 import {
+  deriveMoviesFocusOwner,
   resolvePosterRestorationId,
-  shouldPreferNavigationFocus,
 } from '@/features/media-browser/posterGridFocusPolicy';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
+import { beginFocusAuditCycle, recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { PLAYBACK_NOTIFICATION_DURATION_MS, PLAYBACK_NOTIFICATION_ID } from '@/features/playback/unified/unifiedPlayerLogic';
 import { SearchOverlay } from '@/features/search/SearchOverlay';
 import { searchMovies } from '@/features/search/repositories/movieSearchRepository';
@@ -57,6 +58,12 @@ import {
   resolveMoviesNotificationForStatus,
 } from './moviesScreenLogic';
 import { toggleFavorite, toggleWatchlist, useMovieLibraryStore } from './smart/movieLibraryStore';
+
+const MOVIES_FOCUS_STAGE3B2_MARKER = 'stage3b2-movies-focus-loader-polish-v1';
+
+console.info('[NovaCast Movies Diagnostics Build]', {
+  version: 'stage3b2-data-audit',
+});
 
 export function MoviesScreen() {
   const router = useRouter();
@@ -74,14 +81,29 @@ export function MoviesScreen() {
   const moviesMemory = getMoviesScreenMemory(activeProviderId);
   const library = useMovieLibraryStore(activeProviderId);
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.movies.key);
-  const posterRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
+  const posterRefs = useRef<
+    Map<string, { instance: ElementRef<typeof View>; contentId: string; instanceToken: string; renderedIndex: number }>
+  >(new Map());
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof Pressable>>>(new Map());
   const categoryFocusPendingRef = useRef<string | null>(null);
+  const browseFocusSnapshotRef = useRef<{ categoryId: string; movieId: string; index: number } | null>(null);
+  const restorationTokenRef = useRef<{
+    token: string;
+    source: 'detail-close' | 'playback-close';
+    categoryId: string;
+    targetMovieId: string;
+    targetIndex: number;
+  } | null>(null);
+  const restorationIssuedTokenRef = useRef<string | null>(null);
+  const restorationSequenceRef = useRef(0);
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
   const isRestoringPlaybackFocusRef = useRef(false);
   const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
+  const detailOpenRef = useRef(false);
+  const previousMoviesDataRef = useRef<unknown>(null);
+  const [restorationRetry, setRestorationRetry] = useState(0);
   const [detailSuppressedForPlayback, setDetailSuppressedForPlayback] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchOverlayReady, setSearchOverlayReady] = useState(false);
@@ -130,10 +152,47 @@ export function MoviesScreen() {
   const playbackUiActive = playbackActive || playbackClosing || launchingPlayback;
   const detailOverlayVisible =
     detailOpen && !detailSuppressedForPlayback && !playbackUiActive && Boolean(selectedMovie);
+  const moviesFocusOwner = deriveMoviesFocusOwner({
+    detailOpen: detailOverlayVisible,
+    searchOpen: searchOverlayReady,
+    restoringBrowseFocus,
+    categoryLoading: categoryLoading || loadStatus === 'loading',
+    loadStatus,
+    hasPosters: visibleMovies.length > 0,
+    hasCategories: categories.length > 0,
+  });
+
+  useEffect(() => {
+    detailOpenRef.current = detailOpen;
+  }, [detailOpen]);
 
   useEffect(() => {
     tvPerfSetScreen('movies');
   }, []);
+
+  useEffect(() => {
+    console.info('[NovaCast Movies Detail/List Audit]', {
+      detailOpen,
+      categoryId: selectedCategoryId,
+      rowCount: visibleMovies.length,
+      firstMovieId: visibleMovies[0]?.id ?? null,
+      dataArrayChanged: previousMoviesDataRef.current !== visibleMovies,
+    });
+    previousMoviesDataRef.current = visibleMovies;
+  }, [detailOpen, selectedCategoryId, visibleMovies]);
+
+  useEffect(() => {
+    if (detailOpen && !detailOverlayVisible) {
+      console.info('[NovaCast Movies Detail Overlay Audit]', {
+        phase: 'error-state',
+        selectedMovieId: selectedMovie?.id ?? null,
+        movieDetailId: movieDetail?.id ?? null,
+        detailLoading,
+        detailError,
+        detailOverlayVisible,
+      });
+    }
+  }, [detailError, detailLoading, detailOpen, detailOverlayVisible, movieDetail?.id, selectedMovie?.id]);
 
   const handleFocusMovie = useCallback(
     (movie: { id: string }) => {
@@ -141,9 +200,34 @@ export function MoviesScreen() {
         return;
       }
       tvPerfSetFocus('MoviePosterCard', movie.id);
+      const restore = restorationTokenRef.current;
+      if (restore) {
+        const confirmed = restore.targetMovieId === movie.id;
+        console.info('[NovaCast Movies Restore Confirm]', {
+          token: restore.token,
+          requestedMovieId: restore.targetMovieId,
+          actuallyFocusedMovieId: movie.id,
+          confirmed,
+          retryCount: restorationRetry,
+        });
+        if (confirmed) {
+          restorationTokenRef.current = null;
+          restorationIssuedTokenRef.current = null;
+          isRestoringPlaybackFocusRef.current = false;
+          setRestoringBrowseFocus(false);
+        } else {
+          restorationIssuedTokenRef.current = null;
+          setRestorationRetry((value) => value + 1);
+        }
+      }
+      browseFocusSnapshotRef.current = {
+        categoryId: selectedCategoryId,
+        movieId: movie.id,
+        index: Math.max(0, visibleMovies.findIndex((item) => item.id === movie.id)),
+      };
       focusMovie(movie as Parameters<typeof focusMovie>[0]);
     },
-    [focusMovie, playbackUiActive],
+    [focusMovie, playbackUiActive, selectedCategoryId, visibleMovies],
   );
 
   const handleSelectMovie = useCallback(
@@ -165,7 +249,13 @@ export function MoviesScreen() {
         return;
       }
 
+      browseFocusSnapshotRef.current = {
+        categoryId: selectedCategoryId,
+        movieId: movie.id,
+        index: Math.max(0, visibleMovies.findIndex((item) => item.id === movie.id)),
+      };
       selectMovie(movie);
+      detailOpenRef.current = true;
       const detailPromise = loadMovieDetail(movie);
       pendingDetailPromiseRef.current = detailPromise;
       detailPromise.finally(() => {
@@ -176,16 +266,55 @@ export function MoviesScreen() {
       setDetailSuppressedForPlayback(false);
       setDetailOpen(true);
     },
-    [detailOpen, launchingPlayback, loadMovieDetail, playbackUiActive, selectMovie, selectedMovie?.id],
+    [detailOpen, launchingPlayback, loadMovieDetail, playbackUiActive, selectMovie, selectedCategoryId, selectedMovie?.id, visibleMovies],
   );
 
-  const handleRegisterPosterRef = useCallback((movieId: string, instance: ElementRef<typeof View> | null) => {
+  const handleRegisterPosterRef = useCallback((movieId: string, instance: ElementRef<typeof View> | null, instanceToken: string, renderedIndex: number) => {
     if (instance) {
-      posterRefs.current.set(movieId, instance);
-    } else {
+      posterRefs.current.set(movieId, { instance, contentId: movieId, instanceToken, renderedIndex });
+      console.info('[NovaCast Movie Poster Ref]', {
+        action: 'register',
+        contentId: movieId,
+        instanceToken,
+        nativeTag: findNodeHandle(instance) ?? null,
+        renderedIndex,
+      });
+      return;
+    }
+
+    const stored = posterRefs.current.get(movieId);
+    if (stored?.instanceToken === instanceToken) {
       posterRefs.current.delete(movieId);
+      console.info('[NovaCast Movie Poster Ref]', {
+        action: 'unregister',
+        contentId: movieId,
+        instanceToken,
+        nativeTag: stored.instance ? findNodeHandle(stored.instance) ?? null : null,
+        renderedIndex,
+      });
     }
   }, []);
+
+  const getValidatedPosterTarget = useCallback(
+    (contentId: string, targetIndex?: number) => {
+      const stored = posterRefs.current.get(contentId);
+      const currentItem = targetIndex == null ? visibleMovies.find((movie) => movie.id === contentId) : visibleMovies[targetIndex];
+      const valid =
+        Boolean(stored) &&
+        stored?.contentId === contentId &&
+        currentItem?.id === contentId &&
+        (targetIndex == null || stored?.renderedIndex === targetIndex);
+      console.info('[NovaCast Movie Poster Ref]', {
+        action: 'request',
+        contentId,
+        instanceToken: stored?.instanceToken ?? null,
+        nativeTag: stored?.instance ? findNodeHandle(stored.instance) ?? null : null,
+        renderedIndex: stored?.renderedIndex ?? targetIndex ?? null,
+      });
+      return valid ? stored!.instance : null;
+    },
+    [visibleMovies],
+  );
 
   const handleLoadMore = useCallback(() => loadMore(), [loadMore]);
 
@@ -293,12 +422,12 @@ export function MoviesScreen() {
       region: 'poster-grid',
       itemId: restoreId,
       reason,
-      getTarget: () => posterRefs.current.get(restoreId),
+      getTarget: () => getValidatedPosterTarget(restoreId),
       onSettled: () => {
         setRestoringBrowseFocus(false);
       },
     });
-  }, [activeProviderId, getFocusedMovieId, selectedMovie?.id, visibleMovies]);
+  }, [activeProviderId, getFocusedMovieId, getValidatedPosterTarget, selectedMovie?.id, visibleMovies]);
 
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
@@ -307,10 +436,121 @@ export function MoviesScreen() {
   }, [focusSelectedPoster]);
 
   const closeDetail = useCallback(() => {
+    beginFocusAuditCycle('movies-detail-close', {
+      categoryId: selectedCategoryId,
+      movieId: browseFocusSnapshotRef.current?.movieId ?? null,
+    });
     setDetailOpen(false);
+    detailOpenRef.current = false;
     setDetailSuppressedForPlayback(false);
+    const snapshot = browseFocusSnapshotRef.current;
+    const restoreId = snapshot?.categoryId === selectedCategoryId ? snapshot.movieId : null;
+    const restoreIndex = snapshot?.categoryId === selectedCategoryId ? snapshot.index : -1;
+    const token = `detail-${++restorationSequenceRef.current}`;
+    console.info('[NovaCast Movies Focus Handoff]', {
+      marker: MOVIES_FOCUS_STAGE3B2_MARKER,
+      categoryId: selectedCategoryId,
+      phase: 'detail-close',
+      intendedMovieId: restoreId,
+      focusRequested: Boolean(restoreId),
+      detailOpened: true,
+    });
+    if (restoreId) {
+      restorationTokenRef.current = {
+        token,
+        source: 'detail-close',
+        categoryId: selectedCategoryId,
+        targetMovieId: restoreId,
+        targetIndex: restoreIndex,
+      };
+      restorationIssuedTokenRef.current = null;
+      setRestoringBrowseFocus(true);
+      return;
+    }
     focusSelectedPoster('restore-after-detail-close');
-  }, [focusSelectedPoster]);
+  }, [focusSelectedPoster, selectedCategoryId]);
+
+  useEffect(() => {
+    const restore = restorationTokenRef.current;
+    if (!restore || detailOpenRef.current || restore.categoryId !== selectedCategoryId) {
+      return;
+    }
+
+    const availableIds = visibleMovies.map((movie) => movie.id);
+    const restoreId = resolvePosterRestorationId({
+      focusedId: restore.targetMovieId,
+      selectedId: restore.targetMovieId,
+      availableIds,
+      restorationActive: true,
+      targetMovieId: restore.targetMovieId,
+    });
+    const targetAvailable = Boolean(restoreId);
+    const refMounted = targetAvailable && Boolean(getValidatedPosterTarget(restore.targetMovieId, restore.targetIndex));
+    console.info('[NovaCast Movies Restore]', {
+      token: restore.token,
+      source: restore.source,
+      categoryId: restore.categoryId,
+      targetMovieId: restore.targetMovieId,
+      targetIndex: restore.targetIndex,
+      targetAvailable,
+      refMounted,
+      scrollRequested: targetAvailable,
+      focusRequested: false,
+      outcome: targetAvailable ? 'pending' : 'waiting-for-target',
+    });
+
+    if (!targetAvailable || restorationIssuedTokenRef.current === restore.token) {
+      return;
+    }
+
+    restorationIssuedTokenRef.current = restore.token;
+    InteractionManager.runAfterInteractions(() => {
+      if (restorationTokenRef.current?.token !== restore.token || detailOpenRef.current) {
+        restorationIssuedTokenRef.current = null;
+        return;
+      }
+
+      requestTvFocus({
+        screen: 'movies',
+        source: 'MoviesScreen',
+        region: 'poster-grid',
+        itemId: restore.targetMovieId,
+        reason:
+          restore.source === 'detail-close'
+            ? 'restore-exact-poster-after-detail-close'
+            : 'restore-after-playback-exact-poster',
+        maxFrames: 30,
+        isActive: () =>
+          !detailOpenRef.current && restorationTokenRef.current?.token === restore.token,
+        getTarget: () => getValidatedPosterTarget(restore.targetMovieId, restore.targetIndex),
+        onSettled: (status) => {
+          const current = restorationTokenRef.current;
+          if (!current || current.token !== restore.token) {
+            return;
+          }
+          console.info('[NovaCast Movies Restore]', {
+            token: restore.token,
+            source: restore.source,
+            categoryId: restore.categoryId,
+            targetMovieId: restore.targetMovieId,
+            targetIndex: restore.targetIndex,
+            targetAvailable: true,
+            refMounted: Boolean(getValidatedPosterTarget(restore.targetMovieId, restore.targetIndex)),
+            scrollRequested: true,
+            focusRequested: status === 'executed',
+            outcome: status,
+          });
+          if (status === 'executed') {
+            // Native focus() succeeding is not confirmation. Keep the token
+            // until the target card reports the matching onFocus event.
+          } else if (status === 'timeout') {
+            restorationIssuedTokenRef.current = null;
+            setTimeout(() => setRestorationRetry((value) => value + 1), 0);
+          }
+        },
+      });
+    });
+  }, [getValidatedPosterTarget, restorationRetry, restoringBrowseFocus, selectedCategoryId, visibleMovies]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -392,50 +632,29 @@ export function MoviesScreen() {
     }
 
     setDetailOpen(false);
+    detailOpenRef.current = false;
     setDetailSuppressedForPlayback(false);
     setLaunchingPlayback(false);
     finishUnifiedPlaybackClose();
 
+    const snapshot = browseFocusSnapshotRef.current;
+    const restoreId = snapshot?.categoryId === selectedCategoryId ? snapshot.movieId : selectedMovie?.id;
+    if (!restoreId) {
+      return;
+    }
+    const token = `playback-${++restorationSequenceRef.current}`;
+    restorationTokenRef.current = {
+      token,
+      source: 'playback-close',
+      categoryId: selectedCategoryId,
+      targetMovieId: restoreId,
+      targetIndex: snapshot?.index ?? visibleMovies.findIndex((movie) => movie.id === restoreId),
+    };
+    restorationIssuedTokenRef.current = null;
     isRestoringPlaybackFocusRef.current = true;
     setRestoringBrowseFocus(true);
-    const restoreId = resolvePosterRestorationId({
-      focusedId: getFocusedMovieId() ?? getMoviesScreenMemory(activeProviderId).focusedMovieId,
-      selectedId: selectedMovie?.id ?? null,
-      availableIds: visibleMovies.map((movie) => movie.id),
-    });
-    let cancelled = false;
-
-    const task = InteractionManager.runAfterInteractions(() => {
-      if (cancelled || !restoreId) {
-        isRestoringPlaybackFocusRef.current = false;
-        setRestoringBrowseFocus(false);
-        return;
-      }
-
-      requestTvFocus({
-        screen: 'movies',
-        source: 'MoviesScreen',
-        region: 'poster-grid',
-        itemId: restoreId,
-        reason: 'restore-after-playback',
-        isActive: () => !cancelled,
-        getTarget: () => posterRefs.current.get(restoreId),
-        onSettled: () => {
-          if (!cancelled) {
-            isRestoringPlaybackFocusRef.current = false;
-            setRestoringBrowseFocus(false);
-          }
-        },
-      });
-    });
-
-    return () => {
-      cancelled = true;
-      task.cancel();
-      isRestoringPlaybackFocusRef.current = false;
-      setRestoringBrowseFocus(false);
-    };
-  }, [activeProviderId, didJustClose, getFocusedMovieId, selectedMovie?.id, visibleMovies]);
+    setRestorationRetry((value) => value + 1);
+  }, [didJustClose, selectedCategoryId, selectedMovie?.id, visibleMovies]);
 
   useEffect(() => {
     rememberMoviesScreenMemory(activeProviderId, {
@@ -652,6 +871,14 @@ export function MoviesScreen() {
       moviesRetryAttemptedRef.current = false;
       categoryFocusPendingRef.current = categoryId;
       setRestoringBrowseFocus(true);
+      console.info('[NovaCast Movies Focus Handoff]', {
+        marker: MOVIES_FOCUS_STAGE3B2_MARKER,
+        categoryId,
+        phase: 'category-loading',
+        intendedMovieId: null,
+        focusRequested: false,
+        detailOpened: false,
+      });
       selectCategory(categoryId);
     },
     [selectCategory],
@@ -661,6 +888,10 @@ export function MoviesScreen() {
   useEffect(() => {
     const pendingCategoryId = categoryFocusPendingRef.current;
     if (!pendingCategoryId || pendingCategoryId !== selectedCategoryId) {
+      return;
+    }
+
+    if (restorationTokenRef.current?.categoryId === selectedCategoryId) {
       return;
     }
 
@@ -690,7 +921,7 @@ export function MoviesScreen() {
         isActive: () =>
           !cancelled &&
           categoryFocusPendingRef.current === selectedCategoryId,
-        getTarget: () => posterRefs.current.get(targetId),
+        getTarget: () => getValidatedPosterTarget(targetId),
         onSettled: () => {
           if (cancelled) {
             return;
@@ -699,13 +930,21 @@ export function MoviesScreen() {
           setRestoringBrowseFocus(false);
         },
       });
+      console.info('[NovaCast Movies Focus Handoff]', {
+        marker: MOVIES_FOCUS_STAGE3B2_MARKER,
+        categoryId: selectedCategoryId,
+        phase: 'category-to-grid',
+        intendedMovieId: targetId,
+        focusRequested: true,
+        detailOpened: false,
+      });
     });
 
     return () => {
       cancelled = true;
       task.cancel();
     };
-  }, [categoryLoading || loadStatus === 'loading', selectedCategoryId, visibleMovies]);
+  }, [categoryLoading || loadStatus === 'loading', getValidatedPosterTarget, selectedCategoryId, visibleMovies]);
 useEffect(() => {
     if (loadStatus === 'ready') {
       moviesRetryAttemptedRef.current = false;
@@ -773,6 +1012,32 @@ useEffect(() => {
       : !loading && visibleMovies.length === 0 && loadStatus === 'empty'
         ? 'No movies in this category.'
         : null;
+  const showMoviesVisualLoader =
+    (categories.length === 0 && loadStatus !== 'error') ||
+    (categoryLoading || loadStatus === 'loading');
+
+  useEffect(() => {
+    console.info('[NovaCast Movies Visual Loader]', {
+      visible: showMoviesVisualLoader,
+      reason: categories.length === 0 ? 'initial-category-load' : 'category-first-page-load',
+      categoryId: selectedCategoryId,
+      firstPageLoading: categoryLoading || loadStatus === 'loading',
+      hasUsableItems: visibleMovies.length > 0,
+    });
+  }, [categories.length, categoryLoading, loadStatus, selectedCategoryId, showMoviesVisualLoader, visibleMovies.length]);
+
+  useEffect(() => {
+    if (categoryLoading || loadStatus === 'loading') {
+      recordFocusAudit({
+        component: 'MoviesScreen.loader-anchor',
+        action: 'hasTVPreferredFocus',
+        itemId: selectedCategoryId,
+        detail: {
+          preferred: Boolean(restoringBrowseFocus && categoryFocusPendingRef.current === selectedCategoryId),
+        },
+      });
+    }
+  }, [categoryLoading, loadStatus, restoringBrowseFocus, selectedCategoryId]);
 
   if (!hasDataSource) {
     return (
@@ -821,13 +1086,8 @@ useEffect(() => {
       <NovaTvShell
         activeId="movies"
         providerLabel={selectedProviderLabel}
-         preferActiveNavigationFocus={shouldPreferNavigationFocus({
-          playbackUiActive,
-          detailOverlayVisible,
-          searchBlocksBrowse,
-          restoringBrowseFocus,
-          gridEmpty: visibleMovies.length === 0,
-        })}
+        preferActiveNavigationFocus={moviesFocusOwner === 'navbar'}
+        suppressNavbarPreferredFocus={moviesFocusOwner !== 'navbar'}
         compactNavigationRail>
         <View style={styles.screen}>
           <View style={styles.topBar}>
@@ -853,6 +1113,7 @@ useEffect(() => {
               categories={categories}
               selectedCategoryId={selectedCategoryId}
               preferredCategoryId={moviesMemory.selectedCategoryId}
+              focusOwner={moviesFocusOwner}
               discoverStatusMessage={discoverStatusMessage}
               onSelectCategory={handleSelectCategory}
               onPrefetchCategoryCount={prefetchCategoryCount}
@@ -876,6 +1137,14 @@ useEffect(() => {
                 </View>
               ) : (categoryLoading || loadStatus === 'loading') && visibleMovies.length === 0 ? (
                 <View style={styles.initialLoadingPanel}>
+                  <Pressable
+                    focusable
+                    hasTVPreferredFocus={moviesFocusOwner === 'loading-anchor'}
+                    accessibilityRole="none"
+                    accessibilityLabel="Movies loading"
+                    onPress={() => undefined}
+                    style={styles.loadingFocusAnchor}
+                  />
                   <NovaSpaceLoader label="Loading movies…" />
                 </View>
               ) : (
@@ -889,6 +1158,8 @@ useEffect(() => {
                 categoryLoading={categoryLoading || loadStatus === 'loading'}
                 emptyNotice={gridEmptyNotice}
                 selectedMovieId={selectedMovie?.id ?? null}
+                suppressPreferredFocus={Boolean(restorationTokenRef.current)}
+                focusOwner={moviesFocusOwner}
                 postersFocusable={!detailOpen && !playbackUiActive && !searchBlocksBrowse}
                 onFocusMovie={handleFocusMovie}
                 onSelectMovie={handleSelectMovie}
@@ -900,6 +1171,8 @@ useEffect(() => {
                 sortFocusLeftHandle={categoryFocusLeftHandle}
                 onSortFocusHandleReady={setSortFocusRightHandle}
                 loadMore={handleLoadMore}
+                restoreMovieId={restorationTokenRef.current?.targetMovieId ?? null}
+                restoreMovieIndex={restorationTokenRef.current?.targetIndex ?? null}
               />
               )}
             </View>
@@ -1031,6 +1304,13 @@ function createMoviesStyles(theme: NovaTheme) {
       minHeight: 280,
       alignItems: 'center',
       justifyContent: 'center',
+      paddingBottom: 48,
+    },
+    loadingFocusAnchor: {
+      position: 'absolute',
+      width: 2,
+      height: 2,
+      opacity: 0.01,
     },
     emptyState: {
       flex: 1,

@@ -19,6 +19,8 @@ export function BetaExpiredScreen({
   const scale = Math.min(1, Math.max(0.72, Math.min(width / 1280, height / 720)));
   const device = useDeviceState();
   const remainingMs = getRemainingMs(expiresAt) ?? device.status?.remainingBetaMs ?? 0;
+  const publicDeviceCode =
+    device.status?.publicDeviceCode ?? device.identity?.publicDeviceCode ?? 'Unavailable';
 
   return (
     <ImageBackground source={backgroundAsset} resizeMode="cover" style={styles.screen}>
@@ -33,6 +35,10 @@ export function BetaExpiredScreen({
 
         <View style={styles.statRow}>
           <View style={styles.stat}>
+            <Text style={styles.statLabel}>Device ID</Text>
+            <Text style={[styles.statValue, { fontSize: 28 * scale }]}>{publicDeviceCode}</Text>
+          </View>
+          <View style={styles.stat}>
             <Text style={styles.statLabel}>Countdown</Text>
             <Text style={[styles.statValue, { fontSize: 28 * scale }]}>
               {formatBetaCountdown(Math.max(0, remainingMs)) ?? '0:00:00'}
@@ -41,7 +47,7 @@ export function BetaExpiredScreen({
         </View>
 
         <Text style={[styles.help, { fontSize: 16 * scale }]}>
-          Contact your administrator for an extension (+24h, +72h, or +7 days).
+          Give your Device ID to the administrator, then select Check for extension.
         </Text>
 
         <Pressable

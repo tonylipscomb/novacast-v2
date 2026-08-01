@@ -178,6 +178,30 @@ function AdminPage() {
     await load(token);
   };
 
+  const assignProvider = async (id: string, managedProviderId: string) => {
+    try {
+      const result = await adminRequest('admin-device-action', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          deviceId: id,
+          action: 'assign_provider',
+          managedProviderId,
+        }),
+      });
+      const providerName =
+        typeof result.providerName === 'string' ? result.providerName : 'selected provider';
+      setMessage(
+        result.unchanged
+          ? `Device already uses ${providerName}.`
+          : `Provider changed to ${providerName}. The TV will redownload on next heartbeat.`,
+      );
+      await load(token);
+    } catch (error) {
+      const category = error instanceof Error ? error.message : 'admin_update_failed';
+      setMessage(`Provider could not be changed (${category}).`);
+    }
+  };
+
   const sendCommand = async (deviceId: string, command: string) => {
     await adminRequest('admin-commands', token, {
       method: 'POST',
@@ -239,7 +263,17 @@ function AdminPage() {
 
         {tab === 'dashboard' ? <AdminDashboard data={dashboard as Record<string, unknown> | null} devices={devices} invitations={invitations} providers={providers} onNavigate={setTab} onRefresh={() => void refreshDashboard()} refreshing={refreshing} onCreateInvite={() => setTab('invitations')} /> : null}
 
-        {tab === 'devices' ? <AdminDevices devices={devices} onExtend={(id, hours) => void extend(id, hours)} onCommand={(id) => void sendCommand(id, 'refresh_library')} onRevoke={(id) => void revoke(id)} onMessage={setMessage} /> : null}
+        {tab === 'devices' ? (
+          <AdminDevices
+            devices={devices}
+            providers={providers}
+            onExtend={(id, hours) => void extend(id, hours)}
+            onAssignProvider={(id, managedProviderId) => void assignProvider(id, managedProviderId)}
+            onCommand={(id) => void sendCommand(id, 'refresh_library')}
+            onRevoke={(id) => void revoke(id)}
+            onMessage={setMessage}
+          />
+        ) : null}
 
         {tab === 'invitations' ? <AdminInvitations invitations={invitations} providers={providers} onCreate={createInvite} onMessage={setMessage} openCreate={newInvitationRequested} onOpenCreateHandled={() => setNewInvitationRequested(false)} /> : null}
 

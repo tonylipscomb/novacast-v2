@@ -112,3 +112,91 @@ select { width: 100%; min-height: 50px; padding: 0 14px; border: 1px solid rgba(
 .addDeviceHeader { min-height: 36px !important; padding: 0 14px !important; color: #fff; background: linear-gradient(100deg, #5b21b6, #7c3aed) !important; }.devicesPage { display: grid; gap: 14px; }.deviceMetricGrid { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; }.deviceMetric { min-height: 132px; padding: 14px; border: 1px solid rgba(74,124,205,.25); border-radius: 9px; background: rgba(7, 19, 38, .82); }.deviceMetricIcon { display: grid; width: 30px; height: 30px; place-items: center; margin-bottom: 10px; border-radius: 50%; color: #061124; background: currentColor; font-weight: 900; }.deviceMetric small { display: block; color: #a8b9d7; font-size: 10px; text-transform: uppercase; }.deviceMetric strong { display: block; margin: 5px 0; color: #f5f8ff; font-size: 28px; }.deviceMetricHint { display: block; color: #8195b8; font-size: 10px; }.tone-slate { border-top-color: rgba(148,163,184,.5); color: #b4c4dc; }.deviceFilters { display: grid; grid-template-columns: minmax(240px, 1.7fr) repeat(3, minmax(130px, .75fr)) auto auto; align-items: center; gap: 8px; padding: 14px; border: 1px solid rgba(74,124,205,.22); border-radius: 9px; background: rgba(7, 19, 38, .78); }.deviceSearch { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 0 10px; border: 1px solid rgba(74,124,205,.35); border-radius: 7px; background: rgba(6,20,48,.86); }.deviceSearch span { color: #dbe8ff; font-size: 24px; line-height: 1; }.deviceSearch input { min-height: 40px; padding: 0; border: 0; background: transparent; box-shadow: none; font-size: 12px; }.deviceFilters select { min-height: 42px; border-radius: 7px; font-size: 11px; }.filterButton, .exportButton { min-height: 42px; padding: 0 12px; border: 1px solid rgba(74,124,205,.25); border-radius: 7px; color: #bad0ed; background: rgba(10,27,52,.8); font-size: 11px; white-space: nowrap; }.exportButton { color: #f3f7ff; }.deviceTablePanel { overflow: hidden; border: 1px solid rgba(74,124,205,.25); border-radius: 9px; background: rgba(5, 16, 33, .86); }.deviceTableHead, .deviceTableRow { display: grid; grid-template-columns: minmax(190px, 1.55fr) .7fr .9fr .9fr .8fr 1fr .85fr 1.35fr; gap: 12px; align-items: center; padding: 0 18px; }.deviceTableHead { min-height: 42px; border-bottom: 1px solid rgba(74,124,205,.2); color: #90a6c6; font-size: 10px; letter-spacing: .07em; text-transform: uppercase; }.deviceTableRow { min-height: 74px; border-bottom: 1px solid rgba(74,124,205,.14); color: #dce8fb; font-size: 11px; }.deviceTableRow > div:not(.deviceIdentity):not(.deviceActions) { min-width: 0; }.deviceIdentity { display: flex; align-items: center; gap: 10px; min-width: 0; }.deviceIdentity > div, .deviceTableRow > div > div { display: grid; min-width: 0; gap: 3px; }.deviceIdentity strong, .deviceTableRow strong { overflow: hidden; color: #f2f6ff; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.deviceTableRow small { display: block; overflow: hidden; color: #879bbc; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.deviceAvatar { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 9px; color: #18d7ff; background: rgba(24,215,255,.2); font-size: 17px; }.deviceOnline { display: flex; align-items: center; gap: 6px; color: #b9c7dc; }.deviceOnline i { width: 8px; height: 8px; border-radius: 50%; background: #9fb4d2; }.deviceOnline.online { color: #34e6a0; }.deviceOnline.online i { background: #10d989; box-shadow: 0 0 9px #10d989; }.deviceOnline.offline { color: #b2c1d8; }.betaBadge { display: inline-block; width: max-content; padding: 5px 8px; border-radius: 5px; font-size: 10px; }.beta-active { color: #a7ffdb; background: rgba(16,185,129,.24); }.beta-expired { color: #ffb8a8; background: rgba(239,68,68,.23); }.beta-inactive { color: #b7c6dc; background: rgba(71,91,125,.35); }.beta-revoked { color: #ffb8c3; background: rgba(127,29,55,.35); }.deviceActions { display: flex; justify-content: flex-end; gap: 5px; }.deviceActions button { min-width: 34px; min-height: 34px; padding: 0; border: 1px solid rgba(74,124,205,.24); border-radius: 7px; color: #7edaff; background: rgba(10,30,57,.86); font-size: 15px; }.deviceActions button:nth-child(2) { color: #c08aff; }.deviceActions button:nth-child(3) { color: #c2d4ec; }.deviceActions button:hover { transform: none; }.deviceActions .dangerButton { color: #ff6b78; background: rgba(110,25,45,.25); }.deviceEmpty { display: grid; min-height: 180px; place-items: center; color: #8195b8; font-size: 12px; }.devicePagination { display: flex; align-items: center; justify-content: space-between; min-height: 50px; padding: 0 18px; color: #8195b8; font-size: 11px; }.devicePagination div { display: flex; align-items: center; gap: 5px; }.devicePagination button, .devicePagination strong { display: grid; min-width: 30px; min-height: 30px; place-items: center; padding: 0; border: 1px solid rgba(74,124,205,.24); border-radius: 6px; color: #b6c8e4; background: rgba(10,27,52,.8); }.devicePagination strong { color: #fff; background: #5b21b6; }.devicePagination button:disabled { opacity: .4; }.addDeviceButton { display: none; }
 @media (max-width: 1250px) { .deviceMetricGrid { grid-template-columns: repeat(3, 1fr); }.deviceTablePanel { overflow-x: auto; }.deviceTableHead, .deviceTableRow { min-width: 1050px; } }
 @media (max-width: 760px) { .deviceMetricGrid { grid-template-columns: repeat(2, 1fr); }.deviceFilters { grid-template-columns: 1fr 1fr; }.deviceSearch { grid-column: span 2; }.filterButton, .exportButton { width: 100%; }.deviceTableHead { display: none; }.deviceTablePanel { overflow: visible; border: 0; background: transparent; }.deviceTableRow { display: grid; min-width: 0; grid-template-columns: 1fr auto; gap: 10px; margin-bottom: 10px; padding: 14px; border: 1px solid rgba(74,124,205,.24); border-radius: 8px; background: rgba(7,19,38,.86); }.deviceTableRow > div:not(.deviceIdentity):not(.deviceActions) { grid-column: span 1; }.deviceIdentity { grid-column: 1 / -1; }.deviceActions { grid-column: 1 / -1; justify-content: flex-start; }.devicePagination { padding: 0 4px; }.addDeviceButton { display: block; justify-self: start; }.deviceTablePanel .deviceEmpty { min-height: 120px; border: 1px solid rgba(74,124,205,.2); border-radius: 8px; } }
+
+/* Change provider modal */
+.extendModalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(1, 5, 15, 0.78);
+  backdrop-filter: blur(14px);
+}
+.extendModal {
+  width: min(560px, 100%);
+  padding: 26px;
+  border: 1px solid rgba(94, 138, 255, 0.32);
+  border-radius: 22px;
+  background: linear-gradient(145deg, rgba(13, 24, 48, 0.98), rgba(5, 12, 27, 0.98));
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.58), 0 0 45px rgba(76, 72, 255, 0.14);
+}
+.extendModal > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+.extendModal h2 { margin: 4px 0 6px; font-size: 25px; }
+.extendModal header p { margin: 0; color: #8fa4c8; }
+.extendEyebrow {
+  color: #43d8ff;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 1.5px;
+}
+.extendClose {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  font-size: 22px;
+}
+.extendDeviceCode {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 22px 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(70, 122, 214, 0.24);
+  border-radius: 13px;
+  background: rgba(5, 14, 31, 0.72);
+}
+.extendDeviceCode small { color: #7286aa; text-transform: uppercase; letter-spacing: 1px; }
+.extendDeviceCode strong { color: #f4f7ff; letter-spacing: 0.8px; }
+.extendCustomDate {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  color: #8fa4c8;
+  font-size: 13px;
+  font-weight: 800;
+}
+.extendCustomDate input,
+.extendCustomDate select {
+  min-height: 48px;
+  padding: 0 14px;
+  border: 1px solid rgba(82, 116, 182, 0.35);
+  border-radius: 11px;
+  color: white;
+  color-scheme: dark;
+  background: rgba(5, 14, 31, 0.82);
+}
+.extendModal > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+.extendCancel,
+.extendSave {
+  min-width: 130px;
+  min-height: 46px;
+  border-radius: 12px;
+  font-weight: 900;
+}
+.extendSave {
+  color: white;
+  background: linear-gradient(135deg, #6d4aff, #356ee8);
+  border-color: rgba(134, 116, 255, 0.9);
+}

@@ -1,14 +1,15 @@
 import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
 import { requireAdmin } from '../_shared/admin.ts';
 
-const EXTENSION_HOURS = new Set([24, 72, 168]);
+const MIN_EXTENSION_HOURS = 1;
+const MAX_EXTENSION_HOURS = 24 * 365 * 100;
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return optionsResponse();
   if (request.method !== 'POST') return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
 
   try {
-    const { client } = await requireAdmin(request);
+    const { client, user } = await requireAdmin(request);
     const body = await readJson(request);
     const deviceId = typeof body?.deviceId === 'string' ? body.deviceId : '';
     const action = typeof body?.action === 'string' ? body.action : '';
@@ -16,17 +17,81 @@ Deno.serve(async (request) => {
 
     if (action === 'extend') {
       const hours = Number(body?.hours);
-      if (!EXTENSION_HOURS.has(hours)) {
+      if (
+        !Number.isInteger(hours) ||
+        hours < MIN_EXTENSION_HOURS ||
+        hours > MAX_EXTENSION_HOURS
+      ) {
         return jsonResponse({ errorCategory: 'invalid_extension' }, 400);
       }
       const { data, error } = await client.rpc('extend_device_activation', {
         p_device_id: deviceId,
         p_hours: hours,
       });
-      if (error || !data?.[0]) {
-        return jsonResponse({ errorCategory: 'admin_update_failed' }, 500);
+
+      if (!error && data?.[0]) {
+        return jsonResponse({ ok: true, expiresAt: data[0].expires_at, mode: 'rpc' });
       }
-      return jsonResponse({ ok: true, expiresAt: data[0].expires_at });
+
+      const { data: activations, error: activationReadError } = await client
+        .from('device_activations')
+        .select('id, expires_at, status')
+        .eq('device_id', deviceId)
+        .in('status', ['active', 'expired'])
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (activationReadError || !activations?.[0]) {
+        return jsonResponse(
+          {
+            errorCategory: 'activation_not_found',
+            detail: activationReadError?.message ?? error?.message ?? null,
+          },
+          400,
+        );
+      }
+
+      const currentExpiration = Date.parse(String(activations[0].expires_at ?? ''));
+      const baseTime = Number.isFinite(currentExpiration)
+        ? Math.max(Date.now(), currentExpiration)
+        : Date.now();
+      const expiresAt = new Date(baseTime + hours * 60 * 60 * 1000).toISOString();
+
+      const { error: activationUpdateError } = await client
+        .from('device_activations')
+        .update({
+          status: 'active',
+          expires_at: expiresAt,
+          revoked_at: null,
+          revoked_reason: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', activations[0].id);
+
+      if (activationUpdateError) {
+        return jsonResponse(
+          { errorCategory: 'activation_update_failed', detail: activationUpdateError.message },
+          500,
+        );
+      }
+
+      const { error: deviceUpdateError } = await client
+        .from('devices')
+        .update({
+          status: 'registered',
+          activation_status: 'active',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', deviceId);
+
+      if (deviceUpdateError) {
+        return jsonResponse(
+          { errorCategory: 'device_update_failed', detail: deviceUpdateError.message },
+          500,
+        );
+      }
+
+      return jsonResponse({ ok: true, expiresAt, mode: 'fallback' });
     }
 
     if (action === 'revoke' || action === 'restore') {
@@ -99,6 +164,126 @@ Deno.serve(async (request) => {
         expiresAt: data[0].expires_at,
         managedProviderId: data[0].managed_provider_id,
         providerAssigned: Boolean(data[0].provider_assigned),
+      });
+    }
+
+    // Reassign an activated beta device to a different managed provider package.
+    if (action === 'assign_provider') {
+      const managedProviderId =
+        typeof body?.managedProviderId === 'string' ? body.managedProviderId.trim() : '';
+      if (!managedProviderId) {
+        return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+      }
+
+      const { data: device, error: deviceError } = await client
+        .from('devices')
+        .select('id,status,managed_provider_id')
+        .eq('id', deviceId)
+        .maybeSingle();
+      if (deviceError || !device) {
+        return jsonResponse({ errorCategory: 'device_not_found' }, 400);
+      }
+      if (['revoked', 'disabled'].includes(String(device.status ?? ''))) {
+        return jsonResponse({ errorCategory: 'device_blocked' }, 400);
+      }
+
+      const { data: provider, error: providerError } = await client
+        .from('managed_providers')
+        .select('id,display_name,status,content_policy')
+        .eq('id', managedProviderId)
+        .maybeSingle();
+      if (providerError || !provider) {
+        return jsonResponse({ errorCategory: 'provider_not_found' }, 400);
+      }
+      if (String(provider.status ?? '') !== 'active') {
+        return jsonResponse({ errorCategory: 'provider_inactive' }, 400);
+      }
+
+      if (device.managed_provider_id === managedProviderId) {
+        return jsonResponse({
+          ok: true,
+          managedProviderId,
+          providerName: provider.display_name,
+          unchanged: true,
+        });
+      }
+
+      const now = new Date().toISOString();
+      const contentPolicy =
+        typeof provider.content_policy === 'string' && provider.content_policy.trim()
+          ? provider.content_policy.trim().slice(0, 64)
+          : 'us_only';
+
+      const { error: supersedeError } = await client
+        .from('device_provider_assignments')
+        .update({ status: 'superseded', revoked_at: now, updated_at: now })
+        .eq('device_id', deviceId)
+        .eq('status', 'active');
+      if (supersedeError) {
+        return jsonResponse(
+          { errorCategory: 'assignment_update_failed', detail: supersedeError.message },
+          500,
+        );
+      }
+
+      const { error: insertError } = await client.from('device_provider_assignments').insert({
+        device_id: deviceId,
+        managed_provider_id: managedProviderId,
+        content_policy: contentPolicy,
+        status: 'active',
+      });
+      if (insertError) {
+        return jsonResponse(
+          { errorCategory: 'assignment_create_failed', detail: insertError.message },
+          500,
+        );
+      }
+
+      const { error: deviceUpdateError } = await client
+        .from('devices')
+        .update({
+          managed_provider_id: managedProviderId,
+          content_policy: contentPolicy,
+          updated_at: now,
+        })
+        .eq('id', deviceId);
+      if (deviceUpdateError) {
+        return jsonResponse(
+          { errorCategory: 'device_update_failed', detail: deviceUpdateError.message },
+          500,
+        );
+      }
+
+      await client
+        .from('device_activations')
+        .update({
+          managed_provider_id: managedProviderId,
+          content_policy: contentPolicy,
+          updated_at: now,
+        })
+        .eq('device_id', deviceId)
+        .eq('status', 'active');
+
+      // Queue a config push so the TV re-downloads credentials for the new provider.
+      await client.from('device_commands').insert({
+        device_id: deviceId,
+        command: 'push_configuration',
+        payload: {
+          reason: 'admin_assign_provider',
+          managedProviderId,
+          contentPolicy,
+          redownloadProvider: true,
+        },
+        status: 'pending',
+        created_by: user.id,
+      });
+
+      return jsonResponse({
+        ok: true,
+        managedProviderId,
+        providerName: provider.display_name,
+        contentPolicy,
+        unchanged: false,
       });
     }
 

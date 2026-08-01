@@ -34,8 +34,10 @@ test('SQLite provider paging and search remain local while smart categories stay
 });
 
 test('provider category counts can use SQLite category counts without a legacy index', () => {
-  assert.match(smart, /getCategoryCountFromIndex\(providerId, 'movie', category\.id\) \?\? category\.count/);
+  assert.match(smart, /resolveProviderCategoryCount/);
+  assert.match(smart, /preferSqliteCounts/);
   assert.match(sqlite, /countKnown:\s*true/);
+  assert.match(sqlite, /grouped-counts-applied/);
 });
 
 test('Movies SQLite selection does not import Live TV or playback', () => {

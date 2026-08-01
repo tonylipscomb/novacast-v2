@@ -1,5 +1,6 @@
 import {
   CATALOG_MIGRATION_SQL_V1,
+  CATALOG_MIGRATION_SQL_V2,
   CATALOG_SCHEMA_VERSION,
 } from './catalogSchema.ts';
 import {
@@ -123,12 +124,20 @@ export async function migrateCatalogDatabase(db: CatalogDatabaseHandle): Promise
 
   if (currentVersion < 1) {
     await db.exec(CATALOG_MIGRATION_SQL_V1);
-    await db.exec(`PRAGMA user_version = ${CATALOG_SCHEMA_VERSION}`);
+    await db.exec('PRAGMA user_version = 1');
   }
 
-  // Re-running IF NOT EXISTS migration is safe / idempotent for version bumps within v1.
-  if (currentVersion === CATALOG_SCHEMA_VERSION) {
+  if (currentVersion < 2) {
+    // Stage 3C: add generation-safe v2 tables. Legacy tables remain intact.
     await db.exec(CATALOG_MIGRATION_SQL_V1);
+    await db.exec(CATALOG_MIGRATION_SQL_V2);
+    await db.exec('PRAGMA user_version = 2');
+  }
+
+  // Idempotent repair for the current schema version.
+  if (currentVersion >= CATALOG_SCHEMA_VERSION) {
+    await db.exec(CATALOG_MIGRATION_SQL_V1);
+    await db.exec(CATALOG_MIGRATION_SQL_V2);
   }
 
   const next = await db.getFirst<{ user_version: number }>('PRAGMA user_version');

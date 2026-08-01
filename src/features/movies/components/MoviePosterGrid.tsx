@@ -1,17 +1,18 @@
 import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { FlatList, StyleSheet, Text, View, useWindowDimensions, type ListRenderItemInfo } from 'react-native';
+import { FlatList, StyleSheet, Text, View, useWindowDimensions, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { useAppTheme, type NovaTheme } from '@/theme';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
-import { shouldAutoFocusSortControl, shouldClaimPreferredPosterFocus, isLastPosterRow, type MoviesFocusOwner } from '@/features/media-browser/posterGridFocusPolicy';
+import { shouldAutoFocusSortControl, shouldClaimPreferredPosterFocus, isLastPosterRow } from '@/features/media-browser/posterGridFocusPolicy';
 import { ContentSortControl, type ContentSortControlHandle } from '@/features/media-browser/ContentSortControl';
 import type { ContentSortOption } from '@/features/media-browser/contentSorting';
 import { estimatePosterRowHeight, TV_POSTER_LIST_TUNING } from '@/features/media-browser/tvPosterListTuning';
 import { tvPerfRecordPosterRender, tvPerfSetVisiblePosters } from '@/features/perf/tvPerfStore';
 
 import type { MovieSummary } from '../movieTypes';
+import { getMoviesDetailOpenForDiagnostics } from '../moviesDiagnosticsState';
 import { MoviePosterCard } from './MoviePosterCard';
 import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 
@@ -38,8 +39,12 @@ type MoviePosterGridProps = {
   onSortFocusHandleReady?: (handle: number | undefined) => void;
   restoreMovieId?: string | null;
   restoreMovieIndex?: number | null;
+  restoreScrollOffset?: number | null;
+  restoreVisibleFirstIndex?: number | null;
+  restoreVisibleLastIndex?: number | null;
+  restorationToken?: string | null;
+  onViewportChange?: (state: { offset: number; firstIndex: number | null; lastIndex: number | null }) => void;
   suppressPreferredFocus?: boolean;
-  focusOwner?: MoviesFocusOwner;
 };
 
 export function MoviePosterGrid({
@@ -65,8 +70,12 @@ export function MoviePosterGrid({
   onSortFocusHandleReady,
   restoreMovieId = null,
   restoreMovieIndex = null,
+  restoreScrollOffset = null,
+  restoreVisibleFirstIndex = null,
+  restoreVisibleLastIndex = null,
+  restorationToken = null,
+  onViewportChange,
   suppressPreferredFocus = false,
-  focusOwner = 'poster',
 }: MoviePosterGridProps) {
   const gridHeaderSuffix = `${movies.length} items`;
   const firstMovieId = movies[0]?.id;
@@ -80,8 +89,13 @@ export function MoviePosterGrid({
   const onSelectMovieRef = useRef(onSelectMovie);
   const registerPosterRefRef = useRef(registerPosterRef);
   const previousMoviesDataRef = useRef<MovieSummary[] | null>(null);
+  const moviesDiagnosticsRef = useRef<MovieSummary[]>(movies);
+  const restorationTokenDiagnosticsRef = useRef<string | null>(restorationToken);
   const { width } = useWindowDimensions();
   const listRef = useRef<FlatList<MovieSummary> | null>(null);
+  const currentOffsetRef = useRef(0);
+  const visibleRangeRef = useRef({ firstIndex: null as number | null, lastIndex: null as number | null });
+  const restorationScrollIssuedRef = useRef<string | null>(null);
 
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -89,24 +103,56 @@ export function MoviePosterGrid({
   onFocusMovieRef.current = onFocusMovie;
   onSelectMovieRef.current = onSelectMovie;
   registerPosterRefRef.current = registerPosterRef;
+  // Diagnostics-only mirrors so lifecycle logs can report current values
+  // without widening the mount/unmount effect dependencies.
+  moviesDiagnosticsRef.current = movies;
+  restorationTokenDiagnosticsRef.current = restorationToken;
 
   useEffect(() => {
     const previous = previousMoviesDataRef.current;
-    console.info('[NovaCast Movies FlatList Data]', {
-      event: previous == null ? 'initial-data' : previous === movies ? 'same-array-render' : 'data-array-replaced',
-      arrayChanged: previous != null && previous !== movies,
-      rowCount: movies.length,
-      firstMovieId: movies[0]?.id ?? null,
-      lastMovieId: movies[movies.length - 1]?.id ?? null,
-      flatListKey: columns,
-    });
+    console.info(
+      '[NovaCast Movies FlatList Data] ' +
+        JSON.stringify({
+          reason: previous == null ? 'initial-data' : previous === movies ? 'same-array-render' : 'data-array-replaced',
+          arrayIdentityChanged: previous != null && previous !== movies,
+          previousLength: previous?.length ?? null,
+          nextLength: movies.length,
+          previousFirstId: previous?.[0]?.id ?? null,
+          nextFirstId: movies[0]?.id ?? null,
+          previousLastId: previous?.[previous.length - 1]?.id ?? null,
+          nextLastId: movies[movies.length - 1]?.id ?? null,
+          flatListKey: columns,
+        }),
+    );
     previousMoviesDataRef.current = movies;
   }, [columns, movies]);
 
   useEffect(() => {
-    console.info('[NovaCast Movies FlatList]', { event: 'mounted', flatListKey: columns });
+    console.info(
+      '[NovaCast Movies FlatList] ' +
+        JSON.stringify({
+          action: 'mounted',
+          key: columns,
+          rowCount: moviesDiagnosticsRef.current.length,
+          firstId: moviesDiagnosticsRef.current[0]?.id ?? null,
+          lastId: moviesDiagnosticsRef.current[moviesDiagnosticsRef.current.length - 1]?.id ?? null,
+          detailOpen: getMoviesDetailOpenForDiagnostics(),
+          restorationActive: Boolean(restorationTokenDiagnosticsRef.current),
+        }),
+    );
     return () => {
-      console.info('[NovaCast Movies FlatList]', { event: 'unmounted', flatListKey: columns });
+      console.info(
+        '[NovaCast Movies FlatList] ' +
+          JSON.stringify({
+            action: 'unmounted',
+            key: columns,
+            rowCount: moviesDiagnosticsRef.current.length,
+            firstId: moviesDiagnosticsRef.current[0]?.id ?? null,
+            lastId: moviesDiagnosticsRef.current[moviesDiagnosticsRef.current.length - 1]?.id ?? null,
+            detailOpen: getMoviesDetailOpenForDiagnostics(),
+            restorationActive: Boolean(restorationTokenDiagnosticsRef.current),
+          }),
+      );
     };
   }, [columns]);
 
@@ -177,16 +223,91 @@ export function MoviePosterGrid({
   }, [columns, movies.length]);
 
   useEffect(() => {
-    if (!restoreMovieId || restoreMovieIndex == null || restoreMovieIndex < 0) {
+    if (!restorationToken || !restoreMovieId || restoreMovieIndex == null || restoreMovieIndex < 0) {
       return;
     }
 
+    const range = visibleRangeRef.current.firstIndex != null
+      ? visibleRangeRef.current
+      : { firstIndex: restoreVisibleFirstIndex, lastIndex: restoreVisibleLastIndex };
+    const targetVisible =
+      range.firstIndex != null && range.lastIndex != null &&
+      restoreMovieIndex >= range.firstIndex && restoreMovieIndex <= range.lastIndex;
+    if (targetVisible) {
+      console.info(
+        '[NovaCast Movies Viewport Restore] ' +
+          JSON.stringify({
+            token: restorationToken,
+            targetMovieId: restoreMovieId,
+            targetIndex: restoreMovieIndex,
+            savedOffset: restoreScrollOffset ?? null,
+            currentOffset: currentOffsetRef.current,
+            visibleFirstIndex: range.firstIndex,
+            visibleLastIndex: range.lastIndex,
+            targetVisible: true,
+            focusConfirmed: false,
+            highlightVisible: false,
+            outcome: 'preserved',
+          }),
+      );
+      return;
+    }
+    if (restorationScrollIssuedRef.current === restorationToken) {
+      return;
+    }
+    restorationScrollIssuedRef.current = restorationToken;
+
     try {
+      console.info(
+        '[NovaCast Movies Scroll Command] ' +
+          JSON.stringify({
+            token: restorationToken,
+            source: 'detail-restoration-target-outside-window',
+            method: 'scrollToIndex',
+            requestedIndex: restoreMovieIndex,
+            requestedOffset: restoreScrollOffset ?? null,
+            currentOffset: currentOffsetRef.current,
+            focusedMovieId: selectedMovieId,
+            restorationActive: true,
+            timestamp: Date.now(),
+          }),
+      );
       listRef.current?.scrollToIndex({ index: restoreMovieIndex, animated: false, viewPosition: 0.35 });
+      console.info(
+        '[NovaCast Movies Viewport Restore] ' +
+          JSON.stringify({
+            token: restorationToken,
+            targetMovieId: restoreMovieId,
+            targetIndex: restoreMovieIndex,
+            savedOffset: restoreScrollOffset ?? null,
+            currentOffset: currentOffsetRef.current,
+            visibleFirstIndex: range.firstIndex,
+            visibleLastIndex: range.lastIndex,
+            targetVisible: false,
+            focusConfirmed: false,
+            highlightVisible: false,
+            outcome: 'scrolled-to-target',
+          }),
+      );
     } catch {
       // The list may not have measured yet; the focus coordinator will retry.
     }
-  }, [restoreMovieId, restoreMovieIndex]);
+  }, [restoreMovieId, restoreMovieIndex, restoreScrollOffset, restoreVisibleFirstIndex, restoreVisibleLastIndex, restorationToken, selectedMovieId]);
+
+  const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const offset = Math.max(0, event.nativeEvent.contentOffset.y);
+    currentOffsetRef.current = offset;
+    onViewportChange?.({ offset, ...visibleRangeRef.current });
+  }, [onViewportChange]);
+
+  const handleViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: Array<{ index: number | null }> }) => {
+    const indices = viewableItems.map((entry) => entry.index).filter((index): index is number => index != null);
+    visibleRangeRef.current = {
+      firstIndex: indices.length ? Math.min(...indices) : null,
+      lastIndex: indices.length ? Math.max(...indices) : null,
+    };
+    onViewportChange?.({ offset: currentOffsetRef.current, ...visibleRangeRef.current });
+  }).current;
 
   const columnWidth = useMemo(() => {
     const usable = Math.max(240, width - 320);
@@ -219,7 +340,7 @@ export function MoviePosterGrid({
           hasPreferredFocus={shouldClaimPreferredPosterFocus({
             // Explicit selection owns focus while detail is open/closing.
             // Do not let the first card compete with exact restoration.
-            focusClaimed: focusOwner !== 'poster' || focusClaimedRef.current || selectedMovieId != null || suppressPreferredFocus,
+            focusClaimed: focusClaimedRef.current || selectedMovieId != null || suppressPreferredFocus,
             itemId: item.id,
             seedId: focusSeedRef.current,
           })}
@@ -229,7 +350,7 @@ export function MoviePosterGrid({
         />
       );
     },
-    [columns, focusOwner, handleFocusMovie, handleRegisterRef, handleSelectMovie, isDiscover, movies.length, postersFocusable, selectedMovieId, suppressPreferredFocus],
+    [columns, handleFocusMovie, handleRegisterRef, handleSelectMovie, isDiscover, movies.length, postersFocusable, selectedMovieId, suppressPreferredFocus],
   );
 
   const keyExtractor = useCallback((item: MovieSummary) => item.id, []);
@@ -291,6 +412,9 @@ export function MoviePosterGrid({
             getItemLayout={getItemLayout}
             onEndReachedThreshold={TV_POSTER_LIST_TUNING.onEndReachedThreshold}
             onEndReached={requestMore}
+            onScroll={handleScroll}
+            scrollEventThrottle={16}
+            onViewableItemsChanged={handleViewableItemsChanged}
             renderItem={renderItem}
           />
           {showCategoryLoadingOverlay ? (

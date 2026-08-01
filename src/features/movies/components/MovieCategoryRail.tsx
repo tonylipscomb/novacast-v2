@@ -14,7 +14,6 @@ import type { ProviderCategoryContentType } from '@/features/providers/categoryN
 
 import type { MovieCategory } from '../movieTypes';
 import { formatMovieCategoryCount } from '../movieCategoryCountPolicy';
-import type { MoviesFocusOwner } from '@/features/media-browser/posterGridFocusPolicy';
 
 const PROVIDER_SECTION_ID = 'section:provider';
 const DISCOVER_SECTION_ID = 'section:discover';
@@ -23,7 +22,8 @@ type MovieCategoryRailProps = {
   categories: MovieCategory[];
   selectedCategoryId: string;
   preferredCategoryId?: string | null;
-  focusOwner?: MoviesFocusOwner;
+  suppressPreferredFocus?: boolean;
+  focusable?: boolean;
   discoverStatusMessage?: string | null;
   contentType?: ProviderCategoryContentType;
   onSelectCategory: (categoryId: string) => void;
@@ -36,7 +36,8 @@ export function MovieCategoryRail({
   categories,
   selectedCategoryId,
   preferredCategoryId,
-  focusOwner = 'category',
+  suppressPreferredFocus = false,
+  focusable = true,
   discoverStatusMessage,
   contentType = 'movie',
   onSelectCategory,
@@ -106,7 +107,7 @@ export function MovieCategoryRail({
           const showMarker = isProviderCategory(item) && (Boolean(countryCode) || regionMarker === 'multi');
 
           const preferInitialFocus =
-            focusOwner === 'category' &&
+            !suppressPreferredFocus &&
             !preferredFocusConsumedRef.current &&
             Boolean(initialPreferredCategoryIdRef.current && item.id === initialPreferredCategoryIdRef.current);
           const isSmartCategory = item.kind === 'smart';
@@ -122,7 +123,7 @@ export function MovieCategoryRail({
           return (
             <Pressable
               ref={(instance) => registerItemRef?.(item.id, instance)}
-              focusable
+              focusable={focusable}
               hasTVPreferredFocus={preferInitialFocus}
               {...(selected && nextFocusRightHandle ? { nextFocusRight: nextFocusRightHandle } : null)}
               onFocus={() => {

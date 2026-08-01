@@ -6,6 +6,9 @@ const screen = await fs.readFile(new URL('../src/features/movies/MoviesScreen.ts
 const grid = await fs.readFile(new URL('../src/features/movies/components/MoviePosterGrid.tsx', import.meta.url), 'utf8');
 const model = await fs.readFile(new URL('../src/features/movies/useMoviesScreenModel.ts', import.meta.url), 'utf8');
 const sync = await fs.readFile(new URL('../src/features/providers/providerCatalogSync.ts', import.meta.url), 'utf8');
+const shell = await fs.readFile(new URL('../src/components/nova/NovaTvShell.tsx', import.meta.url), 'utf8');
+const category = await fs.readFile(new URL('../src/features/movies/components/MovieCategoryRail.tsx', import.meta.url), 'utf8');
+const mediaDetail = await fs.readFile(new URL('../src/components/media/MediaDetailOverlay.tsx', import.meta.url), 'utf8');
 
 test('Stage 3B.2 Movies focus handoff keeps a non-activating loading target', () => {
   assert.match(screen, /stage3b2-movies-focus-loader-polish-v1/);
@@ -17,7 +20,7 @@ test('Stage 3B.2 Movies focus handoff keeps a non-activating loading target', ()
   assert.match(screen, /restoreMovieIndex/);
   assert.match(screen, /suppressPreferredFocus/);
   assert.equal((screen.match(/loadingFocusAnchor/g) ?? []).length, 2);
-  assert.match(screen, /hasTVPreferredFocus=\{moviesFocusOwner === 'loading-anchor'\}/);
+  assert.match(screen, /hasTVPreferredFocus=\{!detailCloseSentinelActive && Boolean\(restoringBrowseFocus && categoryFocusPendingRef\.current === selectedCategoryId\)\}/);
 });
 
 test('Stage 3B.2 uses one larger centered transparent loader', () => {
@@ -60,4 +63,25 @@ test('Stage 3B.2 does not let category focus override an active restore token', 
   assert.match(screen, /restorationTokenRef\.current\?\.categoryId === selectedCategoryId/);
   assert.match(grid, /suppressPreferredFocus/);
   assert.match(screen, /showMoviesVisualLoader/);
+});
+
+test('Stage 3B.4 rollback uses only narrow preferred-focus suppression', () => {
+  assert.doesNotMatch(screen, /MoviesFocusOwner|deriveMoviesFocusOwner|focusOwner=/);
+  assert.match(screen, /suppressNavbarPreferredFocus=\{navbarFocusSuppressed\}/);
+  assert.match(screen, /suppressPreferredFocus=\{navbarFocusSuppressed\}/);
+  assert.match(shell, /hasTVPreferredFocus=\{navbarPreferredFocus && active\}/);
+  assert.match(category, /hasTVPreferredFocus=\{preferInitialFocus\}/);
+  assert.doesNotMatch(shell, /MoviesFocusOwner|deriveMoviesFocusOwner/);
+});
+
+test('Stage 3B.4 keeps exact confirmation before suppression release', () => {
+  assert.match(screen, /if \(confirmed\) \{/);
+  assert.match(screen, /requestAnimationFrame\(\(\) => \{/);
+  assert.match(screen, /setNavbarRestoreSuppressed\(false\)/);
+  assert.match(screen, /restorationTokenRef\.current === null/);
+});
+
+test('Stage 3B.4 preserves detail hook ordering', () => {
+  const hookIndex = mediaDetail.indexOf('MediaDetailOverlay.TVFocusGuideView');
+  assert.ok(hookIndex >= 0);
 });

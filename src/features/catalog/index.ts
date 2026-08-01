@@ -26,7 +26,11 @@ export {
   getCatalogItemsPage,
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
+  logCatalogGenerationInventoryOnce,
   deleteStaleCatalogGeneration,
+  cleanupIncompleteCatalogGenerationsV2,
+  deleteCatalogGenerationV2,
+  getCatalogGenerationPhysicalStats,
   clearProviderCatalog,
   listCatalogItemsForGeneration,
   listCatalogCategoriesForGeneration,
@@ -59,7 +63,22 @@ export {
   CATALOG_REQUIRED_TABLES,
   CATALOG_REQUIRED_INDEXES,
   CATALOG_MIGRATION_SQL_V1,
+  CATALOG_MIGRATION_SQL_V2,
 } from './catalogSchema.ts';
+
+export {
+  STAGE3C_GENERATION_SAFE_MARKER,
+  usesGenerationSafeCatalog,
+  catalogItemsTable,
+  catalogCategoriesTable,
+} from './catalogTableRouting.ts';
+
+export {
+  recoverFragmentedMovieCatalogOnce,
+  resetMovieFragmentRecoveryForTests,
+} from './catalogFragmentRecovery.ts';
+
+export type { MovieFragmentRecoveryResult } from './catalogFragmentRecovery.ts';
 
 export {
   CATALOG_CHUNK_PREFERRED_MS,

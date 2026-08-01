@@ -323,6 +323,12 @@ function notifyMovieCatalogReady(providerId: string, generation: number) {
   listeners?.forEach((listener) => listener(generation));
 }
 
+/** Stage 3C fragment recovery publishes Movies-ready once after v2 activation. */
+export function publishMovieCatalogReady(providerId: string, generation: number) {
+  notifyPhase(providerId, 'ready');
+  notifyMovieCatalogReady(providerId, generation);
+}
+
 type CatalogSyncSetup = {
   input: ProviderCatalogSyncInput;
   runToken: number;

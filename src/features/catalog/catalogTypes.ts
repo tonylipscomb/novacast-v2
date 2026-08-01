@@ -91,6 +91,8 @@ export type CatalogItemsPageQuery = {
   limit?: number;
   offset?: number;
   sort?: CatalogItemSort;
+  /** Pin a read to the generation selected by the caller's read contract. */
+  generation?: number;
 };
 
 export type CatalogItemsPage = {
@@ -104,7 +106,8 @@ export type CatalogItemsPage = {
 /** Default UI page size band is 36â€“50; Stage 1 uses 48. */
 export const CATALOG_DEFAULT_PAGE_SIZE = 48;
 
-export const CATALOG_SCHEMA_VERSION = 1;
+/** Stage 3C: generation-safe Movies v2 tables. */
+export const CATALOG_SCHEMA_VERSION = 2;
 
 export const CATALOG_DATABASE_NAME = 'novacast-catalog.db';
 

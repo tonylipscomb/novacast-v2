@@ -10,7 +10,6 @@ import {
   shouldAutoFocusSortControl,
   shouldClaimPreferredPosterFocus,
   shouldPreferNavigationFocus,
-  deriveMoviesFocusOwner,
 } from '../src/features/media-browser/posterGridFocusPolicy.ts';
 import { shouldMoveFocusToChannelsOnCategoryOk } from '../src/features/live/liveTvFocusPreview.ts';
 import {
@@ -127,44 +126,6 @@ test('navbar preferred focus is blocked while restoring browse focus', () => {
   );
 });
 
-test('Movies focus owner gives restoration and child focus precedence over navbar', () => {
-  assert.equal(deriveMoviesFocusOwner({
-    detailOpen: false,
-    searchOpen: false,
-    restoringBrowseFocus: true,
-    categoryLoading: false,
-    loadStatus: 'ready',
-    hasPosters: true,
-    hasCategories: true,
-  }), 'restoring');
-  assert.equal(deriveMoviesFocusOwner({
-    detailOpen: false,
-    searchOpen: false,
-    restoringBrowseFocus: false,
-    categoryLoading: false,
-    loadStatus: 'ready',
-    hasPosters: true,
-    hasCategories: true,
-  }), 'poster');
-  assert.equal(deriveMoviesFocusOwner({
-    detailOpen: false,
-    searchOpen: false,
-    restoringBrowseFocus: false,
-    categoryLoading: true,
-    loadStatus: 'loading',
-    hasPosters: false,
-    hasCategories: true,
-  }), 'loading-anchor');
-  assert.equal(deriveMoviesFocusOwner({
-    detailOpen: false,
-    searchOpen: false,
-    restoringBrowseFocus: false,
-    categoryLoading: false,
-    loadStatus: 'ready',
-    hasPosters: false,
-    hasCategories: true,
-  }), 'category');
-});
 
 test('Search Close does not bounce back to field', () => {
   assert.equal(shouldWireCloseNextFocusToSearch(), false);

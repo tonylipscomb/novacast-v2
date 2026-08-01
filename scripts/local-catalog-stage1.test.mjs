@@ -171,7 +171,7 @@ test('failed sync keeps previous successful generation', async () => {
   assert.equal(draft.length, 1);
 });
 
-test('successful sync removes stale generation', async () => {
+test('successful movie sync retains previous completed generation in v2', async () => {
   await upsertCatalogProvider({ providerId: 'p1', providerType: 'xtream' });
   const g1 = await beginCatalogSync('p1', 'movie');
   await writeCatalogItemsBatch([
@@ -217,7 +217,8 @@ test('successful sync removes stale generation', async () => {
   ]);
   await completeCatalogSync('p1', 'movie', g2);
 
-  assert.equal((await listCatalogItemsForGeneration('p1', 'movie', g1)).length, 0);
+  // Stage 3C: previous completed generation remains readable/retained.
+  assert.equal((await listCatalogItemsForGeneration('p1', 'movie', g1)).length, 1);
   assert.equal((await listCatalogItemsForGeneration('p1', 'movie', g2)).length, 1);
   const page = await getCatalogItemsPage({ providerId: 'p1', mediaType: 'movie' });
   assert.equal(page.items[0].contentId, 'new');

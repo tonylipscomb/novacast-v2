@@ -21,33 +21,6 @@ export function shouldClaimPreferredPosterFocus(input: {
   return !input.focusClaimed && input.seedId != null && input.itemId === input.seedId;
 }
 
-export type MoviesFocusOwner =
-  | 'navbar'
-  | 'category'
-  | 'poster'
-  | 'loading-anchor'
-  | 'detail'
-  | 'search'
-  | 'restoring';
-
-export function deriveMoviesFocusOwner(input: {
-  detailOpen: boolean;
-  searchOpen: boolean;
-  restoringBrowseFocus: boolean;
-  categoryLoading: boolean;
-  loadStatus: string;
-  hasPosters: boolean;
-  hasCategories: boolean;
-}): MoviesFocusOwner {
-  if (input.detailOpen) return 'detail';
-  if (input.searchOpen) return 'search';
-  if (input.restoringBrowseFocus) return 'restoring';
-  if ((input.categoryLoading || input.loadStatus === 'loading') && !input.hasPosters) return 'loading-anchor';
-  if (input.hasPosters) return 'poster';
-  if (input.hasCategories) return 'category';
-  return 'navbar';
-}
-
 /**
  * Resolve which poster to restore after detail/search/playback close.
  * Prefer last focused ID; never fall back to navbar/Search/categories here.

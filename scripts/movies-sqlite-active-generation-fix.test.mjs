@@ -21,7 +21,7 @@ test('syncing or failed media resolves through the readable-generation guard', (
 });
 
 test('category counts are derived from readable item rows', () => {
-  assert.match(repository, /LEFT JOIN catalog_items i/);
+  assert.match(repository, /LEFT JOIN \$\{itemsTable\} i/);
   assert.match(repository, /HAVING COUNT\(i\.content_id\) > 0/);
 });
 

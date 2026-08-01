@@ -52,7 +52,7 @@ type NovaTvShellProps = PropsWithChildren<{
   expirationLabel?: string;
   headerSupplement?: ReactNode;
   preferActiveNavigationFocus?: boolean;
-  /** Explicitly suppress native preferred focus while a child owns Movies focus. */
+  /** Narrow guard for native preferred focus; does not affect focusability or navigation. */
   suppressNavbarPreferredFocus?: boolean;
   /** When false, the left navigation rail cannot receive D-pad focus. */
   navigationFocusable?: boolean;

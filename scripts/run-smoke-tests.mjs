@@ -11,6 +11,8 @@ const suites = [
   'movies-catalog-generation-inventory.test.mjs',
   'catalog-stage3c-generation-safe.test.mjs',
   'movies-stage3c1-category-counts.test.mjs',
+  'movies-stage3d-detail-focus-lifecycle.test.mjs',
+  'movies-stage3d1-viewport-first-handoff.test.mjs',
   'auth-notifications.test.mjs',
   'category-regional-pipeline.test.mjs',
   'category-normalization.test.mjs',

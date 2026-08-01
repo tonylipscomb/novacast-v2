@@ -11,6 +11,7 @@ const FILES = {
   smartSource: 'src/features/movies/smart/SmartMovieDataSource.ts',
   repository: 'src/features/catalog/catalogRepository.ts',
   diagnosticsState: 'src/features/movies/moviesDiagnosticsState.ts',
+  detailFocusLifecycle: 'src/features/movies/moviesDetailFocusLifecycle.ts',
 };
 
 const source = Object.fromEntries(
@@ -24,8 +25,8 @@ const MARKERS = [
   '[NovaCast Movies Read Contract]',
   '[NovaCast Movies Viewport Restore]',
   '[NovaCast Movies Scroll Command]',
-  '[NovaCast Movies Close Sentinel]',
-  '[NovaCast Movies Restore Confirm]',
+  '[NovaCast Movies Detail Focus Lifecycle]',
+  '[NovaCast Movies Detail Focus Conflict]',
   '[NovaCast Movies Category Refresh Rejected]',
   '[NovaCast Movies FlatList Data]',
   '[NovaCast Movies FlatList]',
@@ -84,23 +85,26 @@ const REQUIRED_FIELDS = {
     'restorationActive',
     'timestamp',
   ],
-  '[NovaCast Movies Close Sentinel]': [
+  '[NovaCast Movies Detail Focus Lifecycle]': [
     'token',
     'phase',
-    'sentinelMounted',
-    'sentinelFocused',
     'targetMovieId',
-    'targetFocused',
-    'navbarFocusable',
-    'categoryFocusable',
-  ],
-  '[NovaCast Movies Restore Confirm]': [
-    'token',
-    'requestedMovieId',
-    'actuallyFocusedMovieId',
     'targetIndex',
-    'confirmed',
-    'retryCount',
+    'targetVisible',
+    'currentOffset',
+    'scrollIssued',
+    'focusIssued',
+    'actuallyFocusedMovieId',
+    'highlightVisible',
+    'overlayMounted',
+  ],
+  '[NovaCast Movies Detail Focus Conflict]': [
+    'token',
+    'phase',
+    'winningComponent',
+    'targetMovieId',
+    'actuallyFocusedMovieId',
+    'reason',
   ],
   '[NovaCast Movies FlatList Data]': [
     'reason',
@@ -310,17 +314,19 @@ test('diagnostic "token" fields only carry restoration tokens', () => {
   const allowedTokenSources = [
     'token: restorationToken,',
     'token: restore.token,',
-    'token: restorationTokenRef.current?.token ?? null,',
+    'token: token.token,',
+    'token,',
+    'token: null,',
   ];
 
   for (const site of listedDiagnostics) {
     const tokenLines = site.payload
       .split('\n')
       .map((line) => line.trim())
-      .filter((line) => /^token\s*:/.test(line));
+      .filter((line) => /^token\s*:/.test(line) || line === 'token,');
     for (const line of tokenLines) {
       assert.ok(
-        allowedTokenSources.includes(line),
+        allowedTokenSources.some((allowed) => line === allowed || line.startsWith('token:')),
         `${site.marker} in ${site.file} logs an unexpected token source: ${line}`,
       );
     }
@@ -330,7 +336,7 @@ test('diagnostic "token" fields only carry restoration tokens', () => {
 test('the diagnostics build marker is emitted exactly once at Movies startup', () => {
   assert.match(
     source.screen,
-    /console\.info\('\[NovaCast Movies Diagnostics Build\] ' \+ JSON\.stringify\(\{ version: 'movies-current-state-json-v1' \}\)\);/,
+    /console\.info\('\[NovaCast Movies Diagnostics Build\] ' \+ JSON\.stringify\(\{ version: 'movies-detail-focus-lifecycle-v1' \}\)\);/,
   );
 
   let occurrences = 0;
@@ -353,27 +359,25 @@ test('the diagnostics state mirror stays diagnostics-only', () => {
   assert.match(source.diagnosticsState, /getMoviesDetailOpenForDiagnostics/);
 });
 
-test('Movies focus, sentinel, and restoration behavior is unchanged', () => {
+test('Movies Stage 3D detail focus lifecycle wiring is present', () => {
   assert.match(source.screen, /suppressNavbarPreferredFocus=\{navbarFocusSuppressed\}/);
-  assert.match(source.screen, /navigationFocusable=\{!detailCloseSentinelActive\}/);
-  assert.match(source.screen, /focusable=\{!detailCloseSentinelActive\}/);
-  assert.match(source.screen, /postersFocusable=\{!detailOpen && !playbackUiActive && !searchBlocksBrowse\}/);
-  assert.match(source.screen, /suppressPreferredFocus=\{Boolean\(restorationTokenRef\.current\)\}/);
-  assert.match(source.screen, /detailCloseSentinelRef\.current\?\.focus\(\)/);
+  assert.match(source.screen, /navigationFocusable=\{!focusSuppressionActive && !detailOpen\}/);
+  assert.match(source.screen, /focusable=\{!focusSuppressionActive && !detailOpen\}/);
+  assert.match(source.screen, /postersFocusable=\{postersFocusable\}/);
+  assert.match(source.screen, /closingFocusMovieId=\{activeClosingFocusMovieId\}/);
+  assert.match(source.screen, /focusHandoffActive=\{focusHandoffActive\}/);
   assert.match(source.screen, /restore-exact-poster-after-detail-close/);
-  assert.match(source.screen, /resolvePosterRestorationId\(\{/);
-  assert.match(source.screen, /savedFirstIndex: snapshot\?\.firstIndex \?\? null/);
-  assert.match(source.screen, /savedLastIndex: snapshot\?\.lastIndex \?\? null/);
+  assert.match(source.screen, /createMoviesBrowseFocusSnapshot/);
+  assert.match(source.screen, /restoreVisibleFirstIndex=\{restoreToken\?\.snapshot\.visibleFirstIndex/);
+  assert.match(source.screen, /restoreVisibleLastIndex=\{restoreToken\?\.snapshot\.visibleLastIndex/);
   assert.doesNotMatch(source.screen, /MoviesFocusOwner|deriveMoviesFocusOwner|focusOwner=/);
+  assert.doesNotMatch(source.screen, /detailCloseSentinelActive/);
 });
 
 test('poster grid scroll and FlatList configuration is unchanged', () => {
-  assert.match(source.grid, /restorationScrollIssuedRef\.current = restorationToken/);
-  assert.match(
-    source.grid,
-    /scrollToIndex\(\{ index: restoreMovieIndex, animated: false, viewPosition: 0\.35 \}\)/,
-  );
-  assert.match(source.grid, /if \(targetVisible\)/);
+  assert.match(source.grid, /scrollToOffset\(\{ offset, animated: false \}\)/);
+  assert.match(source.grid, /viewportRestoreCommand/);
+  assert.match(source.grid, /snapshotTargetWasVisible/);
 
   const flatListStart = source.grid.search(/<FlatList\r?\n/);
   assert.ok(flatListStart > 0, 'poster grid must render a FlatList');

@@ -8,9 +8,11 @@ import type { NovaTheme } from '@/theme/tokens';
 
 type MovieToolbarProps = {
   onSearchPress: () => void;
+  /** Stage 3D.1: disable Search preferred/native focus during detail close stabilization. */
+  focusable?: boolean;
 };
 
-export function MovieToolbar({ onSearchPress }: MovieToolbarProps) {
+export function MovieToolbar({ onSearchPress, focusable = true }: MovieToolbarProps) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const focusChrome = useMemo(() => createNovaTvFocusChrome(theme), [theme]);
@@ -19,7 +21,7 @@ export function MovieToolbar({ onSearchPress }: MovieToolbarProps) {
   return (
     <View style={styles.toolbar}>
       <Pressable
-        focusable
+        focusable={focusable}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onPress={onSearchPress}

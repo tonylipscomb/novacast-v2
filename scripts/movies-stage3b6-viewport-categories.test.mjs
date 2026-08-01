@@ -10,26 +10,27 @@ const model = fs.readFileSync('src/features/movies/useMoviesScreenModel.ts', 'ut
 
 test('viewport snapshot stores offset and visible bounds before detail', () => {
   assert.match(screen, /viewportStateRef/);
-  assert.match(screen, /savedOffset/);
-  assert.match(screen, /savedFirstIndex/);
-  assert.match(screen, /savedLastIndex/);
+  assert.match(screen, /verticalOffset/);
+  assert.match(screen, /visibleFirstIndex/);
+  assert.match(screen, /visibleLastIndex/);
+  assert.match(screen, /createMoviesBrowseFocusSnapshot/);
 });
 
-test('visible restoration target does not call scrollToIndex', () => {
-  assert.match(grid, /targetVisible/);
-  assert.match(grid, /outcome: 'preserved'/);
-  assert.match(grid, /if \(targetVisible\)/);
+test('visible restoration uses saved offset not index positioning', () => {
+  assert.match(grid, /snapshotTargetWasVisible/);
+  assert.match(grid, /scrollToOffset/);
+  assert.match(grid, /scrolled-to-saved-offset/);
 });
 
-test('offscreen restoration scrolls at most once per token', () => {
-  assert.match(grid, /restorationScrollIssuedRef/);
-  assert.match(grid, /source: 'detail-restoration-target-outside-window'/);
-  assert.match(grid, /outcome: 'scrolled-to-target'/);
+test('offscreen restoration scrolls at most once per token via offset', () => {
+  assert.match(grid, /viewportRestoreIssuedKeyRef|restorationScrollIssuedRef/);
+  assert.match(grid, /detail-restoration-saved-offset|detail-restoration-offscreen-saved-offset/);
+  assert.doesNotMatch(grid, /viewPosition\s*:/);
 });
 
 test('grid emits the central scroll command diagnostic', () => {
   assert.match(grid, /\[NovaCast Movies Scroll Command\]/);
-  assert.match(grid, /method: 'scrollToIndex'/);
+  assert.match(grid, /method: 'scrollToOffset'/);
   assert.match(grid, /currentOffset/);
 });
 
@@ -40,9 +41,10 @@ test('viewport tracking uses scroll and viewability callbacks', () => {
 });
 
 test('focus confirmation records highlighted viewport and ends restoration', () => {
-  assert.match(screen, /focusConfirmed: true/);
   assert.match(screen, /highlightVisible: true/);
-  assert.match(screen, /restorationTokenRef\.current = null/);
+  assert.match(screen, /browse-restored/);
+  assert.match(screen, /detailFocusTokenRef\.current = null/);
+  assert.match(screen, /completeDetailFocusRestore/);
 });
 
 test('All Movies count is a direct catalog_items count', () => {

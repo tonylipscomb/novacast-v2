@@ -10,20 +10,19 @@ const sqlite = await fs.readFile(new URL('../src/features/movies/data/SqliteMovi
 const model = await fs.readFile(new URL('../src/features/movies/useMoviesScreenModel.ts', import.meta.url), 'utf8');
 const detail = await fs.readFile(new URL('../src/components/media/MediaDetailOverlay.tsx', import.meta.url), 'utf8');
 
-test('close sentinel holds focus until exact poster confirmation', () => {
-  assert.match(screen, /detailCloseSentinelActive/);
-  assert.match(screen, /detailCloseSentinelRef\.current\?\.focus\(\)/);
-  assert.match(screen, /phase: 'target-requested'/);
-  assert.match(screen, /phase: 'target-confirmed'/);
-  assert.match(screen, /phase: 'released'/);
-  assert.match(screen, /phase: 'timeout'/);
-  assert.match(screen, /requestedMovieId: restore\.targetMovieId/);
-  assert.match(screen, /actuallyFocusedMovieId: movie\.id/);
+test('Stage 3D overlay close target holds focus until exact poster confirmation', () => {
+  assert.match(screen, /focusHandoffActive/);
+  assert.match(screen, /overlayCloseTargetRef/);
+  assert.match(screen, /completeDetailFocusRestore/);
+  assert.match(screen, /closing-prepare/);
+  assert.match(screen, /browse-restored/);
+  assert.match(detail, /focusHandoffActive/);
+  assert.match(detail, /closeFocusTarget/);
 });
 
-test('navbar and categories are temporarily non-focusable during sentinel hold', () => {
-  assert.match(screen, /navigationFocusable=\{!detailCloseSentinelActive\}/);
-  assert.match(screen, /focusable=\{!detailCloseSentinelActive\}/);
+test('navbar and categories are temporarily non-focusable during detail close handoff', () => {
+  assert.match(screen, /navigationFocusable=\{!focusSuppressionActive && !detailOpen\}/);
+  assert.match(screen, /focusable=\{!focusSuppressionActive && !detailOpen\}/);
   assert.match(shell, /hasTVPreferredFocus=\{navbarPreferredFocus && active\}/);
   assert.match(category, /focusable=\{focusable\}/);
 });

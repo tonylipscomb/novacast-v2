@@ -43,6 +43,21 @@ type MoviePosterGridProps = {
   restoreVisibleFirstIndex?: number | null;
   restoreVisibleLastIndex?: number | null;
   restorationToken?: string | null;
+  /** Stage 3D: after exact confirm, block any further restore scrolls. */
+  restoreScrollBlocked?: boolean;
+  /**
+   * Stage 3D.1: restore exact saved offset via scrollToOffset (never top-row align).
+   * `initial` once per close; `corrective` at most once after focus drift.
+   */
+  viewportRestoreCommand?: {
+    token: string;
+    offset: number;
+    reason: 'initial' | 'corrective';
+  } | null;
+  /** Stage 3D: during closing, only this poster may be focusable. */
+  closingFocusMovieId?: string | null;
+  /** When true, snapshot said target was visible — do not use index positioning. */
+  snapshotTargetWasVisible?: boolean;
   onViewportChange?: (state: { offset: number; firstIndex: number | null; lastIndex: number | null }) => void;
   suppressPreferredFocus?: boolean;
 };
@@ -74,6 +89,10 @@ export function MoviePosterGrid({
   restoreVisibleFirstIndex = null,
   restoreVisibleLastIndex = null,
   restorationToken = null,
+  restoreScrollBlocked = false,
+  viewportRestoreCommand = null,
+  closingFocusMovieId = null,
+  snapshotTargetWasVisible = false,
   onViewportChange,
   suppressPreferredFocus = false,
 }: MoviePosterGridProps) {
@@ -96,6 +115,7 @@ export function MoviePosterGrid({
   const currentOffsetRef = useRef(0);
   const visibleRangeRef = useRef({ firstIndex: null as number | null, lastIndex: null as number | null });
   const restorationScrollIssuedRef = useRef<string | null>(null);
+  const viewportRestoreIssuedKeyRef = useRef<string | null>(null);
 
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -222,77 +242,121 @@ export function MoviePosterGrid({
     tvPerfSetVisiblePosters(Math.min(movies.length, columns * TV_POSTER_LIST_TUNING.windowSize));
   }, [columns, movies.length]);
 
+  // Stage 3D.1: viewport-first restore via exact saved offset (never top-row align).
   useEffect(() => {
-    if (!restorationToken || !restoreMovieId || restoreMovieIndex == null || restoreMovieIndex < 0) {
+    if (restoreScrollBlocked || !viewportRestoreCommand) {
       return;
     }
+    const commandKey = `${viewportRestoreCommand.token}:${viewportRestoreCommand.reason}`;
+    if (viewportRestoreIssuedKeyRef.current === commandKey) {
+      return;
+    }
+    viewportRestoreIssuedKeyRef.current = commandKey;
 
-    const range = visibleRangeRef.current.firstIndex != null
-      ? visibleRangeRef.current
-      : { firstIndex: restoreVisibleFirstIndex, lastIndex: restoreVisibleLastIndex };
-    const targetVisible =
-      range.firstIndex != null && range.lastIndex != null &&
-      restoreMovieIndex >= range.firstIndex && restoreMovieIndex <= range.lastIndex;
-    if (targetVisible) {
-      console.info(
-        '[NovaCast Movies Viewport Restore] ' +
-          JSON.stringify({
-            token: restorationToken,
-            targetMovieId: restoreMovieId,
-            targetIndex: restoreMovieIndex,
-            savedOffset: restoreScrollOffset ?? null,
-            currentOffset: currentOffsetRef.current,
-            visibleFirstIndex: range.firstIndex,
-            visibleLastIndex: range.lastIndex,
-            targetVisible: true,
-            focusConfirmed: false,
-            highlightVisible: false,
-            outcome: 'preserved',
-          }),
-      );
-      return;
-    }
-    if (restorationScrollIssuedRef.current === restorationToken) {
-      return;
-    }
-    restorationScrollIssuedRef.current = restorationToken;
-
+    const offset = Math.max(0, viewportRestoreCommand.offset);
     try {
       console.info(
         '[NovaCast Movies Scroll Command] ' +
           JSON.stringify({
-            token: restorationToken,
-            source: 'detail-restoration-target-outside-window',
-            method: 'scrollToIndex',
+            token: viewportRestoreCommand.token,
+            source:
+              viewportRestoreCommand.reason === 'corrective'
+                ? 'detail-restoration-corrective-offset'
+                : 'detail-restoration-saved-offset',
+            method: 'scrollToOffset',
             requestedIndex: restoreMovieIndex,
-            requestedOffset: restoreScrollOffset ?? null,
+            requestedOffset: offset,
             currentOffset: currentOffsetRef.current,
             focusedMovieId: selectedMovieId,
             restorationActive: true,
             timestamp: Date.now(),
           }),
       );
-      listRef.current?.scrollToIndex({ index: restoreMovieIndex, animated: false, viewPosition: 0.35 });
+      listRef.current?.scrollToOffset({ offset, animated: false });
       console.info(
         '[NovaCast Movies Viewport Restore] ' +
           JSON.stringify({
-            token: restorationToken,
+            token: viewportRestoreCommand.token,
             targetMovieId: restoreMovieId,
             targetIndex: restoreMovieIndex,
-            savedOffset: restoreScrollOffset ?? null,
+            savedOffset: offset,
             currentOffset: currentOffsetRef.current,
-            visibleFirstIndex: range.firstIndex,
-            visibleLastIndex: range.lastIndex,
-            targetVisible: false,
+            visibleFirstIndex: restoreVisibleFirstIndex,
+            visibleLastIndex: restoreVisibleLastIndex,
+            targetVisible: snapshotTargetWasVisible,
             focusConfirmed: false,
             highlightVisible: false,
-            outcome: 'scrolled-to-target',
+            outcome:
+              viewportRestoreCommand.reason === 'corrective'
+                ? 'corrective-offset-restore'
+                : 'scrolled-to-saved-offset',
           }),
       );
     } catch {
-      // The list may not have measured yet; the focus coordinator will retry.
+      // List may not be measured yet; coordinator retries via restorationRetry.
+      viewportRestoreIssuedKeyRef.current = null;
     }
-  }, [restoreMovieId, restoreMovieIndex, restoreScrollOffset, restoreVisibleFirstIndex, restoreVisibleLastIndex, restorationToken, selectedMovieId]);
+  }, [
+    restoreMovieId,
+    restoreMovieIndex,
+    restoreScrollBlocked,
+    restoreVisibleFirstIndex,
+    restoreVisibleLastIndex,
+    selectedMovieId,
+    snapshotTargetWasVisible,
+    viewportRestoreCommand,
+  ]);
+
+  // Offscreen-at-open fallback: restore the saved window with offset only.
+  // Never top-row-align the target. Snapshot-visible targets must not use
+  // index positioning even if live viewability is stale.
+  useEffect(() => {
+    if (
+      restoreScrollBlocked ||
+      viewportRestoreCommand ||
+      snapshotTargetWasVisible ||
+      !restorationToken ||
+      !restoreMovieId ||
+      restoreMovieIndex == null ||
+      restoreMovieIndex < 0 ||
+      restoreScrollOffset == null
+    ) {
+      return;
+    }
+    if (restorationScrollIssuedRef.current === restorationToken) {
+      return;
+    }
+    restorationScrollIssuedRef.current = restorationToken;
+    const offset = Math.max(0, restoreScrollOffset);
+    try {
+      console.info(
+        '[NovaCast Movies Scroll Command] ' +
+          JSON.stringify({
+            token: restorationToken,
+            source: 'detail-restoration-offscreen-saved-offset',
+            method: 'scrollToOffset',
+            requestedIndex: restoreMovieIndex,
+            requestedOffset: offset,
+            currentOffset: currentOffsetRef.current,
+            focusedMovieId: selectedMovieId,
+            restorationActive: true,
+            timestamp: Date.now(),
+          }),
+      );
+      listRef.current?.scrollToOffset({ offset, animated: false });
+    } catch {
+      restorationScrollIssuedRef.current = null;
+    }
+  }, [
+    restoreMovieId,
+    restoreMovieIndex,
+    restoreScrollBlocked,
+    restoreScrollOffset,
+    restorationToken,
+    selectedMovieId,
+    snapshotTargetWasVisible,
+    viewportRestoreCommand,
+  ]);
 
   const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const offset = Math.max(0, event.nativeEvent.contentOffset.y);
@@ -335,22 +399,38 @@ export function MoviePosterGrid({
         <MoviePosterCard
           movie={item}
           isDiscover={isDiscover}
-          focusable={postersFocusable}
+          focusable={
+            postersFocusable || (closingFocusMovieId != null && closingFocusMovieId === item.id)
+          }
           trapFocusDown={isLastPosterRow({ index, itemCount: movies.length, columns })}
-          hasPreferredFocus={shouldClaimPreferredPosterFocus({
-            // Explicit selection owns focus while detail is open/closing.
-            // Do not let the first card compete with exact restoration.
-            focusClaimed: focusClaimedRef.current || selectedMovieId != null || suppressPreferredFocus,
-            itemId: item.id,
-            seedId: focusSeedRef.current,
-          })}
+          hasPreferredFocus={
+            // Stage 3D: never let first-poster preferred focus compete during close.
+            closingFocusMovieId != null || suppressPreferredFocus
+              ? false
+              : shouldClaimPreferredPosterFocus({
+                  focusClaimed: focusClaimedRef.current || selectedMovieId != null,
+                  itemId: item.id,
+                  seedId: focusSeedRef.current,
+                })
+          }
           onFocus={handleFocusMovie}
           onPress={handleSelectMovie}
           registerRef={(instance, instanceToken) => handleRegisterRef(item.id, index, instance, instanceToken)}
         />
       );
     },
-    [columns, handleFocusMovie, handleRegisterRef, handleSelectMovie, isDiscover, movies.length, postersFocusable, selectedMovieId, suppressPreferredFocus],
+    [
+      closingFocusMovieId,
+      columns,
+      handleFocusMovie,
+      handleRegisterRef,
+      handleSelectMovie,
+      isDiscover,
+      movies.length,
+      postersFocusable,
+      selectedMovieId,
+      suppressPreferredFocus,
+    ],
   );
 
   const keyExtractor = useCallback((item: MovieSummary) => item.id, []);

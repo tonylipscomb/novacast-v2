@@ -23,12 +23,17 @@ export function decideMoviesBackAction(
 /**
  * While the unified player Modal owns the screen, hardware Back must close
  * playback — not the still-mounted detail overlay under it.
+ * During Stage 3D closing phases, Back is consumed but must not start a second close.
  */
 export function shouldHandleMoviesDetailBack(input: {
   playbackUiActive: boolean;
   detailOpen: boolean;
+  detailClosing?: boolean;
 }): boolean {
-  return input.detailOpen && !input.playbackUiActive;
+  if (input.playbackUiActive) {
+    return false;
+  }
+  return input.detailOpen || Boolean(input.detailClosing);
 }
 
 export function didMoviesPlaybackJustClose(previousActive: boolean, currentActive: boolean): boolean {

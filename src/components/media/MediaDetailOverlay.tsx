@@ -30,6 +30,12 @@ type MediaDetailOverlayProps = {
   visible: boolean;
   /** Keep the modal mounted invisibly so TV focus cannot fall through to the browse grid during playback launch. */
   keepFocusTrap?: boolean;
+  /**
+   * Movies Stage 3D close handoff: keep the overlay mounted, hold focus on an
+   * invisible close target, disable action traps so browse can reclaim the exact poster.
+   */
+  focusHandoffActive?: boolean;
+  closeTargetRef?: RefObject<ElementRef<typeof Pressable> | null>;
   blurTarget?: RefObject<View | null>;
   detail: MediaDetail | null;
   detailLoading?: boolean;
@@ -290,6 +296,8 @@ function SeriesEpisodePanel({
 export function MediaDetailOverlay({
   visible,
   keepFocusTrap = false,
+  focusHandoffActive = false,
+  closeTargetRef,
   blurTarget,
   detail,
   detailLoading = false,
@@ -343,7 +351,7 @@ export function MediaDetailOverlay({
   const useTVEventHandler = reactNativeTv.useTVEventHandler ?? noopUseTVEventHandler;
 
   useTVEventHandler((event: TvEventPayload) => {
-    if (!visible || !onPlay) {
+    if (!visible || focusHandoffActive || !onPlay) {
       return;
     }
 
@@ -413,7 +421,8 @@ export function MediaDetailOverlay({
       animation.start();
     }
 
-    if (!firstAction) {
+    // Stage 3D handoff owns focus; do not steal back to Play.
+    if (focusHandoffActive || !firstAction) {
       return;
     }
 
@@ -466,7 +475,7 @@ export function MediaDetailOverlay({
       clearTimeout(focusTimer);
       stopFocusRetry();
     };
-  }, [actionGraphKey, firstAction, opacity, visible]);
+  }, [actionGraphKey, firstAction, focusHandoffActive, opacity, visible]);
 
   useEffect(() => {
     if (!visible) {
@@ -517,6 +526,7 @@ export function MediaDetailOverlay({
   const FocusBoundaryView = (reactNative.TVFocusGuideView ?? View) as unknown as ComponentType<{
     children?: ReactNode;
     style?: unknown;
+    pointerEvents?: 'auto' | 'none' | 'box-none' | 'box-only';
     autoFocus?: boolean;
     trapFocusLeft?: boolean;
     trapFocusRight?: boolean;
@@ -567,11 +577,12 @@ export function MediaDetailOverlay({
         id={id}
         label={label}
         icon={icon as ComponentProps<typeof MaterialCommunityIcons>['name']}
-        onPress={onPress}
+        onPress={focusHandoffActive ? undefined : onPress}
         primary={id === 'play'}
         compact
-        preferred={id === firstAction}
-        selected={focusedTarget === id}
+        preferred={!focusHandoffActive && id === firstAction}
+        selected={!focusHandoffActive && focusedTarget === id}
+        disabled={focusHandoffActive}
         buttonRef={(instance) => {
           if (instance) {
             actionRefs.current.set(id, instance);
@@ -599,9 +610,19 @@ export function MediaDetailOverlay({
         !panelVisible && styles.backdropHidden,
         { opacity: panelVisible ? opacity : 0 },
       ]}
-      pointerEvents={panelVisible ? 'auto' : 'none'}
-      accessibilityViewIsModal={panelVisible}
-      importantForAccessibility={panelVisible ? 'yes' : 'no-hide-descendants'}>
+      pointerEvents={focusHandoffActive ? 'box-none' : panelVisible ? 'auto' : 'none'}
+      accessibilityViewIsModal={panelVisible && !focusHandoffActive}
+      importantForAccessibility={panelVisible && !focusHandoffActive ? 'yes' : 'no-hide-descendants'}>
+      {focusHandoffActive ? (
+        <Pressable
+          ref={closeTargetRef}
+          focusable
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          onPress={() => undefined}
+          style={styles.closeFocusTarget}
+        />
+      ) : null}
       {blurTarget && panelVisible ? (
         <BlurView
           blurTarget={blurTarget}
@@ -611,12 +632,13 @@ export function MediaDetailOverlay({
           style={styles.backdropBlur}
         />
       ) : null}
-      <View style={styles.backdropDim} />
+      <View style={styles.backdropDim} pointerEvents="none" />
       <FocusBoundaryView
         style={styles.focusBoundary}
-        {...(Platform.OS === 'android'
+        {...(Platform.OS === 'android' && !focusHandoffActive
           ? { autoFocus: true, trapFocusLeft: true, trapFocusRight: true, trapFocusUp: true, trapFocusDown: true }
-          : {})}>
+          : {})}
+        pointerEvents={focusHandoffActive ? 'none' : 'auto'}>
         <View
           style={[
             styles.modal,
@@ -626,7 +648,8 @@ export function MediaDetailOverlay({
               width: modalWidth,
               height: modalHeight,
             },
-          ]}>
+          ]}
+          pointerEvents={focusHandoffActive ? 'none' : 'auto'}>
         <View style={[styles.modalBody, styles.modalBodyCompact]}>
           <View style={[styles.posterColumn, styles.posterColumnCompact]}>
             <View style={[styles.posterFrame, styles.posterFrameCompact]}>
@@ -738,6 +761,15 @@ const styles = StyleSheet.create({
   },
   backdropHidden: {
     backgroundColor: 'transparent',
+  },
+  closeFocusTarget: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0.01,
+    left: 0,
+    top: 0,
+    zIndex: 70,
   },
   focusBoundary: {
     ...StyleSheet.absoluteFillObject,

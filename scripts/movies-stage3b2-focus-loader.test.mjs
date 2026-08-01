@@ -16,11 +16,13 @@ test('Stage 3B.2 Movies focus handoff keeps a non-activating loading target', ()
   assert.match(screen, /onPress=\{\(\) => undefined\}/);
   assert.match(screen, /restore-exact-poster-after-detail-close/);
   assert.match(screen, /NovaCast Movies Focus Handoff/);
-  assert.match(screen, /NovaCast Movies Restore/);
+  assert.match(screen, /logMoviesDetailFocusLifecycle/);
   assert.match(screen, /restoreMovieIndex/);
   assert.match(screen, /suppressPreferredFocus/);
   assert.equal((screen.match(/loadingFocusAnchor/g) ?? []).length, 2);
-  assert.match(screen, /hasTVPreferredFocus=\{!detailCloseSentinelActive && Boolean\(restoringBrowseFocus && categoryFocusPendingRef\.current === selectedCategoryId\)\}/);
+  assert.match(screen, /hasTVPreferredFocus=\{/);
+  assert.match(screen, /!focusSuppressionActive/);
+  assert.match(screen, /categoryFocusPendingRef\.current === selectedCategoryId/);
 });
 
 test('Stage 3B.2 uses one larger centered transparent loader', () => {
@@ -33,8 +35,9 @@ test('Stage 3B.2 uses one larger centered transparent loader', () => {
 });
 
 test('exact restoration does not fall back to the first poster while pending', () => {
-  assert.match(screen, /targetMovieId: restoreId/);
-  assert.match(screen, /targetAvailable.*waiting-for-target/);
+  assert.match(screen, /nearest-visible|timeout-nearest-visible-fallback/);
+  assert.match(screen, /closingFocusMovieId/);
+  assert.doesNotMatch(screen, /availableIds\[0\]/);
 });
 
 test('Stage 3B.2 focus and selection remain separate', () => {
@@ -54,13 +57,13 @@ test('Stage 3B.2 poster refs use instance identity and focus confirmation', asyn
   assert.match(card, /instanceToken/);
   assert.match(card, /movie\.id/);
   assert.match(screen, /NovaCast Movie Poster Ref/);
-  assert.match(screen, /NovaCast Movies Restore Confirm/);
-  assert.match(screen, /status === 'executed'/);
-  assert.match(screen, /targetMovieId === movie\.id/);
+  assert.match(screen, /completeDetailFocusRestore/);
+  assert.match(screen, /status === 'timeout'/);
+  assert.match(screen, /movie\.id !== targetId/);
 });
 
 test('Stage 3B.2 does not let category focus override an active restore token', () => {
-  assert.match(screen, /restorationTokenRef\.current\?\.categoryId === selectedCategoryId/);
+  assert.match(screen, /isMoviesDetailClosingPhase\(detailFocusPhaseRef\.current\) \|\| detailFocusTokenRef\.current/);
   assert.match(grid, /suppressPreferredFocus/);
   assert.match(screen, /showMoviesVisualLoader/);
 });
@@ -68,17 +71,17 @@ test('Stage 3B.2 does not let category focus override an active restore token', 
 test('Stage 3B.4 rollback uses only narrow preferred-focus suppression', () => {
   assert.doesNotMatch(screen, /MoviesFocusOwner|deriveMoviesFocusOwner|focusOwner=/);
   assert.match(screen, /suppressNavbarPreferredFocus=\{navbarFocusSuppressed\}/);
-  assert.match(screen, /suppressPreferredFocus=\{navbarFocusSuppressed\}/);
+  assert.match(screen, /suppressPreferredFocus=\{categoryFocusSuppressed\}/);
   assert.match(shell, /hasTVPreferredFocus=\{navbarPreferredFocus && active\}/);
   assert.match(category, /hasTVPreferredFocus=\{preferInitialFocus\}/);
   assert.doesNotMatch(shell, /MoviesFocusOwner|deriveMoviesFocusOwner/);
 });
 
-test('Stage 3B.4 keeps exact confirmation before suppression release', () => {
-  assert.match(screen, /if \(confirmed\) \{/);
-  assert.match(screen, /requestAnimationFrame\(\(\) => \{/);
-  assert.match(screen, /setNavbarRestoreSuppressed\(false\)/);
-  assert.match(screen, /restorationTokenRef\.current === null/);
+test('Stage 3D keeps exact confirmation before overlay removal', () => {
+  assert.match(screen, /isMoviesDetailFocusConfirmed/);
+  assert.match(screen, /setDetailOpen\(false\)/);
+  assert.match(screen, /browse-restored/);
+  assert.match(screen, /detailFocusTokenRef\.current = null/);
 });
 
 test('Stage 3B.4 preserves detail hook ordering', () => {

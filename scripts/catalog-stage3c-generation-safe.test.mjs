@@ -382,10 +382,10 @@ test('previous generation remains readable throughout sync', async () => {
   assert.equal(page.totalCount, 1);
 });
 
-test('no Movies focus/detail/FlatList changes in Stage 3C', () => {
-  assert.match(screen, /detailCloseSentinelActive/);
+test('Stage 3C catalog work remains separate from Movies focus coordinator', () => {
+  // Stage 3D owns close focus; Stage 3C must not reintroduce a global focus owner.
   assert.match(screen, /restore-exact-poster-after-detail-close/);
-  assert.match(grid, /scrollToIndex/);
+  assert.match(grid, /scrollToOffset/);
   assert.doesNotMatch(screen, /MoviesFocusOwner|deriveMoviesFocusOwner/);
   assert.doesNotMatch(grid, /MoviesFocusOwner/);
 });

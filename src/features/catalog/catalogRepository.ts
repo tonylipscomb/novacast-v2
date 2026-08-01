@@ -27,6 +27,15 @@ import {
   recordColdCategorySubPhase,
   timedColdCategorySubPhase,
 } from './coldCategorySpikeAudit.ts';
+import {
+  STAGE3C_GENERATION_SAFE_MARKER,
+  catalogCategoriesConflictTarget,
+  catalogCategoriesTable,
+  catalogItemsConflictTarget,
+  catalogItemsTable,
+  catalogSeasonsTable,
+  usesGenerationSafeCatalog,
+} from './catalogTableRouting.ts';
 
 
 function nowMs() {
@@ -190,21 +199,56 @@ export async function upsertCatalogProvider(input: {
 
 async function resolveNextSyncGeneration(providerId: string, mediaType: CatalogMediaType) {
   const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable(mediaType);
+  const categoriesTable = catalogCategoriesTable(mediaType);
+  const seasonsTable = catalogSeasonsTable(mediaType);
   const row = await db.getFirst<{ max_g: number | null }>(
     `SELECT MAX(g) AS max_g FROM (
        SELECT catalog_generation AS g FROM catalog_providers WHERE provider_id = ?
        UNION ALL
        SELECT generation AS g FROM catalog_sync_state WHERE provider_id = ? AND media_type = ?
        UNION ALL
+       SELECT COALESCE(MAX(sync_generation), 0) AS g FROM ${itemsTable} WHERE provider_id = ? AND media_type = ?
+       UNION ALL
+       SELECT COALESCE(MAX(sync_generation), 0) AS g FROM ${categoriesTable} WHERE provider_id = ? AND media_type = ?
+       UNION ALL
+       SELECT COALESCE(MAX(sync_generation), 0) AS g FROM ${seasonsTable} WHERE provider_id = ?
+       UNION ALL
        SELECT COALESCE(MAX(sync_generation), 0) AS g FROM catalog_items WHERE provider_id = ? AND media_type = ?
        UNION ALL
        SELECT COALESCE(MAX(sync_generation), 0) AS g FROM catalog_categories WHERE provider_id = ? AND media_type = ?
-       UNION ALL
-       SELECT COALESCE(MAX(sync_generation), 0) AS g FROM catalog_seasons WHERE provider_id = ?
      )`,
-    [providerId, providerId, mediaType, providerId, mediaType, providerId, mediaType, providerId],
+    [
+      providerId,
+      providerId,
+      mediaType,
+      providerId,
+      mediaType,
+      providerId,
+      mediaType,
+      providerId,
+      providerId,
+      mediaType,
+      providerId,
+      mediaType,
+    ],
   );
   return asNumber(row?.max_g, 0) + 1;
+}
+
+function logCatalogV2Generation(payload: {
+  providerId: string;
+  mediaType: CatalogMediaType;
+  generation: number;
+  phase: string;
+  itemRows: number;
+  distinctContentIds: number;
+  categoryRows: number;
+  distinctItemCategoryIds: number;
+  ready: boolean;
+  activated: boolean;
+}) {
+  console.info('[NovaCast Catalog V2 Generation] ' + JSON.stringify(payload));
 }
 
 /**
@@ -288,16 +332,25 @@ export async function writeCatalogCategoriesBatch(
     () => getCatalogDatabase(),
   );
 
-  const sql = `INSERT INTO catalog_categories (
-      provider_id, media_type, category_id, category_name, sort_order,
-      item_count, sync_generation, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(provider_id, media_type, category_id) DO UPDATE SET
-      category_name = excluded.category_name,
+  const resolvedMediaType = (mediaType ?? categories[0]?.mediaType ?? 'movie') as CatalogMediaType;
+  const categoriesTable = catalogCategoriesTable(resolvedMediaType);
+  const categoryConflict = catalogCategoriesConflictTarget(resolvedMediaType);
+  const categoryConflictUpdate = usesGenerationSafeCatalog(resolvedMediaType)
+    ? `category_name = excluded.category_name,
+      sort_order = excluded.sort_order,
+      item_count = excluded.item_count,
+      updated_at = excluded.updated_at`
+    : `category_name = excluded.category_name,
       sort_order = excluded.sort_order,
       item_count = excluded.item_count,
       sync_generation = excluded.sync_generation,
       updated_at = excluded.updated_at`;
+  const sql = `INSERT INTO ${categoriesTable} (
+      provider_id, media_type, category_id, category_name, sort_order,
+      item_count, sync_generation, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(${categoryConflict}) DO UPDATE SET
+      ${categoryConflictUpdate}`;
 
   const prepareStart = perfNowMs();
   const statement = await db.prepare(sql);
@@ -419,14 +472,26 @@ export async function writeCatalogItemsBatch(
   }
 
   const db = await getCatalogDatabase();
-  const sql = `INSERT INTO catalog_items (
-      provider_id, media_type, content_id, category_id, title, normalized_title,
-      artwork_url, backdrop_url, release_date, release_year, rating, description,
-      stream_extension, provider_sort_order, series_id, season_number, episode_number,
-      sync_generation, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(provider_id, media_type, content_id) DO UPDATE SET
-      category_id = excluded.category_id,
+  const mediaType = (items[0]?.mediaType ?? 'movie') as CatalogMediaType;
+  const itemsTable = catalogItemsTable(mediaType);
+  const itemConflict = catalogItemsConflictTarget(mediaType);
+  const itemConflictUpdate = usesGenerationSafeCatalog(mediaType)
+    ? `category_id = excluded.category_id,
+      title = excluded.title,
+      normalized_title = excluded.normalized_title,
+      artwork_url = excluded.artwork_url,
+      backdrop_url = excluded.backdrop_url,
+      release_date = excluded.release_date,
+      release_year = excluded.release_year,
+      rating = excluded.rating,
+      description = excluded.description,
+      stream_extension = excluded.stream_extension,
+      provider_sort_order = excluded.provider_sort_order,
+      series_id = excluded.series_id,
+      season_number = excluded.season_number,
+      episode_number = excluded.episode_number,
+      updated_at = excluded.updated_at`
+    : `category_id = excluded.category_id,
       title = excluded.title,
       normalized_title = excluded.normalized_title,
       artwork_url = excluded.artwork_url,
@@ -442,6 +507,14 @@ export async function writeCatalogItemsBatch(
       episode_number = excluded.episode_number,
       sync_generation = excluded.sync_generation,
       updated_at = excluded.updated_at`;
+  const sql = `INSERT INTO ${itemsTable} (
+      provider_id, media_type, content_id, category_id, title, normalized_title,
+      artwork_url, backdrop_url, release_date, release_year, rating, description,
+      stream_extension, provider_sort_order, series_id, season_number, episode_number,
+      sync_generation, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(${itemConflict}) DO UPDATE SET
+      ${itemConflictUpdate}`;
 
   const prepareStart = perfNowMs();
   const statement = await db.prepare(sql);
@@ -547,10 +620,12 @@ export async function recomputeCategoryCounts(
   generation: number,
 ): Promise<{ categoryCount: number; totalItems: number }> {
   const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable(mediaType);
+  const categoriesTable = catalogCategoriesTable(mediaType);
   const aggregateStart = perfNowMs();
   const aggregates = await db.getAll<{ category_id: string; cnt: number | string }>(
     `SELECT category_id, COUNT(*) AS cnt
-     FROM catalog_items
+     FROM ${itemsTable}
      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
      GROUP BY category_id`,
     [providerId, mediaType, generation],
@@ -565,14 +640,14 @@ export async function recomputeCategoryCounts(
 
   // Zero counts for categories in this generation that may have no items.
   await db.run(
-    `UPDATE catalog_categories
+    `UPDATE ${categoriesTable}
      SET item_count = 0, updated_at = ?
      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
     [updatedAt, providerId, mediaType, generation],
   );
 
   const statement = await db.prepare(
-    `UPDATE catalog_categories
+    `UPDATE ${categoriesTable}
      SET item_count = ?, updated_at = ?
      WHERE provider_id = ? AND media_type = ? AND category_id = ? AND sync_generation = ?`,
   );
@@ -603,11 +678,21 @@ export async function recomputeCategoryCounts(
   return { categoryCount: aggregates.length, totalItems };
 }
 
+/**
+ * Legacy series cleanup: delete every generation except keepGeneration.
+ * Movies v2 uses {@link cleanupIncompleteCatalogGenerationsV2} instead so the
+ * previous completed generation remains readable during and after publish.
+ */
 export async function deleteStaleCatalogGeneration(
   providerId: string,
   mediaType: CatalogMediaType,
   keepGeneration: number,
 ): Promise<void> {
+  if (usesGenerationSafeCatalog(mediaType)) {
+    await cleanupIncompleteCatalogGenerationsV2(providerId, mediaType, [keepGeneration]);
+    return;
+  }
+
   const db = await getCatalogDatabase();
   const start = perfNowMs();
   await db.run(
@@ -634,6 +719,123 @@ export async function deleteStaleCatalogGeneration(
   });
 }
 
+/**
+ * Movies v2 cleanup: retain the listed generations (current + previous completed)
+ * and delete only other incomplete/failed v2 generations. Never touches legacy tables.
+ */
+export async function cleanupIncompleteCatalogGenerationsV2(
+  providerId: string,
+  mediaType: CatalogMediaType,
+  keepGenerations: number[],
+): Promise<void> {
+  if (!usesGenerationSafeCatalog(mediaType)) {
+    return;
+  }
+  const keep = [...new Set(keepGenerations.filter((generation) => generation > 0))];
+  const db = await getCatalogDatabase();
+  const start = perfNowMs();
+
+  if (!keep.length) {
+    await db.run(
+      `DELETE FROM catalog_items_v2 WHERE provider_id = ? AND media_type = ?`,
+      [providerId, mediaType],
+    );
+    await db.run(
+      `DELETE FROM catalog_categories_v2 WHERE provider_id = ? AND media_type = ?`,
+      [providerId, mediaType],
+    );
+    await db.run(
+      `DELETE FROM catalog_seasons_v2 WHERE provider_id = ? AND media_type = ?`,
+      [providerId, mediaType],
+    );
+  } else {
+    const placeholders = keep.map(() => '?').join(', ');
+    const params: CatalogSqlParams = [providerId, mediaType, ...keep];
+    await db.run(
+      `DELETE FROM catalog_items_v2
+       WHERE provider_id = ? AND media_type = ? AND sync_generation NOT IN (${placeholders})`,
+      params,
+    );
+    await db.run(
+      `DELETE FROM catalog_categories_v2
+       WHERE provider_id = ? AND media_type = ? AND sync_generation NOT IN (${placeholders})`,
+      params,
+    );
+    await db.run(
+      `DELETE FROM catalog_seasons_v2
+       WHERE provider_id = ? AND media_type = ? AND sync_generation NOT IN (${placeholders})`,
+      params,
+    );
+  }
+
+  recordCatalogWritePhase('stale.delete', {
+    wallMs: perfNowMs() - start,
+    itemCount: 1,
+    meta: { providerId, mediaType, keepGenerations: keep, marker: STAGE3C_GENERATION_SAFE_MARKER },
+  });
+}
+
+export async function deleteCatalogGenerationV2(
+  providerId: string,
+  mediaType: CatalogMediaType,
+  generation: number,
+): Promise<void> {
+  if (!usesGenerationSafeCatalog(mediaType) || generation <= 0) {
+    return;
+  }
+  const db = await getCatalogDatabase();
+  await db.run(
+    `DELETE FROM catalog_items_v2
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+    [providerId, mediaType, generation],
+  );
+  await db.run(
+    `DELETE FROM catalog_categories_v2
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+    [providerId, mediaType, generation],
+  );
+  await db.run(
+    `DELETE FROM catalog_seasons_v2
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+    [providerId, mediaType, generation],
+  );
+}
+
+export async function getCatalogGenerationPhysicalStats(
+  providerId: string,
+  mediaType: CatalogMediaType,
+  generation: number,
+): Promise<{
+  itemRows: number;
+  distinctContentIds: number;
+  categoryRows: number;
+  distinctItemCategoryIds: number;
+}> {
+  const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable(mediaType);
+  const categoriesTable = catalogCategoriesTable(mediaType);
+  const itemStats = await db.getFirst<{ total: number | string; distinct_total: number | string; distinct_categories: number | string }>(
+    `SELECT COUNT(*) AS total,
+            COUNT(DISTINCT content_id) AS distinct_total,
+            COUNT(DISTINCT category_id) AS distinct_categories
+     FROM ${itemsTable}
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+    [providerId, mediaType, generation],
+  );
+  const categoryStats = await db.getFirst<{ total: number | string }>(
+    `SELECT COUNT(*) AS total
+     FROM ${categoriesTable}
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+    [providerId, mediaType, generation],
+  );
+  return {
+    itemRows: asNumber(itemStats?.total),
+    distinctContentIds: asNumber(itemStats?.distinct_total),
+    categoryRows: asNumber(categoryStats?.total),
+    distinctItemCategoryIds: asNumber(itemStats?.distinct_categories),
+  };
+}
+
 export async function completeCatalogSync(
   providerId: string,
   mediaType: CatalogMediaType,
@@ -647,20 +849,40 @@ export async function completeCatalogSync(
   },
 ): Promise<void> {
   const publishedCategoryCount = options?.categories?.length ?? 0;
-  await withCatalogTransaction(async () => {
-    const db = await getCatalogDatabase();
-    if (options?.categories?.length) {
-      const statement = await db.prepare(`
-        INSERT INTO catalog_categories (
-          provider_id, media_type, category_id, category_name, sort_order,
-          item_count, sync_generation, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(provider_id, media_type, category_id) DO UPDATE SET
-          category_name = excluded.category_name,
+  const categoriesTable = catalogCategoriesTable(mediaType);
+  const categoryConflict = catalogCategoriesConflictTarget(mediaType);
+  const categoryConflictUpdate = usesGenerationSafeCatalog(mediaType)
+    ? `category_name = excluded.category_name,
+          sort_order = excluded.sort_order,
+          item_count = excluded.item_count,
+          updated_at = excluded.updated_at`
+    : `category_name = excluded.category_name,
           sort_order = excluded.sort_order,
           item_count = excluded.item_count,
           sync_generation = excluded.sync_generation,
-          updated_at = excluded.updated_at
+          updated_at = excluded.updated_at`;
+
+  let activated = false;
+  let physical = {
+    itemRows: 0,
+    distinctContentIds: 0,
+    categoryRows: 0,
+    distinctItemCategoryIds: 0,
+  };
+
+  await withCatalogTransaction(async () => {
+    const db = await getCatalogDatabase();
+    const provider = await getCatalogProvider(providerId);
+    const previousCompletedGeneration = provider?.catalogGeneration ?? 0;
+
+    if (options?.categories?.length) {
+      const statement = await db.prepare(`
+        INSERT INTO ${categoriesTable} (
+          provider_id, media_type, category_id, category_name, sort_order,
+          item_count, sync_generation, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(${categoryConflict}) DO UPDATE SET
+          ${categoryConflictUpdate}
       `);
       try {
         for (const category of options.categories) {
@@ -679,8 +901,80 @@ export async function completeCatalogSync(
         await statement.finalize();
       }
     }
+
     await recomputeCategoryCounts(providerId, mediaType, generation);
-    await deleteStaleCatalogGeneration(providerId, mediaType, generation);
+    physical = await getCatalogGenerationPhysicalStats(providerId, mediaType, generation);
+
+    let previousItemRows = 0;
+    if (
+      usesGenerationSafeCatalog(mediaType) &&
+      previousCompletedGeneration > 0 &&
+      previousCompletedGeneration !== generation
+    ) {
+      previousItemRows = (
+        await getCatalogGenerationPhysicalStats(providerId, mediaType, previousCompletedGeneration)
+      ).itemRows;
+    }
+
+    // Ghost-completion guard: never publish an empty or inconsistent generation.
+    // Also reject a tiny replacement that would blank a previously recovered catalog.
+    const replacesRecoveredCatalog =
+      mediaType === 'movie' &&
+      previousItemRows >= 1000 &&
+      physical.itemRows < Math.floor(previousItemRows * 0.5);
+    const validationPassed =
+      physical.itemRows > 0 &&
+      physical.itemRows === physical.distinctContentIds &&
+      (mediaType !== 'movie' || physical.categoryRows > 0) &&
+      !replacesRecoveredCatalog;
+
+    if (!validationPassed) {
+      logCatalogV2Generation({
+        providerId,
+        mediaType,
+        generation,
+        phase: 'complete-rejected',
+        ...physical,
+        ready: false,
+        activated: false,
+      });
+      await db.run(
+        `UPDATE catalog_sync_state
+         SET status = 'error',
+             phase = 'complete-rejected',
+             processed_count = COALESCE(?, processed_count),
+             completed_at = ?,
+             error_code = ?,
+             generation = ?
+         WHERE provider_id = ? AND media_type = ?`,
+        [
+          options?.processedCount ?? null,
+          nowMs(),
+          'complete_validation_failed',
+          generation,
+          providerId,
+          mediaType,
+        ],
+      );
+      return;
+    }
+
+    if (usesGenerationSafeCatalog(mediaType)) {
+      const keep = [generation];
+      if (previousCompletedGeneration > 0 && previousCompletedGeneration !== generation) {
+        const previousStats = await getCatalogGenerationPhysicalStats(
+          providerId,
+          mediaType,
+          previousCompletedGeneration,
+        );
+        if (previousStats.itemRows > 0) {
+          keep.push(previousCompletedGeneration);
+        }
+      }
+      await cleanupIncompleteCatalogGenerationsV2(providerId, mediaType, keep);
+    } else {
+      await deleteStaleCatalogGeneration(providerId, mediaType, generation);
+    }
 
     const completedAt = nowMs();
     await db.run(
@@ -695,25 +989,36 @@ export async function completeCatalogSync(
       [options?.processedCount ?? null, completedAt, generation, providerId, mediaType],
     );
 
+    // catalog_generation updates only after physical validation passed above.
     await db.run(
       `UPDATE catalog_providers
-       SET catalog_generation = CASE
-             WHEN catalog_generation > ? THEN catalog_generation
-             ELSE ?
-           END,
+       SET catalog_generation = ?,
            last_successful_sync_at = ?,
            sync_status = 'ready',
            sync_error_code = NULL
        WHERE provider_id = ?`,
-      [generation, generation, completedAt, providerId],
+      [generation, completedAt, providerId],
     );
+    activated = true;
   });
-  console.info('[Catalog Categories Published]', {
+
+  logCatalogV2Generation({
     providerId,
     mediaType,
     generation,
-    categoryCount: publishedCategoryCount,
+    phase: activated ? 'complete-activated' : 'complete-rejected',
+    ...physical,
+    ready: activated,
+    activated,
   });
+  if (activated) {
+    console.info('[Catalog Categories Published]', {
+      providerId,
+      mediaType,
+      generation,
+      categoryCount: publishedCategoryCount,
+    });
+  }
 }
 
 export async function getCatalogGenerationItemCount(
@@ -721,14 +1026,8 @@ export async function getCatalogGenerationItemCount(
   mediaType: CatalogMediaType,
   generation: number,
 ): Promise<number> {
-  const db = await getCatalogDatabase();
-  const row = await db.getFirst<{ total: number }>(
-    `SELECT COUNT(*) AS total
-     FROM catalog_items
-     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
-    [providerId, mediaType, generation],
-  );
-  return asNumber(row?.total);
+  const stats = await getCatalogGenerationPhysicalStats(providerId, mediaType, generation);
+  return stats.itemRows;
 }
 
 export async function getCatalogGenerationItemStats(
@@ -736,16 +1035,10 @@ export async function getCatalogGenerationItemStats(
   mediaType: CatalogMediaType,
   generation: number,
 ): Promise<{ rowCount: number; distinctContentCount: number }> {
-  const db = await getCatalogDatabase();
-  const row = await db.getFirst<{ total: number; distinct_total: number }>(
-    `SELECT COUNT(*) AS total, COUNT(DISTINCT content_id) AS distinct_total
-     FROM catalog_items
-     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
-    [providerId, mediaType, generation],
-  );
+  const stats = await getCatalogGenerationPhysicalStats(providerId, mediaType, generation);
   return {
-    rowCount: asNumber(row?.total),
-    distinctContentCount: asNumber(row?.distinct_total),
+    rowCount: stats.itemRows,
+    distinctContentCount: stats.distinctContentIds,
   };
 }
 
@@ -756,6 +1049,10 @@ export async function failCatalogSync(
 ): Promise<void> {
   const db = await getCatalogDatabase();
   const failedAt = nowMs();
+  const state = await getCatalogSyncState(providerId, mediaType);
+  const provider = await getCatalogProvider(providerId);
+  const failedGeneration = state?.generation ?? 0;
+
   await db.run(
     `UPDATE catalog_sync_state
      SET status = 'error',
@@ -764,13 +1061,48 @@ export async function failCatalogSync(
      WHERE provider_id = ? AND media_type = ?`,
     [errorCode, failedAt, providerId, mediaType],
   );
-  await db.run(
-    `UPDATE catalog_providers
-     SET sync_status = 'error',
-         sync_error_code = ?
-     WHERE provider_id = ?`,
-    [errorCode, providerId],
-  );
+
+  // Never leave a failed empty generation as lastCompletedGeneration.
+  let clearGhostCompletion = false;
+  if (
+    failedGeneration > 0 &&
+    (provider?.catalogGeneration ?? 0) === failedGeneration
+  ) {
+    const physical = await getCatalogGenerationPhysicalStats(providerId, mediaType, failedGeneration);
+    clearGhostCompletion = physical.itemRows <= 0;
+  }
+
+  if (clearGhostCompletion) {
+    await db.run(
+      `UPDATE catalog_providers
+       SET catalog_generation = 0,
+           sync_status = 'error',
+           sync_error_code = ?
+       WHERE provider_id = ?`,
+      [errorCode, providerId],
+    );
+  } else {
+    await db.run(
+      `UPDATE catalog_providers
+       SET sync_status = 'error',
+           sync_error_code = ?
+       WHERE provider_id = ?`,
+      [errorCode, providerId],
+    );
+  }
+
+  if (usesGenerationSafeCatalog(mediaType) && failedGeneration > 0) {
+    const physical = await getCatalogGenerationPhysicalStats(providerId, mediaType, failedGeneration);
+    logCatalogV2Generation({
+      providerId,
+      mediaType,
+      generation: failedGeneration,
+      phase: 'fail',
+      ...physical,
+      ready: false,
+      activated: false,
+    });
+  }
 }
 
 export async function getCatalogSyncState(
@@ -791,22 +1123,227 @@ export async function getCatalogProvider(providerId: string): Promise<CatalogPro
   return row ? mapProvider(row) : null;
 }
 
+const catalogGenerationInventoryLogged = new Set<string>();
+
+/**
+ * Diagnostics-only one-shot inventory of every physical movie/series generation
+ * still present in SQLite for a provider. Never mutates catalog state.
+ */
+export async function logCatalogGenerationInventoryOnce(
+  providerId: string,
+  mediaType: CatalogMediaType,
+  resolverDecision: {
+    currentAttemptGeneration: number;
+    currentStatus: CatalogSyncStatus | null;
+    lastCompletedGeneration: number;
+    lastFailedGeneration: number;
+    previousPathEligible: boolean;
+    resolvedReadableGeneration: number;
+    readableRowCount: number;
+    reason: string;
+  },
+): Promise<void> {
+  const key = `${providerId}:${mediaType}`;
+  if (catalogGenerationInventoryLogged.has(key)) {
+    return;
+  }
+  catalogGenerationInventoryLogged.add(key);
+
+  try {
+    const db = await getCatalogDatabase();
+    const state = await getCatalogSyncState(providerId, mediaType);
+    const provider = await getCatalogProvider(providerId);
+
+    const itemsTable = catalogItemsTable(mediaType);
+    const categoriesTable = catalogCategoriesTable(mediaType);
+    const itemRows = await db.getAll<{
+      sync_generation: number | string;
+      item_rows: number | string;
+      distinct_content_ids: number | string;
+      distinct_item_category_ids: number | string;
+    }>(
+      `SELECT sync_generation,
+              COUNT(*) AS item_rows,
+              COUNT(DISTINCT content_id) AS distinct_content_ids,
+              COUNT(DISTINCT category_id) AS distinct_item_category_ids
+       FROM ${itemsTable}
+       WHERE provider_id = ? AND media_type = ?
+       GROUP BY sync_generation
+       ORDER BY sync_generation DESC`,
+      [providerId, mediaType],
+    );
+
+    const categoryRows = await db.getAll<{
+      sync_generation: number | string;
+      category_rows: number | string;
+    }>(
+      `SELECT sync_generation, COUNT(*) AS category_rows
+       FROM ${categoriesTable}
+       WHERE provider_id = ? AND media_type = ?
+       GROUP BY sync_generation
+       ORDER BY sync_generation DESC`,
+      [providerId, mediaType],
+    );
+
+    const seasonRows = await db.getAll<{
+      sync_generation: number | string;
+      season_rows: number | string;
+    }>(
+      `SELECT sync_generation, COUNT(*) AS season_rows
+       FROM catalog_seasons
+       WHERE provider_id = ?
+       GROUP BY sync_generation
+       ORDER BY sync_generation DESC`,
+      [providerId],
+    );
+
+    const itemByGen = new Map(
+      itemRows.map((row) => [
+        asNumber(row.sync_generation),
+        {
+          itemRows: asNumber(row.item_rows),
+          distinctContentIds: asNumber(row.distinct_content_ids),
+          distinctItemCategoryIds: asNumber(row.distinct_item_category_ids),
+        },
+      ]),
+    );
+    const categoryByGen = new Map(
+      categoryRows.map((row) => [asNumber(row.sync_generation), asNumber(row.category_rows)]),
+    );
+    const seasonByGen = new Map(
+      seasonRows.map((row) => [asNumber(row.sync_generation), asNumber(row.season_rows)]),
+    );
+
+    const generationNumbers = new Set<number>([
+      ...itemByGen.keys(),
+      ...categoryByGen.keys(),
+      ...seasonByGen.keys(),
+      state?.generation ?? 0,
+      provider?.catalogGeneration ?? 0,
+    ]);
+    generationNumbers.delete(0);
+
+    const generations = [...generationNumbers]
+      .sort((left, right) => right - left)
+      .map((generation) => {
+        const items = itemByGen.get(generation);
+        const isCurrentAttempt = (state?.generation ?? 0) === generation;
+        return {
+          generation,
+          itemRows: items?.itemRows ?? 0,
+          distinctContentIds: items?.distinctContentIds ?? 0,
+          categoryRows: categoryByGen.get(generation) ?? 0,
+          distinctItemCategoryIds: items?.distinctItemCategoryIds ?? 0,
+          seasonRows: seasonByGen.get(generation) ?? 0,
+          markedReady: (provider?.catalogGeneration ?? 0) === generation,
+          markedFailed: isCurrentAttempt && state?.status === 'error',
+          completedAt: isCurrentAttempt ? (state?.completedAt ?? null) : null,
+          failureReason: isCurrentAttempt && state?.status === 'error' ? (state?.errorCode ?? null) : null,
+        };
+      });
+
+    console.info(
+      '[NovaCast Catalog Generation Inventory] ' +
+        JSON.stringify({
+          providerId,
+          mediaType,
+          syncState: {
+            status: state?.status ?? null,
+            phase: state?.phase ?? null,
+            generation: state?.generation ?? 0,
+            processedCount: state?.processedCount ?? 0,
+            totalCount: state?.totalCount ?? null,
+            startedAt: state?.startedAt ?? null,
+            completedAt: state?.completedAt ?? null,
+            errorCode: state?.errorCode ?? null,
+            providerCatalogGeneration: provider?.catalogGeneration ?? 0,
+            providerSyncStatus: provider?.syncStatus ?? null,
+            providerSyncErrorCode: provider?.syncErrorCode ?? null,
+            providerLastSuccessfulSyncAt: provider?.lastSuccessfulSyncAt ?? null,
+            providerLastAttemptedSyncAt: provider?.lastAttemptedSyncAt ?? null,
+          },
+          generations,
+          resolverDecision,
+          schemaNotes: {
+            itemPrimaryKey: 'provider_id,media_type,content_id',
+            categoryPrimaryKey: 'provider_id,media_type,category_id',
+            syncGenerationNotInPrimaryKey: true,
+            staleDeleteOnComplete: true,
+          },
+        }),
+    );
+  } catch (error) {
+    console.info(
+      '[NovaCast Catalog Generation Inventory] ' +
+        JSON.stringify({
+          providerId,
+          mediaType,
+          inventoryError: error instanceof Error ? error.message : String(error),
+          resolverDecision,
+        }),
+    );
+  }
+}
+
 export async function resolveReadableCatalogGeneration(
   providerId: string,
   mediaType: CatalogMediaType,
 ): Promise<number> {
   const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable(mediaType);
+  const categoriesTable = catalogCategoriesTable(mediaType);
   const state = await getCatalogSyncState(providerId, mediaType);
   const provider = await getCatalogProvider(providerId);
   const currentAttemptGeneration = state?.generation ?? 0;
-  const lastCompletedGeneration = provider?.catalogGeneration ?? 0;
-  const lastFailedGeneration = state?.status === 'error' ? currentAttemptGeneration : 0;
+  let lastCompletedGeneration = provider?.catalogGeneration ?? 0;
+  const lastFailedGeneration =
+    state?.status === 'syncing' || state?.status === 'error' ? currentAttemptGeneration : 0;
   let resolvedReadableGeneration = 0;
-  let reason: 'current-ready' | 'previous-during-sync' | 'previous-after-failure' | 'recovered-completed-generation' | 'no-readable-generation' = 'no-readable-generation';
+  let reason:
+    | 'current-ready'
+    | 'previous-during-sync'
+    | 'previous-after-failure'
+    | 'recovered-completed-generation'
+    | 'no-readable-generation'
+    | 'ghost-completion-ignored' = 'no-readable-generation';
+
+  const hasReadableRows = async (generation: number) => {
+    if (generation <= 0) {
+      return 0;
+    }
+    const row = await db.getFirst<{ row_count: number | string }>(
+      `SELECT COUNT(*) AS row_count
+       FROM ${itemsTable} i
+       WHERE i.provider_id = ? AND i.media_type = ? AND i.sync_generation = ?
+         AND (
+           ? != 'movie' OR EXISTS (
+             SELECT 1
+             FROM ${categoriesTable} c
+             WHERE c.provider_id = i.provider_id
+               AND c.media_type = i.media_type
+               AND c.sync_generation = i.sync_generation
+           )
+         )`,
+      [providerId, mediaType, generation, mediaType],
+    );
+    return asNumber(row?.row_count);
+  };
+
+  // Ghost completion: catalog_generation pointing at zero rows is not completed.
+  if (lastCompletedGeneration > 0) {
+    const ghostRows = await hasReadableRows(lastCompletedGeneration);
+    if (ghostRows <= 0) {
+      reason = 'ghost-completion-ignored';
+      lastCompletedGeneration = 0;
+    }
+  }
 
   if (state?.status === 'ready' && currentAttemptGeneration > 0) {
-    resolvedReadableGeneration = currentAttemptGeneration;
-    reason = 'current-ready';
+    const readyRows = await hasReadableRows(currentAttemptGeneration);
+    if (readyRows > 0) {
+      resolvedReadableGeneration = currentAttemptGeneration;
+      reason = 'current-ready';
+    }
   } else if (
     lastCompletedGeneration > 0 &&
     lastCompletedGeneration !== currentAttemptGeneration
@@ -815,49 +1352,77 @@ export async function resolveReadableCatalogGeneration(
     reason = state?.status === 'error' ? 'previous-after-failure' : 'previous-during-sync';
   }
 
-  const hasReadableRows = async (generation: number) => {
-    if (generation <= 0) {
-      return 0;
-    }
-    const row = await db.getFirst<{ row_count: number | string }>(
-      `SELECT COUNT(*) AS row_count
-       FROM catalog_items
-       WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
-      [providerId, mediaType, generation],
-    );
-    return asNumber(row?.row_count);
-  };
-
   let readableRowCount = await hasReadableRows(resolvedReadableGeneration);
   if (readableRowCount <= 0) {
     const fallback = await db.getFirst<{ sync_generation: number | string; row_count: number | string }>(
-      `SELECT sync_generation, COUNT(*) AS row_count
-       FROM catalog_items
-       WHERE provider_id = ? AND media_type = ?
-         AND (? = 0 OR sync_generation != ?)
-       GROUP BY sync_generation
+      `SELECT i.sync_generation, COUNT(*) AS row_count
+       FROM ${itemsTable} i
+       WHERE i.provider_id = ? AND i.media_type = ?
+         AND (? = 0 OR i.sync_generation != ?)
+         AND (
+           ? != 'movie' OR EXISTS (
+             SELECT 1
+             FROM ${categoriesTable} c
+             WHERE c.provider_id = i.provider_id
+               AND c.media_type = i.media_type
+               AND c.sync_generation = i.sync_generation
+           )
+         )
+       GROUP BY i.sync_generation
        HAVING COUNT(*) > 0
-       ORDER BY sync_generation DESC
+       ORDER BY i.sync_generation DESC
        LIMIT 1`,
-      [providerId, mediaType, lastFailedGeneration, lastFailedGeneration],
+      [providerId, mediaType, lastFailedGeneration, lastFailedGeneration, mediaType],
     );
     if (fallback) {
       resolvedReadableGeneration = asNumber(fallback.sync_generation);
       readableRowCount = asNumber(fallback.row_count);
       reason = 'recovered-completed-generation';
+    } else {
+      resolvedReadableGeneration = 0;
+      if (reason !== 'ghost-completion-ignored') {
+        reason = 'no-readable-generation';
+      }
     }
   }
 
-  console.info('[Catalog Read Generation]', {
-    providerId,
-    mediaType,
+  const resolvedReason =
+    resolvedReadableGeneration > 0
+      ? reason === 'ghost-completion-ignored'
+        ? 'recovered-completed-generation'
+        : reason
+      : reason === 'ghost-completion-ignored'
+        ? 'no-readable-generation'
+        : reason;
+  console.info(
+    '[Catalog Read Generation] ' +
+      JSON.stringify({
+        providerId,
+        mediaType,
+        currentAttemptGeneration,
+        currentStatus: state?.status ?? null,
+        lastCompletedGeneration: provider?.catalogGeneration ?? 0,
+        resolvedReadableGeneration,
+        readableRowCount,
+        reason: resolvedReason,
+        marker: usesGenerationSafeCatalog(mediaType) ? STAGE3C_GENERATION_SAFE_MARKER : null,
+      }),
+  );
+
+  // Diagnostics only — never changes the resolved generation above.
+  void logCatalogGenerationInventoryOnce(providerId, mediaType, {
     currentAttemptGeneration,
     currentStatus: state?.status ?? null,
-    lastCompletedGeneration,
+    lastCompletedGeneration: provider?.catalogGeneration ?? 0,
+    lastFailedGeneration,
+    previousPathEligible:
+      (provider?.catalogGeneration ?? 0) > 0 &&
+      (provider?.catalogGeneration ?? 0) !== currentAttemptGeneration,
     resolvedReadableGeneration,
     readableRowCount,
-    reason: resolvedReadableGeneration > 0 ? reason : 'no-readable-generation',
+    reason: resolvedReason,
   });
+
   return resolvedReadableGeneration;
 }
 
@@ -866,11 +1431,81 @@ const resolveActiveGeneration = resolveReadableCatalogGeneration;
 export async function getCatalogCategoryCounts(
   providerId: string,
   mediaType: CatalogMediaType,
+  options?: { generation?: number },
 ): Promise<Array<{ categoryId: string; categoryName: string; itemCount: number; sortOrder: number | null }>> {
   const db = await getCatalogDatabase();
-  const generation = await resolveActiveGeneration(providerId, mediaType);
+  const generation = options?.generation ?? (await resolveActiveGeneration(providerId, mediaType));
   if (generation <= 0) {
     return [];
+  }
+
+  const itemsTable = catalogItemsTable(mediaType);
+  const categoriesTable = catalogCategoriesTable(mediaType);
+
+  // Stage 3C.1 Movies: one metadata query + one grouped item-count query.
+  // Never N+1 per category and never page-load to derive counts.
+  if (usesGenerationSafeCatalog(mediaType)) {
+    const [metadataRows, groupedCountRows, totalRow] = await Promise.all([
+      db.getAll<{
+        category_id: string;
+        category_name: string;
+        sort_order: number | string | null;
+      }>(
+        `SELECT category_id, category_name, sort_order
+         FROM ${categoriesTable}
+         WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
+         ORDER BY (sort_order IS NULL) ASC, sort_order ASC, category_name ASC`,
+        [providerId, mediaType, generation],
+      ),
+      db.getAll<{ category_id: string; item_count: number | string }>(
+        `SELECT category_id, COUNT(*) AS item_count
+         FROM ${itemsTable}
+         WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
+         GROUP BY category_id`,
+        [providerId, mediaType, generation],
+      ),
+      db.getFirst<{ total: number | string }>(
+        `SELECT COUNT(*) AS total
+         FROM ${itemsTable}
+         WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+        [providerId, mediaType, generation],
+      ),
+    ]);
+
+    const countsById = new Map(
+      groupedCountRows.map((row) => [asString(row.category_id), asNumber(row.item_count)]),
+    );
+    const merged = metadataRows
+      .map((row) => {
+        const categoryId = asString(row.category_id);
+        return {
+          categoryId,
+          categoryName: asString(row.category_name),
+          itemCount: countsById.get(categoryId) ?? 0,
+          sortOrder: asNullableNumber(row.sort_order),
+        };
+      })
+      .filter((row) => row.itemCount > 0);
+
+    const allMoviesTotal = asNumber(totalRow?.total);
+    console.info(
+      '[NovaCast Movies Category Counts] ' +
+        JSON.stringify({
+          providerId,
+          readableGeneration: generation,
+          categoryMetadataCount: metadataRows.length,
+          groupedCountRows: groupedCountRows.length,
+          nonzeroCategoryCount: merged.length,
+          allMoviesTotal,
+          firstCounts: merged.slice(0, 5).map((row) => ({
+            categoryId: row.categoryId,
+            itemCount: row.itemCount,
+          })),
+          reason: 'grouped-items-v2-merge',
+        }),
+    );
+
+    return merged;
   }
 
   const rows = await db.getAll(
@@ -879,8 +1514,8 @@ export async function getCatalogCategoryCounts(
        c.category_name,
        COUNT(i.content_id) AS item_count,
        c.sort_order
-     FROM catalog_categories c
-     LEFT JOIN catalog_items i
+     FROM ${categoriesTable} c
+     LEFT JOIN ${itemsTable} i
        ON i.provider_id = c.provider_id
       AND i.media_type = c.media_type
       AND i.sync_generation = c.sync_generation
@@ -914,9 +1549,10 @@ export async function getCatalogTotalCount(
     return 0;
   }
 
+  const itemsTable = catalogItemsTable(mediaType);
   const params: CatalogSqlParams = [providerId, mediaType, generation];
   let sql = `SELECT COUNT(*) AS total
-    FROM catalog_items
+    FROM ${itemsTable}
     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`;
 
   if (options?.categoryId) {
@@ -935,7 +1571,7 @@ export async function getCatalogTotalCount(
 
 export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise<CatalogItemsPage> {
   const db = await getCatalogDatabase();
-  const generation = await resolveActiveGeneration(query.providerId, query.mediaType);
+  const generation = query.generation ?? (await resolveActiveGeneration(query.providerId, query.mediaType));
   const limit = Math.min(Math.max(query.limit ?? CATALOG_DEFAULT_PAGE_SIZE, 1), 100);
   const offset = Math.max(query.offset ?? 0, 0);
 
@@ -952,6 +1588,7 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
     return { items: [], totalCount: 0, limit, offset, hasMore: false };
   }
 
+  const itemsTable = catalogItemsTable(query.mediaType);
   const params: CatalogSqlParams = [query.providerId, query.mediaType, generation];
   let where = `provider_id = ? AND media_type = ? AND sync_generation = ?`;
 
@@ -966,13 +1603,13 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
   }
 
   const totalRow = await db.getFirst<{ total: number }>(
-    `SELECT COUNT(*) AS total FROM catalog_items WHERE ${where}`,
+    `SELECT COUNT(*) AS total FROM ${itemsTable} WHERE ${where}`,
     params,
   );
   const totalCount = asNumber(totalRow?.total);
 
   const rows = await db.getAll(
-    `SELECT * FROM catalog_items
+    `SELECT * FROM ${itemsTable}
      WHERE ${where}
      ORDER BY ${orderByClauseCompatible(query.sort)}
      LIMIT ? OFFSET ?`,
@@ -980,6 +1617,24 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
   );
 
   const items = rows.map(mapItem);
+  if (query.mediaType === 'movie') {
+    console.info(
+      '[NovaCast Movies Read Contract] ' +
+        JSON.stringify({
+          providerId: query.providerId,
+          readableGeneration: generation,
+          requestedCategoryId: query.categoryId ?? null,
+          itemsGeneration: generation,
+          categoriesGeneration: generation,
+          pageOffset: offset,
+          pageLimit: limit,
+          pageRowCount: rows.length,
+          totalCount,
+          providerCategoryCount: null,
+          reason: query.categoryId ? 'all-item-rows-category-filter' : 'all-item-rows-direct-count',
+        }),
+    );
+  }
   if (process.env.EXPO_PUBLIC_MOVIES_SQLITE_DIAGNOSTICS === 'true' && query.mediaType === 'movie') {
     console.info('[Movies SQLite Query Diagnostic]', JSON.stringify({
       providerId: query.providerId,
@@ -1008,10 +1663,12 @@ export async function getCatalogDiagnosticSnapshot(
   const state = await getCatalogSyncState(providerId, mediaType);
   const provider = await getCatalogProvider(providerId);
   const resolvedGeneration = await resolveActiveGeneration(providerId, mediaType);
+  const itemsTable = catalogItemsTable(mediaType);
+  const categoriesTable = catalogCategoriesTable(mediaType);
 
   const itemGenerationCounts = await db.getAll(
     `SELECT sync_generation, COUNT(*) AS item_count
-     FROM catalog_items
+     FROM ${itemsTable}
      WHERE provider_id = ? AND media_type = ?
      GROUP BY sync_generation
      ORDER BY sync_generation DESC`,
@@ -1021,7 +1678,7 @@ export async function getCatalogDiagnosticSnapshot(
   const categoryGenerationCounts = await db.getAll(
     `SELECT sync_generation, COUNT(*) AS category_count,
             COALESCE(SUM(item_count), 0) AS reported_item_count
-     FROM catalog_categories
+     FROM ${categoriesTable}
      WHERE provider_id = ? AND media_type = ?
      GROUP BY sync_generation
      ORDER BY sync_generation DESC`,
@@ -1030,21 +1687,21 @@ export async function getCatalogDiagnosticSnapshot(
 
   const exactReadableItems = await db.getFirst<{ total: number }>(
     `SELECT COUNT(*) AS total
-     FROM catalog_items
+     FROM ${itemsTable}
      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
     [providerId, mediaType, resolvedGeneration],
   );
 
   const exactReadableCategories = await db.getFirst<{ total: number }>(
     `SELECT COUNT(*) AS total
-     FROM catalog_categories
+     FROM ${categoriesTable}
      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
     [providerId, mediaType, resolvedGeneration],
   );
 
   const allItemContracts = await db.getAll(
     `SELECT provider_id, media_type, sync_generation, COUNT(*) AS item_count
-     FROM catalog_items
+     FROM ${itemsTable}
      GROUP BY provider_id, media_type, sync_generation
      ORDER BY item_count DESC
      LIMIT 30`,
@@ -1053,7 +1710,7 @@ export async function getCatalogDiagnosticSnapshot(
   const allCategoryContracts = await db.getAll(
     `SELECT provider_id, media_type, sync_generation, COUNT(*) AS category_count,
             COALESCE(SUM(item_count), 0) AS reported_item_count
-     FROM catalog_categories
+     FROM ${categoriesTable}
      GROUP BY provider_id, media_type, sync_generation
      ORDER BY category_count DESC
      LIMIT 30`,
@@ -1062,7 +1719,7 @@ export async function getCatalogDiagnosticSnapshot(
   const itemSamples = await db.getAll(
     `SELECT provider_id, media_type, sync_generation, category_id,
             content_id, title, normalized_title
-     FROM catalog_items
+     FROM ${itemsTable}
      WHERE provider_id = ? AND media_type = ?
      ORDER BY sync_generation DESC, provider_sort_order ASC
      LIMIT 10`,
@@ -1072,7 +1729,7 @@ export async function getCatalogDiagnosticSnapshot(
   const categorySamples = await db.getAll(
     `SELECT provider_id, media_type, sync_generation, category_id,
             category_name, item_count, sort_order
-     FROM catalog_categories
+     FROM ${categoriesTable}
      WHERE provider_id = ? AND media_type = ?
      ORDER BY sync_generation DESC, sort_order ASC
      LIMIT 10`,
@@ -1092,6 +1749,7 @@ export async function getCatalogDiagnosticSnapshot(
     allCategoryContracts,
     itemSamples,
     categorySamples,
+    marker: usesGenerationSafeCatalog(mediaType) ? STAGE3C_GENERATION_SAFE_MARKER : null,
   };
 }
 export async function clearProviderCatalog(providerId: string): Promise<void> {
@@ -1100,6 +1758,9 @@ export async function clearProviderCatalog(providerId: string): Promise<void> {
     await db.run(`DELETE FROM catalog_items WHERE provider_id = ?`, [providerId]);
     await db.run(`DELETE FROM catalog_categories WHERE provider_id = ?`, [providerId]);
     await db.run(`DELETE FROM catalog_seasons WHERE provider_id = ?`, [providerId]);
+    await db.run(`DELETE FROM catalog_items_v2 WHERE provider_id = ?`, [providerId]);
+    await db.run(`DELETE FROM catalog_categories_v2 WHERE provider_id = ?`, [providerId]);
+    await db.run(`DELETE FROM catalog_seasons_v2 WHERE provider_id = ?`, [providerId]);
     await db.run(`DELETE FROM catalog_sync_state WHERE provider_id = ?`, [providerId]);
     await db.run(`DELETE FROM catalog_providers WHERE provider_id = ?`, [providerId]);
   });
@@ -1111,8 +1772,9 @@ export async function listCatalogItemsForGeneration(
   generation: number,
 ): Promise<CatalogItemRecord[]> {
   const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable(mediaType);
   const rows = await db.getAll(
-    `SELECT * FROM catalog_items
+    `SELECT * FROM ${itemsTable}
      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
      ORDER BY normalized_title ASC, content_id ASC`,
     [providerId, mediaType, generation],
@@ -1126,8 +1788,9 @@ export async function listCatalogCategoriesForGeneration(
   generation: number,
 ): Promise<CatalogCategoryRecord[]> {
   const db = await getCatalogDatabase();
+  const categoriesTable = catalogCategoriesTable(mediaType);
   const rows = await db.getAll(
-    `SELECT * FROM catalog_categories
+    `SELECT * FROM ${categoriesTable}
      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
      ORDER BY (sort_order IS NULL) ASC, sort_order ASC, category_name ASC`,
     [providerId, mediaType, generation],

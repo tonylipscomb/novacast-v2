@@ -63,6 +63,44 @@ function appendFallbackCategory(categories: MovieCategory[], providerId: string)
   ];
 }
 
+/**
+ * Stage 3C.1: never let a stale index zero blank authoritative SQLite counts.
+ * Prefer known SQLite counts; only adopt index values when they are positive.
+ */
+function resolveProviderCategoryCount(
+  category: MovieCategory,
+  providerId: string,
+  preferSqliteCounts: boolean,
+): Pick<MovieCategory, 'count' | 'countKnown'> {
+  if (preferSqliteCounts && category.countKnown === true) {
+    return {
+      count: category.count,
+      countKnown: true,
+    };
+  }
+
+  const indexed = getCategoryCountFromIndex(providerId, 'movie', category.id);
+  if (typeof indexed === 'number' && indexed > 0) {
+    return {
+      count: indexed,
+      countKnown: true,
+    };
+  }
+
+  if (category.countKnown === true) {
+    return {
+      count: category.count,
+      countKnown: true,
+    };
+  }
+
+  // Unknown: show placeholder ("...") instead of a misleading 0.
+  return {
+    count: category.count,
+    countKnown: false,
+  };
+}
+
 const indexListeners = new Map<string, Set<() => void>>();
 
 function isSmartCategoryId(categoryId: string) {
@@ -170,8 +208,7 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
         ...category,
         kind: 'provider' as const,
         section: 'provider' as const,
-        count: getCategoryCountFromIndex(providerId, 'movie', category.id) ?? category.count,
-        countKnown: getCategoryCountFromIndex(providerId, 'movie', category.id) !== undefined || category.countKnown !== false,
+        ...resolveProviderCategoryCount(category, providerId, usesSqliteReads),
       })), providerId);
     }
 
@@ -202,8 +239,7 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
       ...category,
       kind: 'provider' as const,
       section: 'provider' as const,
-      count: getCategoryCountFromIndex(providerId, 'movie', category.id) ?? category.count,
-      countKnown: getCategoryCountFromIndex(providerId, 'movie', category.id) !== undefined || category.countKnown !== false,
+      ...resolveProviderCategoryCount(category, providerId, usesSqliteReads),
     }));
     const providerWithFallback = appendFallbackCategory(providerWithKind, providerId);
 
@@ -291,7 +327,27 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
 
     async getCategories() {
       const providerCategories = await base.getCategories();
-      return buildSmartCategories(providerCategories);
+      const wrappedCategories = await buildSmartCategories(providerCategories);
+      console.info(
+        '[NovaCast Movies Category Contract] ' +
+          JSON.stringify({
+            providerId,
+            readableGeneration: null,
+            repositoryCategoryCount: providerCategories.length,
+            sqliteProviderCategoryCount: providerCategories.filter((category) => category.kind === 'provider').length,
+            wrappedCategoryCount: wrappedCategories.length,
+            appliedProviderCategoryCount: wrappedCategories.filter(
+              (category) => category.kind === 'provider' && category.id !== 'all',
+            ).length,
+            totalMovieCount: wrappedCategories.find((category) => category.id === 'all')?.count ?? null,
+            firstProviderCategoryIds: wrappedCategories
+              .filter((category) => category.kind === 'provider' && category.id !== 'all')
+              .slice(0, 5)
+              .map((category) => category.id),
+            reason: 'smart-wrapper',
+          }),
+      );
+      return wrappedCategories;
     },
 
     async getMoviesPage(input) {
@@ -364,7 +420,14 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
         return 0;
       }
 
-      return getCategoryCountFromIndex(providerId, 'movie', categoryId) ?? (await base.getCategoryCount?.(categoryId)) ?? 0;
+      if (usesSqliteReads && base.getCategoryCount) {
+        return base.getCategoryCount(categoryId);
+      }
+      const indexed = getCategoryCountFromIndex(providerId, 'movie', categoryId);
+      if (typeof indexed === 'number' && indexed > 0) {
+        return indexed;
+      }
+      return (await base.getCategoryCount?.(categoryId)) ?? indexed ?? 0;
     },
 
     async prefetchAllCategoryCounts(categoryIds, onCategoryCount) {
@@ -432,16 +495,23 @@ export async function refreshSmartCategoryCounts(
   categories: MovieCategory[],
 ): Promise<MovieCategory[]> {
   const settings = await getMoviesSettings();
+  // Provider rows with authoritative SQLite counts must not be blanked by index zeros.
+  const preferSqliteProviderCounts = categories.some(
+    (category) =>
+      category.kind === 'provider' &&
+      category.id !== 'all' &&
+      category.countKnown === true &&
+      category.count > 0,
+  );
+
   if (settings.hideSmartCategories) {
     return categories.map((category) => {
       if (category.kind !== 'provider') {
         return category;
       }
-      const indexed = getCategoryCountFromIndex(providerId, 'movie', category.id);
       return {
         ...category,
-        count: indexed ?? category.count,
-        countKnown: indexed !== undefined || category.countKnown !== false,
+        ...resolveProviderCategoryCount(category, providerId, preferSqliteProviderCounts),
       };
     });
   }
@@ -450,11 +520,9 @@ export async function refreshSmartCategoryCounts(
 
   return categories.map((category) => {
     if (category.kind === 'provider') {
-      const indexed = getCategoryCountFromIndex(providerId, 'movie', category.id);
       return {
         ...category,
-        count: indexed ?? category.count,
-        countKnown: indexed !== undefined || category.countKnown !== false,
+        ...resolveProviderCategoryCount(category, providerId, preferSqliteProviderCounts),
       };
     }
 

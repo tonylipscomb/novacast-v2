@@ -70,7 +70,8 @@ function applyIndexedProviderCounts(providerId: string, categories: MovieCategor
       return category;
     }
     const indexed = getCategoryCountFromIndex(providerId, 'movie', category.id);
-    if (indexed == null) {
+    // Never adopt a stale index zero over an unresolved count (placeholder stays "...").
+    if (indexed == null || indexed <= 0) {
       return category;
     }
     changed = true;
@@ -84,8 +85,40 @@ function applyCategoryCount(categories: MovieCategory[], categoryId: string, cou
 }
 
 function mergeCategoriesPreservingCounts(previous: MovieCategory[], next: MovieCategory[]) {
+  if (!next.length && previous.length) {
+    return previous;
+  }
   if (!previous.length) {
     return next;
+  }
+
+  const previousProvider = previous.filter((category) => category.kind === 'provider' && category.id !== 'all');
+  const nextProvider = next.filter((category) => category.kind === 'provider' && category.id !== 'all');
+  const previousAll = previous.find((category) => category.id === 'all');
+  const nextAll = next.find((category) => category.id === 'all');
+  const previousTotal = previousAll?.count ?? 0;
+  const nextTotal = nextAll?.count ?? 0;
+
+  // A late smart-count/category refresh must not erase a valid provider rail.
+  // Treat a zero or implausibly small result as a rejected refresh, not new state.
+  if (
+    (previousProvider.length > 0 && nextProvider.length === 0) ||
+    (previousTotal > 0 && nextTotal > 0 && nextTotal < previousTotal * 0.25)
+  ) {
+    console.info(
+      '[NovaCast Movies Category Refresh Rejected] ' +
+        JSON.stringify({
+          readableGeneration: null,
+          previousProviderCount: previousProvider.length,
+          nextProviderCount: nextProvider.length,
+          previousTotal,
+          nextTotal,
+          previousCategoryCount: previous.length,
+          nextCategoryCount: next.length,
+          reason: nextProvider.length === 0 ? 'zero-provider-categories' : 'suspiciously-tiny-total',
+        }),
+    );
+    return previous;
   }
 
   const previousById = new Map(previous.map((category) => [category.id, category]));
@@ -185,14 +218,19 @@ export function useMoviesScreenModel(
       setVisibleMovies((current) => {
         const next = typeof updater === 'function' ? updater(current) : updater;
         visibleMoviesRef.current = next;
-        console.info('[NovaCast Movies Data]', {
-          reason,
-          previousArrayChanged: current !== next,
-          previousCount: current.length,
-          nextCount: next.length,
-          firstMovieId: next[0]?.id ?? null,
-          lastMovieId: next[next.length - 1]?.id ?? null,
-        });
+        console.info(
+          '[NovaCast Movies Data] ' +
+            JSON.stringify({
+              reason,
+              arrayIdentityChanged: current !== next,
+              previousLength: current.length,
+              nextLength: next.length,
+              previousFirstId: current[0]?.id ?? null,
+              nextFirstId: next[0]?.id ?? null,
+              previousLastId: current[current.length - 1]?.id ?? null,
+              nextLastId: next[next.length - 1]?.id ?? null,
+            }),
+        );
         return next;
       });
     },
@@ -336,6 +374,25 @@ export function useMoviesScreenModel(
 
         const warmedCategories = warmUnresolvedCategoryCounts(nextCategories);
         setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
+        console.info(
+          '[NovaCast Movies Category Contract] ' +
+            JSON.stringify({
+              providerId: activeProviderId,
+              readableGeneration: null,
+              repositoryCategoryCount: nextCategories.length,
+              sqliteProviderCategoryCount: nextCategories.filter((category) => category.kind === 'provider').length,
+              wrappedCategoryCount: warmedCategories.length,
+              appliedProviderCategoryCount: warmedCategories.filter(
+                (category) => category.kind === 'provider' && category.id !== 'all',
+              ).length,
+              totalMovieCount: warmedCategories.find((category) => category.id === 'all')?.count ?? null,
+              firstProviderCategoryIds: warmedCategories
+                .filter((category) => category.kind === 'provider' && category.id !== 'all')
+                .slice(0, 5)
+                .map((category) => category.id),
+              reason: warmedCategories.length ? 'model-apply' : 'empty-refresh-preserved',
+            }),
+        );
         logMoviesPerf('categories_state_applied', {
           providerId: activeProviderId,
           totalCategoryCount: warmedCategories.length,

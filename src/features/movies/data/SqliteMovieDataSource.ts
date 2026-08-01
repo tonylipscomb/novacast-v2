@@ -5,8 +5,10 @@ import {
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
 } from '../../catalog/catalogRepository.ts';
+import { recoverFragmentedMovieCatalogOnce } from '../../catalog/catalogFragmentRecovery.ts';
 import type { CatalogItemRecord, CatalogItemSort } from '../../catalog/catalogTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
+import { publishMovieCatalogReady } from '../../providers/providerCatalogSync.ts';
 
 import type { MovieDataSource } from './MovieDataSource.ts';
 import type { MovieCategory, MovieSummary } from '../movieTypes.ts';
@@ -89,30 +91,110 @@ export async function isSqliteMovieCatalogReady(providerId: string): Promise<boo
   return totalCount > 0;
 }
 
+type CachedSqliteCategories = {
+  generation: number;
+  categories: MovieCategory[];
+  totalCount: number;
+};
+
+const lastValidSqliteCategoriesByProvider = new Map<string, CachedSqliteCategories>();
+
+export function resetLastValidSqliteMovieCategoriesForTests() {
+  lastValidSqliteCategoriesByProvider.clear();
+}
+
 export function createSqliteMovieDataSource(providerId: string): MovieDataSource {
   return {
     sourceKind: 'sqlite',
 
     async getCategories(): Promise<MovieCategory[]> {
       await logSqliteMovieDiagnostic(providerId, 'get-categories-before-query');
+      // Stage 3C: one-time merge of verified legacy fragments into generation-safe v2.
+      const recovery = await recoverFragmentedMovieCatalogOnce(providerId);
+      if (recovery.activated && recovery.recoveredGeneration != null) {
+        publishMovieCatalogReady(providerId, recovery.recoveredGeneration);
+      }
+      const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie');
       const [categories, totalCount] = await Promise.all([
-        getCatalogCategoryCounts(providerId, 'movie'),
-        getCatalogTotalCount(providerId, 'movie'),
+        getCatalogCategoryCounts(providerId, 'movie', { generation: readableGeneration }),
+        getCatalogTotalCount(providerId, 'movie', { generation: readableGeneration }),
       ]);
+
+      const previous = lastValidSqliteCategoriesByProvider.get(providerId);
+      const nonzeroCategoryCount = categories.filter((category) => category.itemCount > 0).length;
+      const refreshLooksEmpty =
+        totalCount > 0 &&
+        (categories.length === 0 || nonzeroCategoryCount === 0) &&
+        Boolean(previous && previous.categories.length > 0 && previous.totalCount > 0);
+
+      if (refreshLooksEmpty && previous) {
+        console.info(
+          '[NovaCast Movies Category Counts Applied] ' +
+            JSON.stringify({
+              readableGeneration,
+              appliedProviderCategoryCount: previous.categories.filter(
+                (category) => category.id !== SQLITE_MOVIES_DISCOVER_ID,
+              ).length,
+              zeroCountCategories: 0,
+              preservedPreviousCounts: true,
+              reason: 'rejected-empty-refresh',
+              previousGeneration: previous.generation,
+              previousTotalCount: previous.totalCount,
+            }),
+        );
+        console.info(
+          '[NovaCast Movies Category Refresh Rejected] ' +
+            JSON.stringify({
+              readableGeneration,
+              previousProviderCount: previous.categories.filter(
+                (category) => category.id !== SQLITE_MOVIES_DISCOVER_ID,
+              ).length,
+              nextProviderCount: categories.length,
+              previousTotal: previous.totalCount,
+              nextTotal: totalCount,
+              reason: 'empty-grouped-counts-with-rows',
+            }),
+        );
+        return previous.categories;
+      }
+
+      console.info(
+        '[NovaCast Movies Category Contract] ' +
+          JSON.stringify({
+            providerId,
+            readableGeneration,
+            repositoryCategoryCount: categories.length,
+            sqliteProviderCategoryCount: categories.length,
+            wrappedCategoryCount: categories.length + (totalCount > 0 ? 1 : 0),
+            appliedProviderCategoryCount: categories.length,
+            totalMovieCount: totalCount,
+            firstProviderCategoryIds: categories.slice(0, 5).map((category) => category.categoryId),
+            reason: readableGeneration > 0 ? 'readable-generation' : 'no-readable-generation',
+          }),
+      );
+      console.info(
+        '[NovaCast Movies Read Contract] ' +
+          JSON.stringify({
+            providerId,
+            readableGeneration,
+            requestedCategoryId: null,
+            itemsGeneration: readableGeneration,
+            categoriesGeneration: readableGeneration,
+            pageOffset: null,
+            pageLimit: null,
+            pageRowCount: null,
+            totalCount,
+            providerCategoryCount: categories.length,
+            reason: 'all-item-rows-direct-count-no-category-join',
+          }),
+      );
 
       if (!categories.length && totalCount <= 0) {
         console.info('[Movies SQLite] unavailable', { providerId });
         return [];
       }
 
-      console.info('[Movies SQLite] category-counts', {
-        providerId,
-        categoryCount: categories.length,
-        providerCategoryCount: categories.length,
-        totalCount,
-      });
-
-      return [
+      const nextCategories: MovieCategory[] = [
         {
           id: SQLITE_MOVIES_DISCOVER_ID,
           renderKey: SQLITE_MOVIES_DISCOVER_ID,
@@ -133,9 +215,34 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
           section: 'provider' as const,
         })),
       ];
+
+      lastValidSqliteCategoriesByProvider.set(providerId, {
+        generation: readableGeneration,
+        categories: nextCategories,
+        totalCount,
+      });
+
+      console.info(
+        '[NovaCast Movies Category Counts Applied] ' +
+          JSON.stringify({
+            readableGeneration,
+            appliedProviderCategoryCount: categories.length,
+            zeroCountCategories: 0,
+            preservedPreviousCounts: false,
+            allMoviesTotal: totalCount,
+            firstCounts: categories.slice(0, 5).map((category) => ({
+              categoryId: category.categoryId,
+              itemCount: category.itemCount,
+            })),
+            reason: 'grouped-counts-applied',
+          }),
+      );
+
+      return nextCategories;
     },
 
     async getMoviesPage(input) {
+      const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie');
       const categoryId =
         input.categoryId && input.categoryId !== SQLITE_MOVIES_DISCOVER_ID
           ? input.categoryId
@@ -148,6 +255,7 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
         offset: input.offset,
         limit: input.limit,
         sort: mapSort(input.sort),
+        generation: readableGeneration,
       });
 
       await logSqliteMovieDiagnostic(providerId, 'first-page-after-query');

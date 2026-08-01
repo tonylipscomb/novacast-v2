@@ -1,20 +1,26 @@
 import { useMemo, useState } from 'react';
 
 type Device = Record<string, unknown>;
+type Provider = Record<string, unknown>;
 type Action = (id: string) => void;
 type ExtendAction = (id: string, hours: number) => void;
+type AssignProviderAction = (id: string, managedProviderId: string) => void;
 
 type ExtendPreset = '7' | '30' | '90' | 'custom' | 'never';
 
 export function AdminDevices({
   devices,
+  providers,
   onExtend,
+  onAssignProvider,
   onCommand,
   onRevoke,
   onMessage,
 }: {
   devices: Device[];
+  providers: Provider[];
   onExtend: ExtendAction;
+  onAssignProvider: AssignProviderAction;
   onCommand: Action;
   onRevoke: Action;
   onMessage: (message: string) => void;
@@ -27,7 +33,24 @@ export function AdminDevices({
   const [extendDevice, setExtendDevice] = useState<Device | null>(null);
   const [extendPreset, setExtendPreset] = useState<ExtendPreset>('30');
   const [customDate, setCustomDate] = useState('');
+  const [providerDevice, setProviderDevice] = useState<Device | null>(null);
+  const [selectedProviderId, setSelectedProviderId] = useState('');
   const pageSize = 10;
+
+  const providerNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const provider of providers) {
+      const id = String(provider.id ?? '');
+      if (!id) continue;
+      map.set(id, String(provider.display_name ?? provider.slug ?? 'Managed provider'));
+    }
+    return map;
+  }, [providers]);
+
+  const activeProviders = useMemo(
+    () => providers.filter((provider) => String(provider.status ?? 'active') === 'active'),
+    [providers],
+  );
 
   const filtered = useMemo(
     () =>
@@ -126,6 +149,23 @@ export function AdminDevices({
     setExtendDevice(device);
     setExtendPreset('30');
     setCustomDate('');
+  };
+
+  const openChangeProvider = (device: Device) => {
+    const currentId = String(device.managed_provider_id ?? '');
+    const fallback = activeProviders[0] ? String(activeProviders[0].id) : '';
+    setProviderDevice(device);
+    setSelectedProviderId(currentId || fallback);
+  };
+
+  const saveProviderChange = () => {
+    if (!providerDevice) return;
+    if (!selectedProviderId) {
+      onMessage('Choose a managed provider for this device.');
+      return;
+    }
+    onAssignProvider(String(providerDevice.id), selectedProviderId);
+    setProviderDevice(null);
   };
 
   const saveExtension = () => {
@@ -238,7 +278,11 @@ export function AdminDevices({
             <DeviceRow
               key={String(device.id)}
               device={device}
+              providerName={
+                providerNameById.get(String(device.managed_provider_id ?? '')) ?? 'No provider'
+              }
               onExtend={() => openExtend(device)}
+              onChangeProvider={() => openChangeProvider(device)}
               onCommand={onCommand}
               onRevoke={onRevoke}
               onMessage={onMessage}
@@ -350,6 +394,79 @@ export function AdminDevices({
           </section>
         </div>
       ) : null}
+
+      {providerDevice ? (
+        <div
+          className="extendModalBackdrop"
+          role="presentation"
+          onMouseDown={() => setProviderDevice(null)}>
+          <section
+            className="extendModal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="change-provider-title"
+            onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <span className="extendEyebrow">MANAGED PROVIDER</span>
+                <h2 id="change-provider-title">Change device provider</h2>
+                <p>
+                  {String(
+                    providerDevice.friendly_name ??
+                      providerDevice.assigned_tester_name ??
+                      providerDevice.public_device_code ??
+                      'NovaCast device',
+                  )}
+                </p>
+              </div>
+              <button
+                className="extendClose"
+                onClick={() => setProviderDevice(null)}
+                aria-label="Close">
+                
+              </button>
+            </header>
+
+            <div className="extendDeviceCode">
+              <small>Current provider</small>
+              <strong>
+                {providerNameById.get(String(providerDevice.managed_provider_id ?? '')) ??
+                  'No provider assigned'}
+              </strong>
+            </div>
+
+            {activeProviders.length ? (
+              <label className="extendCustomDate">
+                New provider
+                <select
+                  value={selectedProviderId}
+                  onChange={(event) => setSelectedProviderId(event.target.value)}
+                  aria-label="Select managed provider">
+                  {activeProviders.map((provider) => (
+                    <option key={String(provider.id)} value={String(provider.id)}>
+                      {String(provider.display_name ?? provider.slug ?? 'Managed provider')}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <p>No active managed providers are available.</p>
+            )}
+
+            <footer>
+              <button className="extendCancel" onClick={() => setProviderDevice(null)}>
+                Cancel
+              </button>
+              <button
+                className="extendSave"
+                onClick={saveProviderChange}
+                disabled={!activeProviders.length || !selectedProviderId}>
+                Save provider
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -385,13 +502,17 @@ function DeviceMetric({
 
 function DeviceRow({
   device,
+  providerName,
   onExtend,
+  onChangeProvider,
   onCommand,
   onRevoke,
   onMessage,
 }: {
   device: Device;
+  providerName: string;
   onExtend: () => void;
+  onChangeProvider: () => void;
   onCommand: Action;
   onRevoke: Action;
   onMessage: (message: string) => void;
@@ -425,6 +546,7 @@ function DeviceRow({
           <small>
             {String(device.manufacturer ?? '')} {String(device.model ?? '')}
           </small>
+          <small>{providerName}</small>
         </div>
       </div>
 
@@ -472,7 +594,7 @@ function DeviceRow({
           title="View device"
           onClick={() =>
             onMessage(
-              `${name} - ${String(device.public_device_code ?? '')} - ${String(
+              `${name} - ${String(device.public_device_code ?? '')} - ${providerName} - ${String(
                 device.status ?? 'registered',
               )} - ${remaining}`,
             )
@@ -485,6 +607,13 @@ function DeviceRow({
           title="Extend access"
           onClick={onExtend}>
           Extend
+        </button>
+
+        <button
+          aria-label={`Change provider for ${name}`}
+          title="Change provider"
+          onClick={onChangeProvider}>
+          Provider
         </button>
 
         <button

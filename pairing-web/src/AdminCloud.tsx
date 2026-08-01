@@ -129,6 +129,30 @@ export function AdminCloud() {
     }
   };
 
+  const assignProvider = async (id: string, managedProviderId: string) => {
+    try {
+      const result = await adminRequest('admin-device-action', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          deviceId: id,
+          action: 'assign_provider',
+          managedProviderId,
+        }),
+      });
+      const providerName =
+        typeof result.providerName === 'string' ? result.providerName : 'selected provider';
+      setMessage(
+        result.unchanged
+          ? `Device already uses ${providerName}.`
+          : `Provider changed to ${providerName}. The TV will redownload on next heartbeat.`,
+      );
+      await load(token, true);
+    } catch (error) {
+      const category = error instanceof Error ? error.message : 'admin_update_failed';
+      setMessage('Provider could not be changed (' + category + ').');
+    }
+  };
+
   const createInvitation = async (input: InvitationInput) => {
     const result = await adminRequest('admin-invites', token, {
       method: 'POST',
@@ -249,7 +273,9 @@ export function AdminCloud() {
         {!loading && tab === 'devices' ? (
           <AdminDevices
             devices={devices}
+            providers={providers}
             onExtend={(id, hours) => void extend(id, hours)}
+            onAssignProvider={(id, managedProviderId) => void assignProvider(id, managedProviderId)}
             onCommand={(id) => void command(id)}
             onRevoke={(id) => void revoke(id)}
             onMessage={setMessage}

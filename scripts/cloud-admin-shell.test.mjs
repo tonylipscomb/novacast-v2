@@ -21,3 +21,9 @@ test('Cloud Admin wires device extension to admin-device-action', () => {
   assert.match(cloud, /onExtend=/);
   assert.match(cloud, /Beta access extended successfully/);
 });
+
+test('Cloud Admin wires provider reassignment to admin-device-action', () => {
+  assert.match(cloud, /action: 'assign_provider'/);
+  assert.match(cloud, /onAssignProvider=/);
+  assert.match(cloud, /Provider changed to/);
+});

@@ -9,7 +9,7 @@ Deno.serve(async (request) => {
   if (request.method !== 'POST') return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
 
   try {
-    const { client } = await requireAdmin(request);
+    const { client, user } = await requireAdmin(request);
     const body = await readJson(request);
     const deviceId = typeof body?.deviceId === 'string' ? body.deviceId : '';
     const action = typeof body?.action === 'string' ? body.action : '';
@@ -164,6 +164,126 @@ Deno.serve(async (request) => {
         expiresAt: data[0].expires_at,
         managedProviderId: data[0].managed_provider_id,
         providerAssigned: Boolean(data[0].provider_assigned),
+      });
+    }
+
+    // Reassign an activated beta device to a different managed provider package.
+    if (action === 'assign_provider') {
+      const managedProviderId =
+        typeof body?.managedProviderId === 'string' ? body.managedProviderId.trim() : '';
+      if (!managedProviderId) {
+        return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+      }
+
+      const { data: device, error: deviceError } = await client
+        .from('devices')
+        .select('id,status,managed_provider_id')
+        .eq('id', deviceId)
+        .maybeSingle();
+      if (deviceError || !device) {
+        return jsonResponse({ errorCategory: 'device_not_found' }, 400);
+      }
+      if (['revoked', 'disabled'].includes(String(device.status ?? ''))) {
+        return jsonResponse({ errorCategory: 'device_blocked' }, 400);
+      }
+
+      const { data: provider, error: providerError } = await client
+        .from('managed_providers')
+        .select('id,display_name,status,content_policy')
+        .eq('id', managedProviderId)
+        .maybeSingle();
+      if (providerError || !provider) {
+        return jsonResponse({ errorCategory: 'provider_not_found' }, 400);
+      }
+      if (String(provider.status ?? '') !== 'active') {
+        return jsonResponse({ errorCategory: 'provider_inactive' }, 400);
+      }
+
+      if (device.managed_provider_id === managedProviderId) {
+        return jsonResponse({
+          ok: true,
+          managedProviderId,
+          providerName: provider.display_name,
+          unchanged: true,
+        });
+      }
+
+      const now = new Date().toISOString();
+      const contentPolicy =
+        typeof provider.content_policy === 'string' && provider.content_policy.trim()
+          ? provider.content_policy.trim().slice(0, 64)
+          : 'us_only';
+
+      const { error: supersedeError } = await client
+        .from('device_provider_assignments')
+        .update({ status: 'superseded', revoked_at: now, updated_at: now })
+        .eq('device_id', deviceId)
+        .eq('status', 'active');
+      if (supersedeError) {
+        return jsonResponse(
+          { errorCategory: 'assignment_update_failed', detail: supersedeError.message },
+          500,
+        );
+      }
+
+      const { error: insertError } = await client.from('device_provider_assignments').insert({
+        device_id: deviceId,
+        managed_provider_id: managedProviderId,
+        content_policy: contentPolicy,
+        status: 'active',
+      });
+      if (insertError) {
+        return jsonResponse(
+          { errorCategory: 'assignment_create_failed', detail: insertError.message },
+          500,
+        );
+      }
+
+      const { error: deviceUpdateError } = await client
+        .from('devices')
+        .update({
+          managed_provider_id: managedProviderId,
+          content_policy: contentPolicy,
+          updated_at: now,
+        })
+        .eq('id', deviceId);
+      if (deviceUpdateError) {
+        return jsonResponse(
+          { errorCategory: 'device_update_failed', detail: deviceUpdateError.message },
+          500,
+        );
+      }
+
+      await client
+        .from('device_activations')
+        .update({
+          managed_provider_id: managedProviderId,
+          content_policy: contentPolicy,
+          updated_at: now,
+        })
+        .eq('device_id', deviceId)
+        .eq('status', 'active');
+
+      // Queue a config push so the TV re-downloads credentials for the new provider.
+      await client.from('device_commands').insert({
+        device_id: deviceId,
+        command: 'push_configuration',
+        payload: {
+          reason: 'admin_assign_provider',
+          managedProviderId,
+          contentPolicy,
+          redownloadProvider: true,
+        },
+        status: 'pending',
+        created_by: user.id,
+      });
+
+      return jsonResponse({
+        ok: true,
+        managedProviderId,
+        providerName: provider.display_name,
+        contentPolicy,
+        unchanged: false,
       });
     }
 

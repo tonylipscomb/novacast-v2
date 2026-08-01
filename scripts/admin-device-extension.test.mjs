@@ -23,6 +23,15 @@ test('Devices screen offers preset, custom, and never-expiring access options', 
   assert.match(devices, /datetime-local/);
 });
 
+test('Devices screen can change a beta tester managed provider', () => {
+  assert.match(devices, /Change device provider/);
+  assert.match(devices, /onAssignProvider/);
+  assert.match(devices, /Save provider/);
+  assert.match(backend, /action === 'assign_provider'/);
+  assert.match(backend, /redownloadProvider: true/);
+  assert.match(backend, /device_provider_assignments/);
+});
+
 test('Admin backend accepts bounded custom extension hours', () => {
   assert.match(backend, /MAX_EXTENSION_HOURS = 24 \* 365 \* 100/);
   assert.match(backend, /Number\.isInteger\(hours\)/);

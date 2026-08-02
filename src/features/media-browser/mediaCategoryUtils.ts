@@ -30,14 +30,23 @@ export function isProviderCategory(category: MediaCategory) {
   return category.kind === 'provider' || (!isSmartCategoryId(category.id) && !isSectionCategoryId(category.id));
 }
 
-export const DEFAULT_BROWSE_CATEGORY_ID = `smart:${SMART_CATEGORY_KEY_FEATURES}`;
+/** Prefer All Movies / first provider category — Features is temporarily disabled. */
+export const DEFAULT_BROWSE_CATEGORY_ID = 'all';
 
 export function findDefaultBrowseCategoryId(categories: MediaCategory[]) {
-  const features = categories.find(
+  const allMovies = categories.find(
     (category) => category.id === DEFAULT_BROWSE_CATEGORY_ID && category.kind !== 'section',
   );
-  if (features) {
+  if (allMovies) {
     return DEFAULT_BROWSE_CATEGORY_ID;
+  }
+
+  const featuresId = `smart:${SMART_CATEGORY_KEY_FEATURES}`;
+  const features = categories.find(
+    (category) => category.id === featuresId && category.kind !== 'section',
+  );
+  if (features) {
+    return featuresId;
   }
 
   return findDefaultProviderCategoryId(categories);

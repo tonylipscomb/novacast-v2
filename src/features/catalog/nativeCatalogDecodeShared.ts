@@ -1,4 +1,5 @@
 import type { NativeCatalogRecord } from './nativeCatalogDecodeTypes.ts';
+import { resolveCatalogItemCategoryId } from './vodCategoryFilterCapability.ts';
 
 export function isCatalogSqliteWriterOnlyDiagnosticEnabled() {
   return (
@@ -22,11 +23,14 @@ export function nativeRecordToMovieSummary(
   containerExtension?: string;
   providerSortOrder?: number;
 } {
+  const resolvedCategoryId = resolveCatalogItemCategoryId(record.categoryId, categoryId, {
+    allowFallback: true,
+  });
   return {
     id: record.contentId,
-    categoryId: record.categoryId || categoryId,
+    categoryId: resolvedCategoryId,
     title: record.title,
-    genres: [(record.categoryId || categoryId).replace(/-/g, ' ') || 'Movies'],
+    genres: [resolvedCategoryId.replace(/-/g, ' ') || 'Movies'],
     posterStyleKey: 'native',
     posterUrl: record.artworkUrl ?? undefined,
     rating: record.rating != null ? String(record.rating) : undefined,

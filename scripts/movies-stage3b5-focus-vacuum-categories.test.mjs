@@ -21,8 +21,10 @@ test('Stage 3D overlay close target holds focus until exact poster confirmation'
 });
 
 test('navbar and categories are temporarily non-focusable during detail close handoff', () => {
-  assert.match(screen, /navigationFocusable=\{!focusSuppressionActive && !detailOpen\}/);
-  assert.match(screen, /focusable=\{!focusSuppressionActive && !detailOpen\}/);
+  // Closing phases keep chromeFocusable false; preferred also suppressed via navbarPreferredSuppressed.
+  assert.match(screen, /navigationFocusable=\{chromeFocusable && !searchBlocksBrowse\}/);
+  assert.match(screen, /focusable=\{chromeFocusable && !searchBlocksBrowse\}/);
+  assert.match(screen, /suppressNavbarPreferredFocus=\{navbarPreferredSuppressed\}/);
   assert.match(shell, /hasTVPreferredFocus=\{navbarPreferredFocus && active\}/);
   assert.match(category, /focusable=\{focusable\}/);
 });

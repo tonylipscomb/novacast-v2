@@ -20,11 +20,26 @@ export type CatalogDecodeBatchStats = {
   responseBytes?: number;
   rawSeen?: number;
   matched?: number;
+  emptyCategoryIdCount?: number;
   batchesEmitted?: number;
   maxBatchSize?: number;
   batchSize?: number;
   mediaType?: string;
 };
+
+/** Panels that ignore category_id= return nearly the full dump for every category request. */
+export function isLikelyUnfilteredCategoryDump(stats: {
+  rawSeen?: number;
+  matched?: number;
+  emptyCategoryIdCount?: number;
+}): boolean {
+  const rawSeen = Number(stats.rawSeen ?? 0);
+  const matched = Number(stats.matched ?? 0);
+  if (rawSeen < 1500 || matched < 1500) {
+    return false;
+  }
+  return matched >= Math.floor(rawSeen * 0.9);
+}
 
 export type StreamXtreamCategoryDecodeInput = {
   requestUrl: string;

@@ -1,10 +1,9 @@
-import type { ElementRef } from 'react';
+import type { ElementRef, ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { FlatList, StyleSheet, Text, View, useWindowDimensions, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { useAppTheme, type NovaTheme } from '@/theme';
-import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
 import { shouldAutoFocusSortControl, shouldClaimPreferredPosterFocus, isLastPosterRow } from '@/features/media-browser/posterGridFocusPolicy';
 import { ContentSortControl, type ContentSortControlHandle } from '@/features/media-browser/ContentSortControl';
 import type { ContentSortOption } from '@/features/media-browser/contentSorting';
@@ -23,7 +22,6 @@ type MoviePosterGridProps = {
   columns: number;
   hasMore: boolean;
   loading: boolean;
-  categoryLoading?: boolean;
   selectedMovieId: string | null;
   postersFocusable?: boolean;
   onFocusMovie: (movie: MovieSummary) => void;
@@ -56,10 +54,30 @@ type MoviePosterGridProps = {
   } | null;
   /** Stage 3D: during closing, only this poster may be focusable. */
   closingFocusMovieId?: string | null;
+  /**
+   * Stage 3D.2: while post-restore latch is active, only this poster may hold
+   * hasTVPreferredFocus. Does not re-request focus.
+   */
+  postRestorePreferredMovieId?: string | null;
+  /**
+   * Stage 3D.3: pin focus chrome on this poster during correction / latch
+   * without requiring a second native onFocus.
+   */
+  pinnedHighlightMovieId?: string | null;
+  /**
+   * Stage 3D.3: briefly disable FlatList scroll during focus transfer to
+   * prevent native one-row auto-align drift.
+   */
+  lockScrollForFocusRestore?: boolean;
   /** When true, snapshot said target was visible — do not use index positioning. */
   snapshotTargetWasVisible?: boolean;
   onViewportChange?: (state: { offset: number; firstIndex: number | null; lastIndex: number | null }) => void;
   suppressPreferredFocus?: boolean;
+  /**
+   * Stage 3E.3: absolute overlays (primary/pagination loaders) rendered inside the
+   * poster list viewport — not the screen shell and not FlatList footer content.
+   */
+  listOverlays?: ReactNode;
 };
 
 export function MoviePosterGrid({
@@ -69,7 +87,6 @@ export function MoviePosterGrid({
   columns,
   hasMore,
   loading,
-  categoryLoading = false,
   selectedMovieId,
   postersFocusable = true,
   onFocusMovie,
@@ -92,9 +109,13 @@ export function MoviePosterGrid({
   restoreScrollBlocked = false,
   viewportRestoreCommand = null,
   closingFocusMovieId = null,
+  postRestorePreferredMovieId = null,
+  pinnedHighlightMovieId = null,
+  lockScrollForFocusRestore = false,
   snapshotTargetWasVisible = false,
   onViewportChange,
   suppressPreferredFocus = false,
+  listOverlays = null,
 }: MoviePosterGridProps) {
   const gridHeaderSuffix = `${movies.length} items`;
   const firstMovieId = movies[0]?.id;
@@ -403,15 +424,23 @@ export function MoviePosterGrid({
             postersFocusable || (closingFocusMovieId != null && closingFocusMovieId === item.id)
           }
           trapFocusDown={isLastPosterRow({ index, itemCount: movies.length, columns })}
+          forceFocused={
+            pinnedHighlightMovieId != null
+              ? pinnedHighlightMovieId === item.id
+              : closingFocusMovieId === item.id || postRestorePreferredMovieId === item.id
+          }
           hasPreferredFocus={
-            // Stage 3D: never let first-poster preferred focus compete during close.
-            closingFocusMovieId != null || suppressPreferredFocus
-              ? false
-              : shouldClaimPreferredPosterFocus({
-                  focusClaimed: focusClaimedRef.current || selectedMovieId != null,
-                  itemId: item.id,
-                  seedId: focusSeedRef.current,
-                })
+            // Stage 3D.2: restored poster retains preferred ownership after confirm.
+            postRestorePreferredMovieId != null
+              ? postRestorePreferredMovieId === item.id
+              : // Stage 3D: never let first-poster preferred focus compete during close.
+                closingFocusMovieId != null || suppressPreferredFocus
+                ? false
+                : shouldClaimPreferredPosterFocus({
+                    focusClaimed: focusClaimedRef.current || selectedMovieId != null,
+                    itemId: item.id,
+                    seedId: focusSeedRef.current,
+                  })
           }
           onFocus={handleFocusMovie}
           onPress={handleSelectMovie}
@@ -427,6 +456,8 @@ export function MoviePosterGrid({
       handleSelectMovie,
       isDiscover,
       movies.length,
+      pinnedHighlightMovieId,
+      postRestorePreferredMovieId,
       postersFocusable,
       selectedMovieId,
       suppressPreferredFocus,
@@ -435,9 +466,7 @@ export function MoviePosterGrid({
 
   const keyExtractor = useCallback((item: MovieSummary) => item.id, []);
 
-  const loadingLabel = `Loading ${selectedCategoryLabel}â€¦`;
-  const showInitialLoader = categoryLoading && movies.length === 0 && !emptyNotice;
-  const showCategoryLoadingOverlay = categoryLoading && movies.length > 0;
+  // Stage 3E.1: visual loaders are owned by MoviesScreen (primary + pagination).
 
   return (
     <View style={styles.panel}>
@@ -457,13 +486,7 @@ export function MoviePosterGrid({
         </View>
       </View>
 
-      {showInitialLoader ? (
-        <View style={styles.loadingStage}>
-          <View style={styles.largeLoader}>
-            <NovaSpaceLoader label={loadingLabel} />
-          </View>
-        </View>
-      ) : emptyNotice ? (
+      {emptyNotice ? (
         <View style={styles.emptyNotice}>
           <MaterialCommunityIcons
             name={emptyNotice.includes('display') ? 'cloud-off-outline' : 'movie-off-outline'}
@@ -480,7 +503,7 @@ export function MoviePosterGrid({
             key={columns}
             numColumns={columns}
             keyExtractor={keyExtractor}
-            scrollEnabled
+            scrollEnabled={!lockScrollForFocusRestore}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.list}
             columnWrapperStyle={columns > 1 ? styles.row : undefined}
@@ -497,13 +520,7 @@ export function MoviePosterGrid({
             onViewableItemsChanged={handleViewableItemsChanged}
             renderItem={renderItem}
           />
-          {showCategoryLoadingOverlay ? (
-            <View style={styles.loadingOverlay} pointerEvents="none">
-              <View style={styles.largeLoader}>
-                <NovaSpaceLoader label={loadingLabel} />
-              </View>
-            </View>
-          ) : null}
+          {listOverlays}
         </View>
       )}
     </View>
@@ -569,24 +586,11 @@ function createStyles(theme: NovaTheme) {
       fontWeight: '600',
       textAlign: 'center',
     },
-    loadingStage: {
-      flex: 1,
-      alignItems: 'center',
-      justifyContent: 'center',
-      paddingBottom: 0,
-    },
     listStage: {
       flex: 1,
       minHeight: 0,
-    },
-    loadingOverlay: {
-      ...StyleSheet.absoluteFillObject,
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: 'transparent',
-    },
-    largeLoader: {
-      transform: [{ scale: 1.25 }],
+      position: 'relative',
+      overflow: 'hidden',
     },
   });
 }

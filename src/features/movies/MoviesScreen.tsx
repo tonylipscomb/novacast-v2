@@ -2,8 +2,20 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BackHandler, findNodeHandle, InteractionManager, Linking, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import ReactNative, {
+  BackHandler,
+  findNodeHandle,
+  InteractionManager,
+  Linking,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 
+import { BlurView } from 'expo-blur';
 import { MediaDetailOverlay } from '@/components/media/MediaDetailOverlay';
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
@@ -50,36 +62,61 @@ import { searchMovies } from '@/features/search/repositories/movieSearchReposito
 import type { SearchResult } from '@/features/search/searchTypes';
 import { setMoviesDetailOpenForDiagnostics } from './moviesDiagnosticsState';
 import {
+  deriveMoviesPaginationLoaderMode,
+  deriveMoviesPrimaryLoaderModeFromGate,
+  isMoviesPrimaryLoaderGateVisible,
+  logMoviesPaginationLoader,
+  logMoviesPrimaryLoader,
+  MOVIES_PAGINATION_LOADER_LABEL,
+  MOVIES_PRIMARY_LOADER_MIN_MS,
+  resolveMoviesPrimaryLoaderLabel,
+  type MoviesPaginationLoaderMode,
+  type MoviesPrimaryLoaderHideReason,
+  type MoviesPrimaryLoaderMode,
+} from './moviesLoaderState';
+import {
   MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS,
   MOVIES_FOCUS_SUPPRESSION_RELEASE_MS,
   MOVIES_MAX_FOCUS_REQUESTS,
   MOVIES_MAX_VIEWPORT_RESTORES,
+  MOVIES_MOUNTED_FOCUS_MAX_FRAMES,
+  MOVIES_OFFSCREEN_FOCUS_MAX_FRAMES,
+  MOVIES_POST_RESTORE_LATCH_MS,
   MOVIES_VIEWPORT_OFFSET_TOLERANCE_PX,
+  areMoviesChromeNormallyFocusable,
   areMoviesPostersNormallyFocusable,
   canBeginMoviesDetailClose,
   createMoviesBrowseFocusSnapshot,
+  createMoviesPostRestoreLatch,
+  createMoviesRestoreTiming,
   isMoviesBrowseSnapshotImmutable,
   isMoviesDetailClosingPhase,
   isMoviesDetailFocusConfirmed,
   isMoviesDetailOverlayMounted,
   isMoviesFocusSuppressionActive,
+  isMoviesNativeFocusRowAlignmentDrift,
+  isMoviesPostRestoreLatchActive,
   isMoviesViewportOffsetStable,
   logMoviesDetailFocusConflict,
   logMoviesDetailFocusLifecycle,
   logMoviesFocusSuppression,
+  logMoviesPostRestoreFocus,
+  logMoviesRestoreTiming,
+  logMoviesSearchFocusBlocked,
   logMoviesViewportLock,
   resolveMoviesClosingFocusableMovieId,
   resolveNearestVisiblePoster,
+  shouldReRequestMoviesPosterFocusAfterCorrective,
   shouldSuppressMoviesCategoryFocus,
   shouldSuppressMoviesNavbarFocus,
-  shouldSuppressMoviesSearchFocus,
   wasMoviesSnapshotTargetVisible,
   type MoviesBrowseFocusSnapshot,
   type MoviesDetailFocusPhase,
   type MoviesDetailFocusToken,
+  type MoviesPostRestoreLatch,
+  type MoviesPostRestoreReleaseReason,
+  type MoviesRestoreTimingState,
 } from './moviesDetailFocusLifecycle';
-
-const MOVIES_FOCUS_STAGE3D1_MARKER = 'stage3d1-movies-viewport-first-handoff-v1';
 import { logMoviesPlayback } from './moviesPlaybackDiagnostics';
 import { decideMoviesBackAction, shouldHandleMoviesDetailBack } from './moviesPlaybackLogic';
 import {
@@ -91,8 +128,17 @@ import {
 } from './moviesScreenLogic';
 import { toggleFavorite, toggleWatchlist, useMovieLibraryStore } from './smart/movieLibraryStore';
 
+const MOVIES_FOCUS_STAGE3D1_MARKER = 'stage3d1-movies-viewport-lock-v2';
+const MOVIES_FOCUS_STAGE3D2_MARKER = 'stage3d2-movies-post-restore-focus-v1';
+const MOVIES_FOCUS_STAGE3D3_MARKER = 'stage3d3-movies-restore-polish-v1';
 const MOVIES_FOCUS_STAGE3B2_MARKER = 'stage3b2-movies-focus-loader-polish-v1';
 const MOVIES_FOCUS_STAGE3D_MARKER = 'stage3d-movies-detail-focus-lifecycle-v1';
+
+type MoviesTvEventPayload = {
+  eventType: string;
+};
+
+function noopUseMoviesTvEventHandler(_handler: (event: MoviesTvEventPayload) => void) {}
 
 console.info('[NovaCast Movies Diagnostics Build] ' + JSON.stringify({ version: 'movies-detail-focus-lifecycle-v1' }));
 
@@ -153,6 +199,12 @@ export function MoviesScreen() {
     reason: 'initial' | 'corrective';
   } | null>(null);
   const [focusSuppressionHeld, setFocusSuppressionHeld] = useState(false);
+  const [postRestoreLatch, setPostRestoreLatch] = useState<MoviesPostRestoreLatch | null>(null);
+  const postRestoreLatchRef = useRef<MoviesPostRestoreLatch | null>(null);
+  const postRestoreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const actualFocusedComponentRef = useRef<string | null>(null);
+  const restoreTimingRef = useRef<MoviesRestoreTimingState | null>(null);
+  const [lockScrollForFocusRestore, setLockScrollForFocusRestore] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchOverlayReady, setSearchOverlayReady] = useState(false);
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
@@ -192,6 +244,8 @@ export function MoviesScreen() {
     setSort,
     categoryHasRatings,
     getFocusedMovieId,
+    getListOffset,
+    firstPageLoadGate,
   } = useMoviesScreenModel(undefined, {
     initialSelectedCategoryId: moviesMemory.selectedCategoryId,
     initialFocusedMovieId: moviesMemory.focusedMovieId,
@@ -213,15 +267,27 @@ export function MoviesScreen() {
     detailOverlayVisible ||
     detailSuppressedForPlayback ||
     restoringBrowseFocus;
-  const navbarFocusSuppressed =
-    shouldSuppressMoviesNavbarFocus(detailFocusPhase) || focusSuppressionActive;
-  const categoryFocusSuppressed =
-    shouldSuppressMoviesCategoryFocus(detailFocusPhase) || focusSuppressionActive;
-  const searchFocusSuppressed = shouldSuppressMoviesSearchFocus(detailFocusPhase) || focusSuppressionActive;
+  const postRestoreActive = isMoviesPostRestoreLatchActive(postRestoreLatch);
+  // Preferred-focus gates (Stage 3D.2): independent of native focusability.
+  const navbarPreferredSuppressed =
+    shouldSuppressMoviesNavbarFocus(detailFocusPhase) || focusSuppressionActive || postRestoreActive;
+  const categoryPreferredSuppressed =
+    shouldSuppressMoviesCategoryFocus(detailFocusPhase) || focusSuppressionActive || postRestoreActive;
+  // Stage 3D.3: chrome may be focusable after latch release only — not during postRestoreActive.
+  const chromeFocusable =
+    areMoviesChromeNormallyFocusable(detailFocusPhase) &&
+    !detailOpen &&
+    !playbackUiActive &&
+    !postRestoreActive;
   const activeClosingFocusMovieId = resolveMoviesClosingFocusableMovieId({
     phase: detailFocusPhase,
     targetMovieId: closingFocusMovieId,
   });
+  const postRestorePreferredMovieId = postRestoreActive ? postRestoreLatch!.restoredMovieId : null;
+  const pinnedHighlightMovieId =
+    postRestorePreferredMovieId ??
+    activeClosingFocusMovieId ??
+    (detailClosing ? closingFocusMovieId : null);
   const activeSnapshot = detailFocusTokenRef.current?.snapshot ?? browseFocusSnapshotRef.current;
   const snapshotTargetWasVisible = activeSnapshot
     ? wasMoviesSnapshotTargetVisible(activeSnapshot)
@@ -232,19 +298,86 @@ export function MoviesScreen() {
     setDetailFocusPhase(phase);
   }, []);
 
+  const releasePostRestoreLatch = useCallback((reason: MoviesPostRestoreReleaseReason) => {
+    const latch = postRestoreLatchRef.current;
+    if (!latch?.postRestoreActive) {
+      return;
+    }
+    if (postRestoreTimeoutRef.current) {
+      clearTimeout(postRestoreTimeoutRef.current);
+      postRestoreTimeoutRef.current = null;
+    }
+    const released: MoviesPostRestoreLatch = { ...latch, postRestoreActive: false };
+    postRestoreLatchRef.current = released;
+    setPostRestoreLatch(released);
+    logMoviesPostRestoreFocus({
+      token: latch.token,
+      restoredMovieId: latch.restoredMovieId,
+      phase: detailFocusPhaseRef.current,
+      postRestoreActive: false,
+      searchPreferred: false,
+      navbarPreferred: false,
+      categoryPreferred: false,
+      firstPosterPreferred: false,
+      actualFocusedComponent: actualFocusedComponentRef.current,
+      releaseReason: reason,
+    });
+  }, []);
+
+  const activatePostRestoreLatch = useCallback(
+    (token: string | null, movieId: string) => {
+      if (postRestoreTimeoutRef.current) {
+        clearTimeout(postRestoreTimeoutRef.current);
+        postRestoreTimeoutRef.current = null;
+      }
+      const latch = createMoviesPostRestoreLatch({ token, restoredMovieId: movieId });
+      postRestoreLatchRef.current = latch;
+      setPostRestoreLatch(latch);
+      actualFocusedComponentRef.current = 'MoviePosterCard';
+      logMoviesPostRestoreFocus({
+        token: latch.token,
+        restoredMovieId: latch.restoredMovieId,
+        phase: 'browse-restored',
+        postRestoreActive: true,
+        searchPreferred: false,
+        navbarPreferred: false,
+        categoryPreferred: false,
+        firstPosterPreferred: false,
+        actualFocusedComponent: 'MoviePosterCard',
+        releaseReason: null,
+      });
+      console.info(
+        '[NovaCast Movies Post Restore Latch] ' +
+          JSON.stringify({
+            marker: MOVIES_FOCUS_STAGE3D2_MARKER,
+            token: latch.token,
+            restoredMovieId: latch.restoredMovieId,
+            latchMs: MOVIES_POST_RESTORE_LATCH_MS,
+          }),
+      );
+      postRestoreTimeoutRef.current = setTimeout(() => {
+        postRestoreTimeoutRef.current = null;
+        releasePostRestoreLatch('timeout');
+      }, MOVIES_POST_RESTORE_LATCH_MS);
+    },
+    [releasePostRestoreLatch],
+  );
+
   const releaseFocusSuppressionAfterStabilize = useCallback((token: string | null) => {
     if (suppressionReleaseTimerRef.current) {
       clearTimeout(suppressionReleaseTimerRef.current);
       suppressionReleaseTimerRef.current = null;
     }
     setFocusSuppressionHeld(true);
+    const latchActive = isMoviesPostRestoreLatchActive(postRestoreLatchRef.current);
+    // Stage 3D.3: Search/navbar/category stay non-focusable while latch owns focus.
     logMoviesFocusSuppression({
       token,
       phase: 'browse-restored',
-      searchPreferredAllowed: false,
-      navbarPreferredAllowed: false,
-      categoryPreferredAllowed: false,
-      firstPosterPreferredAllowed: false,
+      searchAllowed: !latchActive,
+      navbarAllowed: !latchActive,
+      categoryAllowed: !latchActive,
+      firstPosterAllowed: false,
     });
     requestAnimationFrame(() => {
       suppressionReleaseTimerRef.current = setTimeout(() => {
@@ -254,14 +387,29 @@ export function MoviesScreen() {
         restoreScrollBlockedRef.current = false;
         scrollIssuedTokenRef.current = null;
         setViewportRestoreCommand(null);
+        const latchStillActive = isMoviesPostRestoreLatchActive(postRestoreLatchRef.current);
         logMoviesFocusSuppression({
           token,
           phase: 'browse',
-          searchPreferredAllowed: true,
-          navbarPreferredAllowed: true,
-          categoryPreferredAllowed: true,
-          firstPosterPreferredAllowed: true,
+          searchAllowed: !latchStillActive,
+          navbarAllowed: !latchStillActive,
+          categoryAllowed: !latchStillActive,
+          firstPosterAllowed: !latchStillActive,
         });
+        if (latchStillActive) {
+          logMoviesPostRestoreFocus({
+            token: postRestoreLatchRef.current?.token ?? token,
+            restoredMovieId: postRestoreLatchRef.current?.restoredMovieId ?? null,
+            phase: 'browse',
+            postRestoreActive: true,
+            searchPreferred: false,
+            navbarPreferred: false,
+            categoryPreferred: false,
+            firstPosterPreferred: false,
+            actualFocusedComponent: actualFocusedComponentRef.current,
+            releaseReason: null,
+          });
+        }
       }, MOVIES_FOCUS_SUPPRESSION_RELEASE_MS);
     });
   }, [setDetailFocusPhaseSafe]);
@@ -273,6 +421,50 @@ export function MoviesScreen() {
 
   useEffect(() => {
     tvPerfSetScreen('movies');
+  }, []);
+
+  // Stage 3D.2: directional input releases preferred ownership (not focusability).
+  const reactNativeTv = ReactNative as typeof ReactNative & {
+    useTVEventHandler?: (handler: (event: MoviesTvEventPayload) => void) => void;
+  };
+  const useTVEventHandler = reactNativeTv.useTVEventHandler ?? noopUseMoviesTvEventHandler;
+  useTVEventHandler((event: MoviesTvEventPayload) => {
+    if (!postRestoreLatchRef.current?.postRestoreActive) {
+      return;
+    }
+    const eventType = event.eventType;
+    if (eventType === 'up' || eventType === 'down' || eventType === 'left' || eventType === 'right') {
+      releasePostRestoreLatch('dpad-input');
+    }
+  });
+
+  useEffect(() => {
+    return () => {
+      if (suppressionReleaseTimerRef.current) {
+        clearTimeout(suppressionReleaseTimerRef.current);
+        suppressionReleaseTimerRef.current = null;
+      }
+      if (postRestoreTimeoutRef.current) {
+        clearTimeout(postRestoreTimeoutRef.current);
+        postRestoreTimeoutRef.current = null;
+      }
+      const latch = postRestoreLatchRef.current;
+      if (latch?.postRestoreActive) {
+        postRestoreLatchRef.current = { ...latch, postRestoreActive: false };
+        logMoviesPostRestoreFocus({
+          token: latch.token,
+          restoredMovieId: latch.restoredMovieId,
+          phase: detailFocusPhaseRef.current,
+          postRestoreActive: false,
+          searchPreferred: false,
+          navbarPreferred: false,
+          categoryPreferred: false,
+          firstPosterPreferred: false,
+          actualFocusedComponent: actualFocusedComponentRef.current,
+          releaseReason: 'unmount',
+        });
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -331,6 +523,7 @@ export function MoviesScreen() {
 
       // Do not complete on focus alone — native TV auto-scroll may have drifted.
       if (targetFocusConfirmedRef.current && !viewportStable) {
+        const rowDrift = isMoviesNativeFocusRowAlignmentDrift({ offsetDelta });
         logMoviesViewportLock({
           token: token.token,
           phase: detailFocusPhaseRef.current,
@@ -339,23 +532,41 @@ export function MoviesScreen() {
           snapshotOffset: snapshot.verticalOffset,
           currentOffset,
           offsetDelta,
+          targetRelativeRow: snapshot.targetRelativeRow,
           snapshotTargetWasVisible: snapshotWasVisible,
-          viewportRestoreIssued: viewportRestoreCountRef.current > 0,
-          correctiveRestoreIssued: viewportRestoreCountRef.current > 1,
+          initialRestoreIssued: viewportRestoreCountRef.current >= 1,
+          correctiveRestoreIssued: viewportRestoreCountRef.current >= 2,
+          focusRequestCount: focusRequestCountRef.current,
           targetFocusConfirmed: true,
+          highlightVisible,
           viewportStable: false,
           overlayMounted: true,
         });
         if (viewportRestoreCountRef.current < MOVIES_MAX_VIEWPORT_RESTORES) {
           viewportRestoreCountRef.current += 1;
+          if (restoreTimingRef.current) {
+            restoreTimingRef.current.correctiveScrollUsed = true;
+          }
+          setLockScrollForFocusRestore(true);
           setViewportRestoreCommand({
             token: `${token.token}:corrective`,
             offset: snapshot.verticalOffset,
             reason: 'corrective',
           });
-          // Allow one final focus request after corrective scroll settles.
-          if (focusRequestCountRef.current < MOVIES_MAX_FOCUS_REQUESTS) {
+          // Stage 3D.3: keep highlight via pinned chrome; do not re-request poster focus.
+          if (shouldReRequestMoviesPosterFocusAfterCorrective({ targetFocusConfirmed: true })) {
             focusIssuedTokenRef.current = null;
+          }
+          if (rowDrift) {
+            console.info(
+              '[NovaCast Movies Viewport Lock] ' +
+                JSON.stringify({
+                  token: token.token,
+                  phase: detailFocusPhaseRef.current,
+                  note: 'native-focus-row-alignment-corrective',
+                  offsetDelta,
+                }),
+            );
           }
           setRestorationRetry((value) => value + 1);
         }
@@ -399,10 +610,13 @@ export function MoviesScreen() {
         snapshotOffset: snapshot.verticalOffset,
         currentOffset,
         offsetDelta,
+        targetRelativeRow: snapshot.targetRelativeRow,
         snapshotTargetWasVisible: snapshotWasVisible,
-        viewportRestoreIssued: viewportRestoreCountRef.current > 0,
-        correctiveRestoreIssued: viewportRestoreCountRef.current > 1,
+        initialRestoreIssued: viewportRestoreCountRef.current >= 1,
+        correctiveRestoreIssued: viewportRestoreCountRef.current >= 2,
+        focusRequestCount: focusRequestCountRef.current,
         targetFocusConfirmed: targetFocusConfirmedRef.current,
+        highlightVisible,
         viewportStable,
         overlayMounted: true,
       });
@@ -417,16 +631,18 @@ export function MoviesScreen() {
       }
 
       restoreScrollBlockedRef.current = true;
+      setLockScrollForFocusRestore(false);
       setDetailFocusPhaseSafe('closing-confirm');
       detailFocusTokenRef.current = null;
       focusIssuedTokenRef.current = null;
       isRestoringPlaybackFocusRef.current = false;
       setRestoringBrowseFocus(false);
-      // Keep closingFocusMovieId until browse so highlight stays on target.
+      // Keep closingFocusMovieId until latch owns preferred/highlight pin.
       browseFocusSnapshotRef.current = createMoviesBrowseFocusSnapshot({
         ...snapshot,
         movieId,
         movieIndex,
+        columns: getSeriesPosterColumns(width),
       });
 
       // Hide overlay only after focus + viewport both confirm.
@@ -435,6 +651,23 @@ export function MoviesScreen() {
       setDetailSuppressedForPlayback(false);
       setDetailFocusPhaseSafe('browse-restored');
       setViewportRestoreCommand(null);
+      const overlayRemovedAt = Date.now();
+      if (restoreTimingRef.current && restoreTimingRef.current.token === token.token) {
+        restoreTimingRef.current.overlayRemovedAt = overlayRemovedAt;
+        if (restoreTimingRef.current.focusConfirmedAt == null) {
+          restoreTimingRef.current.focusConfirmedAt = overlayRemovedAt;
+        }
+        logMoviesRestoreTiming({
+          token: token.token,
+          startedAt: restoreTimingRef.current.startedAt,
+          viewportConfirmedAt: restoreTimingRef.current.viewportConfirmedAt,
+          focusConfirmedAt: restoreTimingRef.current.focusConfirmedAt,
+          overlayRemovedAt,
+          totalMs: overlayRemovedAt - restoreTimingRef.current.startedAt,
+          correctiveScrollUsed: restoreTimingRef.current.correctiveScrollUsed,
+          searchFocusAttempted: restoreTimingRef.current.searchFocusAttempted,
+        });
+      }
       logMoviesDetailFocusLifecycle({
         token: token.token,
         phase: 'browse-restored',
@@ -448,14 +681,27 @@ export function MoviesScreen() {
         highlightVisible: true,
         overlayMounted: false,
       });
+      console.info(
+        '[NovaCast Movies Restore Polish] ' +
+          JSON.stringify({ marker: MOVIES_FOCUS_STAGE3D3_MARKER, token: token.token }),
+      );
+      // Stage 3D.2/3D.3: pin preferred ownership — do not re-request focus.
+      activatePostRestoreLatch(token.token, movieId);
       releaseFocusSuppressionAfterStabilize(token.token);
-      // Clear target-only focus gate after suppression path starts.
+      // Clear target-only focus gate after latch owns highlight pin.
       setTimeout(() => {
         setClosingFocusMovieId(null);
       }, MOVIES_FOCUS_SUPPRESSION_RELEASE_MS + 16);
       return true;
     },
-    [closingFocusMovieId, releaseFocusSuppressionAfterStabilize, setDetailFocusPhaseSafe, visibleMovies],
+    [
+      activatePostRestoreLatch,
+      closingFocusMovieId,
+      releaseFocusSuppressionAfterStabilize,
+      setDetailFocusPhaseSafe,
+      visibleMovies,
+      width,
+    ],
   );
 
   const handleFocusMovie = useCallback(
@@ -464,6 +710,7 @@ export function MoviesScreen() {
         return;
       }
       tvPerfSetFocus('MoviePosterCard', movie.id);
+      actualFocusedComponentRef.current = 'MoviePosterCard';
 
       const phase = detailFocusPhaseRef.current;
       if (isMoviesDetailClosingPhase(phase)) {
@@ -481,9 +728,17 @@ export function MoviesScreen() {
           setRestorationRetry((value) => value + 1);
           return;
         }
+        if (restoreTimingRef.current && restoreTimingRef.current.focusConfirmedAt == null) {
+          restoreTimingRef.current.focusConfirmedAt = Date.now();
+        }
         focusMovie(movie as Parameters<typeof focusMovie>[0]);
         completeDetailFocusRestore(movie.id, true);
         return;
+      }
+
+      const latch = postRestoreLatchRef.current;
+      if (latch?.postRestoreActive && movie.id !== latch.restoredMovieId) {
+        releasePostRestoreLatch('focus-left-poster');
       }
 
       if (!isMoviesBrowseSnapshotImmutable(phase)) {
@@ -494,11 +749,21 @@ export function MoviesScreen() {
           verticalOffset: viewportStateRef.current.offset,
           visibleFirstIndex: viewportStateRef.current.firstIndex,
           visibleLastIndex: viewportStateRef.current.lastIndex,
+          columns: getSeriesPosterColumns(width),
         });
       }
       focusMovie(movie as Parameters<typeof focusMovie>[0]);
     },
-    [closingFocusMovieId, completeDetailFocusRestore, focusMovie, playbackUiActive, selectedCategoryId, visibleMovies],
+    [
+      closingFocusMovieId,
+      completeDetailFocusRestore,
+      focusMovie,
+      playbackUiActive,
+      releasePostRestoreLatch,
+      selectedCategoryId,
+      visibleMovies,
+      width,
+    ],
   );
 
   const handleSelectMovie = useCallback(
@@ -528,6 +793,7 @@ export function MoviesScreen() {
         verticalOffset: viewportStateRef.current.offset,
         visibleFirstIndex: viewportStateRef.current.firstIndex,
         visibleLastIndex: viewportStateRef.current.lastIndex,
+        columns: getSeriesPosterColumns(width),
       });
       selectMovie(movie);
       detailOpenRef.current = true;
@@ -539,6 +805,7 @@ export function MoviesScreen() {
         }
       });
       setDetailSuppressedForPlayback(false);
+      releasePostRestoreLatch('screen-change');
       setDetailOpen(true);
       setDetailFocusPhaseSafe('detail-open');
       logMoviesDetailFocusLifecycle({
@@ -560,11 +827,13 @@ export function MoviesScreen() {
       launchingPlayback,
       loadMovieDetail,
       playbackUiActive,
+      releasePostRestoreLatch,
       selectMovie,
       selectedCategoryId,
       selectedMovie?.id,
       setDetailFocusPhaseSafe,
       visibleMovies,
+      width,
     ],
   );
 
@@ -573,33 +842,38 @@ export function MoviesScreen() {
       viewportStateRef.current = state;
       const phase = detailFocusPhaseRef.current;
       const token = detailFocusTokenRef.current;
-      if (
-        (phase === 'closing-viewport' || phase === 'closing-focus') &&
-        token &&
-        isMoviesViewportOffsetStable({
+      if ((phase === 'closing-viewport' || phase === 'closing-focus') && token) {
+        const stable = isMoviesViewportOffsetStable({
           currentOffset: state.offset,
           snapshotOffset: token.snapshot.verticalOffset,
           tolerancePx: MOVIES_VIEWPORT_OFFSET_TOLERANCE_PX,
-        })
-      ) {
-        // Kick the close driver to advance / re-focus once offset matches snapshot.
-        setRestorationRetry((value) => value + 1);
+        });
+        if (stable) {
+          // Kick the close driver to advance / re-confirm once offset matches snapshot.
+          setRestorationRetry((value) => value + 1);
+        } else if (phase === 'closing-focus' && targetFocusConfirmedRef.current) {
+          // Native focus auto-scroll drifted after poster focus — re-enter confirm/corrective.
+          setRestorationRetry((value) => value + 1);
+        }
       }
-      // Snapshot is immutable while detail is open or closing.
+      // Snapshot is immutable while detail is open or closing — never mutate it here.
       if (isMoviesBrowseSnapshotImmutable(phase)) {
         return;
       }
       const snapshot = browseFocusSnapshotRef.current;
       if (snapshot) {
-        browseFocusSnapshotRef.current = {
-          ...snapshot,
+        browseFocusSnapshotRef.current = createMoviesBrowseFocusSnapshot({
+          categoryId: snapshot.categoryId,
+          movieId: snapshot.movieId,
+          movieIndex: snapshot.movieIndex,
           verticalOffset: state.offset,
           visibleFirstIndex: state.firstIndex,
           visibleLastIndex: state.lastIndex,
-        };
+          columns: getSeriesPosterColumns(width),
+        });
       }
     },
-    [],
+    [width],
   );
 
   const handleRegisterPosterRef = useCallback((movieId: string, instance: ElementRef<typeof View> | null, instanceToken: string, renderedIndex: number) => {
@@ -792,6 +1066,8 @@ export function MoviesScreen() {
       focusRequestCountRef.current = 0;
       targetFocusConfirmedRef.current = false;
       viewportStableRef.current = false;
+      restoreTimingRef.current = createMoviesRestoreTiming(token);
+      setLockScrollForFocusRestore(false);
       setViewportRestoreCommand(null);
       setFocusSuppressionHeld(true);
       setClosingFocusMovieId(snapshot.movieId);
@@ -814,10 +1090,10 @@ export function MoviesScreen() {
       logMoviesFocusSuppression({
         token,
         phase: 'closing-prepare',
-        searchPreferredAllowed: false,
-        navbarPreferredAllowed: false,
-        categoryPreferredAllowed: false,
-        firstPosterPreferredAllowed: false,
+        searchAllowed: false,
+        navbarAllowed: false,
+        categoryAllowed: false,
+        firstPosterAllowed: false,
       });
       console.info('[NovaCast Movies Focus Handoff]', {
         marker: MOVIES_FOCUS_STAGE3D1_MARKER,
@@ -928,6 +1204,9 @@ export function MoviesScreen() {
     }
 
     if (phase === 'closing-viewport') {
+      // Always re-assert the saved offset (even when currently stable). Native
+      // TV focus may already have drifted, and same-offset scrollToOffset may
+      // not emit onScroll — so never transfer focus in the same turn.
       if (
         viewportRestoreCountRef.current === 0 &&
         !restoreScrollBlockedRef.current &&
@@ -948,20 +1227,77 @@ export function MoviesScreen() {
           snapshotOffset: snapshot.verticalOffset,
           currentOffset,
           offsetDelta,
+          targetRelativeRow: snapshot.targetRelativeRow,
           snapshotTargetWasVisible: snapshotWasVisible,
-          viewportRestoreIssued: true,
+          initialRestoreIssued: true,
           correctiveRestoreIssued: false,
+          focusRequestCount: focusRequestCountRef.current,
           targetFocusConfirmed: false,
+          highlightVisible: false,
           viewportStable,
           overlayMounted: true,
         });
+
+        // Double-rAF settle gate: if FlatList suppresses a no-op onScroll,
+        // still advance only after the restore command has been committed.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (detailFocusTokenRef.current?.token !== token.token) {
+              return;
+            }
+            if (detailFocusPhaseRef.current !== 'closing-viewport') {
+              return;
+            }
+            const settledOffset = viewportStateRef.current.offset;
+            const settled = isMoviesViewportOffsetStable({
+              currentOffset: settledOffset,
+              snapshotOffset: snapshot.verticalOffset,
+            });
+            if (!settled) {
+              // Wait for onScroll / corrective path to kick restorationRetry.
+              setRestorationRetry((value) => value + 1);
+              return;
+            }
+            viewportStableRef.current = true;
+            if (restoreTimingRef.current?.token === token.token) {
+              restoreTimingRef.current.viewportConfirmedAt = Date.now();
+            }
+            setDetailFocusPhaseSafe('closing-focus');
+            logMoviesViewportLock({
+              token: token.token,
+              phase: 'closing-focus',
+              targetMovieId,
+              targetIndex,
+              snapshotOffset: snapshot.verticalOffset,
+              currentOffset: settledOffset,
+              offsetDelta: settledOffset - snapshot.verticalOffset,
+              targetRelativeRow: snapshot.targetRelativeRow,
+              snapshotTargetWasVisible: snapshotWasVisible,
+              initialRestoreIssued: true,
+              correctiveRestoreIssued: false,
+              focusRequestCount: focusRequestCountRef.current,
+              targetFocusConfirmed: false,
+              highlightVisible: false,
+              viewportStable: true,
+              overlayMounted: true,
+            });
+          });
+        });
+        return;
       }
 
-      if (viewportStable) {
+      // Subsequent kicks (onScroll ack after restore / retry): advance only when stable.
+      if (viewportRestoreCountRef.current > 0 && viewportStable) {
         viewportStableRef.current = true;
         requestAnimationFrame(() => {
           if (detailFocusTokenRef.current?.token !== token.token) {
             return;
+          }
+          if (detailFocusPhaseRef.current !== 'closing-viewport') {
+            return;
+          }
+          if (restoreTimingRef.current?.token === token.token) {
+            restoreTimingRef.current.viewportConfirmedAt = Date.now();
           }
           setDetailFocusPhaseSafe('closing-focus');
           logMoviesViewportLock({
@@ -972,10 +1308,13 @@ export function MoviesScreen() {
             snapshotOffset: snapshot.verticalOffset,
             currentOffset: viewportStateRef.current.offset,
             offsetDelta: viewportStateRef.current.offset - snapshot.verticalOffset,
+            targetRelativeRow: snapshot.targetRelativeRow,
             snapshotTargetWasVisible: snapshotWasVisible,
-            viewportRestoreIssued: true,
-            correctiveRestoreIssued: false,
+            initialRestoreIssued: true,
+            correctiveRestoreIssued: viewportRestoreCountRef.current >= 2,
+            focusRequestCount: focusRequestCountRef.current,
             targetFocusConfirmed: false,
+            highlightVisible: false,
             viewportStable: true,
             overlayMounted: true,
           });
@@ -1009,9 +1348,13 @@ export function MoviesScreen() {
 
     focusIssuedTokenRef.current = token.token;
     focusRequestCountRef.current += 1;
-    InteractionManager.runAfterInteractions(() => {
+    // Stage 3D.3: lock scroll before focus to prevent native one-row auto-align.
+    setLockScrollForFocusRestore(true);
+
+    const issueFocusRequest = () => {
       if (detailFocusTokenRef.current?.token !== token.token) {
         focusIssuedTokenRef.current = null;
+        setLockScrollForFocusRestore(false);
         return;
       }
       requestTvFocus({
@@ -1023,7 +1366,9 @@ export function MoviesScreen() {
           token.source === 'detail-close'
             ? 'restore-exact-poster-after-detail-close'
             : 'restore-after-playback-exact-poster',
-        maxFrames: 30,
+        maxFrames: snapshotWasVisible
+          ? MOVIES_MOUNTED_FOCUS_MAX_FRAMES
+          : MOVIES_OFFSCREEN_FOCUS_MAX_FRAMES,
         isActive: () =>
           isMoviesDetailClosingPhase(detailFocusPhaseRef.current) &&
           detailFocusTokenRef.current?.token === token.token,
@@ -1047,11 +1392,19 @@ export function MoviesScreen() {
           });
           if (status === 'timeout') {
             focusIssuedTokenRef.current = null;
+            setLockScrollForFocusRestore(false);
             setTimeout(() => setRestorationRetry((value) => value + 1), 0);
           }
         },
       });
-    });
+    };
+
+    // Mounted targets: skip InteractionManager lag. Offscreen keeps settle wait.
+    if (snapshotWasVisible && targetInPage) {
+      issueFocusRequest();
+    } else {
+      InteractionManager.runAfterInteractions(issueFocusRequest);
+    }
   }, [
     closingFocusMovieId,
     completeDetailFocusRestore,
@@ -1421,6 +1774,11 @@ export function MoviesScreen() {
       return;
     }
 
+    // Stage 3D.2: do not compete with restored-poster ownership via first-poster request.
+    if (isMoviesPostRestoreLatchActive(postRestoreLatchRef.current)) {
+      return;
+    }
+
     if (categoryLoading || loadStatus === 'loading') {
       return;
     }
@@ -1434,7 +1792,11 @@ export function MoviesScreen() {
 
     let cancelled = false;
     const task = InteractionManager.runAfterInteractions(() => {
-      if (cancelled || categoryFocusPendingRef.current !== selectedCategoryId) {
+      if (
+        cancelled ||
+        categoryFocusPendingRef.current !== selectedCategoryId ||
+        isMoviesPostRestoreLatchActive(postRestoreLatchRef.current)
+      ) {
         return;
       }
 
@@ -1446,7 +1808,8 @@ export function MoviesScreen() {
         reason: 'focus-first-movies-after-category',
         isActive: () =>
           !cancelled &&
-          categoryFocusPendingRef.current === selectedCategoryId,
+          categoryFocusPendingRef.current === selectedCategoryId &&
+          !isMoviesPostRestoreLatchActive(postRestoreLatchRef.current),
         getTarget: () => getValidatedPosterTarget(targetId),
         onSettled: () => {
           if (cancelled) {
@@ -1538,22 +1901,158 @@ useEffect(() => {
       : !loading && visibleMovies.length === 0 && loadStatus === 'empty'
         ? 'No movies in this category.'
         : null;
-  const showMoviesVisualLoader =
-    (categories.length === 0 && loadStatus !== 'error') ||
-    (categoryLoading || loadStatus === 'loading');
+  const hasUsableItems = visibleMovies.length > 0;
+  const categoriesLoading = categories.length === 0 && loadStatus !== 'error';
+  const paginationLoading = loading && !categoryLoading;
+  const detailBlocksBrowse = detailOpen || detailClosing || detailOverlayVisible;
+  const gateVisible = isMoviesPrimaryLoaderGateVisible({
+    categoriesLoading,
+    loadingCategoryId: firstPageLoadGate.loadingCategoryId,
+    firstPageResolvedCategoryId: firstPageLoadGate.firstPageResolvedCategoryId,
+  });
+  const gatePrimaryMode: MoviesPrimaryLoaderMode = deriveMoviesPrimaryLoaderModeFromGate({
+    categoriesLoading,
+    loadingCategoryId: firstPageLoadGate.loadingCategoryId,
+    firstPageResolvedCategoryId: firstPageLoadGate.firstPageResolvedCategoryId,
+    hasUsableItems,
+  });
+  const [primaryHoldVisible, setPrimaryHoldVisible] = useState(false);
+  const primaryShownAtRef = useRef(0);
+  const primaryHideReasonRef = useRef<MoviesPrimaryLoaderHideReason>(null);
+  const primaryLoaderVisible = gateVisible || primaryHoldVisible;
+  const primaryLoaderMode: MoviesPrimaryLoaderMode = primaryLoaderVisible
+    ? gatePrimaryMode === 'hidden'
+      ? hasUsableItems
+        ? 'category-blocking'
+        : 'initial'
+      : gatePrimaryMode
+    : 'hidden';
+  const paginationLoaderMode: MoviesPaginationLoaderMode = deriveMoviesPaginationLoaderMode({
+    primaryVisible: primaryLoaderVisible,
+    paginationLoading,
+    hasUsableItems,
+    detailBlocksBrowse,
+  });
+  const paginationLoaderVisible = paginationLoaderMode === 'loading-more';
+  const primaryLoaderLabel = resolveMoviesPrimaryLoaderLabel({
+    primaryMode: primaryLoaderMode === 'hidden' && primaryLoaderVisible ? 'initial' : primaryLoaderMode,
+    categoryDisplayName: categories.length > 0 ? selectedCategoryLabel : null,
+    hasCategories: categories.length > 0,
+  });
+  const firstPageReady =
+    firstPageLoadGate.loadingCategoryId != null &&
+    firstPageLoadGate.firstPageResolvedCategoryId === firstPageLoadGate.loadingCategoryId;
+  const primaryDiagRef = useRef<string | null>(null);
+  const paginationDiagRef = useRef<string | null>(null);
+
+  // Stage 3E.2: keep primary loader up through first-page readiness + min duration.
+  useEffect(() => {
+    if (gateVisible) {
+      if (!primaryHoldVisible) {
+        primaryShownAtRef.current = Date.now();
+        primaryHideReasonRef.current = null;
+        setPrimaryHoldVisible(true);
+      }
+      return;
+    }
+
+    if (!primaryHoldVisible) {
+      return;
+    }
+
+    const elapsed = Date.now() - primaryShownAtRef.current;
+    const remaining = MOVIES_PRIMARY_LOADER_MIN_MS - elapsed;
+    if (remaining <= 0) {
+      primaryHideReasonRef.current = firstPageReady ? 'first-page-ready' : 'minimum-duration';
+      setPrimaryHoldVisible(false);
+      return;
+    }
+
+    primaryHideReasonRef.current = null;
+    const timer = setTimeout(() => {
+      primaryHideReasonRef.current = firstPageReady ? 'minimum-duration' : 'minimum-duration';
+      setPrimaryHoldVisible(false);
+    }, remaining);
+    return () => clearTimeout(timer);
+  }, [firstPageReady, gateVisible, primaryHoldVisible]);
 
   useEffect(() => {
-    console.info('[NovaCast Movies Visual Loader]', {
-      visible: showMoviesVisualLoader,
-      reason: categories.length === 0 ? 'initial-category-load' : 'category-first-page-load',
-      categoryId: selectedCategoryId,
-      firstPageLoading: categoryLoading || loadStatus === 'loading',
-      hasUsableItems: visibleMovies.length > 0,
+    const diagKey = JSON.stringify({
+      mode: primaryLoaderMode,
+      visible: primaryLoaderVisible,
+      loadingCategoryId: firstPageLoadGate.loadingCategoryId,
+      requestToken: firstPageLoadGate.loadingRequestToken,
+      firstPageReady,
+      hasUsableItems,
+      minimumDurationMet: !primaryHoldVisible || Date.now() - primaryShownAtRef.current >= MOVIES_PRIMARY_LOADER_MIN_MS,
+      hideReason: primaryLoaderVisible ? null : primaryHideReasonRef.current,
     });
-  }, [categories.length, categoryLoading, loadStatus, selectedCategoryId, showMoviesVisualLoader, visibleMovies.length]);
+    if (primaryDiagRef.current === diagKey) {
+      return;
+    }
+    primaryDiagRef.current = diagKey;
+    logMoviesPrimaryLoader({
+      mode: primaryLoaderMode,
+      selectedCategoryId,
+      selectedCategoryName: categories.length > 0 ? selectedCategoryLabel : null,
+      loadingCategoryId: firstPageLoadGate.loadingCategoryId,
+      requestToken: firstPageLoadGate.loadingRequestToken,
+      firstPageReady,
+      minimumDurationMet:
+        !primaryHoldVisible || Date.now() - primaryShownAtRef.current >= MOVIES_PRIMARY_LOADER_MIN_MS,
+      visible: primaryLoaderVisible,
+      hideReason: primaryLoaderVisible ? null : primaryHideReasonRef.current,
+      hasUsableItems,
+    });
+  }, [
+    categories.length,
+    firstPageLoadGate.loadingCategoryId,
+    firstPageLoadGate.loadingRequestToken,
+    firstPageReady,
+    hasUsableItems,
+    primaryHoldVisible,
+    primaryLoaderMode,
+    primaryLoaderVisible,
+    selectedCategoryId,
+    selectedCategoryLabel,
+  ]);
 
   useEffect(() => {
-    if (categoryLoading || loadStatus === 'loading') {
+    const diagKey = JSON.stringify({
+      mode: paginationLoaderMode,
+      visible: paginationLoaderVisible,
+      categoryId: selectedCategoryId,
+      currentItemCount: visibleMovies.length,
+      requestPending: paginationLoading,
+      hasNextPage: hasMore,
+      primaryLoaderVisible,
+    });
+    if (paginationDiagRef.current === diagKey) {
+      return;
+    }
+    paginationDiagRef.current = diagKey;
+    logMoviesPaginationLoader({
+      mode: paginationLoaderMode,
+      visible: paginationLoaderVisible,
+      categoryId: selectedCategoryId,
+      currentItemCount: visibleMovies.length,
+      requestPending: paginationLoading,
+      hasNextPage: hasMore,
+      primaryLoaderVisible,
+      placement: 'list-stage-bottom-center-overlay',
+    });
+  }, [
+    hasMore,
+    paginationLoaderMode,
+    paginationLoaderVisible,
+    paginationLoading,
+    primaryLoaderVisible,
+    selectedCategoryId,
+    visibleMovies.length,
+  ]);
+
+  useEffect(() => {
+    if (primaryLoaderMode === 'initial') {
       recordFocusAudit({
         component: 'MoviesScreen.loader-anchor',
         action: 'hasTVPreferredFocus',
@@ -1563,7 +2062,7 @@ useEffect(() => {
         },
       });
     }
-  }, [categoryLoading, loadStatus, restoringBrowseFocus, selectedCategoryId]);
+  }, [primaryLoaderMode, restoringBrowseFocus, selectedCategoryId]);
 
   if (!hasDataSource) {
     return (
@@ -1603,6 +2102,35 @@ useEffect(() => {
     areMoviesPostersNormallyFocusable(detailFocusPhase) && !playbackUiActive && !searchBlocksBrowse;
   const restoreToken = detailFocusTokenRef.current;
 
+  // Stage 3E.3: single primary/pagination loader trees (absolute overlays inside listStage).
+  const primaryLoaderNode = primaryLoaderVisible ? (
+    <View
+      style={styles.primaryLoaderOverlay}
+      pointerEvents="none"
+      accessible={false}
+      focusable={false}>
+      {primaryLoaderMode === 'category-blocking' ? <View style={styles.primaryLoaderDim} /> : null}
+      <View style={styles.primaryLoaderContent}>
+        <Text style={styles.primaryLoaderLabel} numberOfLines={1}>
+          {primaryLoaderLabel}
+        </Text>
+        <NovaSpaceLoader label={primaryLoaderLabel} variant="hero" />
+      </View>
+    </View>
+  ) : null;
+
+  const paginationLoaderNode = paginationLoaderVisible ? (
+    <View
+      style={styles.paginationLoaderBar}
+      pointerEvents="none"
+      accessible={false}
+      focusable={false}>
+      <BlurView intensity={10} tint="dark" style={styles.paginationLoaderPill}>
+        <NovaSpaceLoader label={MOVIES_PAGINATION_LOADER_LABEL} variant="inline" />
+      </BlurView>
+    </View>
+  ) : null;
+
   return (
     <View style={styles.root}>
       <>
@@ -1632,11 +2160,12 @@ useEffect(() => {
           playbackUiActive,
           detailOverlayVisible: detailOverlayVisible || detailClosing || focusSuppressionActive,
           searchBlocksBrowse,
-          restoringBrowseFocus: restoringBrowseFocus || detailClosing || focusSuppressionActive,
+          restoringBrowseFocus:
+            restoringBrowseFocus || detailClosing || focusSuppressionActive || postRestoreActive,
           gridEmpty: visibleMovies.length === 0,
         })}
-        suppressNavbarPreferredFocus={navbarFocusSuppressed}
-        navigationFocusable={!focusSuppressionActive && !detailOpen}
+        suppressNavbarPreferredFocus={navbarPreferredSuppressed}
+        navigationFocusable={chromeFocusable && !searchBlocksBrowse}
         compactNavigationRail>
         <View style={styles.screen}>
           <View style={styles.topBar}>
@@ -1645,9 +2174,32 @@ useEffect(() => {
               <Text style={styles.copy}>Thousands of movies. Any genre. Anytime.</Text>
             </View>
             <MovieToolbar
-              focusable={!searchFocusSuppressed}
+              focusable={chromeFocusable && !searchBlocksBrowse}
+              hasTVPreferredFocus={false}
+              onSearchFocus={() => {
+                actualFocusedComponentRef.current = 'MovieToolbar.Search';
+                if (restoreTimingRef.current) {
+                  restoreTimingRef.current.searchFocusAttempted = true;
+                }
+                if (!postRestoreLatchRef.current?.postRestoreActive) {
+                  return;
+                }
+                // Should not happen while focusable={false}; log if native still delivers focus.
+                logMoviesSearchFocusBlocked({
+                  token: postRestoreLatchRef.current.token,
+                  reason: 'post-restore-latch-focusable-false-bypass',
+                  source: 'MovieToolbar.onFocus',
+                });
+              }}
               onSearchPress={() => {
-                if (searchFocusSuppressed) {
+                if (!chromeFocusable || searchBlocksBrowse) {
+                  if (postRestoreActive) {
+                    logMoviesSearchFocusBlocked({
+                      token: postRestoreLatchRef.current?.token ?? null,
+                      reason: 'post-restore-latch-not-focusable',
+                      source: 'MovieToolbar.onSearchPress',
+                    });
+                  }
                   return;
                 }
                 logMoviesPlayback('search-open', {});
@@ -1666,8 +2218,8 @@ useEffect(() => {
               categories={categories}
               selectedCategoryId={selectedCategoryId}
               preferredCategoryId={moviesMemory.selectedCategoryId}
-              suppressPreferredFocus={categoryFocusSuppressed}
-              focusable={!focusSuppressionActive && !detailOpen}
+              suppressPreferredFocus={categoryPreferredSuppressed}
+              focusable={chromeFocusable && !searchBlocksBrowse}
               discoverStatusMessage={discoverStatusMessage}
               onSelectCategory={handleSelectCategory}
               onPrefetchCategoryCount={prefetchCategoryCount}
@@ -1685,66 +2237,86 @@ useEffect(() => {
             />
 
             <View style={styles.middleColumn}>
-              {categories.length === 0 && loadStatus !== 'error' ? (
-                <View style={styles.initialLoadingPanel}>
-                  <NovaSpaceLoader label="Loading movie categories…" />
-                </View>
-              ) : (categoryLoading || loadStatus === 'loading') && visibleMovies.length === 0 ? (
-                <View style={styles.initialLoadingPanel}>
-                  <Pressable
-                    focusable
-                    hasTVPreferredFocus={
-                      !focusSuppressionActive &&
-                      !detailClosing &&
-                      !detailOpen &&
-                      Boolean(restoringBrowseFocus && categoryFocusPendingRef.current === selectedCategoryId)
+              {/* Stage 3B.2 focus anchor — separate from Stage 3E/3E.1 visual loaders. */}
+              {primaryLoaderMode === 'initial' ? (
+                <Pressable
+                  focusable
+                  hasTVPreferredFocus={
+                    !focusSuppressionActive &&
+                    !detailClosing &&
+                    !detailOpen &&
+                    !postRestoreActive &&
+                    Boolean(restoringBrowseFocus && categoryFocusPendingRef.current === selectedCategoryId)
+                  }
+                  accessibilityRole="none"
+                  accessibilityLabel="Movies loading"
+                  onPress={() => undefined}
+                  style={styles.loadingFocusAnchor}
+                />
+              ) : null}
+
+              {categories.length > 0 ? (
+                <View
+                  style={[
+                    styles.gridStage,
+                    primaryLoaderMode === 'category-blocking' && styles.gridStageDimmed,
+                  ]}
+                  pointerEvents={primaryLoaderMode === 'category-blocking' ? 'none' : 'auto'}>
+                  <MoviePosterGrid
+                    movies={visibleMovies}
+                    selectedCategoryLabel={selectedCategoryLabel}
+                    selectedCategoryId={selectedCategoryId}
+                    columns={posterColumns}
+                    hasMore={hasMore}
+                    loading={loading}
+                    emptyNotice={gridEmptyNotice}
+                    selectedMovieId={selectedMovie?.id ?? null}
+                    suppressPreferredFocus={
+                      focusSuppressionActive ||
+                      detailClosing ||
+                      Boolean(restoreToken) ||
+                      postRestoreActive ||
+                      primaryLoaderMode === 'category-blocking'
                     }
-                    accessibilityRole="none"
-                    accessibilityLabel="Movies loading"
-                    onPress={() => undefined}
-                    style={styles.loadingFocusAnchor}
+                    postersFocusable={postersFocusable && primaryLoaderMode !== 'category-blocking'}
+                    closingFocusMovieId={activeClosingFocusMovieId}
+                    postRestorePreferredMovieId={postRestorePreferredMovieId}
+                    pinnedHighlightMovieId={pinnedHighlightMovieId}
+                    lockScrollForFocusRestore={lockScrollForFocusRestore}
+                    snapshotTargetWasVisible={snapshotTargetWasVisible}
+                    viewportRestoreCommand={viewportRestoreCommand}
+                    onFocusMovie={handleFocusMovie}
+                    onSelectMovie={handleSelectMovie}
+                    registerPosterRef={handleRegisterPosterRef}
+                    sortOption={sortOption}
+                    onSortChange={setSort}
+                    showRatingSort={categoryHasRatings}
+                    isDiscover={isDiscoverCategory}
+                    sortFocusLeftHandle={categoryFocusLeftHandle}
+                    onSortFocusHandleReady={setSortFocusRightHandle}
+                    loadMore={handleLoadMore}
+                    restoreMovieId={restoreToken?.snapshot.movieId ?? null}
+                    restoreMovieIndex={restoreToken?.snapshot.movieIndex ?? null}
+                    restoreScrollOffset={restoreToken?.snapshot.verticalOffset ?? null}
+                    restoreVisibleFirstIndex={restoreToken?.snapshot.visibleFirstIndex ?? null}
+                    restoreVisibleLastIndex={restoreToken?.snapshot.visibleLastIndex ?? null}
+                    restorationToken={restoreToken?.token ?? null}
+                    restoreScrollBlocked={
+                      restoreScrollBlockedRef.current ||
+                      detailFocusPhase === 'browse-restored' ||
+                      detailFocusPhase === 'browse'
+                    }
+                    onViewportChange={handleViewportChange}
+                    listOverlays={
+                      <>
+                        {primaryLoaderNode}
+                        {paginationLoaderNode}
+                      </>
+                    }
                   />
-                  <NovaSpaceLoader label="Loading movies…" />
                 </View>
               ) : (
-              <MoviePosterGrid
-                movies={visibleMovies}
-                selectedCategoryLabel={selectedCategoryLabel}
-                selectedCategoryId={selectedCategoryId}
-                columns={posterColumns}
-                hasMore={hasMore}
-                loading={loading}
-                categoryLoading={categoryLoading || loadStatus === 'loading'}
-                emptyNotice={gridEmptyNotice}
-                selectedMovieId={selectedMovie?.id ?? null}
-                suppressPreferredFocus={focusSuppressionActive || detailClosing || Boolean(restoreToken)}
-                postersFocusable={postersFocusable}
-                closingFocusMovieId={activeClosingFocusMovieId}
-                snapshotTargetWasVisible={snapshotTargetWasVisible}
-                viewportRestoreCommand={viewportRestoreCommand}
-                onFocusMovie={handleFocusMovie}
-                onSelectMovie={handleSelectMovie}
-                registerPosterRef={handleRegisterPosterRef}
-                sortOption={sortOption}
-                onSortChange={setSort}
-                showRatingSort={categoryHasRatings}
-                isDiscover={isDiscoverCategory}
-                sortFocusLeftHandle={categoryFocusLeftHandle}
-                onSortFocusHandleReady={setSortFocusRightHandle}
-                loadMore={handleLoadMore}
-                restoreMovieId={restoreToken?.snapshot.movieId ?? null}
-                restoreMovieIndex={restoreToken?.snapshot.movieIndex ?? null}
-                restoreScrollOffset={restoreToken?.snapshot.verticalOffset ?? null}
-                restoreVisibleFirstIndex={restoreToken?.snapshot.visibleFirstIndex ?? null}
-                restoreVisibleLastIndex={restoreToken?.snapshot.visibleLastIndex ?? null}
-                restorationToken={restoreToken?.token ?? null}
-                restoreScrollBlocked={
-                  restoreScrollBlockedRef.current ||
-                  detailFocusPhase === 'browse-restored' ||
-                  detailFocusPhase === 'browse'
-                }
-                onViewportChange={handleViewportChange}
-              />
+                <View style={styles.gridStage}>{primaryLoaderNode}</View>
               )}
             </View>
 
@@ -1871,19 +2443,84 @@ function createMoviesStyles(theme: NovaTheme) {
     middleColumn: {
       flex: 1,
       minWidth: 0,
+      position: 'relative',
+      minHeight: 280,
     },
-    initialLoadingPanel: {
+    gridStage: {
       flex: 1,
       minHeight: 280,
+      backgroundColor: 'transparent',
+    },
+    gridStageDimmed: {
+      opacity: 0.42,
+    },
+    // Stage 3E.3: fill MoviePosterGrid listStage viewport only (not full TV shell).
+    primaryLoaderOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      alignItems: 'center',
+      justifyContent: 'flex-start',
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      zIndex: 3,
+    },
+    primaryLoaderDim: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0, 0, 0, 0.28)',
+    },
+    primaryLoaderContent: {
+      position: 'absolute',
+      // ~42% down the poster list viewport; nudge up by half stack height.
+      top: '42%',
+      left: 12,
+      right: 12,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingBottom: 48,
+      gap: 24,
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      transform: [{ translateY: -52 }],
+    },
+    primaryLoaderLabel: {
+      color: theme.colors.textPrimary,
+      fontSize: 22,
+      fontWeight: '800',
+      letterSpacing: 0.2,
+      textAlign: 'center',
+      backgroundColor: 'transparent',
+      zIndex: 1,
+      textShadowColor: 'rgba(0, 0, 0, 0.65)',
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 5,
+    },
+    paginationLoaderBar: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      zIndex: 3,
+    },
+    paginationLoaderPill: {
+      overflow: 'hidden',
+      flexDirection: 'row',
+      alignItems: 'center',
+      minHeight: 44,
+      paddingHorizontal: 18,
+      paddingVertical: 9,
+      borderRadius: 22,
+      backgroundColor: 'rgba(4, 10, 24, 0.7)',
+      borderWidth: 1,
+      borderColor: 'rgba(95, 149, 216, 0.35)',
     },
     loadingFocusAnchor: {
       position: 'absolute',
       width: 2,
       height: 2,
       opacity: 0.01,
+      zIndex: 2,
     },
     emptyState: {
       flex: 1,

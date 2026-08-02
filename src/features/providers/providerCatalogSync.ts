@@ -98,12 +98,25 @@ import {
   nativeRecordToSeriesSummary,
   streamXtreamCategoryDecode,
 } from '../catalog/nativeCatalogDecode.ts';
+import {
+  getCatalogCategoryCounts,
+  getCatalogTotalCount,
+  resolveReadableCatalogGeneration,
+} from '../catalog/catalogRepository.ts';
+import {
+  createVodCategoryProbeAccumulator,
+  evaluateVodCategoryFilterCapability,
+  normalizeStreamCategoryId,
+  readVodCategoryFilterCapability,
+  writeVodCategoryFilterCapability,
+  type VodCategoryProbeSample,
+} from '../catalog/vodCategoryFilterCapability.ts';
 import type { MovieSummary } from '../movies/movieTypes.ts';
 import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 
 const PERF_LOG_PREFIX = '[NovaCast CatalogSync]';
 const CATALOG_SYNC_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const CATALOG_SYNC_CHECKPOINT_VERSION = 10;
+const CATALOG_SYNC_CHECKPOINT_VERSION = 14; // Stage 3C.2: SQLite Movies item sync independent of smart categories
 const CATALOG_SYNC_CHECKPOINT_PREFIX = '@novacast/catalog-sync-checkpoint/';
 const syncInFlight = new Map<string, Promise<void>>();
 
@@ -1227,185 +1240,457 @@ export async function runMovieCatalogSync(
       setup.resumeSeriesIndex,
     );
 
-    for (
-      let movieCategoryIndex = setup.resumeMovieIndex;
-      movieCategoryIndex < movieCategories.length;
-      movieCategoryIndex += 1
-    ) {
-      const category = movieCategories[movieCategoryIndex];
-      if (!(await yieldForPlaybackIfNeeded(providerId, `movie-category:${category.id}`, 'movies', runToken))) {
-        publishCatalogProgress(setup);
-        setup.progressThrottle.flush();
-        schedulePendingHeavySync(providerId, input);
-        return;
-      }
-      if (isCancelled()) {
-        return;
-      }
+    // Stage 3C.2: probe category filtering, then either one full dump or per-category sync.
+    // Capability detection is independent of Discover/smart toggles — SQLite assignment must be correct either way.
+    // SQLite Movies reads also require item rows even when smart categories are hidden (count-only is not enough).
+    const nativeAvailable = isNativeCatalogDecodeAvailable();
+    const writerOnly = isCatalogSqliteWriterOnlyDiagnosticEnabled();
+    const syncMovieItems = smartCategoriesEnabled || Boolean(sqliteHandle?.enabled);
+    let filteringReliable = true;
+    let movieSyncStrategy: 'full-dump-stream-category' | 'filtered-per-category' = 'filtered-per-category';
 
-      const categoryStarted = Date.now();
-      markCatalogAuditCategory('movie', 'fetch_start', { categoryId: category.id });
-      beginVodCategoryPhaseProfile(category.id);
-      let items: Awaited<ReturnType<NonNullable<MovieDataSource['listCategoryMovies']>>> | null = null;
+    logSync(providerId, 'movie-filter-capability-gate', {
+      nativeAvailable,
+      sqliteEnabled: Boolean(sqliteHandle?.enabled),
+      smartCategoriesEnabled,
+      syncMovieItems,
+      movieCategoryCount: movieCategories.length,
+    });
 
-      try {
-        if (smartCategoriesEnabled) {
-          const requestUrl = movies.getCatalogListRequestUrl?.(category.id) ?? null;
-          const useNative = Boolean(requestUrl) && isNativeCatalogDecodeAvailable();
-          const writerOnly = isCatalogSqliteWriterOnlyDiagnosticEnabled();
+    if (nativeAvailable && sqliteHandle?.enabled) {
+      const cachedCapability = await readVodCategoryFilterCapability(providerId);
+      const providerCategoryIds = movieCategories
+        .map((category) => category.id)
+        .filter((id) => id && id !== 'all' && !String(id).startsWith('section:') && !String(id).startsWith('smart:'));
+      // Probe spread-out categories (not only the first two) so last-write-wins victims are included.
+      const probeCategoryIds =
+        providerCategoryIds.length >= 2
+          ? [
+              providerCategoryIds[Math.floor(providerCategoryIds.length * 0.2)]!,
+              providerCategoryIds[Math.floor(providerCategoryIds.length * 0.8)]!,
+            ]
+          : providerCategoryIds.slice(0, 2);
 
-          if (!useNative && requestUrl) {
-            logSync(providerId, 'movie-category-native-decode-skipped', {
-              categoryId: category.id,
-              reason: 'module-unavailable',
+      if (cachedCapability && Date.now() - cachedCapability.probedAt < 7 * 24 * 60 * 60 * 1000) {
+        filteringReliable = cachedCapability.filteringReliable;
+        logSync(providerId, 'movie-filter-capability-cache-hit', {
+          filteringReliable,
+          reason: cachedCapability.reason,
+        });
+      } else if (probeCategoryIds.length >= 2) {
+        const probes: VodCategoryProbeSample[] = [];
+        for (const categoryId of probeCategoryIds) {
+          if (isCancelled()) {
+            return;
+          }
+          const probeUrl = movies.getCatalogListRequestUrl?.(categoryId) ?? null;
+          if (!probeUrl) {
+            logSync(providerId, 'movie-filter-capability-probe-skipped', {
+              categoryId,
+              reason: 'url-unavailable',
             });
+            continue;
+          }
+          const accumulator = createVodCategoryProbeAccumulator(categoryId);
+          const probeResult = await streamXtreamCategoryDecode({
+            requestUrl: probeUrl,
+            mediaType: 'movie',
+            filterCategoryId: categoryId,
+            providerId,
+            isCancelled,
+            onBatch: async (records) => {
+              accumulator.onRecords(records);
+            },
+          });
+          if (probeResult.cancelled || isCancelled()) {
+            return;
+          }
+          probes.push(accumulator.sample);
+          logSync(providerId, 'movie-filter-capability-probe', {
+            requestedCategoryId: accumulator.sample.requestedCategoryId,
+            returnedCount: accumulator.sample.returnedCount,
+            distinctReturnedCategoryIds: accumulator.sample.distinctReturnedCategoryIds,
+            matchingRequestedCategoryCount: accumulator.sample.matchingRequestedCategoryCount,
+            firstContentIds: accumulator.sample.firstContentIds,
+          });
+        }
+        if (probes.length >= 1) {
+          const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie').catch(() => 0);
+          const previousTotal =
+            readableGeneration > 0
+              ? await getCatalogTotalCount(providerId, 'movie', { generation: readableGeneration }).catch(() => 0)
+              : 0;
+          const capability = evaluateVodCategoryFilterCapability({
+            providerId,
+            probes,
+            estimatedCatalogSize: Math.max(
+              previousTotal,
+              ...probes.map((probe) => probe.returnedCount),
+            ),
+          });
+          await writeVodCategoryFilterCapability(capability);
+          filteringReliable = capability.filteringReliable;
+        } else {
+          logSync(providerId, 'movie-filter-capability-probe-failed', {
+            reason: 'no-probe-samples',
+            probeCategoryIds,
+          });
+        }
+      } else {
+        logSync(providerId, 'movie-filter-capability-probe-failed', {
+          reason: 'insufficient-provider-categories',
+          probeCategoryIds,
+        });
+      }
+    }
+
+    if (!filteringReliable && nativeAvailable && sqliteHandle?.enabled) {
+      movieSyncStrategy = 'full-dump-stream-category';
+      const fullDumpUrl = movies.getCatalogListRequestUrl?.('all') ?? null;
+      if (!fullDumpUrl) {
+        throw new Error('movie_full_dump_url_unavailable');
+      }
+
+      let rawStreamCount = 0;
+      let decodedStreamCount = 0;
+      let missingCategoryIdCount = 0;
+      const distinctStreamCategoryIds = new Set<string>();
+      const distinctContentIds = new Set<string>();
+      const assignmentSamples: Array<{
+        contentId: string;
+        sourceCategoryId: string | null;
+        normalizedCategoryId: string;
+      }> = [];
+
+      const fullDumpResult = await streamXtreamCategoryDecode({
+        requestUrl: fullDumpUrl,
+        mediaType: 'movie',
+        filterCategoryId: 'all',
+        providerId,
+        isCancelled,
+        onBatch: async (records) => {
+          rawStreamCount += records.length;
+          if (sqliteHandle) {
+            recordCatalogSqliteDecoded(sqliteHandle, records.length);
           }
 
-          if (useNative && requestUrl) {
-            let matched = 0;
-            const decodeResult = await streamXtreamCategoryDecode({
-              requestUrl,
-              mediaType: 'movie',
-              filterCategoryId: category.id,
-              providerId,
-              isCancelled,
-              onBatch: async (records) => {
-                try {
-                  matched += records.length;
-                  if (sqliteHandle) {
-                    recordCatalogSqliteDecoded(sqliteHandle, records.length);
-                  }
-                  if (writerOnly) {
-                    if (sqliteHandle?.enabled && records.length) {
+          for (const record of records) {
+            const source =
+              record.categoryId != null && String(record.categoryId).trim() !== ''
+                ? String(record.categoryId)
+                : null;
+            if (!source) {
+              missingCategoryIdCount += 1;
+            }
+            const normalized = normalizeStreamCategoryId(record.categoryId);
+            distinctStreamCategoryIds.add(normalized);
+            if (record.contentId) {
+              distinctContentIds.add(record.contentId);
+            }
+            if (assignmentSamples.length < 6 && record.contentId) {
+              assignmentSamples.push({
+                contentId: record.contentId,
+                sourceCategoryId: source,
+                normalizedCategoryId: normalized,
+              });
+            }
+          }
+
+          decodedStreamCount += records.length;
+
+          if (writerOnly) {
+            await writeCatalogItemsFromSourceBudgeted(
+              sqliteHandle!,
+              records,
+              (record) =>
+                mapNativeRecordToCatalogItem(
+                  record,
+                  providerId,
+                  'movie',
+                  'all',
+                  sqliteHandle!.generation,
+                  { allowCategoryFallback: false },
+                ),
+              { isCancelled, mapKind: 'movieMapping' },
+            );
+            return;
+          }
+
+          const mapped = records.map((record) => {
+            const categoryId = normalizeStreamCategoryId(record.categoryId);
+            return nativeRecordToMovieSummary({ ...record, categoryId }, categoryId) as MovieSummary;
+          });
+          if (movieIndex && mapped.length) {
+            await processTimeBudgeted(
+              mapped,
+              (movie) => {
+                movieIndex.ingest([movie]);
+              },
+              { isCancelled },
+            );
+          }
+          if (sqliteHandle?.enabled && mapped.length) {
+            await writeCatalogItemsFromSourceBudgeted(
+              sqliteHandle,
+              mapped,
+              (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
+              { isCancelled, mapKind: 'movieMapping' },
+            );
+          }
+        },
+      });
+
+      if (fullDumpResult.cancelled || isCancelled()) {
+        return;
+      }
+
+      markCatalogAuditItems(decodedStreamCount, 'processed');
+      const counts = await getCatalogCategoryCounts(providerId, 'movie', {
+        generation: sqliteHandle.generation,
+      }).catch(() => []);
+      // Counts may be empty until categories flush; rebuild from stream set for progress.
+      for (const categoryId of distinctStreamCategoryIds) {
+        setup.movieCountMap[categoryId] = setup.movieCountMap[categoryId] ?? 0;
+      }
+      for (const row of counts) {
+        setup.movieCountMap[row.categoryId] = row.itemCount;
+      }
+
+      console.info(
+        '[NovaCast Movies Full Dump Sync] ' +
+          JSON.stringify({
+            providerId,
+            generation: sqliteHandle.generation,
+            rawStreamCount: fullDumpResult.stats.rawSeen ?? rawStreamCount,
+            decodedStreamCount,
+            distinctContentIds: distinctContentIds.size,
+            metadataCategoryCount: movieCategories.length,
+            distinctStreamCategoryIds: distinctStreamCategoryIds.size,
+            missingCategoryIdCount,
+            filteringReliable: false,
+            strategy: movieSyncStrategy,
+            marker: 'stage3c2-vod-full-dump-sync-v1',
+          }),
+      );
+      console.info(
+        '[NovaCast Movies Category Assignment Sample] ' +
+          JSON.stringify({
+            generation: sqliteHandle.generation,
+            samples: assignmentSamples,
+            marker: 'stage3c2-vod-full-dump-sync-v1',
+          }),
+      );
+
+      await writeCatalogSyncCheckpointSafe(
+        setup,
+        runToken,
+        'movies',
+        movieCategories.length,
+        setup.resumeSeriesIndex,
+      );
+    } else {
+      movieSyncStrategy = 'filtered-per-category';
+      console.info(
+        '[NovaCast Movies Full Dump Sync] ' +
+          JSON.stringify({
+            providerId,
+            generation: sqliteHandle?.generation ?? null,
+            rawStreamCount: 0,
+            decodedStreamCount: 0,
+            distinctContentIds: 0,
+            metadataCategoryCount: movieCategories.length,
+            distinctStreamCategoryIds: 0,
+            missingCategoryIdCount: 0,
+            filteringReliable: true,
+            strategy: movieSyncStrategy,
+            marker: 'stage3c2-vod-full-dump-sync-v1',
+          }),
+      );
+
+      for (
+        let movieCategoryIndex = setup.resumeMovieIndex;
+        movieCategoryIndex < movieCategories.length;
+        movieCategoryIndex += 1
+      ) {
+        const category = movieCategories[movieCategoryIndex];
+        if (!(await yieldForPlaybackIfNeeded(providerId, `movie-category:${category.id}`, 'movies', runToken))) {
+          publishCatalogProgress(setup);
+          setup.progressThrottle.flush();
+          schedulePendingHeavySync(providerId, input);
+          return;
+        }
+        if (isCancelled()) {
+          return;
+        }
+
+        const categoryStarted = Date.now();
+        markCatalogAuditCategory('movie', 'fetch_start', { categoryId: category.id });
+        beginVodCategoryPhaseProfile(category.id);
+        let items: Awaited<ReturnType<NonNullable<MovieDataSource['listCategoryMovies']>>> | null = null;
+
+        try {
+          if (syncMovieItems) {
+            const requestUrl = movies.getCatalogListRequestUrl?.(category.id) ?? null;
+            const useNative = Boolean(requestUrl) && nativeAvailable;
+            // SQLite-only (smart hidden) still needs native→DB writes; skip in-memory index ingest.
+            const sqliteWriterOnly = writerOnly || (!movieIndex && Boolean(sqliteHandle?.enabled));
+
+            if (!useNative && requestUrl) {
+              logSync(providerId, 'movie-category-native-decode-skipped', {
+                categoryId: category.id,
+                reason: 'module-unavailable',
+              });
+            }
+
+            if (useNative && requestUrl) {
+              let matched = 0;
+              const decodeResult = await streamXtreamCategoryDecode({
+                requestUrl,
+                mediaType: 'movie',
+                filterCategoryId: category.id,
+                providerId,
+                isCancelled,
+                onBatch: async (records) => {
+                  try {
+                    matched += records.length;
+                    if (sqliteHandle) {
+                      recordCatalogSqliteDecoded(sqliteHandle, records.length);
+                    }
+                    if (sqliteWriterOnly) {
+                      if (sqliteHandle?.enabled && records.length) {
+                        await writeCatalogItemsFromSourceBudgeted(
+                          sqliteHandle,
+                          records,
+                          (record) =>
+                            mapNativeRecordToCatalogItem(
+                              record,
+                              providerId,
+                              'movie',
+                              category.id,
+                              sqliteHandle!.generation,
+                              { allowCategoryFallback: true },
+                            ),
+                          { isCancelled, mapKind: 'movieMapping' },
+                        );
+                      }
+                      return;
+                    }
+                    const mapped = records.map(
+                      (record) => nativeRecordToMovieSummary(record, category.id) as MovieSummary,
+                    );
+                    if (movieIndex && mapped.length) {
+                      const ingestStarted = Date.now();
+                      await processTimeBudgeted(
+                        mapped,
+                        (movie) => {
+                          movieIndex.ingest([movie]);
+                        },
+                        { isCancelled },
+                      );
+                      addVodCategoryPhaseMs('ingestMs', Date.now() - ingestStarted);
+                    }
+                    if (sqliteHandle?.enabled && mapped.length) {
                       await writeCatalogItemsFromSourceBudgeted(
                         sqliteHandle,
-                        records,
-                        (record) =>
-                          mapNativeRecordToCatalogItem(
-                            record,
-                            providerId,
-                            'movie',
-                            category.id,
-                            sqliteHandle!.generation,
-                          ),
+                        mapped,
+                        (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
                         { isCancelled, mapKind: 'movieMapping' },
                       );
                     }
-                    return;
+                    releaseBatch(`movie-native-mapped:${category.id}`, mapped);
+                  } finally {
+                    releaseBatch(`movie-native-raw:${category.id}`, records);
                   }
-                  const mapped = records.map(
-                    (record) => nativeRecordToMovieSummary(record, category.id) as MovieSummary,
-                  );
-                  if (movieIndex && mapped.length) {
-                    const ingestStarted = Date.now();
-                    await processTimeBudgeted(
-                      mapped,
-                      (movie) => {
-                        movieIndex.ingest([movie]);
-                      },
-                      { isCancelled },
-                    );
-                    addVodCategoryPhaseMs('ingestMs', Date.now() - ingestStarted);
-                  }
-                  if (sqliteHandle?.enabled && mapped.length) {
-                    await writeCatalogItemsFromSourceBudgeted(
-                      sqliteHandle,
-                      mapped,
-                      (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
-                      { isCancelled, mapKind: 'movieMapping' },
-                    );
-                  }
-                  releaseBatch(`movie-native-mapped:${category.id}`, mapped);
-                } finally {
-                  releaseBatch(`movie-native-raw:${category.id}`, records);
-                }
-              },
-            });
-            if (decodeResult.cancelled || isCancelled()) {
-              return;
-            }
-            matched = decodeResult.matched;
-            setup.movieCountMap[category.id] = matched;
-            markCatalogAuditItems(matched, 'processed');
-            addVodCategoryPhaseMs('jsonParseMs', Number(decodeResult.stats.downloadParseMs ?? 0));
-            logSync(providerId, 'movie-category-native-decode', {
-              categoryId: category.id,
-              matched,
-              batches: decodeResult.batches,
-              maxBatchSize: decodeResult.maxBatchSize,
-              rawSeen: decodeResult.stats.rawSeen,
-              writerOnly,
-            });
-          } else {
-            const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
-            items = loaded.items;
-            if (sqliteHandle) {
-              recordCatalogSqliteDecoded(sqliteHandle, items.length);
-            }
-
-            if (loaded.truncated && movieIndex) {
-              movieIndex.markCategoryLoadTruncated();
-            }
-
-            if (items.length && movieIndex && !writerOnly) {
-              const ingestStarted = Date.now();
-              await processTimeBudgeted(
-                items,
-                (movie) => {
-                  movieIndex.ingest([movie]);
                 },
-                { isCancelled },
-              );
-              addVodCategoryPhaseMs('ingestMs', Date.now() - ingestStarted);
-            }
+              });
+              if (decodeResult.cancelled || isCancelled()) {
+                return;
+              }
+              matched = decodeResult.matched;
+              setup.movieCountMap[category.id] = matched;
+              markCatalogAuditItems(matched, 'processed');
+              addVodCategoryPhaseMs('jsonParseMs', Number(decodeResult.stats.downloadParseMs ?? 0));
+              logSync(providerId, 'movie-category-native-decode', {
+                categoryId: category.id,
+                matched,
+                batches: decodeResult.batches,
+                maxBatchSize: decodeResult.maxBatchSize,
+                rawSeen: decodeResult.stats.rawSeen,
+                strategy: movieSyncStrategy,
+                writerOnly: sqliteWriterOnly,
+              });
+            } else {
+              const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
+              items = loaded.items;
+              if (sqliteHandle) {
+                recordCatalogSqliteDecoded(sqliteHandle, items.length);
+              }
 
-            if (items.length && sqliteHandle?.enabled) {
-              await writeCatalogItemsFromSourceBudgeted(
-                sqliteHandle,
-                items,
-                (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
-                { isCancelled, mapKind: 'movieMapping' },
-              );
-            }
+              if (loaded.truncated && movieIndex) {
+                movieIndex.markCategoryLoadTruncated();
+              }
 
-            setup.movieCountMap[category.id] = items.length;
-            markCatalogAuditItems(items.length, 'processed');
+              if (items.length && movieIndex && !sqliteWriterOnly) {
+                const ingestStarted = Date.now();
+                await processTimeBudgeted(
+                  items,
+                  (movie) => {
+                    movieIndex.ingest([movie]);
+                  },
+                  { isCancelled },
+                );
+                addVodCategoryPhaseMs('ingestMs', Date.now() - ingestStarted);
+              }
+
+              if (items.length && sqliteHandle?.enabled) {
+                await writeCatalogItemsFromSourceBudgeted(
+                  sqliteHandle,
+                  items,
+                  (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
+                  { isCancelled, mapKind: 'movieMapping' },
+                );
+              }
+
+              setup.movieCountMap[category.id] = items.length;
+              markCatalogAuditItems(items.length, 'processed');
+            }
+          } else if (movies.getCategoryCount) {
+            setup.movieCountMap[category.id] = await movies.getCategoryCount(category.id);
           }
-        } else if (movies.getCategoryCount) {
-          setup.movieCountMap[category.id] = await movies.getCategoryCount(category.id);
+
+          const durationMs = Date.now() - categoryStarted;
+          const categoryMode = syncMovieItems ? 'full' : 'count-only';
+          finishVodCategoryPhaseProfile({
+            mode: categoryMode,
+            durationMs,
+          });
+          markCatalogAuditCategory('movie', 'fetch_done', {
+            categoryId: category.id,
+            count: setup.movieCountMap[category.id] ?? 0,
+            durationMs,
+          });
+          logSync(providerId, 'movie-category-synced', {
+            categoryId: category.id,
+            count: setup.movieCountMap[category.id] ?? 0,
+            durationMs,
+            mode: categoryMode,
+          });
+        } catch (error) {
+          finishVodCategoryPhaseProfile({
+            failed: true,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        } finally {
+          releaseBatch(`movie-category:${category.id}`, items);
         }
 
-        const durationMs = Date.now() - categoryStarted;
-        finishVodCategoryPhaseProfile({
-          mode: smartCategoriesEnabled ? 'full' : 'count-only',
-          durationMs,
-        });
-        markCatalogAuditCategory('movie', 'fetch_done', {
-          categoryId: category.id,
-          count: setup.movieCountMap[category.id] ?? 0,
-          durationMs,
-        });
-        logSync(providerId, 'movie-category-synced', {
-          categoryId: category.id,
-          count: setup.movieCountMap[category.id] ?? 0,
-          durationMs,
-          mode: smartCategoriesEnabled ? 'full' : 'count-only',
-        });
-      } catch (error) {
-        finishVodCategoryPhaseProfile({
-          failed: true,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        throw error;
-      } finally {
-        releaseBatch(`movie-category:${category.id}`, items);
+        await writeCatalogSyncCheckpointSafe(setup, runToken, 'movies', movieCategoryIndex + 1, setup.resumeSeriesIndex);
+        if (movieCategoryIndex === setup.resumeMovieIndex || (movieCategoryIndex + 1) % 5 === 0) {
+          publishCatalogProgress(setup);
+        }
+        await waitForCatalogSyncIdleSlot();
       }
-
-      await writeCatalogSyncCheckpointSafe(setup, runToken, 'movies', movieCategoryIndex + 1, setup.resumeSeriesIndex);
-      if (movieCategoryIndex === setup.resumeMovieIndex || (movieCategoryIndex + 1) % 5 === 0) {
-        publishCatalogProgress(setup);
-      }
-      await waitForCatalogSyncIdleSlot();
     }
 
     if (movieIndex && smartCategoriesEnabled && !isCancelled()) {

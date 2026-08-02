@@ -7,8 +7,13 @@ import type { NovaTheme } from '@/theme/tokens';
 
 type NovaSpaceLoaderProps = {
   label?: string;
-  /** panel = rocket + label + energy bar; inline = row; badge = compact pulsing rocket only */
-  variant?: 'inline' | 'panel' | 'badge';
+  /**
+   * panel = rocket + label + energy bar;
+   * inline = row;
+   * badge = compact pulsing rocket only;
+   * hero = large transparent spaceship (Movies Stage 3E primary loader)
+   */
+  variant?: 'inline' | 'panel' | 'badge' | 'hero';
 };
 
 export function NovaSpaceLoader({ label = 'Loading…', variant = 'panel' }: NovaSpaceLoaderProps) {
@@ -57,6 +62,17 @@ export function NovaSpaceLoader({ label = 'Loading…', variant = 'panel' }: Nov
     );
   }
 
+  if (variant === 'hero') {
+    return (
+      <View style={styles.hero} accessibilityRole="progressbar" accessibilityLabel={label}>
+        <Animated.View style={[styles.heroRocketWrap, { transform: [{ scale: rocketScale }] }]}>
+          <Animated.View style={[styles.heroGlow, { opacity: rocketGlow }]} />
+          <MaterialCommunityIcons name="rocket-launch" size={64} color={accent} />
+        </Animated.View>
+      </View>
+    );
+  }
+
   if (variant === 'inline') {
     return (
       <View style={styles.inlineRow} accessibilityRole="progressbar" accessibilityLabel={label}>
@@ -94,6 +110,29 @@ function createStyles(theme: NovaTheme) {
       paddingHorizontal: 16,
       paddingVertical: 12,
       minWidth: 160,
+      backgroundColor: 'transparent',
+    },
+    hero: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      alignSelf: 'center',
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      // No card / shadow wrapper — spaceship only.
+    },
+    heroRocketWrap: {
+      width: 96,
+      height: 96,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: 'transparent',
+    },
+    heroGlow: {
+      position: 'absolute',
+      width: 72,
+      height: 72,
+      borderRadius: 99,
+      backgroundColor: theme.scheme === 'light' ? 'rgba(12, 74, 110, 0.14)' : 'rgba(59, 130, 246, 0.22)',
     },
     rocketWrap: {
       width: 72,
@@ -160,9 +199,9 @@ function createStyles(theme: NovaTheme) {
       paddingVertical: 8,
     },
     inlineLabel: {
-      color: theme.colors.textSecondary,
-      fontSize: 13,
-      fontWeight: '600',
+      color: theme.colors.textPrimary,
+      fontSize: 15,
+      fontWeight: '700',
     },
   });
 }

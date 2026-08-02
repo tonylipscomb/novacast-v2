@@ -225,7 +225,8 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
       return {
         id: `${SMART_CATEGORY_PREFIX}${definition.key}`,
         renderKey: `${SMART_CATEGORY_PREFIX}${definition.key}`,
-        name: `${definition.icon} ${definition.name}`,
+        // Keep icon on its own field — embedding emoji in `name` produced mojibake in logs/TV text.
+        name: definition.name,
         icon: definition.icon,
         smartKey: definition.key,
         kind: 'smart' as const,

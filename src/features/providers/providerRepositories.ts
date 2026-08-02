@@ -1497,8 +1497,10 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       return mapped;
     },
     getCatalogListRequestUrl(categoryId: string) {
+      // `all` requests the unfiltered dump — used to repair category_id collapse when
+      // a panel ignores per-category filters and poisons UPSERT last-write-wins.
       if (!categoryId || categoryId === 'all') {
-        return null;
+        return client.buildPlayerApiUrl('get_vod_streams');
       }
       return client.buildPlayerApiUrl('get_vod_streams', { category_id: categoryId });
     },

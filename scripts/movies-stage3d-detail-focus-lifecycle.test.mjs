@@ -75,15 +75,18 @@ test('5. Navbar cannot receive focus during closing states', () => {
     assert.equal(shouldSuppressMoviesNavbarFocus(phase), true);
   }
   assert.equal(shouldSuppressMoviesNavbarFocus('browse'), false);
-  assert.match(screen, /navigationFocusable=\{!focusSuppressionActive && !detailOpen\}/);
-  assert.match(screen, /suppressNavbarPreferredFocus=\{navbarFocusSuppressed\}/);
+  // Stage 3D.2: chrome focusable only in browse/browse-restored; preferred stays suppressed while closing.
+  assert.match(screen, /navigationFocusable=\{chromeFocusable && !searchBlocksBrowse\}/);
+  assert.match(screen, /suppressNavbarPreferredFocus=\{navbarPreferredSuppressed\}/);
+  assert.match(screen, /areMoviesChromeNormallyFocusable/);
 });
 
 test('6. Category rail cannot receive focus during closing states', () => {
   for (const phase of ['closing-prepare', 'closing-viewport', 'closing-focus', 'closing-confirm', 'browse-restored']) {
     assert.equal(shouldSuppressMoviesCategoryFocus(phase), true);
   }
-  assert.match(screen, /focusable=\{!focusSuppressionActive && !detailOpen\}/);
+  assert.match(screen, /suppressPreferredFocus=\{categoryPreferredSuppressed\}/);
+  assert.match(screen, /focusable=\{chromeFocusable && !searchBlocksBrowse\}/);
   assert.match(category, /focusable=\{focusable\}/);
 });
 

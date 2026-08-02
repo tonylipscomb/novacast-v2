@@ -227,6 +227,7 @@ function SeriesEpisodePanel({
   detail,
   selectedSeasonNumber,
   focusedEpisodeId,
+  firstSeasonRef,
   onSeasonPress,
   onEpisodePress,
   onEpisodeFocus,
@@ -234,12 +235,14 @@ function SeriesEpisodePanel({
   detail: MediaDetail;
   selectedSeasonNumber?: number;
   focusedEpisodeId?: string | null;
+  firstSeasonRef?: (instance: ElementRef<typeof Pressable> | null) => void;
   onSeasonPress?: (seasonNumber: number) => void;
   onEpisodePress?: (episode: MediaDetailEpisode) => void;
   onEpisodeFocus?: (episodeId: string) => void;
 }) {
   const selected = selectedSeasonNumber ?? detail.seasons[0]?.seasonNumber;
   const episodes = detail.episodes.filter((episode) => episode.seasonNumber === selected);
+  const firstSeasonNumber = detail.seasons[0]?.seasonNumber;
 
   return (
     <View style={styles.sidePanelContent}>
@@ -250,6 +253,7 @@ function SeriesEpisodePanel({
           return (
             <Pressable
               key={season.seasonNumber}
+              ref={season.seasonNumber === firstSeasonNumber ? firstSeasonRef : undefined}
               focusable
               accessibilityLabel={season.name ?? `Season ${season.seasonNumber}`}
               onFocus={() => onEpisodeFocus?.(`season-${season.seasonNumber}`)}
@@ -326,7 +330,9 @@ export function MediaDetailOverlay({
   const [opacity] = useState(() => new Animated.Value(0));
   const actionRefs = useRef(new Map<ActionId, ElementRef<typeof Pressable>>());
   const playRef = useRef<ElementRef<typeof Pressable> | null>(null);
+  const firstSeasonRef = useRef<ElementRef<typeof Pressable> | null>(null);
   const [actionHandles, setActionHandles] = useState<Record<string, number>>({});
+  const [seriesPanelHandle, setSeriesPanelHandle] = useState<number | undefined>(undefined);
   const focusRetryCancelRef = useRef<(() => void) | null>(null);
   const wasVisibleRef = useRef(false);
   const lastPlayInvokeAtRef = useRef(0);
@@ -492,10 +498,13 @@ export function MediaDetailOverlay({
         }
       });
       setActionHandles(nextHandles);
+      // Series detail: resolve first season chip so action-row Right/Down can leave the self-trap.
+      const seasonHandle = handleFor(firstSeasonRef);
+      setSeriesPanelHandle(seasonHandle ?? undefined);
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [actionGraphKey, visible]);
+  }, [actionGraphKey, detail?.id, detail?.seasons?.length, visible]);
 
   useEffect(() => {
     if (visible && Platform.OS === 'android') {
@@ -594,9 +603,15 @@ export function MediaDetailOverlay({
           }
         }}
         nextFocusLeft={actionHandles[left ?? id]}
-        nextFocusRight={actionHandles[right ?? id]}
+        nextFocusRight={
+          right
+            ? actionHandles[right]
+            : isMovie
+              ? actionHandles[id]
+              : seriesPanelHandle
+        }
         nextFocusUp={actionHandles[id]}
-        nextFocusDown={actionHandles[id]}
+        nextFocusDown={isMovie ? actionHandles[id] : (seriesPanelHandle ?? actionHandles[id])}
         onFocus={handleActionFocus}
         onBlur={() => setFocusedTarget(null)}
       />
@@ -738,6 +753,11 @@ export function MediaDetailOverlay({
                 detail={detail}
                 selectedSeasonNumber={selectedSeasonNumber}
                 focusedEpisodeId={focusedEpisodeId}
+                firstSeasonRef={(instance) => {
+                  firstSeasonRef.current = instance;
+                  const handle = instance ? findNodeHandle(instance) ?? undefined : undefined;
+                  setSeriesPanelHandle((current) => (current === handle ? current : handle));
+                }}
                 onSeasonPress={onSeasonPress}
                 onEpisodePress={onEpisodePress}
                 onEpisodeFocus={onEpisodeFocus}

@@ -13,6 +13,8 @@ import {
   completeCatalogSync,
   failCatalogSync,
   getCatalogGenerationItemStats,
+  getCatalogGenerationLargestCategory,
+  getCatalogGenerationPhysicalStats,
   upsertCatalogProvider,
   writeCatalogCategoriesBatch,
   writeCatalogItemsBatch,
@@ -24,6 +26,8 @@ import {
   beginCatalogWriteQuietPeriod,
   endCatalogWriteQuietPeriod,
 } from './catalogWriteQuietPeriod.ts';
+import { validateMoviesCategoryDistribution } from './moviesCategoryDistributionValidation.ts';
+import { resolveCatalogItemCategoryId } from './vodCategoryFilterCapability.ts';
 
 const PERF_LOG_PREFIX = '[NovaCast CatalogSqlite]';
 
@@ -219,6 +223,7 @@ export function mapNativeRecordToCatalogItem(
   mediaType: CatalogMediaType,
   fallbackCategoryId: string,
   generation: number,
+  options?: { allowCategoryFallback?: boolean },
 ): CatalogItemInput {
   const contentId =
     mediaType === 'series' ? record.seriesId || record.contentId : record.contentId;
@@ -226,7 +231,9 @@ export function mapNativeRecordToCatalogItem(
     providerId,
     mediaType,
     contentId,
-    categoryId: record.categoryId || fallbackCategoryId,
+    categoryId: resolveCatalogItemCategoryId(record.categoryId, fallbackCategoryId, {
+      allowFallback: options?.allowCategoryFallback !== false,
+    }),
     title: record.title,
     artworkUrl: record.artworkUrl ?? null,
     backdropUrl: record.backdropUrl ?? null,
@@ -600,10 +607,49 @@ export async function finishCatalogSqliteMediaSync(input: {
           return false;
         }
 
-        await completeCatalogSync(handle.providerId, handle.mediaType, handle.generation, {
-          processedCount,
-          categories: handle.pendingCategories,
+        // Stage 3C.2: reject collapsed category distributions before activation.
+        const physical = await getCatalogGenerationPhysicalStats(
+          handle.providerId,
+          handle.mediaType,
+          handle.generation,
+        );
+        const largest = await getCatalogGenerationLargestCategory(
+          handle.providerId,
+          handle.mediaType,
+          handle.generation,
+        );
+        const metadataCategoryCount =
+          handle.pendingCategories?.length || physical.categoryRows;
+        const distribution = validateMoviesCategoryDistribution({
+          generation: handle.generation,
+          totalItems: physical.itemRows,
+          distinctCategoryIds: physical.distinctItemCategoryIds,
+          metadataCategoryCount,
+          nonzeroCategoryCount: largest.nonzeroCategoryCount,
+          largestCategoryId: largest.categoryId,
+          largestCategoryCount: largest.itemCount,
         });
+        if (!distribution.validationPassed) {
+          await failCatalogSync(
+            handle.providerId,
+            handle.mediaType,
+            distribution.rejectionReason ?? 'category_distribution_failed',
+          );
+          return false;
+        }
+
+        const activated = await completeCatalogSync(
+          handle.providerId,
+          handle.mediaType,
+          handle.generation,
+          {
+            processedCount,
+            categories: handle.pendingCategories,
+          },
+        );
+        if (!activated) {
+          return false;
+        }
         logSqlite('sqlite-sync-completed', {
           providerId: handle.providerId,
           mediaType: handle.mediaType,

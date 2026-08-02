@@ -360,11 +360,12 @@ test('the diagnostics state mirror stays diagnostics-only', () => {
 });
 
 test('Movies Stage 3D detail focus lifecycle wiring is present', () => {
-  assert.match(source.screen, /suppressNavbarPreferredFocus=\{navbarFocusSuppressed\}/);
-  assert.match(source.screen, /navigationFocusable=\{!focusSuppressionActive && !detailOpen\}/);
-  assert.match(source.screen, /focusable=\{!focusSuppressionActive && !detailOpen\}/);
-  assert.match(source.screen, /postersFocusable=\{postersFocusable\}/);
+  assert.match(source.screen, /suppressNavbarPreferredFocus=\{navbarPreferredSuppressed\}/);
+  assert.match(source.screen, /navigationFocusable=\{chromeFocusable && !searchBlocksBrowse\}/);
+  assert.match(source.screen, /focusable=\{chromeFocusable && !searchBlocksBrowse\}/);
+  assert.match(source.screen, /postersFocusable=\{postersFocusable && primaryLoaderMode !== 'category-blocking'\}/);
   assert.match(source.screen, /closingFocusMovieId=\{activeClosingFocusMovieId\}/);
+  assert.match(source.screen, /postRestorePreferredMovieId=\{postRestorePreferredMovieId\}/);
   assert.match(source.screen, /focusHandoffActive=\{focusHandoffActive\}/);
   assert.match(source.screen, /restore-exact-poster-after-detail-close/);
   assert.match(source.screen, /createMoviesBrowseFocusSnapshot/);

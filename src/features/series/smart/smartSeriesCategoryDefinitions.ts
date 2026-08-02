@@ -126,8 +126,21 @@ const ALL_DEFINITIONS: SmartSeriesCategoryDefinition[] = [
   },
 ];
 
+/**
+ * Temporary: Features + New Releases remain unstable on device.
+ * Keep library rails (Continue Watching / Favorites / Recently Watched).
+ */
+const DISABLE_FEATURES_AND_NEW_RELEASES = true;
+
 export function getActiveSmartSeriesCategoryDefinitions() {
-  return ALL_DEFINITIONS;
+  if (!DISABLE_FEATURES_AND_NEW_RELEASES) {
+    return ALL_DEFINITIONS;
+  }
+  return ALL_DEFINITIONS.filter(
+    (definition) =>
+      definition.key !== SMART_CATEGORY_KEY_FEATURES &&
+      definition.key !== SMART_CATEGORY_KEY_NEW_RELEASES,
+  );
 }
 
 export function resolveSmartSeriesCategoryDefinition(key: string) {

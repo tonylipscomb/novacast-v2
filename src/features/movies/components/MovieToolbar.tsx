@@ -8,11 +8,22 @@ import type { NovaTheme } from '@/theme/tokens';
 
 type MovieToolbarProps = {
   onSearchPress: () => void;
-  /** Stage 3D.1: disable Search preferred/native focus during detail close stabilization. */
+  /** Native focusable for D-pad — independent of preferred focus. */
   focusable?: boolean;
+  /**
+   * Stage 3D.2: Search must never auto-claim preferred focus after detail restore.
+   * Keep false unless an explicit product path opts in (none today).
+   */
+  hasTVPreferredFocus?: boolean;
+  onSearchFocus?: () => void;
 };
 
-export function MovieToolbar({ onSearchPress, focusable = true }: MovieToolbarProps) {
+export function MovieToolbar({
+  onSearchPress,
+  focusable = true,
+  hasTVPreferredFocus = false,
+  onSearchFocus,
+}: MovieToolbarProps) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const focusChrome = useMemo(() => createNovaTvFocusChrome(theme), [theme]);
@@ -22,7 +33,11 @@ export function MovieToolbar({ onSearchPress, focusable = true }: MovieToolbarPr
     <View style={styles.toolbar}>
       <Pressable
         focusable={focusable}
-        onFocus={() => setFocused(true)}
+        hasTVPreferredFocus={hasTVPreferredFocus}
+        onFocus={() => {
+          setFocused(true);
+          onSearchFocus?.();
+        }}
         onBlur={() => setFocused(false)}
         onPress={onSearchPress}
         {...(Platform.isTV ? ({ onClick: onSearchPress } as object) : null)}

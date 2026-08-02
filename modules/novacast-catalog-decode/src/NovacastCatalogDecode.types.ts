@@ -26,6 +26,7 @@ export type CatalogDecodeBatchStats = {
   responseBytes?: number;
   rawSeen?: number;
   matched?: number;
+  emptyCategoryIdCount?: number;
   batchesEmitted?: number;
   maxBatchSize?: number;
   batchSize?: number;

@@ -222,6 +222,7 @@ private class DecodeJob(
   private var responseBytes = 0L
   private var rawSeen = 0
   private var matched = 0
+  private var emptyCategoryIdCount = 0
   private var batchesEmitted = 0
   private var maxBatchSize = 0
 
@@ -309,6 +310,9 @@ private class DecodeJob(
               rawSeen += 1
               val item = readObject(reader) ?: continue
               val itemCategory = stringField(item, "category_id")
+              if (itemCategory.isNullOrEmpty()) {
+                emptyCategoryIdCount += 1
+              }
               if (!filterCategoryId.isNullOrEmpty() &&
                 filterCategoryId != "all" &&
                 !itemCategory.isNullOrEmpty() &&
@@ -375,6 +379,7 @@ private class DecodeJob(
     "responseBytes" to responseBytes,
     "rawSeen" to rawSeen,
     "matched" to matched,
+    "emptyCategoryIdCount" to emptyCategoryIdCount,
     "batchesEmitted" to batchesEmitted,
     "maxBatchSize" to maxBatchSize,
     "batchSize" to batchSize,
@@ -383,13 +388,16 @@ private class DecodeJob(
 
   private fun normalize(raw: Map<String, Any?>, index: Int): Map<String, Any?> {
     val title = stringField(raw, "name")?.trim().orEmpty()
+    // Preserve stream category_id only. Never stamp filterCategoryId — JS falls back.
+    // Stamping poisons SQLite UPSERT last-write-wins when panels ignore category filters.
+    val streamCategoryId = stringField(raw, "category_id")
     return if (mediaType == "series") {
       val seriesId = stringField(raw, "series_id") ?: stringField(raw, "stream_id") ?: "series-$index"
       mapOf(
         "mediaType" to "series",
         "contentId" to seriesId,
         "seriesId" to seriesId,
-        "categoryId" to (stringField(raw, "category_id") ?: filterCategoryId),
+        "categoryId" to streamCategoryId,
         "title" to title.ifEmpty { "Series ${index + 1}" },
         "artworkUrl" to firstString(raw, "cover", "stream_icon"),
         "backdropUrl" to firstString(raw, "backdrop_path"),
@@ -403,7 +411,7 @@ private class DecodeJob(
       mapOf(
         "mediaType" to "movie",
         "contentId" to streamId,
-        "categoryId" to (stringField(raw, "category_id") ?: filterCategoryId),
+        "categoryId" to streamCategoryId,
         "title" to title.ifEmpty { "Movie ${index + 1}" },
         "artworkUrl" to firstString(raw, "stream_icon", "cover", "movie_image"),
         "backdropUrl" to firstString(raw, "backdrop_path"),

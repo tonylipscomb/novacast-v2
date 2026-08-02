@@ -26,11 +26,13 @@ test('Stage 3B.2 Movies focus handoff keeps a non-activating loading target', ()
 });
 
 test('Stage 3B.2 uses one larger centered transparent loader', () => {
-  assert.match(grid, /largeLoader/);
+  // Stage 3E: primary spaceship lives on MoviesScreen; grid has no loaders.
+  assert.match(screen, /primaryLoaderOverlay/);
+  assert.match(screen, /variant="hero"/);
+  assert.doesNotMatch(grid, /NovaSpaceLoader/);
   assert.doesNotMatch(grid, /paginationLoader/);
   assert.doesNotMatch(grid, /variant="badge"/);
   assert.doesNotMatch(grid, /Loading more movies/);
-  assert.doesNotMatch(grid, /backgroundColor:.*rgba/);
   assert.doesNotMatch(grid, /More available/);
 });
 
@@ -65,13 +67,13 @@ test('Stage 3B.2 poster refs use instance identity and focus confirmation', asyn
 test('Stage 3B.2 does not let category focus override an active restore token', () => {
   assert.match(screen, /isMoviesDetailClosingPhase\(detailFocusPhaseRef\.current\) \|\| detailFocusTokenRef\.current/);
   assert.match(grid, /suppressPreferredFocus/);
-  assert.match(screen, /showMoviesVisualLoader/);
+  assert.match(screen, /primaryLoaderMode|primaryLoaderVisible/);
 });
 
 test('Stage 3B.4 rollback uses only narrow preferred-focus suppression', () => {
   assert.doesNotMatch(screen, /MoviesFocusOwner|deriveMoviesFocusOwner|focusOwner=/);
-  assert.match(screen, /suppressNavbarPreferredFocus=\{navbarFocusSuppressed\}/);
-  assert.match(screen, /suppressPreferredFocus=\{categoryFocusSuppressed\}/);
+  assert.match(screen, /suppressNavbarPreferredFocus=\{navbarPreferredSuppressed\}/);
+  assert.match(screen, /suppressPreferredFocus=\{categoryPreferredSuppressed\}/);
   assert.match(shell, /hasTVPreferredFocus=\{navbarPreferredFocus && active\}/);
   assert.match(category, /hasTVPreferredFocus=\{preferInitialFocus\}/);
   assert.doesNotMatch(shell, /MoviesFocusOwner|deriveMoviesFocusOwner/);

@@ -121,23 +121,31 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
       ]);
 
       const previous = lastValidSqliteCategoriesByProvider.get(providerId);
+      const previousProviderCount = previous
+        ? previous.categories.filter((category) => category.id !== SQLITE_MOVIES_DISCOVER_ID).length
+        : 0;
       const nonzeroCategoryCount = categories.filter((category) => category.itemCount > 0).length;
       const refreshLooksEmpty =
         totalCount > 0 &&
         (categories.length === 0 || nonzeroCategoryCount === 0) &&
         Boolean(previous && previous.categories.length > 0 && previous.totalCount > 0);
+      // Reject last-write-wins collapse (e.g. hundreds of categories → only UFC Arabia).
+      const refreshLooksCollapsed =
+        Boolean(previous && previousProviderCount >= 8) &&
+        totalCount > 0 &&
+        categories.length > 0 &&
+        categories.length <= 2 &&
+        categories.length < previousProviderCount * 0.25;
 
-      if (refreshLooksEmpty && previous) {
+      if ((refreshLooksEmpty || refreshLooksCollapsed) && previous) {
         console.info(
           '[NovaCast Movies Category Counts Applied] ' +
             JSON.stringify({
               readableGeneration,
-              appliedProviderCategoryCount: previous.categories.filter(
-                (category) => category.id !== SQLITE_MOVIES_DISCOVER_ID,
-              ).length,
+              appliedProviderCategoryCount: previousProviderCount,
               zeroCountCategories: 0,
               preservedPreviousCounts: true,
-              reason: 'rejected-empty-refresh',
+              reason: refreshLooksCollapsed ? 'rejected-collapsed-refresh' : 'rejected-empty-refresh',
               previousGeneration: previous.generation,
               previousTotalCount: previous.totalCount,
             }),
@@ -146,13 +154,13 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
           '[NovaCast Movies Category Refresh Rejected] ' +
             JSON.stringify({
               readableGeneration,
-              previousProviderCount: previous.categories.filter(
-                (category) => category.id !== SQLITE_MOVIES_DISCOVER_ID,
-              ).length,
+              previousProviderCount,
               nextProviderCount: categories.length,
               previousTotal: previous.totalCount,
               nextTotal: totalCount,
-              reason: 'empty-grouped-counts-with-rows',
+              reason: refreshLooksCollapsed
+                ? 'collapsed-provider-rail'
+                : 'empty-grouped-counts-with-rows',
             }),
         );
         return previous.categories;

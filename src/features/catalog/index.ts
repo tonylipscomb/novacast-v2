@@ -31,6 +31,7 @@ export {
   cleanupIncompleteCatalogGenerationsV2,
   deleteCatalogGenerationV2,
   getCatalogGenerationPhysicalStats,
+  getCatalogGenerationLargestCategory,
   clearProviderCatalog,
   listCatalogItemsForGeneration,
   listCatalogCategoriesForGeneration,
@@ -38,6 +39,18 @@ export {
   recomputeCategoryCounts,
   getCatalogGenerationItemStats,
 } from './catalogRepository.ts';
+
+export {
+  MOVIES_UNCATEGORIZED_CATEGORY_ID,
+  normalizeStreamCategoryId,
+  resolveCatalogItemCategoryId,
+  createVodCategoryProbeAccumulator,
+  evaluateVodCategoryFilterCapability,
+  computeContentIdOverlapRatio,
+  clearVodCategoryFilterCapabilityForTests,
+} from './vodCategoryFilterCapability.ts';
+
+export { validateMoviesCategoryDistribution } from './moviesCategoryDistributionValidation.ts';
 
 export {
   CATALOG_SCHEMA_VERSION,

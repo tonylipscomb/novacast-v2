@@ -17,6 +17,11 @@ let posterInstanceSequence = 0;
 type MoviePosterCardProps = {
   movie: MovieSummary;
   hasPreferredFocus?: boolean;
+  /**
+   * Stage 3D.3: keep focus chrome visible during viewport correction / post-restore
+   * even if native onBlur fires. Does not request focus.
+   */
+  forceFocused?: boolean;
   onFocus: (movie: MovieSummary) => void;
   onPress?: (movie: MovieSummary) => void;
   registerRef?: (instance: ElementRef<typeof Pressable> | null, instanceToken: string) => void;
@@ -57,6 +62,7 @@ function moviePosterCardPropsAreEqual(previous: MoviePosterCardProps, next: Movi
   return (
     previous.movie === next.movie &&
     previous.hasPreferredFocus === next.hasPreferredFocus &&
+    previous.forceFocused === next.forceFocused &&
     previous.focusable === next.focusable &&
     previous.isDiscover === next.isDiscover &&
     previous.trapFocusDown === next.trapFocusDown &&
@@ -69,6 +75,7 @@ function moviePosterCardPropsAreEqual(previous: MoviePosterCardProps, next: Movi
 export const MoviePosterCard = memo(function MoviePosterCard({
   movie,
   hasPreferredFocus,
+  forceFocused = false,
   onFocus,
   onPress,
   registerRef,
@@ -80,6 +87,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [isFocused, setIsFocused] = useState(false);
+  const showFocused = isFocused || forceFocused;
   const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
   const [selfFocusHandle, setSelfFocusHandle] = useState<number | undefined>();
   const instanceToken = useMemo(() => `movie-poster-${++posterInstanceSequence}-${movie.id}`, [movie.id]);
@@ -134,15 +142,18 @@ export const MoviePosterCard = memo(function MoviePosterCard({
         setIsFocused(true);
         onFocus(movie);
       }}
-      onBlur={() => setIsFocused(false)}
+      onBlur={() => {
+        // Local native focus cleared; forceFocused may still pin chrome during correction.
+        setIsFocused(false);
+      }}
       onPress={() => onPress?.(movie)}
       style={styles.card}>
-      <View style={[styles.posterShell, isFocused && styles.posterShellFocused]}>
+      <View style={[styles.posterShell, showFocused && styles.posterShellFocused]}>
         <View
           style={[
             styles.poster,
             showPosterArt ? styles.posterWithArt : { backgroundColor: posterColors.background },
-            isFocused && styles.posterFocused,
+            showFocused && styles.posterFocused,
           ]}>
           {showPosterArt ? (
             <>
@@ -183,7 +194,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
 </View>
       </View>
 
-      <Text numberOfLines={1} style={[styles.title, isFocused && styles.titleFocused]}>
+      <Text numberOfLines={1} style={[styles.title, showFocused && styles.titleFocused]}>
         {displayStreamTitle(movie.title)}
       </Text>
       <View style={styles.metaRow}>

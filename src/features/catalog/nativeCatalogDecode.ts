@@ -9,6 +9,8 @@ export type {
   StreamXtreamCategoryDecodeResult,
 } from './nativeCatalogDecodeTypes.ts';
 
+export { isLikelyUnfilteredCategoryDump } from './nativeCatalogDecodeTypes.ts';
+
 export {
   isCatalogSqliteWriterOnlyDiagnosticEnabled,
   nativeRecordToMovieSummary,

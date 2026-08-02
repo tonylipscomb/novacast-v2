@@ -100,9 +100,16 @@ function mergeCategoriesPreservingCounts(previous: MovieCategory[], next: MovieC
   const nextTotal = nextAll?.count ?? 0;
 
   // A late smart-count/category refresh must not erase a valid provider rail.
-  // Treat a zero or implausibly small result as a rejected refresh, not new state.
+  // Treat a zero, collapsed, or implausibly small result as a rejected refresh.
+  const looksCollapsedProviderRail =
+    previousProvider.length >= 8 &&
+    nextProvider.length > 0 &&
+    nextProvider.length <= 2 &&
+    nextProvider.length < previousProvider.length * 0.25;
+
   if (
     (previousProvider.length > 0 && nextProvider.length === 0) ||
+    looksCollapsedProviderRail ||
     (previousTotal > 0 && nextTotal > 0 && nextTotal < previousTotal * 0.25)
   ) {
     console.info(
@@ -115,7 +122,12 @@ function mergeCategoriesPreservingCounts(previous: MovieCategory[], next: MovieC
           nextTotal,
           previousCategoryCount: previous.length,
           nextCategoryCount: next.length,
-          reason: nextProvider.length === 0 ? 'zero-provider-categories' : 'suspiciously-tiny-total',
+          reason:
+            nextProvider.length === 0
+              ? 'zero-provider-categories'
+              : looksCollapsedProviderRail
+                ? 'collapsed-provider-rail'
+                : 'suspiciously-tiny-total',
         }),
     );
     return previous;
@@ -199,6 +211,12 @@ export function useMoviesScreenModel(
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [categoryHasRatings, setCategoryHasRatings] = useState(true);
+  /** Stage 3E.2/3E.3: first-page readiness gate for primary loader lifetime (observe-only). */
+  const [firstPageLoadGate, setFirstPageLoadGate] = useState(() => ({
+    loadingCategoryId: null as string | null,
+    loadingRequestToken: null as string | null,
+    firstPageResolvedCategoryId: null as string | null,
+  }));
 
   const offsetRef = useRef(0);
   const requestGenerationRef = useRef(0);
@@ -587,6 +605,15 @@ export function useMoviesScreenModel(
       previousListScopeRef.current.categoryId === selectedCategoryId;
     previousListScopeRef.current = { providerId: activeProviderId, categoryId: selectedCategoryId };
 
+    // Stage 3E.2/3E.3: arm the primary-loader gate synchronously so it cannot flash
+    // off between category selection and the async first-page start.
+    // Gate never mutates displayed movies / selected category — observe readiness only.
+    setFirstPageLoadGate({
+      loadingCategoryId: selectedCategoryId,
+      loadingRequestToken: requestKey,
+      firstPageResolvedCategoryId: null,
+    });
+
     const loadInitialPage = async () => {
       const pageStartedAt = Date.now();
       await Promise.resolve();
@@ -595,9 +622,8 @@ export function useMoviesScreenModel(
       setCategoryLoading(true);
       setLoadStatus(retainVisible ? loadStatusRef.current : 'loading');
       setLoadErrorMessage(null);
-      if (!retainVisible) {
-        updateVisibleMovies([], 'category-first-page-reset');
-      }
+      // Stage 3E: keep prior posters as a dimmed backdrop during uncached
+      // category first-page load. Replace on success; clear only on error.
       setCategoryHasRatings(true);
       offsetRef.current = 0;
 
@@ -645,6 +671,17 @@ export function useMoviesScreenModel(
           setCategoryHasRatings(Boolean(page.hasValidRatings));
         }
         syncCategoryCount(selectedCategoryId, page.totalCount);
+        // Resolve gate only for this request token — stale completions cannot hide a newer loader.
+        setFirstPageLoadGate((previous) => {
+          if (previous.loadingRequestToken !== requestKey) {
+            return previous;
+          }
+          return {
+            loadingCategoryId: selectedCategoryId,
+            loadingRequestToken: requestKey,
+            firstPageResolvedCategoryId: selectedCategoryId,
+          };
+        });
         logMoviesPerf('movies_page_ready', {
           providerId: activeProviderId,
           categoryId: selectedCategoryId,
@@ -690,6 +727,16 @@ export function useMoviesScreenModel(
         setHasMore(false);
         setLoadStatus('error');
         setLoadErrorMessage(error instanceof Error ? error.message : 'Unable to load movies for this category.');
+        setFirstPageLoadGate((previous) => {
+          if (previous.loadingRequestToken !== requestKey) {
+            return previous;
+          }
+          return {
+            loadingCategoryId: selectedCategoryId,
+            loadingRequestToken: requestKey,
+            firstPageResolvedCategoryId: selectedCategoryId,
+          };
+        });
       } finally {
         if (!cancelled && buildContentSortRequestKey({
           providerId: activeProviderId,
@@ -966,6 +1013,9 @@ export function useMoviesScreenModel(
     detailError: resolvedDataSource ? detailError : null,
     resolvePlaybackMovieId: () => resolvePlaybackMovieId(selectedMovieId, focusedMovieIdRef.current),
     getFocusedMovieId: () => focusedMovieIdRef.current,
+    /** Diagnostics-only: next page offset (does not change load behavior). */
+    getListOffset: () => offsetRef.current,
+    firstPageLoadGate,
     loadMore,
     reload,
     searchQuery,

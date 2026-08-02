@@ -836,6 +836,30 @@ export async function getCatalogGenerationPhysicalStats(
   };
 }
 
+/** Stage 3C.2: largest category share from item rows (pre-activation). */
+export async function getCatalogGenerationLargestCategory(
+  providerId: string,
+  mediaType: CatalogMediaType,
+  generation: number,
+): Promise<{ categoryId: string | null; itemCount: number; nonzeroCategoryCount: number }> {
+  const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable(mediaType);
+  const rows = await db.getAll<{ category_id: string; item_count: number | string }>(
+    `SELECT category_id, COUNT(*) AS item_count
+     FROM ${itemsTable}
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
+     GROUP BY category_id
+     ORDER BY item_count DESC`,
+    [providerId, mediaType, generation],
+  );
+  const top = rows[0];
+  return {
+    categoryId: top ? asString(top.category_id) : null,
+    itemCount: top ? asNumber(top.item_count) : 0,
+    nonzeroCategoryCount: rows.filter((row) => asNumber(row.item_count) > 0).length,
+  };
+}
+
 export async function completeCatalogSync(
   providerId: string,
   mediaType: CatalogMediaType,
@@ -847,7 +871,7 @@ export async function completeCatalogSync(
       updatedAt?: number;
     }>;
   },
-): Promise<void> {
+): Promise<boolean> {
   const publishedCategoryCount = options?.categories?.length ?? 0;
   const categoriesTable = catalogCategoriesTable(mediaType);
   const categoryConflict = catalogCategoriesConflictTarget(mediaType);
@@ -1011,14 +1035,16 @@ export async function completeCatalogSync(
     ready: activated,
     activated,
   });
-  if (activated) {
-    console.info('[Catalog Categories Published]', {
-      providerId,
-      mediaType,
-      generation,
-      categoryCount: publishedCategoryCount,
-    });
+  if (!activated) {
+    return false;
   }
+  console.info('[Catalog Categories Published]', {
+    providerId,
+    mediaType,
+    generation,
+    categoryCount: publishedCategoryCount,
+  });
+  return true;
 }
 
 export async function getCatalogGenerationItemCount(
@@ -1475,19 +1501,26 @@ export async function getCatalogCategoryCounts(
     const countsById = new Map(
       groupedCountRows.map((row) => [asString(row.category_id), asNumber(row.item_count)]),
     );
-    const merged = metadataRows
-      .map((row) => {
-        const categoryId = asString(row.category_id);
-        return {
-          categoryId,
-          categoryName: asString(row.category_name),
-          itemCount: countsById.get(categoryId) ?? 0,
-          sortOrder: asNullableNumber(row.sort_order),
-        };
-      })
-      .filter((row) => row.itemCount > 0);
-
+    const mapped = metadataRows.map((row) => {
+      const categoryId = asString(row.category_id);
+      return {
+        categoryId,
+        categoryName: asString(row.category_name),
+        itemCount: countsById.get(categoryId) ?? 0,
+        sortOrder: asNullableNumber(row.sort_order),
+      };
+    });
+    // Stage 3C.2: production browse only lists categories that can load posters.
+    // Collapsed metadata-all fallback was diagnostic-only and is no longer applied.
+    const merged = mapped.filter((row) => row.itemCount > 0);
     const allMoviesTotal = asNumber(totalRow?.total);
+    const looksCollapsed =
+      metadataRows.length >= 8 &&
+      allMoviesTotal >= 500 &&
+      merged.length > 0 &&
+      merged.length <= 2 &&
+      merged.length < metadataRows.length * 0.2;
+
     console.info(
       '[NovaCast Movies Category Counts] ' +
         JSON.stringify({
@@ -1496,12 +1529,17 @@ export async function getCatalogCategoryCounts(
           categoryMetadataCount: metadataRows.length,
           groupedCountRows: groupedCountRows.length,
           nonzeroCategoryCount: merged.length,
+          appliedCategoryCount: merged.length,
           allMoviesTotal,
+          collapsedCategoryIds: looksCollapsed,
           firstCounts: merged.slice(0, 5).map((row) => ({
             categoryId: row.categoryId,
             itemCount: row.itemCount,
           })),
-          reason: 'grouped-items-v2-merge',
+          reason: looksCollapsed
+            ? 'grouped-items-v2-collapsed-diagnostic'
+            : 'grouped-items-v2-merge',
+          marker: 'stage3c2-vod-full-dump-sync-v1',
         }),
     );
 

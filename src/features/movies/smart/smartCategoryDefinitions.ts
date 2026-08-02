@@ -134,8 +134,21 @@ export const SMART_CATEGORY_DEFINITIONS: SmartCategoryDefinition[] = [
   },
 ];
 
+/**
+ * Temporary: Features + New Releases remain unstable on device.
+ * Keep library rails (Continue Watching / Favorites / Recently Watched).
+ */
+const DISABLE_FEATURES_AND_NEW_RELEASES = true;
+
 export function getActiveSmartCategoryDefinitions() {
-  return SMART_CATEGORY_DEFINITIONS;
+  if (!DISABLE_FEATURES_AND_NEW_RELEASES) {
+    return SMART_CATEGORY_DEFINITIONS;
+  }
+  return SMART_CATEGORY_DEFINITIONS.filter(
+    (definition) =>
+      definition.key !== SMART_CATEGORY_KEY_FEATURES &&
+      definition.key !== SMART_CATEGORY_KEY_NEW_RELEASES,
+  );
 }
 
 export function resolveSmartCategoryDefinition(categoryId: string) {

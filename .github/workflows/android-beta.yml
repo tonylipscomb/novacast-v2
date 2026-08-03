@@ -26,7 +26,9 @@ permissions:
   contents: write
 
 env:
+  NODE_ENV: production
   EXPO_PUBLIC_MOVIES_SQLITE_READS: 'true'
+  SENTRY_DISABLE_AUTO_UPLOAD: 'true'
   EXPO_NO_TELEMETRY: '1'
   CI: 'true'
 
@@ -107,10 +109,12 @@ jobs:
       - name: Build release APK
         working-directory: android
         env:
+          NODE_ENV: production
+          EXPO_PUBLIC_MOVIES_SQLITE_READS: 'true'
+          SENTRY_DISABLE_AUTO_UPLOAD: 'true'
           NOVACAST_KEYSTORE_PASSWORD: ${{ secrets.NOVACAST_KEYSTORE_PASSWORD }}
           NOVACAST_KEY_ALIAS: ${{ secrets.NOVACAST_KEY_ALIAS }}
           NOVACAST_KEY_PASSWORD: ${{ secrets.NOVACAST_KEY_PASSWORD }}
-          EXPO_PUBLIC_MOVIES_SQLITE_READS: 'true'
         run: ./gradlew app:assembleRelease --no-daemon
 
       - name: Verify APK exists

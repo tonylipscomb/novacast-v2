@@ -16,7 +16,6 @@ import ReactNative, {
 } from 'react-native';
 
 import { BlurView } from 'expo-blur';
-import { MediaDetailOverlay } from '@/components/media/MediaDetailOverlay';
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
 import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
@@ -44,8 +43,13 @@ import { buildMoviePlaybackUrlResolved } from '@/features/providers/providerPlay
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 import { MovieCategoryRail } from './components/MovieCategoryRail';
+import { MovieDetailOverlay } from './components/MovieDetailOverlay';
 import { MoviePosterGrid } from './components/MoviePosterGrid';
 import { MovieToolbar } from './components/MovieToolbar';
+import {
+  resolveContinueWatchingLabel,
+  selectRelatedMovies,
+} from './movieDetailOverlayModel';
 import { getMoviesScreenMemory, rememberMoviesScreenMemory } from './moviesScreenMemory';
 import { useMoviesScreenModel } from './useMoviesScreenModel';
 import { getMovieCategoryRailCategories } from './moviesVisibleCategories';
@@ -2467,6 +2471,28 @@ useEffect(() => {
     };
   }, [clearScope]);
 
+  const continueWatchingEntry = useMemo(() => {
+    if (!selectedMovie) return null;
+    return library.state.watchHistory.find((entry) => entry.movieId === selectedMovie.id) ?? null;
+  }, [library.state.watchHistory, selectedMovie]);
+
+  const continueWatchingLabel = useMemo(
+    () => resolveContinueWatchingLabel(continueWatchingEntry?.progressPercent),
+    [continueWatchingEntry?.progressPercent],
+  );
+
+  const relatedMovies = useMemo(() => {
+    if (!selectedMovie) return [];
+    return selectRelatedMovies(selectedMovie, visibleMovies, 12);
+  }, [selectedMovie, visibleMovies]);
+
+  const handleSelectRelatedMovie = useCallback(
+    (movie: (typeof visibleMovies)[number]) => {
+      handleSelectMovie(movie);
+    },
+    [handleSelectMovie],
+  );
+
   const gridEmptyNotice =
     !loading && visibleMovies.length === 0 && loadStatus === 'error'
       ? 'No movies to display right now.'
@@ -2937,7 +2963,7 @@ useEffect(() => {
       </NovaTvShell>
         </View>
 
-      <MediaDetailOverlay
+      <MovieDetailOverlay
         visible={detailOverlayVisible}
         focusHandoffActive={focusHandoffActive}
         closeTargetRef={overlayCloseTargetRef}
@@ -2950,11 +2976,15 @@ useEffect(() => {
         }
         detailError={null}
         detailLoading={detailLoading && !focusHandoffActive}
+        continueWatchingLabel={continueWatchingLabel}
+        continueWatchingProgress={continueWatchingEntry?.progressPercent ?? null}
+        relatedMovies={relatedMovies}
         isFavorite={selectedMovie ? library.isFavorite(selectedMovie.id) : false}
         isWatchlisted={selectedMovie ? library.isWatchlisted(selectedMovie.id) : false}
         onClose={closeDetail}
         onPlay={focusHandoffActive ? undefined : selectedMovie ? startPlayback : undefined}
         onRetry={focusHandoffActive ? undefined : selectedMovie ? handleDetailRetry : undefined}
+        onSelectRelated={focusHandoffActive ? undefined : handleSelectRelatedMovie}
         onTrailerPress={
           movieDetail?.trailerUrl
             ? () => {
@@ -2982,7 +3012,7 @@ useEffect(() => {
       <SearchOverlay
         visible={searchOverlayVisible && !playbackUiActive}
         // Keep Search controller/results alive across Detail + playback (no Modal while hidden).
-        retainMounted={searchOpen}
+        retainMounted={searchOpen && !playbackUiActive}
         restoreFocusMovieId={searchPhase === 'returning' ? searchRestoreMovieId : null}
         onRestoreFocusHandled={() => {
           if (searchPhaseRef.current !== 'returning') {

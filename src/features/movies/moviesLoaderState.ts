@@ -132,7 +132,10 @@ export function resolveMoviesPrimaryLoaderLabel(input: {
   }
 
   const name = sanitizeMoviesCategoryDisplayName(input.categoryDisplayName);
-  if (!input.hasCategories || !name) {
+  if (!input.hasCategories) {
+    return 'Loading provider categories…';
+  }
+  if (!name) {
     return 'Loading Movies';
   }
 

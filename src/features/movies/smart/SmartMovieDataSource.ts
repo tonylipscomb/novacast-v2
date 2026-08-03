@@ -328,6 +328,47 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
 
     async getCategories() {
       const providerCategories = await base.getCategories();
+      const realProviderCategories = providerCategories.filter(
+        (category) => category.kind === 'provider' && category.id !== 'all',
+      );
+
+      if (usesSqliteReads) {
+        if (!realProviderCategories.length) {
+          console.info(
+            '[NovaCast Movies Category Contract] ' +
+              JSON.stringify({
+                providerId,
+                readableGeneration: null,
+                repositoryCategoryCount: providerCategories.length,
+                sqliteProviderCategoryCount: 0,
+                wrappedCategoryCount: 0,
+                appliedProviderCategoryCount: 0,
+                totalMovieCount: null,
+                firstProviderCategoryIds: [],
+                reason: 'provider-categories-pending',
+              }),
+          );
+          return [];
+        }
+
+        console.info(
+          '[NovaCast Movies Category Contract] ' +
+            JSON.stringify({
+              providerId,
+              readableGeneration: null,
+              repositoryCategoryCount: providerCategories.length,
+              sqliteProviderCategoryCount: realProviderCategories.length,
+              wrappedCategoryCount: providerCategories.length,
+              appliedProviderCategoryCount: realProviderCategories.length,
+              totalMovieCount: providerCategories.find((category) => category.id === 'all')?.count ?? null,
+              firstProviderCategoryIds: realProviderCategories.slice(0, 5).map((category) => category.id),
+              reason: 'provider-categories-applied',
+            }),
+        );
+        // SQLite path: provider-only list — no smart-wrapper substitute categories.
+        return providerCategories;
+      }
+
       const wrappedCategories = await buildSmartCategories(providerCategories);
       console.info(
         '[NovaCast Movies Category Contract] ' +

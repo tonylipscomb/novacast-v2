@@ -357,12 +357,11 @@ export async function writeCategoriesFromSourceBudgeted<T>(
     return 0;
   }
 
-  // Keep the previous successful category rows readable while a movie
-  // generation is being built. They are committed atomically with readiness.
+  // Stage 4 category-rail: stage pendingCategories for the atomic ready
+  // transition, then fall through and stream category rows immediately so the
+  // Movies rail can read them before item sync completes.
   if (handle.mediaType === 'movie') {
     handle.pendingCategories = categories.map(mapCategory);
-    releaseMovieCategoryGate(handle.providerId);
-    return handle.pendingCategories.length;
   }
 
   try {
@@ -422,7 +421,11 @@ export async function writeCategoriesFromSourceBudgeted<T>(
     return 0;
   } finally {
     endCatalogWriteQuietPeriod();
-    releaseSeriesCategoryGate(handle.providerId);
+    if (handle.mediaType === 'movie') {
+      releaseMovieCategoryGate(handle.providerId);
+    } else {
+      releaseSeriesCategoryGate(handle.providerId);
+    }
   }
 }
 

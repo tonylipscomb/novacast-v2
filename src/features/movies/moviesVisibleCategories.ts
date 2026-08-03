@@ -45,7 +45,10 @@ function isValidPersistedSelection(categories: readonly MovieCategory[], categor
   if (!categoryId || categoryId === ALL_MOVIES_CATEGORY_ID) {
     return false;
   }
-  return categories.some((category) => category.id === categoryId && isSelectableCategory(category));
+  if (categoryId.startsWith('smart:') || categoryId.startsWith('section:')) {
+    return false;
+  }
+  return categories.some((category) => category.id === categoryId && isVisibleProviderCategory(category));
 }
 
 function pickFirstUsableProviderCategory(visibleProviderCategories: MovieCategory[]) {
@@ -54,14 +57,15 @@ function pickFirstUsableProviderCategory(visibleProviderCategories: MovieCategor
   }
 
   const first = visibleProviderCategories[0];
-  // Unknown counts are still usable — only skip when we know the row is empty.
+  // Unknown counts (still syncing) are immediately selectable. Only skip rows we
+  // already know are empty after a completed item-generation count.
   if (!(first.countKnown === true && first.count <= 0)) {
     return first;
   }
 
   return (
     visibleProviderCategories.find(
-      (category) => category.countKnown === true && category.count > 0,
+      (category) => !(category.countKnown === true && category.count <= 0),
     ) ?? null
   );
 }

@@ -27,6 +27,7 @@ export {
   getCatalogMovieItem,
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
+  resolveReadableCategoryGeneration,
   logCatalogGenerationInventoryOnce,
   deleteStaleCatalogGeneration,
   cleanupIncompleteCatalogGenerationsV2,

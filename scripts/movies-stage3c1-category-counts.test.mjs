@@ -158,8 +158,10 @@ test('All Movies count comes from total rows and counts appear without selection
   assert.equal(all?.countKnown, true);
 
   const provider = categories.filter((category) => category.id !== 'all');
-  assert.equal(provider.length, 2);
-  assert.ok(provider.every((category) => category.countKnown === true && category.count > 0));
+  // Stage 4: zero-count metadata categories remain visible for the rail.
+  assert.equal(provider.length, 3);
+  assert.ok(provider.every((category) => category.countKnown === true));
+  assert.ok(provider.some((category) => category.id === 'c3' && category.count === 0));
   assert.equal(await getCatalogTotalCount('p1', 'movie'), 3);
 });
 
@@ -167,11 +169,8 @@ test('category 0 placeholders are replaced before interaction', async () => {
   await seedMovieCatalog();
   const source = createSqliteMovieDataSource('p1');
   const categories = await source.getCategories();
-  assert.ok(
-    categories.every(
-      (category) => category.countKnown !== false && (category.id === 'all' || category.count > 0),
-    ),
-  );
+  assert.ok(categories.every((category) => category.countKnown !== false));
+  assert.ok(categories.some((category) => category.id === 'c3' && category.count === 0));
   assert.match(countPolicy, /countKnown === false/);
   assert.match(countPolicy, /return '\.\.\.'/);
 });
@@ -241,7 +240,7 @@ test('pagination and detail paths do not recompute category counts', () => {
 });
 
 test('category selection is not required to populate counts', () => {
-  assert.match(sqliteSource, /countKnown: true/);
+  assert.match(sqliteSource, /countKnown: itemsGeneration > 0|countKnown: true/);
   assert.match(sqliteSource, /grouped-counts-applied/);
   assert.match(smartSource, /resolveProviderCategoryCount/);
   assert.match(smartSource, /preferSqliteCounts/);

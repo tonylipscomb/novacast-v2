@@ -35,6 +35,7 @@ import { subscribeCategoryCountIndex, getCategoryCountFromIndex } from '@/featur
 import {
   subscribeCatalogSyncPhase,
   subscribeMovieCatalogReady,
+  subscribeMovieCategoriesUpdated,
 } from '@/features/providers/providerCatalogSync';
 import { subscribeSmartCategoryCache } from '@/features/providers/smartCategoryCacheStore';
 import { isSmartCategoryId, normalizeSelectedSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
@@ -92,7 +93,14 @@ function applyCategoryCount(categories: MovieCategory[], categoryId: string, cou
 
 function mergeCategoriesPreservingCounts(previous: MovieCategory[], next: MovieCategory[]) {
   if (!next.length && previous.length) {
-    return previous;
+    const previousHasRealProvider = previous.some(
+      (category) => category.kind === 'provider' && category.id !== 'all',
+    );
+    // Allow clear when previous had no real provider categories (e.g. pending/empty).
+    if (previousHasRealProvider) {
+      return previous;
+    }
+    return next;
   }
   if (!previous.length) {
     return next;
@@ -421,7 +429,13 @@ export function useMoviesScreenModel(
                 .filter((category) => category.kind === 'provider' && category.id !== 'all')
                 .slice(0, 5)
                 .map((category) => category.id),
-              reason: warmedCategories.length ? 'model-apply' : 'empty-refresh-preserved',
+              reason: warmedCategories.some(
+                (category) => category.kind === 'provider' && category.id !== 'all',
+              )
+                ? 'provider-categories-applied'
+                : warmedCategories.length
+                  ? 'model-apply'
+                  : 'empty-refresh-preserved',
             }),
         );
         logMoviesPerf('categories_state_applied', {
@@ -525,6 +539,21 @@ export function useMoviesScreenModel(
       providerId: activeProviderId,
     });
 
+    const unsubscribeMovieCategoriesUpdated = subscribeMovieCategoriesUpdated(
+      activeProviderId,
+      (payload) => {
+        if (!mounted) {
+          return;
+        }
+        logMoviesPerf('movie_categories_updated_received', {
+          providerId: activeProviderId,
+          generation: payload.generation,
+          categoryCount: payload.categoryCount,
+        });
+        void loadCategories();
+      },
+    );
+
     let lastPublishedGeneration = 0;
     const unsubscribeMovieReady = subscribeMovieCatalogReady(activeProviderId, (generation) => {
       if (!mounted) {
@@ -597,6 +626,7 @@ export function useMoviesScreenModel(
       unsubscribeSmartCache();
       unsubscribeSync();
       unsubscribeMovieReady();
+      unsubscribeMovieCategoriesUpdated();
       unsubscribeLibrary();
       unsubscribeSettings();
     };

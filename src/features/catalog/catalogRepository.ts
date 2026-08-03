@@ -1452,15 +1452,110 @@ export async function resolveReadableCatalogGeneration(
   return resolvedReadableGeneration;
 }
 
+
+export async function resolveReadableCategoryGeneration(
+  providerId: string,
+  mediaType: CatalogMediaType,
+): Promise<number> {
+  const db = await getCatalogDatabase();
+  const categoriesTable = catalogCategoriesTable(mediaType);
+  const state = await getCatalogSyncState(providerId, mediaType);
+  const provider = await getCatalogProvider(providerId);
+  const currentAttemptGeneration = state?.generation ?? 0;
+  const currentStatus = state?.status ?? null;
+  const lastCompletedGeneration = provider?.catalogGeneration ?? 0;
+
+  const countValidCategoryRows = async (generation: number) => {
+    if (generation <= 0) {
+      return 0;
+    }
+    const row = await db.getFirst<{ row_count: number | string }>(
+      `SELECT COUNT(*) AS row_count
+       FROM ${categoriesTable}
+       WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
+         AND TRIM(COALESCE(category_id, '')) != ''
+         AND TRIM(COALESCE(category_name, '')) != ''`,
+      [providerId, mediaType, generation],
+    );
+    return asNumber(row?.row_count);
+  };
+
+  let resolvedCategoryGeneration = 0;
+  let categoryRowCount = 0;
+  let reason:
+    | 'current-sync-category-generation'
+    | 'completed-category-generation'
+    | 'no-readable-category-generation' = 'no-readable-category-generation';
+
+  if (currentAttemptGeneration > 0) {
+    const rows = await countValidCategoryRows(currentAttemptGeneration);
+    if (rows > 0) {
+      resolvedCategoryGeneration = currentAttemptGeneration;
+      categoryRowCount = rows;
+      reason =
+        currentStatus === 'ready'
+          ? 'completed-category-generation'
+          : 'current-sync-category-generation';
+    }
+  }
+
+  if (reason === 'no-readable-category-generation' && lastCompletedGeneration > 0) {
+    const rows = await countValidCategoryRows(lastCompletedGeneration);
+    if (rows > 0) {
+      resolvedCategoryGeneration = lastCompletedGeneration;
+      categoryRowCount = rows;
+      reason = 'completed-category-generation';
+    }
+  }
+
+  if (reason === 'no-readable-category-generation') {
+    const row = await db.getFirst<{ sync_generation: number | string; row_count: number | string }>(
+      `SELECT sync_generation, COUNT(*) AS row_count
+       FROM ${categoriesTable}
+       WHERE provider_id = ? AND media_type = ?
+         AND TRIM(COALESCE(category_id, '')) != ''
+         AND TRIM(COALESCE(category_name, '')) != ''
+       GROUP BY sync_generation
+       ORDER BY sync_generation DESC
+       LIMIT 1`,
+      [providerId, mediaType],
+    );
+    const newestGeneration = asNumber(row?.sync_generation);
+    const rows = asNumber(row?.row_count);
+    if (newestGeneration > 0 && rows > 0) {
+      resolvedCategoryGeneration = newestGeneration;
+      categoryRowCount = rows;
+      reason = 'completed-category-generation';
+    }
+  }
+
+  console.info(
+    '[NovaCast Category Read Generation] ' +
+      JSON.stringify({
+        providerId,
+        mediaType,
+        currentAttemptGeneration,
+        currentStatus,
+        lastCompletedGeneration,
+        resolvedCategoryGeneration,
+        categoryRowCount,
+        reason,
+      }),
+  );
+
+  return resolvedCategoryGeneration;
+}
+
 const resolveActiveGeneration = resolveReadableCatalogGeneration;
 
 export async function getCatalogCategoryCounts(
   providerId: string,
   mediaType: CatalogMediaType,
-  options?: { generation?: number },
+  options?: { generation?: number; includeZeroCountCategories?: boolean },
 ): Promise<Array<{ categoryId: string; categoryName: string; itemCount: number; sortOrder: number | null }>> {
   const db = await getCatalogDatabase();
   const generation = options?.generation ?? (await resolveActiveGeneration(providerId, mediaType));
+  const includeZeroCountCategories = Boolean(options?.includeZeroCountCategories);
   if (generation <= 0) {
     return [];
   }
@@ -1510,9 +1605,11 @@ export async function getCatalogCategoryCounts(
         sortOrder: asNullableNumber(row.sort_order),
       };
     });
-    // Stage 3C.2: production browse only lists categories that can load posters.
-    // Collapsed metadata-all fallback was diagnostic-only and is no longer applied.
-    const merged = mapped.filter((row) => row.itemCount > 0);
+    // Category-rail readiness may include zero-count rows while items are still syncing.
+    // Item pages remain gated by resolveReadableCatalogGeneration separately.
+    const merged = includeZeroCountCategories
+      ? mapped.filter((row) => row.categoryId.trim() && row.categoryName.trim())
+      : mapped.filter((row) => row.itemCount > 0);
     const allMoviesTotal = asNumber(totalRow?.total);
     const looksCollapsed =
       metadataRows.length >= 8 &&
@@ -1538,7 +1635,9 @@ export async function getCatalogCategoryCounts(
           })),
           reason: looksCollapsed
             ? 'grouped-items-v2-collapsed-diagnostic'
-            : 'grouped-items-v2-merge',
+            : includeZeroCountCategories
+              ? 'grouped-items-v2-metadata-including-zero'
+              : 'grouped-items-v2-merge',
           marker: 'stage3c2-vod-full-dump-sync-v1',
         }),
     );

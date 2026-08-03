@@ -127,6 +127,9 @@ const pendingSyncInputs = new Map<string, ProviderCatalogSyncInput>();
 const syncListeners = new Map<string, Set<(phase: CatalogSyncPhase) => void>>();
 const movieReadyListeners = new Map<string, Set<(generation: number) => void>>();
 let movieReadySubscriptionInstance = 0;
+const movieCategoriesUpdatedListeners = new Map<string, Set<(payload: { generation: number; categoryCount: number }) => void>>();
+const lastMovieCategoriesUpdatedSignature = new Map<string, string>();
+
 const catalogSyncSetupCache = new Map<string, Promise<CatalogSyncSetup>>();
 
 let syncGeneration = 0;
@@ -340,6 +343,45 @@ function notifyMovieCatalogReady(providerId: string, generation: number) {
 export function publishMovieCatalogReady(providerId: string, generation: number) {
   notifyPhase(providerId, 'ready');
   notifyMovieCatalogReady(providerId, generation);
+}
+
+export function subscribeMovieCategoriesUpdated(
+  providerId: string,
+  listener: (payload: { generation: number; categoryCount: number }) => void,
+) {
+  const listeners = movieCategoriesUpdatedListeners.get(providerId) ?? new Set();
+  listeners.add(listener);
+  movieCategoriesUpdatedListeners.set(providerId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (!listeners.size) {
+      movieCategoriesUpdatedListeners.delete(providerId);
+    }
+  };
+}
+
+function notifyMovieCategoriesUpdated(providerId: string, generation: number, categoryCount: number) {
+  const signature = `${providerId}:${generation}:${categoryCount}`;
+  if (lastMovieCategoriesUpdatedSignature.get(providerId) === signature) {
+    return;
+  }
+  lastMovieCategoriesUpdatedSignature.set(providerId, signature);
+  const listeners = movieCategoriesUpdatedListeners.get(providerId);
+  console.info('[NovaCast Movies] movie-categories-updated', {
+    providerId,
+    generation,
+    categoryCount,
+    listenerCount: listeners?.size ?? 0,
+  });
+  listeners?.forEach((listener) => listener({ generation, categoryCount }));
+}
+
+export function publishMovieCategoriesUpdated(
+  providerId: string,
+  generation: number,
+  categoryCount: number,
+) {
+  notifyMovieCategoriesUpdated(providerId, generation, categoryCount);
 }
 
 type CatalogSyncSetup = {
@@ -1213,7 +1255,7 @@ export async function runMovieCatalogSync(
     });
 
     if (sqliteHandle.enabled) {
-      await writeCategoriesFromSourceBudgeted(
+      const writtenCategories = await writeCategoriesFromSourceBudgeted(
         sqliteHandle,
         movieCategories,
         (category, index) => ({
@@ -1226,6 +1268,9 @@ export async function runMovieCatalogSync(
         }),
         { isCancelled },
       );
+      if (writtenCategories > 0) {
+        publishMovieCategoriesUpdated(providerId, sqliteHandle.generation, writtenCategories);
+      }
     }
 
     // Let Series finish category SQLite upserts before Movies begins item ingest/writes.

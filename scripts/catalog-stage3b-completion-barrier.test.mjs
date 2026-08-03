@@ -56,10 +56,11 @@ test('Movies completion barrier verifies rows before completeCatalogSync', () =>
   assert.match(sync, /subscribeMovieCatalogReady/);
 });
 
-test('new movie categories remain staged until the atomic ready transition', () => {
-  assert.match(writer, /Keep the previous successful category rows readable/);
+test('Stage 4 movie categories stream for category-rail while pendingCategories remain staged', () => {
+  assert.match(writer, /Stage 4 category-rail/);
   assert.match(writer, /handle\.pendingCategories = categories\.map\(mapCategory\)/);
-  assert.doesNotMatch(writer, /void writeCatalogItemsFromSourceBudgeted/);
+  assert.match(writer, /sqlite-categories-streamed/);
+  assert.match(writer, /categories: handle\.pendingCategories/);
 });
 
 test('Movies reload categories once on the completed catalog-ready phase', () => {

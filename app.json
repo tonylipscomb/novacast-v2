@@ -32,6 +32,7 @@
         "expo-splash-screen",
         {
           "backgroundColor": "#000000",
+          "image": "./splash.png",
           "resizeMode": "cover"
         }
       ],

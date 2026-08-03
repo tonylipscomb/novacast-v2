@@ -7,13 +7,19 @@ import type { MovieDataSource } from './data/MovieDataSource';
 import { createSqliteMovieDataSource } from './data/SqliteMovieDataSource';
 import { MOVIE_PAGE_SIZE } from './movieMockData';
 import type { MovieCategory, MovieSummary } from './movieTypes';
+import type { MovieDetailEnrichmentOrigin } from './movieDetailEnrichment';
 import { resolvePlaybackMovieId, resolveSelectedMovie, type MoviesLoadStatus } from './moviesScreenLogic';
 import { getMoviesScreenMemory, rememberMoviesScreenMemory } from './moviesScreenMemory';
 import {
   createSmartMovieDataSource,
-  findDefaultCategoryId,
   refreshSmartCategoryCounts,
 } from './smart/SmartMovieDataSource';
+import {
+  ALL_MOVIES_CATEGORY_ID,
+  getVisibleMovieCategories,
+  logMoviesInitialCategory,
+  resolveMoviesInitialCategory,
+} from './moviesVisibleCategories';
 import { subscribeMovieLibrary } from './smart/movieLibraryStore';
 import {
   getMoviesSettingsSync,
@@ -153,10 +159,6 @@ function mergeCategoriesPreservingCounts(previous: MovieCategory[], next: MovieC
   });
 }
 
-function isSelectableCategory(category: MovieCategory) {
-  return category.kind !== 'section';
-}
-
 export function useMoviesScreenModel(
   dataSource?: MovieDataSource,
   options: MoviesScreenModelOptions = {},
@@ -166,6 +168,7 @@ export function useMoviesScreenModel(
   const activeProviderId = selectedProvider?.id ?? 'demo-provider';
   const settings = useMoviesSettingsStore();
   const sortOption = settings.movieSortOption;
+  const detailOriginRef = useRef<MovieDetailEnrichmentOrigin>('browse');
   const resolvedDataSource = useMemo(() => {
     if (dataSource) {
       return dataSource;
@@ -175,8 +178,14 @@ export function useMoviesScreenModel(
       console.info('[Movies SQLite] selected', {
         providerId: selectedProvider.id,
       });
+      const providerMovies = activeBundle?.movies;
       return createSmartMovieDataSource(
-        createSqliteMovieDataSource(selectedProvider.id),
+        createSqliteMovieDataSource(selectedProvider.id, {
+          fetchProviderMovieInfo: providerMovies?.getMovieInfo
+            ? (movieId) => providerMovies.getMovieInfo!(movieId)
+            : undefined,
+          getDetailOrigin: () => detailOriginRef.current,
+        }),
         selectedProvider.id,
       );
     }
@@ -259,6 +268,10 @@ export function useMoviesScreenModel(
   const previousListScopeRef = useRef({ providerId: '', categoryId: '' });
   const categoriesRef = useRef<MovieCategory[]>([]);
   const hideSmartCategoriesRef = useRef(settings.hideSmartCategories);
+  /** Explicit selectMovie pin — survives browse page reloads for Search-origin Detail/Play. */
+  const pinnedSelectedMovieIdRef = useRef<string | null>(
+    options.initialSelectedMovieId ?? providerMemory.selectedMovieId,
+  );
 
   useEffect(() => {
     categoriesRef.current = categories;
@@ -421,16 +434,30 @@ export function useMoviesScreenModel(
         });
         scheduleSmartCountRefresh();
         setSelectedCategoryId((current) => {
-          let nextId = current;
-          if (current && current !== 'all' && warmedCategories.some((category) => category.id === current && isSelectableCategory(category))) {
-            nextId = current;
-          } else {
-            const remembered = options.initialSelectedCategoryId ?? providerMemory.selectedCategoryId;
-            if (remembered && warmedCategories.some((category) => category.id === remembered && isSelectableCategory(category))) {
-              nextId = remembered;
-            } else {
-              nextId = findDefaultCategoryId(warmedCategories);
-            }
+          const remembered = options.initialSelectedCategoryId ?? providerMemory.selectedCategoryId;
+          const decision = resolveMoviesInitialCategory({
+            categories: warmedCategories,
+            previousCategoryId: current,
+            rememberedCategoryId: remembered,
+          });
+          const nextId = decision.selectedCategoryId;
+
+          if (decision.shouldLog) {
+            logMoviesInitialCategory({
+              providerId: activeProviderId,
+              readableGeneration: null,
+              previousCategoryId: current || null,
+              selectedCategoryId: nextId,
+              visibleCategoryCount: decision.visibleCategoryCount,
+              usedAllMoviesFallback: decision.usedAllMoviesFallback,
+              reason: decision.reason,
+            });
+          }
+
+          if (nextId && nextId !== current) {
+            rememberMoviesScreenMemory(activeProviderId, {
+              selectedCategoryId: nextId,
+            });
           }
 
           const selected = warmedCategories.find((category) => category.id === nextId);
@@ -438,7 +465,12 @@ export function useMoviesScreenModel(
             selected?.kind === 'provider'
               ? getCategoryCountFromIndex(activeProviderId, 'movie', selected.id)
               : undefined;
-          if (selected && selected.countKnown === false && indexedSelected == null) {
+          if (
+            selected &&
+            selected.id !== ALL_MOVIES_CATEGORY_ID &&
+            selected.countKnown === false &&
+            indexedSelected == null
+          ) {
             // Progressive: only the first selected category may enqueue a network count.
             queueMicrotask(() => prefetchCategoryCount(selected.id, selected.kind));
           }
@@ -698,6 +730,12 @@ export function useMoviesScreenModel(
             return current;
           }
 
+          // Stage 3G.4: keep Search/detail selections that are outside the current
+          // browse page so hiding Search / page refresh cannot clear Play's movie.
+          if (current && pinnedSelectedMovieIdRef.current === current) {
+            return current;
+          }
+
           // Focus restoration is browse chrome. Selection is created only by
           // explicit poster activation.
           return null;
@@ -777,8 +815,13 @@ export function useMoviesScreenModel(
   }, [selectedMovieId, selectedMovieSnapshot, visibleMovies]);
 
   const loadMovieDetail = useCallback(
-    async (movie: MovieSummary) => {
+    async (
+      movie: MovieSummary,
+      loadOptions?: { origin?: MovieDetailEnrichmentOrigin },
+    ) => {
       const requestId = ++detailRequestIdRef.current;
+      const origin = loadOptions?.origin ?? 'browse';
+      detailOriginRef.current = origin;
       const fallback = buildMoviePreviewDetail(movie);
       console.info('[NovaCast Movies Detail Load]', {
         phase: 'start',
@@ -788,7 +831,9 @@ export function useMoviesScreenModel(
         summaryHasContentId: Boolean(movie.id),
         summaryHasContainerExtension: Boolean(movie.containerExtension),
         requestAction: resolvedDataSource?.getMovieInfo ? 'getMovieInfo' : 'preview-only',
+        origin,
       });
+      // Local-first: open Detail immediately from the selected summary / SQLite row.
       setMovieDetail(fallback);
       setDetailError(null);
       setDetailLoading(true);
@@ -807,6 +852,7 @@ export function useMoviesScreenModel(
             errorName: 'StaleRequest',
             errorCode: 'stale-detail-request',
             status: 'cancelled',
+            origin,
           });
           return;
         }
@@ -823,10 +869,56 @@ export function useMoviesScreenModel(
           errorName: detail ? null : 'DetailUnavailable',
           errorCode: detail ? null : 'detail-null-response',
           status: detail ? 'fulfilled' : 'empty',
+          origin,
         });
         if (!detail && resolvedDataSource?.getMovieInfo) {
           setDetailError('Detailed movie information is unavailable.');
         }
+
+        // Clear loading so Play stays available while optional provider enrichment merges.
+        if (requestId === detailRequestIdRef.current) {
+          setDetailLoading(false);
+        }
+
+        if (!detail || !resolvedDataSource?.enrichMovieInfo) {
+          return;
+        }
+
+        // Progressive enrichment: merge into the same Detail overlay (no remount).
+        void resolvedDataSource
+          .enrichMovieInfo(movie.id)
+          .then((enriched) => {
+            if (requestId !== detailRequestIdRef.current || !enriched) {
+              return;
+            }
+            if (enriched.id !== movie.id) {
+              return;
+            }
+            setMovieDetail(enriched);
+            setSelectedMovieSnapshot((previous) => {
+              if (!previous || previous.id !== movie.id) {
+                return previous;
+              }
+              const nextExtension = enriched.containerExtension;
+              if (!nextExtension || previous.containerExtension === nextExtension) {
+                return previous;
+              }
+              return { ...previous, containerExtension: nextExtension };
+            });
+          })
+          .catch((error) => {
+            console.info(
+              '[NovaCast Movies Detail Load]',
+              {
+                phase: 'enrichment-nonfatal',
+                providerId: activeProviderId,
+                movieId: movie.id,
+                origin,
+                errorName: error instanceof Error ? error.name : 'UnknownError',
+                errorCode: error instanceof Error ? error.message : String(error),
+              },
+            );
+          });
       } catch (error) {
         console.info('[NovaCast Movies Detail Load]', {
           phase: 'failure',
@@ -839,10 +931,12 @@ export function useMoviesScreenModel(
           errorName: error instanceof Error ? error.name : 'UnknownError',
           errorCode: error instanceof Error ? error.message : String(error),
           status: 'rejected',
+          origin,
         });
         if (requestId === detailRequestIdRef.current) {
+          // Retain local preview; Play remains available when a source can be resolved.
           setMovieDetail(fallback);
-          setDetailError('Detailed movie information could not be loaded.');
+          setDetailError(null);
         }
       } finally {
         if (requestId === detailRequestIdRef.current) {
@@ -860,6 +954,9 @@ export function useMoviesScreenModel(
 
     logMoviesAction('category-selected', { categoryId });
     setSearchQueryState('');
+    pinnedSelectedMovieIdRef.current = null;
+    setSelectedMovieSnapshot(null);
+    setSelectedMovieId(null);
     setSelectedCategoryId(categoryId);
     setLoadStatus('loading');
     setLoadErrorMessage(null);
@@ -887,6 +984,7 @@ export function useMoviesScreenModel(
   const selectMovie = (movie: MovieSummary) => {
     logMoviesAction('movie-selected', { movieId: movie.id });
     focusedMovieIdRef.current = movie.id;
+    pinnedSelectedMovieIdRef.current = movie.id;
     setFocusedMovieId(movie.id);
     setSelectedMovieId(movie.id);
     setSelectedMovieSnapshot(movie);
@@ -991,8 +1089,14 @@ export function useMoviesScreenModel(
     setSearchQueryState(nextQuery);
   };
 
+  const visibleMovieCategories = useMemo(
+    () => getVisibleMovieCategories(resolvedDataSource ? categories : []),
+    [categories, resolvedDataSource],
+  );
+
   return {
     categories: resolvedDataSource ? categories : [],
+    visibleMovieCategories,
     selectedCategoryId,
     focusedMovie: resolvedDataSource ? focusedMovie : null,
     selectedMovie: resolvedDataSource ? selectedMovie : null,

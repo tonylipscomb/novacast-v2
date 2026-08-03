@@ -2,6 +2,7 @@ export type SearchTimingStage =
   | 'index-scan'
   | 'index-map'
   | 'provider-fallback'
+  | 'sqlite'
   | 'global-grouped'
   | 'scope-complete';
 
@@ -9,7 +10,7 @@ export type SearchTimingMetric = {
   stage: SearchTimingStage;
   scope?: string;
   queryLength: number;
-  repository: 'index' | 'provider' | 'none';
+  repository: 'index' | 'provider' | 'sqlite' | 'none';
   candidateCount?: number;
   returnedCount?: number;
   queryDurationMs: number;

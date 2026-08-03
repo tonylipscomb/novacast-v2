@@ -2,16 +2,28 @@ import {
   getCatalogCategoryCounts,
   getCatalogDiagnosticSnapshot,
   getCatalogItemsPage,
+  getCatalogMovieItem,
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
 } from '../../catalog/catalogRepository.ts';
 import { recoverFragmentedMovieCatalogOnce } from '../../catalog/catalogFragmentRecovery.ts';
 import type { CatalogItemRecord, CatalogItemSort } from '../../catalog/catalogTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
+import type { MediaDetail } from '../../media-browser/mediaTypes.ts';
 import { publishMovieCatalogReady } from '../../providers/providerCatalogSync.ts';
 
 import type { MovieDataSource } from './MovieDataSource.ts';
 import type { MovieCategory, MovieSummary } from '../movieTypes.ts';
+import {
+  buildLocalMovieDetailFromCatalogItem,
+  getCachedProviderMovieInfo,
+  isLocalMovieDetailComplete,
+  logMovieDetailEnrichment,
+  mergeLocalAndProviderMovieDetail,
+  normalizeDetailContainerExtension,
+  setCachedProviderMovieInfo,
+  type MovieDetailEnrichmentOrigin,
+} from '../movieDetailEnrichment.ts';
 
 const SQLITE_MOVIES_DISCOVER_ID = 'all';
 const SQLITE_MOVIES_DIAGNOSTICS_ENABLED =
@@ -103,7 +115,32 @@ export function resetLastValidSqliteMovieCategoriesForTests() {
   lastValidSqliteCategoriesByProvider.clear();
 }
 
-export function createSqliteMovieDataSource(providerId: string): MovieDataSource {
+export type SqliteMovieDataSourceOptions = {
+  /** Controlled VOD-info fallback. Must not be provider search. */
+  fetchProviderMovieInfo?: (movieId: string) => Promise<MediaDetail | null>;
+  /** Browse vs Search origin for enrichment diagnostics. */
+  getDetailOrigin?: () => MovieDetailEnrichmentOrigin;
+};
+
+export function createSqliteMovieDataSource(
+  providerId: string,
+  options?: SqliteMovieDataSourceOptions,
+): MovieDataSource {
+  const localDetailByMovieId = new Map<string, MediaDetail>();
+
+  async function loadLocalMovieDetail(movieId: string): Promise<MediaDetail | null> {
+    const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie');
+    const item = await getCatalogMovieItem(providerId, movieId, {
+      generation: readableGeneration,
+    });
+    if (!item) {
+      return null;
+    }
+    const detail = buildLocalMovieDetailFromCatalogItem(item, movieId);
+    localDetailByMovieId.set(movieId, detail);
+    return detail;
+  }
+
   return {
     sourceKind: 'sqlite',
 
@@ -283,6 +320,7 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
     },
 
     async searchMovies(input) {
+      const startedAt = Date.now();
       const page = await getCatalogItemsPage({
         providerId,
         mediaType: 'movie',
@@ -290,7 +328,14 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
         offset: input.offset,
         limit: input.limit,
         sort: 'title',
+        // Stage 3G: first page must not wait on a full-generation COUNT.
+        skipTotalCount: true,
       });
+      const sqliteMs = Date.now() - startedAt;
+      const mappingStartedAt = Date.now();
+      const items = page.items.map(mapCatalogItemToMovie);
+      const mappingMs = Date.now() - mappingStartedAt;
+      const hasMore = page.items.length >= input.limit;
 
       console.info('[Movies SQLite] search', {
         providerId,
@@ -298,13 +343,212 @@ export function createSqliteMovieDataSource(providerId: string): MovieDataSource
         offset: page.offset,
         itemCount: page.items.length,
         totalCount: page.totalCount,
+        hasMore,
+        sqliteMs,
+        mappingMs,
+        skipTotalCount: true,
+        marker: 'stage3g-sqlite-movies-search-v1',
       });
 
+      try {
+        const { getActiveMoviesSearchRequestId, markMoviesSearchPath } = await import(
+          '@/features/search/moviesSearchPerfDiagnostics'
+        );
+        markMoviesSearchPath(getActiveMoviesSearchRequestId(), 'sqlite', { sqliteMs, mappingMs });
+      } catch {
+        // Diagnostics must never fail search.
+      }
+
       return {
-        items: page.items.map(mapCatalogItemToMovie),
-        totalCount: page.totalCount,
-        hasMore: page.hasMore,
+        items,
+        // Approximate until a later COUNT; enough for "N+ results" / hasMore paging.
+        totalCount: input.offset + items.length + (hasMore ? 1 : 0),
+        hasMore,
       };
+    },
+
+    async getMovieInfo(movieId) {
+      const origin = options?.getDetailOrigin?.() ?? 'browse';
+      const local = await loadLocalMovieDetail(movieId);
+      const localExtensionPresent = Boolean(
+        normalizeDetailContainerExtension(local?.containerExtension),
+      );
+
+      if (!local) {
+        logMovieDetailEnrichment({
+          origin,
+          movieId,
+          localRowFound: false,
+          localExtensionPresent: false,
+          providerInfoRequested: false,
+          providerInfoSucceeded: false,
+          providerExtensionPresent: false,
+          resolvedExtensionSource: 'none',
+          detailMode: 'preview-fallback',
+          failureReason: 'local-row-not-found',
+        });
+        return null;
+      }
+
+      const complete = isLocalMovieDetailComplete(local);
+      logMovieDetailEnrichment({
+        origin,
+        movieId,
+        localRowFound: true,
+        localExtensionPresent,
+        providerInfoRequested: false,
+        providerInfoSucceeded: false,
+        providerExtensionPresent: false,
+        resolvedExtensionSource: localExtensionPresent ? 'catalog' : 'none',
+        detailMode: complete ? 'local-complete' : 'local-preview-enriching',
+        failureReason: null,
+      });
+      return local;
+    },
+
+    async enrichMovieInfo(movieId) {
+      const origin = options?.getDetailOrigin?.() ?? 'browse';
+      const local =
+        localDetailByMovieId.get(movieId) ?? (await loadLocalMovieDetail(movieId));
+      if (!local) {
+        logMovieDetailEnrichment({
+          origin,
+          movieId,
+          localRowFound: false,
+          localExtensionPresent: false,
+          providerInfoRequested: false,
+          providerInfoSucceeded: false,
+          providerExtensionPresent: false,
+          resolvedExtensionSource: 'none',
+          detailMode: 'preview-fallback',
+          failureReason: 'local-row-not-found',
+        });
+        return null;
+      }
+
+      const localExtensionPresent = Boolean(
+        normalizeDetailContainerExtension(local.containerExtension),
+      );
+
+      if (isLocalMovieDetailComplete(local) && !options?.fetchProviderMovieInfo) {
+        return local;
+      }
+
+      // Still enrich incomplete locals, or prefer cached provider info when reopening.
+      const cached = getCachedProviderMovieInfo(providerId, movieId);
+      if (cached) {
+        const merged = mergeLocalAndProviderMovieDetail(local, cached);
+        localDetailByMovieId.set(movieId, merged.detail);
+        logMovieDetailEnrichment({
+          origin,
+          movieId,
+          localRowFound: true,
+          localExtensionPresent,
+          providerInfoRequested: false,
+          providerInfoSucceeded: true,
+          providerExtensionPresent: Boolean(
+            normalizeDetailContainerExtension(cached.containerExtension),
+          ),
+          resolvedExtensionSource: merged.resolvedExtensionSource,
+          detailMode: 'enriched',
+          failureReason: null,
+        });
+        return merged.detail;
+      }
+
+      if (!options?.fetchProviderMovieInfo) {
+        logMovieDetailEnrichment({
+          origin,
+          movieId,
+          localRowFound: true,
+          localExtensionPresent,
+          providerInfoRequested: false,
+          providerInfoSucceeded: false,
+          providerExtensionPresent: false,
+          resolvedExtensionSource: localExtensionPresent ? 'catalog' : 'none',
+          detailMode: isLocalMovieDetailComplete(local)
+            ? 'local-complete'
+            : 'preview-fallback',
+          failureReason: isLocalMovieDetailComplete(local)
+            ? null
+            : 'provider-info-unavailable',
+        });
+        return local;
+      }
+
+      if (isLocalMovieDetailComplete(local)) {
+        // Local already playable + descriptive; skip network unless reopening used cache above.
+        return local;
+      }
+
+      logMovieDetailEnrichment({
+        origin,
+        movieId,
+        localRowFound: true,
+        localExtensionPresent,
+        providerInfoRequested: true,
+        providerInfoSucceeded: false,
+        providerExtensionPresent: false,
+        resolvedExtensionSource: localExtensionPresent ? 'catalog' : 'none',
+        detailMode: 'local-preview-enriching',
+        failureReason: null,
+      });
+
+      try {
+        const providerDetail = await options.fetchProviderMovieInfo(movieId);
+        if (!providerDetail) {
+          logMovieDetailEnrichment({
+            origin,
+            movieId,
+            localRowFound: true,
+            localExtensionPresent,
+            providerInfoRequested: true,
+            providerInfoSucceeded: false,
+            providerExtensionPresent: false,
+            resolvedExtensionSource: localExtensionPresent ? 'catalog' : 'none',
+            detailMode: 'preview-fallback',
+            failureReason: 'provider-info-null',
+          });
+          return local;
+        }
+
+        setCachedProviderMovieInfo(providerId, movieId, providerDetail);
+        const merged = mergeLocalAndProviderMovieDetail(local, providerDetail);
+        localDetailByMovieId.set(movieId, merged.detail);
+        logMovieDetailEnrichment({
+          origin,
+          movieId,
+          localRowFound: true,
+          localExtensionPresent,
+          providerInfoRequested: true,
+          providerInfoSucceeded: true,
+          providerExtensionPresent: Boolean(
+            normalizeDetailContainerExtension(providerDetail.containerExtension),
+          ),
+          resolvedExtensionSource: merged.resolvedExtensionSource,
+          detailMode: 'enriched',
+          failureReason: null,
+        });
+        return merged.detail;
+      } catch (error) {
+        const failureReason =
+          error instanceof Error
+            ? error.message || error.name || 'provider-info-rejected'
+            : 'provider-info-rejected';
+        logMovieDetailEnrichment({
+          origin,
+          movieId,
+          localRowFound: true,
+          localExtensionPresent,
+          providerInfoRequested: true,
+          providerInfoSucceeded: false,
+          providerExtensionPresent: false,
+          resolvedExtensionSource: localExtensionPresent ? 'catalog' : 'none',
+          detailMode: 'preview-fallback',
+          failureReason,
+        });
+        return local;
+      }
     },
 
     async getCategoryCount(categoryId) {

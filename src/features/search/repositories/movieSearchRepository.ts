@@ -3,9 +3,11 @@ import type { MovieDataSource } from '../../movies/data/MovieDataSource.ts';
 import { matchesMovie } from '../../movies/movieMockData.ts';
 import { normalizeSearchQuery } from '../searchQuery.ts';
 
+import { isSqliteMovieDataSource } from '../moviesSearchDatasource.ts';
 import { scanCatalogForSearchAsync } from '../searchCatalogScan.ts';
 import { compareSearchCandidates } from '../searchRanking.ts';
 import { SEARCH_PROVIDER_FALLBACK_TIMEOUT_MS } from '../searchConstants.ts';
+import { getActiveMoviesSearchRequestId, markMoviesSearchPath } from '../moviesSearchPerfDiagnostics.ts';
 import { createSearchTimer, logSearchTiming, withSearchTimeout } from '../searchTiming.ts';
 import type { MovieSearchResult, SearchPageRequest, SearchPageResult } from '../searchTypes.ts';
 
@@ -20,6 +22,39 @@ function entryToSearchResult(providerId: string, entry: MovieCatalogEntry): Movi
     genres: entry.genreTags,
     rating: entry.rating > 0 ? `${entry.rating}` : undefined,
     categoryId: entry.categoryId,
+    containerExtension: entry.containerExtension,
+  };
+}
+
+function mapPageToSearchResults(
+  providerId: string,
+  page: { items: Array<{
+    id: string;
+    title: string;
+    year?: number | string;
+    posterUrl?: string;
+    genres?: string[];
+    rating?: string;
+    categoryId?: string;
+    containerExtension?: string;
+  }>; totalCount: number; hasMore: boolean },
+): SearchPageResult<MovieSearchResult> {
+  return {
+    items: page.items.map((movie) => ({
+      type: 'movie' as const,
+      id: movie.id,
+      providerId,
+      title: movie.title,
+      year: typeof movie.year === 'string' ? Number(movie.year) || undefined : movie.year,
+      posterUrl: movie.posterUrl,
+      genres: movie.genres,
+      rating: movie.rating,
+      categoryId: movie.categoryId,
+      // Stage 3G.4: keep SQLite stream_extension through Search → Detail → Play.
+      containerExtension: movie.containerExtension,
+    })),
+    totalCount: page.totalCount,
+    hasMore: page.hasMore,
   };
 }
 
@@ -56,6 +91,7 @@ function searchMovieCatalogIndex(
     }),
     toResult: (entry) => entryToSearchResult(providerId, entry),
   }).then((page) => {
+    const elapsed = timer.elapsed();
     logSearchTiming({
       stage: 'index-scan',
       scope: 'movie',
@@ -63,15 +99,23 @@ function searchMovieCatalogIndex(
       repository: 'index',
       candidateCount: page.totalCount,
       returnedCount: page.items.length,
-      queryDurationMs: timer.elapsed(),
-      totalDurationMs: timer.elapsed(),
+      queryDurationMs: elapsed,
+      totalDurationMs: elapsed,
       indexSize: index.size,
+    });
+    markMoviesSearchPath(getActiveMoviesSearchRequestId(), 'index', {
+      indexScanMs: elapsed,
+      mappingMs: 0,
     });
 
     return page;
   });
 }
 
+/**
+ * Stage 3G: SQLite is authoritative when the datasource is sqlite-backed.
+ * Zero SQLite hits are valid and must not fall through to provider/network.
+ */
 export async function searchMovies(
   providerId: string,
   dataSource: MovieDataSource | null | undefined,
@@ -81,12 +125,49 @@ export async function searchMovies(
     throw new DOMException('Aborted', 'AbortError');
   }
 
-  const indexed = await searchMovieCatalogIndex(providerId, request.query, request.offset, request.limit, request.signal);
+  const sqlite = isSqliteMovieDataSource(dataSource);
+  if (sqlite && dataSource?.searchMovies) {
+    const timer = createSearchTimer();
+    const page = await dataSource.searchMovies({
+      query: request.query,
+      offset: request.offset,
+      limit: request.limit,
+    });
+    if (request.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    const mapped = mapPageToSearchResults(providerId, page);
+    const elapsed = timer.elapsed();
+    logSearchTiming({
+      stage: 'sqlite',
+      scope: 'movie',
+      queryLength: request.query.trim().length,
+      repository: 'sqlite',
+      returnedCount: mapped.items.length,
+      queryDurationMs: elapsed,
+      totalDurationMs: elapsed,
+    });
+    markMoviesSearchPath(getActiveMoviesSearchRequestId(), 'sqlite', {
+      sqliteMs: elapsed,
+      mappingMs: 0,
+    });
+    // Zero results are authoritative — never fall through to Xtream.
+    return mapped;
+  }
+
+  const indexed = await searchMovieCatalogIndex(
+    providerId,
+    request.query,
+    request.offset,
+    request.limit,
+    request.signal,
+  );
   if (indexed) {
     return indexed;
   }
 
   if (!dataSource?.searchMovies) {
+    markMoviesSearchPath(getActiveMoviesSearchRequestId(), 'none');
     return { items: [], totalCount: 0, hasMore: false };
   }
 
@@ -106,7 +187,7 @@ export async function searchMovies(
       throw new DOMException('Aborted', 'AbortError');
     }
 
-    if (page.totalCount > 0) {
+    if (page.totalCount > 0 || page.items.length > 0) {
       const normalized = request.query.trim().toLowerCase();
       const sorted = [...page.items].sort((left, right) => {
         if (matchesMovie(left, normalized) && !matchesMovie(right, normalized)) {
@@ -120,33 +201,27 @@ export async function searchMovies(
         return compareSearchCandidates(request.query, { title: left.title }, { title: right.title });
       });
 
-      const mapped = sorted.map((movie) => ({
-        type: 'movie' as const,
-        id: movie.id,
-        providerId,
-        title: movie.title,
-        year: movie.year,
-        posterUrl: movie.posterUrl,
-        genres: movie.genres,
-        rating: movie.rating,
-        categoryId: movie.categoryId,
-      }));
+      const mapped = mapPageToSearchResults(providerId, {
+        items: sorted,
+        totalCount: page.totalCount,
+        hasMore: page.hasMore,
+      });
 
+      const elapsed = timer.elapsed();
       logSearchTiming({
         stage: 'provider-fallback',
         scope: 'movie',
         queryLength: request.query.trim().length,
         repository: 'provider',
-        returnedCount: mapped.length,
-        queryDurationMs: timer.elapsed(),
-        totalDurationMs: timer.elapsed(),
+        returnedCount: mapped.items.length,
+        queryDurationMs: elapsed,
+        totalDurationMs: elapsed,
+      });
+      markMoviesSearchPath(getActiveMoviesSearchRequestId(), 'provider', {
+        mappingMs: elapsed,
       });
 
-      return {
-        items: mapped,
-        totalCount: page.totalCount,
-        hasMore: page.hasMore,
-      };
+      return mapped;
     }
   } catch (error) {
     logSearchTiming({
@@ -161,6 +236,7 @@ export async function searchMovies(
     throw error;
   }
 
+  markMoviesSearchPath(getActiveMoviesSearchRequestId(), 'none');
   return { items: [], totalCount: 0, hasMore: false };
 }
 
@@ -175,5 +251,6 @@ export function movieSummaryToSearchResult(providerId: string, movie: ReturnType
     genres: movie.genres,
     rating: movie.rating,
     categoryId: movie.categoryId,
+    containerExtension: movie.containerExtension,
   };
 }

@@ -42,6 +42,8 @@ export type MovieSearchResult = SearchResultBase & {
   genres?: string[];
   rating?: string;
   categoryId?: string;
+  /** From catalog_items_v2.stream_extension — required for Xtream VOD URL construction. */
+  containerExtension?: string;
 };
 
 export type SeriesSearchResult = SearchResultBase & {

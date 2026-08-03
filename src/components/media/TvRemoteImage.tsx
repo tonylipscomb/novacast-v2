@@ -19,6 +19,8 @@ type TvRemoteImageProps = {
   style?: ImageStyle;
   resizeMode?: ImageResizeMode;
   onError?: () => void;
+  /** Diagnostics-only hook (e.g. Movies search first-poster timing). */
+  onLoadEnd?: () => void;
 };
 
 let pendingImageCount = 0;
@@ -44,7 +46,7 @@ function toContentFit(resizeMode: ImageResizeMode): ImageContentFit {
   }
 }
 
-function TvRemoteImageComponent({ uri, style, resizeMode = 'cover', onError }: TvRemoteImageProps) {
+function TvRemoteImageComponent({ uri, style, resizeMode = 'cover', onError, onLoadEnd }: TvRemoteImageProps) {
   const normalizedUri = normalizeTvRemoteImageUri(uri);
   // Sticky failure is keyed to the URI — a recycled card with a new URI auto-recovers.
   const [failedUri, setFailedUri] = useState<string | null>(null);
@@ -95,6 +97,7 @@ function TvRemoteImageComponent({ uri, style, resizeMode = 'cover', onError }: T
           pendingRef.current = false;
           bumpPending(-1);
         }
+        onLoadEnd?.();
       }}
       onError={() => {
         if (pendingRef.current) {

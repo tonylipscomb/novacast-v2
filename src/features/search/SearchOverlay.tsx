@@ -17,6 +17,24 @@ import { SearchPosterGrid } from './SearchPosterGrid';
 import { SearchResults } from './SearchResults';
 import { TvSearchKeyboard } from './TvSearchKeyboard';
 import { logSearchEvent } from './searchDiagnostics';
+import {
+  cancelMoviesSearchResultFocus,
+  getMoviesSearchResultTargetRef,
+  logMoviesSearchFocus,
+  noteMoviesSearchResultsReady,
+} from './moviesSearchFocus';
+import {
+  beginMoviesSearchInputDownHandoff,
+  bumpMoviesSearchInputQueryRevision,
+  cancelMoviesSearchInputHandoff,
+  getFirstMoviesSearchResultNativeTag,
+  getMoviesSearchInputQueryRevision,
+  hasPendingMoviesSearchInputHandoff,
+  noteMoviesSearchInputReclaimed,
+  setMoviesSearchInputTargetsListener,
+  setMoviesSearchNativeTagResolver,
+} from './moviesSearchInputHandoff';
+import { getActiveMoviesSearchRequestId } from './moviesSearchPerfDiagnostics';
 import { shouldReclaimSearchFromClose, shouldReturnFocusToSearchShellAfterIme, shouldAutoFocusSearchFocusGuide, resolveCloseNextFocusHandles, shouldWireSearchNextFocusUpToClose } from './searchOverlayFocusPolicy';
 import { scopedSearchEmptyHint } from './searchScopes';
 import { isSearchableQuery } from './searchQuery';
@@ -25,6 +43,14 @@ import { useSearchController } from './useSearchController';
 
 type SearchOverlayProps = {
   visible: boolean;
+  /**
+   * Stage 3G.3: keep controller/results mounted while Detail is open so Search
+   * can restore the same query/results after detail closes.
+   */
+  retainMounted?: boolean;
+  /** After returning from Detail, focus this movie result once. */
+  restoreFocusMovieId?: string | null;
+  onRestoreFocusHandled?: () => void;
   scope: Exclude<SearchScope, 'all'>;
   providerId: string;
   title: string;
@@ -34,12 +60,13 @@ type SearchOverlayProps = {
   /** Fires once the native Modal is on screen — browse layers can defer blocking until then. */
   onReady?: () => void;
   onSelectResult: (result: SearchResult) => void;
+  onQueryCommitted?: (query: string) => void;
   pageSize?: number;
 };
 
 /** Avoid mounting search hooks while the overlay is closed — prevents idle reset loops. */
 export function SearchOverlay(props: SearchOverlayProps) {
-  if (!props.visible) {
+  if (!props.visible && !props.retainMounted) {
     return null;
   }
 
@@ -48,6 +75,9 @@ export function SearchOverlay(props: SearchOverlayProps) {
 
 function SearchOverlayContent({
   visible,
+  retainMounted = false,
+  restoreFocusMovieId = null,
+  onRestoreFocusHandled,
   scope,
   providerId,
   title,
@@ -56,6 +86,7 @@ function SearchOverlayContent({
   onClose,
   onReady,
   onSelectResult,
+  onQueryCommitted,
   pageSize = 50,
 }: SearchOverlayProps) {
   const inputRef = useRef<TextInput>(null);
@@ -66,12 +97,20 @@ function SearchOverlayContent({
   const closeOwnsFocusRef = useRef(false);
   const [preferSearchFocus, setPreferSearchFocus] = useState(true);
   const [focusedResultKey, setFocusedResultKey] = useState<string | null>(null);
+  const [focusedSearchMovieId, setFocusedSearchMovieId] = useState<string | null>(null);
+  const [searchInputFocused, setSearchInputFocused] = useState(false);
   const [closeFocused, setCloseFocused] = useState(false);
   const [searchFieldHandle, setSearchFieldHandle] = useState<number | undefined>(undefined);
   const [closeHandle, setCloseHandle] = useState<number | undefined>(undefined);
+  const [firstResultNativeTag, setFirstResultNativeTag] = useState<number | undefined>(undefined);
+  const [handoffActive, setHandoffActive] = useState(false);
   // Fire TV / Android TV: native soft keyboard. Close never reclaims Search focus.
   const useNativeTvKeyboard = Platform.isTV;
   const useOnScreenKeyboard = Platform.OS === 'android' && !useNativeTvKeyboard;
+  const searchInputFocusedRef = useRef(false);
+  const preferSearchFocusRef = useRef(true);
+  const imeVisibleRef = useRef(false);
+  const handoffGuardRef = useRef(false);
 
   const confirmOverlayFocus = useCallback(
     (source: string) => {
@@ -105,10 +144,50 @@ function SearchOverlayContent({
   }, [visible]);
 
   const handleSearchShellFocus = useCallback(() => {
-    // Drop preferred focus after landing once — leaving it true fights Close/results forever.
-    setPreferSearchFocus(false);
+    // Preferred focus only for open / empty / Up-return — never reclaim mid-handoff.
+    if (handoffGuardRef.current || hasPendingMoviesSearchInputHandoff()) {
+      setPreferSearchFocus(false);
+      preferSearchFocusRef.current = false;
+      return;
+    }
+    setSearchInputFocused(true);
+    searchInputFocusedRef.current = true;
+    setHandoffActive(false);
+    if (focusedSearchMovieId) {
+      // Explicit Up-from-results return — preferred focus allowed again for the field.
+      setPreferSearchFocus(true);
+      preferSearchFocusRef.current = true;
+      const requestId = getActiveMoviesSearchRequestId();
+      logMoviesSearchFocus({
+        requestId,
+        query: '',
+        resultCount: 0,
+        action: 'up-to-input',
+        targetMovieId: focusedSearchMovieId,
+        targetMounted: false,
+        focusRequested: false,
+        actuallyFocusedMovieId: null,
+        searchInputFocused: true,
+        retryCount: 0,
+      });
+      noteMoviesSearchInputReclaimed({
+        requestId,
+        queryRevision: getMoviesSearchInputQueryRevision(),
+        inputPreferred: true,
+      });
+    } else {
+      // Drop preferred focus after first open landing — leaving it true fights results.
+      setPreferSearchFocus(false);
+      preferSearchFocusRef.current = false;
+    }
+    setFocusedSearchMovieId(null);
     confirmOverlayFocus('search-input');
-  }, [confirmOverlayFocus]);
+  }, [confirmOverlayFocus, focusedSearchMovieId]);
+
+  const handleSearchShellBlur = useCallback(() => {
+    setSearchInputFocused(false);
+    searchInputFocusedRef.current = false;
+  }, []);
 
   const handleCloseFocus = useCallback(() => {
     // Never reclaim Search when Close (or a result) receives focus.
@@ -123,6 +202,7 @@ function SearchOverlayContent({
   }, [confirmOverlayFocus]);
 
   const handleKeyboardActivate = useCallback(() => {
+    imeVisibleRef.current = true;
     logSearchEvent('search_input_ime_armed', { scope });
   }, [scope]);
 
@@ -144,10 +224,37 @@ function SearchOverlayContent({
   const controller = useSearchController<SearchResult>({
     scope,
     providerId,
-    enabled: visible,
+    // Keep searching while retainMounted even if the modal is temporarily hidden for Detail.
+    enabled: visible || retainMounted,
     pageSize,
     executeSearch,
+    onQueryCommitted,
   });
+
+  useEffect(() => {
+    if (scope !== 'movie') {
+      setMoviesSearchInputTargetsListener(null);
+      setMoviesSearchNativeTagResolver(null);
+      setFirstResultNativeTag(undefined);
+      return;
+    }
+    setMoviesSearchNativeTagResolver((target) => {
+      if (!target) {
+        return null;
+      }
+      return findNodeHandle(target as never) ?? null;
+    });
+    const refresh = () => {
+      const tag = getFirstMoviesSearchResultNativeTag();
+      setFirstResultNativeTag((prev) => (prev === (tag ?? undefined) ? prev : tag ?? undefined));
+    };
+    setMoviesSearchInputTargetsListener(refresh);
+    refresh();
+    return () => {
+      setMoviesSearchInputTargetsListener(null);
+      setMoviesSearchNativeTagResolver(null);
+    };
+  }, [scope, controller.results.length, controller.status]);
 
   const usePosterGrid = scope === 'movie' || scope === 'series';
 
@@ -165,15 +272,72 @@ function SearchOverlayContent({
   }, [providerId, scope, useNativeTvKeyboard, useOnScreenKeyboard]);
 
   useEffect(() => {
-    if (!visible) {
+    // Stage 3G.3: when retainMounted hides the modal, do NOT wipe query/results/focus memory.
+    if (!visible && !retainMounted) {
       focusConfirmedRef.current = false;
       initialFocusRequestedRef.current = false;
       closeOwnsFocusRef.current = false;
       setPreferSearchFocus(true);
+      preferSearchFocusRef.current = true;
       setFocusedResultKey(null);
+      setFocusedSearchMovieId(null);
+      setSearchInputFocused(false);
+      searchInputFocusedRef.current = false;
       setCloseFocused(false);
+      setFirstResultNativeTag(undefined);
+      setHandoffActive(false);
+      handoffGuardRef.current = false;
+      imeVisibleRef.current = false;
+      cancelMoviesSearchResultFocus('search-closed', {
+        searchInputFocused: false,
+        resultCount: 0,
+      });
+      cancelMoviesSearchInputHandoff('search-closed', {
+        searchInputFocused: false,
+        resultCount: 0,
+      });
     }
-  }, [visible]);
+  }, [retainMounted, visible]);
+
+  // Stage 3G.3: restore focus to the selected search result after Detail closes.
+  useEffect(() => {
+    if (!visible || !restoreFocusMovieId || scope !== 'movie') {
+      return;
+    }
+    setPreferSearchFocus(false);
+    preferSearchFocusRef.current = false;
+    setFocusedSearchMovieId(restoreFocusMovieId);
+    setFocusedResultKey(`movie:${restoreFocusMovieId}`);
+    const movieId = restoreFocusMovieId;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+      requestTvFocus({
+        screen: 'search-overlay',
+        source: 'SearchOverlay',
+        region: 'search-results',
+        itemId: movieId,
+        reason: 'restore-after-detail-close',
+        isActive: () => visible,
+        getTarget: () => getMoviesSearchResultTargetRef(movieId)?.current ?? null,
+      });
+      onRestoreFocusHandled?.();
+    }, 48);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [onRestoreFocusHandled, restoreFocusMovieId, scope, visible]);
+
+  useEffect(() => {
+    return () => {
+      cancelMoviesSearchResultFocus('overlay-unmount');
+      cancelMoviesSearchInputHandoff('overlay-unmount');
+      setMoviesSearchInputTargetsListener(null);
+    };
+  }, []);
 
   useLayoutEffect(() => {
     if (!visible) {
@@ -235,6 +399,20 @@ function SearchOverlayContent({
   const setQueryLogged = useCallback(
     (value: string) => {
       logSearchEvent('search_query_change', { scope, queryLength: value.trim().length });
+      bumpMoviesSearchInputQueryRevision();
+      cancelMoviesSearchResultFocus('query-change', {
+        query: value.trim(),
+        searchInputFocused: searchInputFocusedRef.current,
+      });
+      cancelMoviesSearchInputHandoff('query-change', {
+        resultCount: 0,
+        inputFocused: searchInputFocusedRef.current,
+        inputPreferred: preferSearchFocusRef.current,
+        imeVisible: imeVisibleRef.current,
+      });
+      setFocusedSearchMovieId(null);
+      setHandoffActive(false);
+      handoffGuardRef.current = false;
       controller.setQuery(value);
     },
     [controller, scope],
@@ -249,6 +427,38 @@ function SearchOverlayContent({
   const resultsCountLabel = controller.totalCount.toLocaleString();
   const showInitialResultsLoader = controller.status === 'loading' && controller.results.length === 0;
 
+  useEffect(() => {
+    if (scope !== 'movie') {
+      return;
+    }
+    const requestId = getActiveMoviesSearchRequestId();
+    if (!requestId) {
+      return;
+    }
+    if (showEmpty) {
+      noteMoviesSearchResultsReady({
+        requestId,
+        query: trimmedQuery,
+        resultIds: [],
+        searchInputFocused: searchInputFocusedRef.current,
+      });
+      setFocusedSearchMovieId(null);
+      return;
+    }
+    if (!showResults || controller.status !== 'ready') {
+      return;
+    }
+    const movieIds = controller.results
+      .filter((result): result is SearchResult & { type: 'movie'; id: string } => result.type === 'movie')
+      .map((result) => result.id);
+    noteMoviesSearchResultsReady({
+      requestId,
+      query: trimmedQuery,
+      resultIds: movieIds,
+      searchInputFocused: searchInputFocusedRef.current,
+    });
+  }, [controller.results, controller.status, scope, showEmpty, showResults, trimmedQuery]);
+
   const posterListHeader = useMemo(() => {
     if (showInitialResultsLoader) {
       return <SearchLoadingState />;
@@ -260,8 +470,78 @@ function SearchOverlayContent({
   const handlePosterFocus = useCallback((key: string) => {
     // Track selection without forcing the poster grid to re-render on every D-pad move.
     setFocusedResultKey((current) => (current === key ? current : key));
+    if (key.startsWith('movie:')) {
+      setFocusedSearchMovieId(key.slice('movie:'.length));
+    }
+    // Target confirmed — SearchInput must not reclaim preferred focus.
+    setHandoffActive(false);
+    handoffGuardRef.current = false;
+    setPreferSearchFocus(false);
+    preferSearchFocusRef.current = false;
     logSearchEvent('search_result_focus', { scope, key });
   }, [scope]);
+
+  const handleSearchDown = useCallback(
+    (meta: { imeVisible: boolean }) => {
+      if (scope !== 'movie') {
+        return;
+      }
+      // One Down press → one handoff (ignore repeats while pending).
+      if (handoffGuardRef.current || hasPendingMoviesSearchInputHandoff()) {
+        return;
+      }
+
+      const movieIds = controller.results
+        .filter((result): result is SearchResult & { type: 'movie'; id: string } => result.type === 'movie')
+        .map((result) => result.id);
+
+      if (!isSearchableQuery(trimmedQuery) || movieIds.length === 0) {
+        beginMoviesSearchInputDownHandoff({
+          requestId: getActiveMoviesSearchRequestId() ?? 0,
+          queryRevision: getMoviesSearchInputQueryRevision(),
+          resultIds: [],
+          inputPreferred: preferSearchFocusRef.current,
+          inputFocused: searchInputFocusedRef.current,
+          imeVisible: meta.imeVisible || imeVisibleRef.current,
+        });
+        return;
+      }
+
+      // Stage 3G.2: clear preferred focus before Down leaves the field.
+      setPreferSearchFocus(false);
+      preferSearchFocusRef.current = false;
+      handoffGuardRef.current = true;
+      setHandoffActive(true);
+
+      const result = beginMoviesSearchInputDownHandoff({
+        requestId: getActiveMoviesSearchRequestId() ?? 0,
+        queryRevision: getMoviesSearchInputQueryRevision(),
+        resultIds: movieIds,
+        inputPreferred: false,
+        inputFocused: searchInputFocusedRef.current,
+        imeVisible: meta.imeVisible || imeVisibleRef.current,
+        dismissIme: () => {
+          imeVisibleRef.current = false;
+          inputRef.current?.blur();
+        },
+      });
+
+      if (!result.accepted) {
+        handoffGuardRef.current = false;
+        setHandoffActive(false);
+      } else if (result.nativeTag != null) {
+        setFirstResultNativeTag(result.nativeTag);
+      }
+
+      // Release the press guard after a tick so native nextFocusDown + requestTvFocus
+      // cannot double-fire a second token from the same Down.
+      requestAnimationFrame(() => {
+        // Keep handoffActive until target confirms / cancels; only clear the press latch.
+        handoffGuardRef.current = false;
+      });
+    },
+    [controller.results, scope, trimmedQuery],
+  );
 
   const handleLoadMore = useCallback(() => {
     if (controller.hasMore) {
@@ -297,13 +577,16 @@ function SearchOverlayContent({
       scope={scope}
       mode="empty"
       query={trimmedQuery}
-      onClear={controller.clearQuery}
-      focusUpHandle={resultsFocusUpHandle}
+      // Stage 3G: movie empty state is non-focusable — keep Search focused (no retry loop).
+      onClear={scope === 'movie' ? undefined : controller.clearQuery}
+      focusUpHandle={scope === 'movie' ? undefined : resultsFocusUpHandle}
     />
   ) : showResults ? (
     usePosterGrid ? (
       <SearchPosterGrid
         results={controller.results}
+        focusedMovieId={focusedSearchMovieId}
+        searchQuery={trimmedQuery}
         onFocusResult={handlePosterFocus}
         onSelectResult={handleSelect}
         onEndReached={handleLoadMore}
@@ -321,6 +604,12 @@ function SearchOverlayContent({
       />
     )
   ) : null;
+
+  // Stage 3G.4: while Detail/playback owns the screen, keep controller state mounted
+  // but do NOT render the Modal — a hidden Modal still steals Android TV focus/OK.
+  if (!visible) {
+    return null;
+  }
 
   return (
     <Modal
@@ -383,14 +672,31 @@ function SearchOverlayContent({
             onClear={controller.clearQuery}
             onSubmit={() => {
               inputRef.current?.blur();
+              imeVisibleRef.current = false;
               handleImeReturnToShell();
             }}
             showSoftKeyboard={!useOnScreenKeyboard}
             openKeyboardOnFocus={false}
             autoFocus={false}
-            preferredFocus={preferSearchFocus && !closeFocused}
+            preferredFocus={
+              preferSearchFocus &&
+              !closeFocused &&
+              !handoffActive &&
+              (showIdle || showEmpty || controller.results.length === 0)
+            }
             focusUpHandle={shouldWireSearchNextFocusUpToClose() ? closeHandle : undefined}
+            // Stage 3G.2: point Down at the first mounted result — never trap to self.
+            focusDownHandle={
+              scope === 'movie' &&
+              controller.results.length > 0 &&
+              firstResultNativeTag != null &&
+              firstResultNativeTag !== searchFieldHandle
+                ? firstResultNativeTag
+                : undefined
+            }
+            onDown={scope === 'movie' ? handleSearchDown : undefined}
             onShellFocus={handleSearchShellFocus}
+            onShellBlur={handleSearchShellBlur}
             onKeyboardActivate={handleKeyboardActivate}
           />
           </View>

@@ -31,6 +31,12 @@ export interface MovieDataSource {
 
   getMovieInfo?(movieId: string): Promise<MediaDetail | null>;
 
+  /**
+   * Optional progressive enrichment after local Detail is shown.
+   * Must not remount Detail; merge into the existing record when possible.
+   */
+  enrichMovieInfo?(movieId: string): Promise<MediaDetail | null>;
+
   /** Xtream providers resolve counts lazily, one category at a time. */
   getCategoryCount?(categoryId: string): Promise<number>;
 

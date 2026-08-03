@@ -2,8 +2,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { logSearchEvent } from './searchDiagnostics';
+import {
+  beginMoviesSearchInput,
+  getActiveMoviesSearchRequestId,
+  markMoviesSearchCancelled,
+  markMoviesSearchDebounceReleased,
+  markMoviesSearchQueryFinished,
+  markMoviesSearchStateApplied,
+} from './moviesSearchPerfDiagnostics';
 import { SEARCH_DEBOUNCE_MS } from './searchConstants';
-import { isSearchableQuery } from './searchQuery';
+import { isSearchableQuery, normalizeSearchQuery } from './searchQuery';
 import type { SearchLoadStatus, SearchScope } from './searchTypes';
 
 type UseSearchControllerOptions<T> = {
@@ -93,19 +101,34 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
 
     const requestId = ++requestIdRef.current;
     const controller = new AbortController();
+    const hadPrevious = Boolean(abortRef.current);
     abortRef.current?.abort();
     abortRef.current = controller;
     offsetRef.current = 0;
+
+    let moviesRequestId: number | null = null;
+    if (scope === 'movie') {
+      moviesRequestId = beginMoviesSearchInput({
+        query: trimmed,
+        normalizedQueryLength: normalizeSearchQuery(trimmed).length,
+        debounceMs: SEARCH_DEBOUNCE_MS,
+        previousRequestCancelled: hadPrevious,
+      });
+    }
 
     setStatus('loading');
     setErrorMessage(null);
 
     const timer = setTimeout(() => {
       const startedAt = Date.now();
+      if (moviesRequestId != null) {
+        markMoviesSearchDebounceReleased(moviesRequestId);
+      }
       logSearchEvent('search_debounce_fire', {
         scope,
         queryLength: trimmed.length,
         providerId,
+        moviesRequestId,
       });
       void executeSearchRef.current({
         providerId,
@@ -116,12 +139,22 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
       })
         .then((page) => {
           if (requestId !== requestIdRef.current || controller.signal.aborted) {
+            if (moviesRequestId != null) {
+              markMoviesSearchCancelled(
+                moviesRequestId,
+                controller.signal.aborted ? 'aborted' : 'stale',
+              );
+            }
             return;
           }
 
           const posterMissing = page.items.filter(
             (item) => item && typeof item === 'object' && 'posterUrl' in item && !(item as { posterUrl?: string }).posterUrl,
           ).length;
+
+          if (moviesRequestId != null) {
+            markMoviesSearchQueryFinished(moviesRequestId, page.totalCount);
+          }
 
           logSearchEvent('search_query_done', {
             scope,
@@ -130,6 +163,7 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
             totalCount: page.totalCount,
             posterMissing,
             durationMs: Date.now() - startedAt,
+            moviesRequestId: moviesRequestId ?? getActiveMoviesSearchRequestId(),
           });
 
           offsetRef.current = page.items.length;
@@ -137,10 +171,19 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
           setTotalCount(page.totalCount);
           setHasMore(page.hasMore);
           setStatus(page.items.length > 0 ? 'ready' : 'empty');
+          if (moviesRequestId != null) {
+            markMoviesSearchStateApplied(moviesRequestId, page.items.length);
+          }
           onQueryCommittedRef.current?.(trimmed);
         })
         .catch((error) => {
           if (requestId !== requestIdRef.current || controller.signal.aborted) {
+            if (moviesRequestId != null) {
+              markMoviesSearchCancelled(
+                moviesRequestId,
+                controller.signal.aborted ? 'aborted' : 'stale',
+              );
+            }
             return;
           }
 
@@ -156,14 +199,22 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
           setHasMore(false);
           setStatus('error');
           setErrorMessage(error instanceof Error ? error.message : 'Unable to search right now.');
+          if (moviesRequestId != null) {
+            markMoviesSearchQueryFinished(moviesRequestId, 0);
+            markMoviesSearchStateApplied(moviesRequestId, 0);
+          }
         });
     }, SEARCH_DEBOUNCE_MS);
 
     return () => {
       clearTimeout(timer);
+      // Abort only this in-flight request. markMoviesSearchCancelled no-ops once applied.
       controller.abort();
+      if (moviesRequestId != null) {
+        markMoviesSearchCancelled(moviesRequestId, 'aborted');
+      }
     };
-  }, [enabled, pageSize, providerId, query, reloadToken]);
+  }, [enabled, pageSize, providerId, query, reloadToken, scope]);
 
   const loadMore = useCallback(async () => {
     const trimmed = query.trim();

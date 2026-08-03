@@ -1640,19 +1640,60 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
     params.push(`%${normalizeCatalogTitle(query.query)}%`);
   }
 
-  const totalRow = await db.getFirst<{ total: number }>(
-    `SELECT COUNT(*) AS total FROM ${itemsTable} WHERE ${where}`,
-    params,
-  );
-  const totalCount = asNumber(totalRow?.total);
-
-  const rows = await db.getAll(
-    `SELECT * FROM ${itemsTable}
+  const pageSql = `SELECT * FROM ${itemsTable}
      WHERE ${where}
      ORDER BY ${orderByClauseCompatible(query.sort)}
-     LIMIT ? OFFSET ?`,
-    [...params, limit, offset],
-  );
+     LIMIT ? OFFSET ?`;
+
+  // Diagnostics-only: EXPLAIN QUERY PLAN for Movies search (no SQL behavior change).
+  if (query.mediaType === 'movie' && query.query?.trim()) {
+    try {
+      const planRows = await db.getAll<{ detail?: string; id?: number; parent?: number; notused?: number }>(
+        `EXPLAIN QUERY PLAN ${pageSql}`,
+        [...params, limit, offset],
+      );
+      console.info(
+        '[NovaCast Movies Search Query Plan] ' +
+          JSON.stringify({
+            table: itemsTable,
+            generation,
+            likePattern: `%${normalizeCatalogTitle(query.query)}%`,
+            limit,
+            offset,
+            orderBy: orderByClauseCompatible(query.sort),
+            plan: planRows.map((row) => ({
+              id: row.id ?? null,
+              parent: row.parent ?? null,
+              detail: row.detail ?? String(row),
+            })),
+            marker: 'stage-movies-search-perf-audit-v1',
+          }),
+      );
+    } catch (error) {
+      console.info(
+        '[NovaCast Movies Search Query Plan] ' +
+          JSON.stringify({
+            table: itemsTable,
+            error: error instanceof Error ? error.message : String(error),
+            marker: 'stage-movies-search-perf-audit-v1',
+          }),
+      );
+    }
+  }
+
+  const rows = await db.getAll(pageSql, [...params, limit, offset]);
+
+  let totalCount: number;
+  if (query.skipTotalCount) {
+    // First-page search: avoid a full LIKE COUNT over the generation.
+    totalCount = offset + rows.length + (rows.length === limit ? 1 : 0);
+  } else {
+    const totalRow = await db.getFirst<{ total: number }>(
+      `SELECT COUNT(*) AS total FROM ${itemsTable} WHERE ${where}`,
+      params,
+    );
+    totalCount = asNumber(totalRow?.total);
+  }
 
   const items = rows.map(mapItem);
   if (query.mediaType === 'movie') {
@@ -1689,8 +1730,45 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
     totalCount,
     limit,
     offset,
-    hasMore: offset + items.length < totalCount,
+    hasMore: query.skipTotalCount
+      ? rows.length >= limit
+      : offset + items.length < totalCount,
   };
+}
+
+/**
+ * Canonical single-movie catalog row for Detail enrichment.
+ * Reads catalog_items_v2 at the readable sync generation (content_id / stream_id).
+ */
+export async function getCatalogMovieItem(
+  providerId: string,
+  contentId: string,
+  options?: { generation?: number },
+): Promise<CatalogItemRecord | null> {
+  const trimmedId = String(contentId ?? '').trim();
+  if (!providerId || !trimmedId) {
+    return null;
+  }
+
+  const generation =
+    options?.generation ?? (await resolveReadableCatalogGeneration(providerId, 'movie'));
+  if (generation <= 0) {
+    return null;
+  }
+
+  const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable('movie');
+  const row = await db.getFirst(
+    `SELECT * FROM ${itemsTable}
+     WHERE provider_id = ?
+       AND media_type = ?
+       AND sync_generation = ?
+       AND content_id = ?
+     LIMIT 1`,
+    [providerId, 'movie', generation, trimmedId],
+  );
+
+  return row ? mapItem(row as Record<string, unknown>) : null;
 }
 
 export async function getCatalogDiagnosticSnapshot(

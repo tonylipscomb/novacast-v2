@@ -1,5 +1,7 @@
-import { useSyncExternalStore } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { Modal, Platform, StyleSheet, View } from 'react-native';
+
+import { noteMoviePlaybackPlayerMounted } from '@/features/movies/moviesPlaybackAudit';
 
 import { isUnifiedPlaybackActive } from './unifiedPlayerLogic.ts';
 import {
@@ -34,6 +36,19 @@ function useUnifiedPlayerHostMounted() {
  */
 export function UnifiedPlayerHost() {
   const mounted = useUnifiedPlayerHostMounted();
+  const item = useSyncExternalStore(
+    subscribeUnifiedPlayer,
+    () => getUnifiedPlayerState().item,
+    () => null,
+  );
+
+  // Diagnostics-only: observe when the movie player host mounts.
+  useEffect(() => {
+    if (!mounted || !item || item.mediaType !== 'movie') {
+      return;
+    }
+    noteMoviePlaybackPlayerMounted(item.id);
+  }, [item, mounted]);
 
   if (!mounted) {
     return null;

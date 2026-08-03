@@ -93,6 +93,11 @@ export type CatalogItemsPageQuery = {
   sort?: CatalogItemSort;
   /** Pin a read to the generation selected by the caller's read contract. */
   generation?: number;
+  /**
+   * Stage 3G: skip COUNT(*) for first-page search latency.
+   * hasMore is inferred from page length === limit; totalCount may be approximate.
+   */
+  skipTotalCount?: boolean;
 };
 
 export type CatalogItemsPage = {

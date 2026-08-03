@@ -48,6 +48,13 @@ import { MoviePosterGrid } from './components/MoviePosterGrid';
 import { MovieToolbar } from './components/MovieToolbar';
 import { getMoviesScreenMemory, rememberMoviesScreenMemory } from './moviesScreenMemory';
 import { useMoviesScreenModel } from './useMoviesScreenModel';
+import { getMovieCategoryRailCategories } from './moviesVisibleCategories';
+import {
+  beginMoviePlaybackLifecycle,
+  logMoviePlaybackShape,
+  markMoviePlaybackLifecycle,
+  noteMoviePlaybackFailed,
+} from './moviesPlaybackAudit';
 
 import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
 import {
@@ -59,6 +66,25 @@ import { beginFocusAuditCycle, recordFocusAudit } from '@/features/navigation/fo
 import { PLAYBACK_NOTIFICATION_DURATION_MS, PLAYBACK_NOTIFICATION_ID } from '@/features/playback/unified/unifiedPlayerLogic';
 import { SearchOverlay } from '@/features/search/SearchOverlay';
 import { searchMovies } from '@/features/search/repositories/movieSearchRepository';
+import { resolveMoviesSearchDatasource } from '@/features/search/moviesSearchDatasource';
+import { runMoviesSearchPerfProbeOnce } from '@/features/search/moviesSearchPerfProbe';
+import {
+  isMoviesSearchOverlayMounted,
+  isMoviesSearchOverlayVisible,
+  logMoviesSearchReopen,
+  logMoviesSearchSelection,
+  movieSummaryFromSearchResult,
+  shouldBlockMoviesSearchToolbar,
+  shouldToggleCloseMoviesSearch,
+  type MoviesDetailSource,
+  type MoviesSearchPhase,
+} from '@/features/search/moviesSearchSelection';
+import {
+  logMoviesSearchPlayback,
+  validateSearchPlaybackMovie,
+} from '@/features/search/moviesSearchPlayback';
+import { getActiveMoviesSearchRequestId } from '@/features/search/moviesSearchPerfDiagnostics';
+import { createSqliteMovieDataSource } from './data/SqliteMovieDataSource';
 import type { SearchResult } from '@/features/search/searchTypes';
 import { setMoviesDetailOpenForDiagnostics } from './moviesDiagnosticsState';
 import {
@@ -205,8 +231,15 @@ export function MoviesScreen() {
   const actualFocusedComponentRef = useRef<string | null>(null);
   const restoreTimingRef = useRef<MoviesRestoreTimingState | null>(null);
   const [lockScrollForFocusRestore, setLockScrollForFocusRestore] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchPhase, setSearchPhase] = useState<MoviesSearchPhase>('closed');
+  const searchPhaseRef = useRef<MoviesSearchPhase>('closed');
   const [searchOverlayReady, setSearchOverlayReady] = useState(false);
+  const [searchRestoreMovieId, setSearchRestoreMovieId] = useState<string | null>(null);
+  const [detailSource, setDetailSource] = useState<MoviesDetailSource>('browse');
+  const detailSourceRef = useRef<MoviesDetailSource>('browse');
+  const searchQueryForSelectionRef = useRef('');
+  const searchOpen = isMoviesSearchOverlayMounted(searchPhase);
+  const searchOverlayVisible = isMoviesSearchOverlayVisible(searchPhase);
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
   const moviesRetryAttemptedRef = useRef(false);
   const moviesDetailRetryAttemptedRef = useRef(false);
@@ -221,6 +254,7 @@ export function MoviesScreen() {
     useUnifiedPlayer();
   const {
     categories,
+    visibleMovieCategories,
     selectedCategoryId,
     selectedMovie,
     visibleMovies,
@@ -795,9 +829,11 @@ export function MoviesScreen() {
         visibleLastIndex: viewportStateRef.current.lastIndex,
         columns: getSeriesPosterColumns(width),
       });
+      setDetailSource('browse');
+      detailSourceRef.current = 'browse';
       selectMovie(movie);
       detailOpenRef.current = true;
-      const detailPromise = loadMovieDetail(movie);
+      const detailPromise = loadMovieDetail(movie, { origin: 'browse' });
       pendingDetailPromiseRef.current = detailPromise;
       detailPromise.finally(() => {
         if (pendingDetailPromiseRef.current === detailPromise) {
@@ -808,6 +844,18 @@ export function MoviesScreen() {
       releasePostRestoreLatch('screen-change');
       setDetailOpen(true);
       setDetailFocusPhaseSafe('detail-open');
+      // Diagnostics-only shape snapshot at browse Detail open.
+      logMoviePlaybackShape({
+        origin: 'browse-detail',
+        movieId: movie.id,
+        contentId: movie.id,
+        streamId: movie.id,
+        providerId: activeProviderId,
+        mediaType: 'movie',
+        containerExtension: movie.containerExtension,
+        title: movie.title,
+        posterUrl: movie.posterUrl,
+      });
       logMoviesDetailFocusLifecycle({
         token: null,
         phase: 'detail-open',
@@ -823,6 +871,7 @@ export function MoviesScreen() {
       });
     },
     [
+      activeProviderId,
       detailOpen,
       launchingPlayback,
       loadMovieDetail,
@@ -926,10 +975,40 @@ export function MoviesScreen() {
   const handleLoadMore = useCallback(() => loadMore(), [loadMore]);
 
   useEffect(() => {
-    if (!searchOpen || playbackUiActive) {
+    searchPhaseRef.current = searchPhase;
+  }, [searchPhase]);
+
+  useEffect(() => {
+    detailSourceRef.current = detailSource;
+  }, [detailSource]);
+
+  useEffect(() => {
+    if (!searchOverlayVisible || playbackUiActive) {
       setSearchOverlayReady(false);
     }
-  }, [playbackUiActive, searchOpen]);
+  }, [playbackUiActive, searchOverlayVisible]);
+
+  // Diagnostics-only controlled search probe (no keyboard automation).
+  // Runs once when Movies is ready so ONN timings are captured without typing.
+  useEffect(() => {
+    if (playbackUiActive || !activeProviderId) {
+      return;
+    }
+    void (async () => {
+      const selection = await resolveMoviesSearchDatasource({
+        providerId: activeProviderId,
+        browseDataSource:
+          process.env.EXPO_PUBLIC_MOVIES_SQLITE_READS === 'true'
+            ? createSqliteMovieDataSource(activeProviderId)
+            : null,
+        bundleMovies: bundle?.movies,
+      });
+      await runMoviesSearchPerfProbeOnce({
+        providerId: activeProviderId,
+        dataSource: selection.dataSource,
+      });
+    })();
+  }, [activeProviderId, bundle?.movies, playbackUiActive]);
 
   useEffect(() => {
     if (playbackActive) {
@@ -1000,6 +1079,13 @@ export function MoviesScreen() {
         kind: selectedCategory.kind,
       })
     : 'All Movies';
+  // Presentation-only: All Movies stays in `categories` for fallback/queries.
+  const railCategories = useMemo(() => {
+    if (visibleMovieCategories.some((category) => category.kind !== 'section')) {
+      return visibleMovieCategories;
+    }
+    return getMovieCategoryRailCategories(categories);
+  }, [categories, visibleMovieCategories]);
   const posterColumns = getSeriesPosterColumns(width);
   const isDiscoverCategory = isFeaturesSmartCategoryId(selectedCategoryId);
 
@@ -1037,10 +1123,23 @@ export function MoviesScreen() {
   }, [activeProviderId, getFocusedMovieId, getValidatedPosterTarget, selectedMovie?.id, visibleMovies]);
 
   const closeSearch = useCallback(() => {
-    setSearchOpen(false);
+    logMoviesSearchSelection({
+      requestId: getActiveMoviesSearchRequestId(),
+      query: searchQueryForSelectionRef.current,
+      movieId: searchRestoreMovieId,
+      action: 'search-reset',
+      searchPhase: 'closed',
+      detailSource: detailSourceRef.current,
+      searchOpen: false,
+      detailOpen: detailOpenRef.current,
+      selectedMovieStored: Boolean(selectedMovie?.id),
+      overlayVisible: false,
+    });
+    setSearchPhase('closed');
     setSearchOverlayReady(false);
+    setSearchRestoreMovieId(null);
     focusSelectedPoster('restore-after-search-close');
-  }, [focusSelectedPoster]);
+  }, [focusSelectedPoster, searchRestoreMovieId, selectedMovie?.id]);
 
   const beginDetailFocusClose = useCallback(
     (source: 'detail-close' | 'playback-close') => {
@@ -1144,6 +1243,48 @@ export function MoviesScreen() {
       // One close transition only — swallow duplicate Back during closing.
       return;
     }
+
+    // Stage 3G.3: Search-origin detail closes back into Search — skip browse restore.
+    if (detailSourceRef.current === 'search') {
+      const movieId = selectedMovie?.id ?? searchRestoreMovieId;
+      logMoviesSearchSelection({
+        requestId: getActiveMoviesSearchRequestId(),
+        query: searchQueryForSelectionRef.current,
+        movieId,
+        action: 'detail-closed',
+        searchPhase: 'returning',
+        detailSource: 'search',
+        searchOpen: true,
+        detailOpen: false,
+        selectedMovieStored: Boolean(movieId),
+        overlayVisible: true,
+      });
+      setDetailOpen(false);
+      detailOpenRef.current = false;
+      setDetailSuppressedForPlayback(false);
+      setDetailFocusPhaseSafe('browse');
+      setClosingFocusMovieId(null);
+      setRestoringBrowseFocus(false);
+      setFocusSuppressionHeld(false);
+      setSearchRestoreMovieId(movieId);
+      setSearchOverlayReady(true);
+      setSearchPhase('returning');
+      searchPhaseRef.current = 'returning';
+      logMoviesSearchSelection({
+        requestId: getActiveMoviesSearchRequestId(),
+        query: searchQueryForSelectionRef.current,
+        movieId,
+        action: 'search-restoring',
+        searchPhase: 'returning',
+        detailSource: 'search',
+        searchOpen: true,
+        detailOpen: false,
+        selectedMovieStored: Boolean(movieId),
+        overlayVisible: true,
+      });
+      return;
+    }
+
     beginFocusAuditCycle('movies-detail-close', {
       categoryId: selectedCategoryId,
       movieId: browseFocusSnapshotRef.current?.movieId ?? null,
@@ -1156,7 +1297,14 @@ export function MoviesScreen() {
       setDetailFocusPhaseSafe('browse');
       focusSelectedPoster('restore-after-detail-close');
     }
-  }, [beginDetailFocusClose, focusSelectedPoster, selectedCategoryId, setDetailFocusPhaseSafe]);
+  }, [
+    beginDetailFocusClose,
+    focusSelectedPoster,
+    searchRestoreMovieId,
+    selectedCategoryId,
+    selectedMovie?.id,
+    setDetailFocusPhaseSafe,
+  ]);
 
   // Stage 3D.1: prepare → viewport lock → focus → confirm (focus + offset).
   useEffect(() => {
@@ -1518,6 +1666,30 @@ export function MoviesScreen() {
     finishUnifiedPlaybackClose();
     setDetailSuppressedForPlayback(false);
 
+    // Stage 3G.4: Search-origin playback returns to the same Detail overlay.
+    if (detailSourceRef.current === 'search') {
+      detailOpenRef.current = true;
+      setDetailOpen(true);
+      setDetailFocusPhaseSafe('detail-open');
+      setSearchPhase('detail-open');
+      searchPhaseRef.current = 'detail-open';
+      isRestoringPlaybackFocusRef.current = false;
+      logMoviesSearchPlayback({
+        movieId: selectedMovieRef.current?.id ?? searchRestoreMovieId,
+        providerId: activeProviderId,
+        detailSource: 'search',
+        action: 'playback-returned',
+        selectedMoviePresent: Boolean(selectedMovieRef.current),
+        streamIdPresent: Boolean(selectedMovieRef.current?.id),
+        containerExtensionPresent: Boolean(selectedMovieRef.current?.containerExtension),
+        playbackContextPresent: Boolean(bundle),
+        resolverInvoked: false,
+        playbackStarted: false,
+        failureReason: null,
+      });
+      return;
+    }
+
     // Playback close reuses the same Stage 3D coordinator; keep overlay path
     // available until exact poster confirm when a snapshot exists.
     isRestoringPlaybackFocusRef.current = true;
@@ -1533,7 +1705,14 @@ export function MoviesScreen() {
     detailOpenRef.current = false;
     setDetailFocusPhaseSafe('browse');
     isRestoringPlaybackFocusRef.current = false;
-  }, [beginDetailFocusClose, didJustClose, setDetailFocusPhaseSafe]);
+  }, [
+    activeProviderId,
+    beginDetailFocusClose,
+    bundle,
+    didJustClose,
+    searchRestoreMovieId,
+    setDetailFocusPhaseSafe,
+  ]);
 
   useEffect(() => {
     rememberMoviesScreenMemory(activeProviderId, {
@@ -1546,6 +1725,14 @@ export function MoviesScreen() {
 
   const startPlayback = useCallback(async () => {
     const requestedMovie = selectedMovieRef.current;
+    const fromSearch = detailSourceRef.current === 'search';
+    const auditOrigin = fromSearch ? 'search-detail' : 'browse-detail';
+
+    beginMoviePlaybackLifecycle({
+      origin: auditOrigin,
+      movieId: requestedMovie?.id ?? null,
+      detailOpen: detailOpenRef.current,
+    });
 
     logMoviesPlayback('play-requested', {
       hasBundle: Boolean(bundle),
@@ -1553,21 +1740,118 @@ export function MoviesScreen() {
       playbackActive,
       playbackClosing,
       inFlight: playbackLaunchInFlightRef.current,
+      detailSource: detailSourceRef.current,
     });
+
+    if (fromSearch) {
+      logMoviesSearchPlayback({
+        movieId: requestedMovie?.id ?? null,
+        providerId: activeProviderId,
+        detailSource: 'search',
+        action: 'play-pressed',
+        selectedMoviePresent: Boolean(requestedMovie),
+        streamIdPresent: Boolean(requestedMovie?.id),
+        containerExtensionPresent: Boolean(requestedMovie?.containerExtension),
+        playbackContextPresent: Boolean(bundle),
+        resolverInvoked: false,
+        playbackStarted: false,
+        failureReason: null,
+      });
+    }
 
     if (!bundle || !requestedMovie) {
       logMoviesPlayback('play-blocked', { reason: 'missing-movie-or-bundle' });
+      noteMoviePlaybackFailed('missing-movie-or-bundle', requestedMovie?.id ?? null);
+      if (fromSearch) {
+        logMoviesSearchPlayback({
+          movieId: requestedMovie?.id ?? null,
+          providerId: activeProviderId,
+          detailSource: 'search',
+          action: 'playback-rejected',
+          selectedMoviePresent: Boolean(requestedMovie),
+          streamIdPresent: Boolean(requestedMovie?.id),
+          containerExtensionPresent: Boolean(requestedMovie?.containerExtension),
+          playbackContextPresent: Boolean(bundle),
+          resolverInvoked: false,
+          playbackStarted: false,
+          failureReason: 'missing-movie-or-bundle',
+        });
+      }
       return;
+    }
+
+    markMoviePlaybackLifecycle('movie-resolved', { movieId: requestedMovie.id });
+    logMoviePlaybackShape({
+      origin: auditOrigin,
+      movieId: requestedMovie.id,
+      contentId: requestedMovie.id,
+      streamId: requestedMovie.id,
+      providerId: activeProviderId,
+      mediaType: 'movie',
+      containerExtension:
+        movieDetailRef.current?.id === requestedMovie.id
+          ? movieDetailRef.current.containerExtension ?? requestedMovie.containerExtension
+          : requestedMovie.containerExtension,
+      title: requestedMovie.title,
+      posterUrl: requestedMovie.posterUrl,
+    });
+
+    if (fromSearch) {
+      const validated = validateSearchPlaybackMovie(requestedMovie);
+      logMoviesSearchPlayback({
+        movieId: requestedMovie.id,
+        providerId: activeProviderId,
+        detailSource: 'search',
+        action: 'payload-validated',
+        selectedMoviePresent: true,
+        streamIdPresent: validated.streamIdPresent,
+        containerExtensionPresent: validated.containerExtensionPresent,
+        playbackContextPresent: true,
+        resolverInvoked: false,
+        playbackStarted: false,
+        failureReason: validated.failureReason,
+      });
+      if (!validated.ok) {
+        noteMoviePlaybackFailed(validated.failureReason ?? 'payload-invalid', requestedMovie.id);
+        showNotification({
+          id: PLAYBACK_NOTIFICATION_ID,
+          type: 'error',
+          title: 'Playback unavailable',
+          message:
+            validated.failureReason === 'missing-stream-id'
+              ? 'This movie is missing a stream id and cannot play.'
+              : 'This movie could not start playing right now.',
+          duration: PLAYBACK_NOTIFICATION_DURATION_MS,
+          position: 'bottom-right',
+          scope: 'movies',
+        });
+        logMoviesSearchPlayback({
+          movieId: requestedMovie.id,
+          providerId: activeProviderId,
+          detailSource: 'search',
+          action: 'playback-rejected',
+          selectedMoviePresent: true,
+          streamIdPresent: validated.streamIdPresent,
+          containerExtensionPresent: validated.containerExtensionPresent,
+          playbackContextPresent: true,
+          resolverInvoked: false,
+          playbackStarted: false,
+          failureReason: validated.failureReason,
+        });
+        return;
+      }
     }
 
     if (playbackActive || playbackClosing || playbackLaunchInFlightRef.current) {
       logMoviesPlayback('play-blocked', { reason: 'playback-busy' });
+      noteMoviePlaybackFailed('playback-busy', requestedMovie.id);
       return;
     }
 
     const now = Date.now();
     if (now - lastPlaybackLaunchAtRef.current < 800) {
       logMoviesPlayback('play-blocked', { reason: 'debounce' });
+      noteMoviePlaybackFailed('debounce', requestedMovie.id);
       return;
     }
 
@@ -1606,6 +1890,22 @@ export function MoviesScreen() {
         logMoviesPlayback('play-blocked', {
           reason: 'movie-selection-changed',
         });
+        noteMoviePlaybackFailed('movie-selection-changed', requestedMovie.id);
+        if (fromSearch) {
+          logMoviesSearchPlayback({
+            movieId: requestedMovie.id,
+            providerId: activeProviderId,
+            detailSource: 'search',
+            action: 'playback-rejected',
+            selectedMoviePresent: Boolean(currentMovie),
+            streamIdPresent: Boolean(currentMovie?.id),
+            containerExtensionPresent: Boolean(currentMovie?.containerExtension),
+            playbackContextPresent: true,
+            resolverInvoked: false,
+            playbackStarted: false,
+            failureReason: 'movie-selection-changed',
+          });
+        }
         return;
       }
 
@@ -1615,6 +1915,25 @@ export function MoviesScreen() {
           ? latestMovieDetail
           : null;
 
+      if (fromSearch) {
+        logMoviesSearchPlayback({
+          movieId: currentMovie.id,
+          providerId: activeProviderId,
+          detailSource: 'search',
+          action: 'resolver-invoked',
+          selectedMoviePresent: true,
+          streamIdPresent: true,
+          containerExtensionPresent: Boolean(
+            matchingDetail?.containerExtension || currentMovie.containerExtension,
+          ),
+          playbackContextPresent: true,
+          resolverInvoked: true,
+          playbackStarted: false,
+          failureReason: null,
+        });
+      }
+
+      markMoviePlaybackLifecycle('source-resolution-started', { movieId: currentMovie.id });
       const streamUrl = buildMoviePlaybackUrlResolved(
         bundle,
         currentMovie.id,
@@ -1623,6 +1942,24 @@ export function MoviesScreen() {
       );
 
       if (!streamUrl) {
+        noteMoviePlaybackFailed('stream-url-unavailable', currentMovie.id);
+        if (fromSearch) {
+          logMoviesSearchPlayback({
+            movieId: currentMovie.id,
+            providerId: activeProviderId,
+            detailSource: 'search',
+            action: 'playback-rejected',
+            selectedMoviePresent: true,
+            streamIdPresent: true,
+            containerExtensionPresent: Boolean(
+              matchingDetail?.containerExtension || currentMovie.containerExtension,
+            ),
+            playbackContextPresent: true,
+            resolverInvoked: true,
+            playbackStarted: false,
+            failureReason: 'stream-url-unavailable',
+          });
+        }
         showNotification({
           id: PLAYBACK_NOTIFICATION_ID,
           type: 'error',
@@ -1635,8 +1972,26 @@ export function MoviesScreen() {
         return;
       }
 
+      markMoviePlaybackLifecycle('source-resolved', {
+        movieId: currentMovie.id,
+      });
+      logMoviePlaybackShape({
+        origin: auditOrigin,
+        movieId: currentMovie.id,
+        contentId: currentMovie.id,
+        streamId: currentMovie.id,
+        providerId: activeProviderId,
+        mediaType: 'movie',
+        containerExtension:
+          matchingDetail?.containerExtension ?? currentMovie.containerExtension,
+        playbackSource: 'resolved',
+        title: currentMovie.title,
+        posterUrl: currentMovie.posterUrl,
+      });
+
       lastPlaybackLaunchAtRef.current = Date.now();
       playFocusGuardUntilRef.current = Date.now() + 2000;
+      // Keep Search phase on detail-open; do not restore Search results while launching.
       setDetailSuppressedForPlayback(true);
       dismissNotification(PLAYBACK_NOTIFICATION_ID);
 
@@ -1644,6 +1999,8 @@ export function MoviesScreen() {
         movieId: currentMovie.id,
       });
 
+      markMoviePlaybackLifecycle('launcher-called', { movieId: currentMovie.id });
+      markMoviePlaybackLifecycle('player-requested', { movieId: currentMovie.id });
       await launchPlayback(
         {
           id: currentMovie.id,
@@ -1659,12 +2016,52 @@ export function MoviesScreen() {
           contentFit: 'cover',
         },
       );
-    } catch {
+
+      if (fromSearch) {
+        logMoviesSearchPlayback({
+          movieId: currentMovie.id,
+          providerId: activeProviderId,
+          detailSource: 'search',
+          action: 'playback-started',
+          selectedMoviePresent: true,
+          streamIdPresent: true,
+          containerExtensionPresent: Boolean(
+            matchingDetail?.containerExtension || currentMovie.containerExtension,
+          ),
+          playbackContextPresent: true,
+          resolverInvoked: true,
+          playbackStarted: true,
+          failureReason: null,
+        });
+      }
+    } catch (error) {
       logMoviesPlayback('launch-failed', {
         movieId: requestedMovie.id,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error),
       });
 
       setDetailSuppressedForPlayback(false);
+      noteMoviePlaybackFailed(
+        error instanceof Error ? error.message : 'launch-failed',
+        requestedMovie.id,
+      );
+
+      if (fromSearch) {
+        logMoviesSearchPlayback({
+          movieId: requestedMovie.id,
+          providerId: activeProviderId,
+          detailSource: 'search',
+          action: 'playback-rejected',
+          selectedMoviePresent: true,
+          streamIdPresent: Boolean(requestedMovie.id),
+          containerExtensionPresent: Boolean(requestedMovie.containerExtension),
+          playbackContextPresent: Boolean(bundle),
+          resolverInvoked: true,
+          playbackStarted: false,
+          failureReason: 'launch-failed',
+        });
+      }
 
       showNotification({
         id: PLAYBACK_NOTIFICATION_ID,
@@ -1689,36 +2086,209 @@ export function MoviesScreen() {
     showNotification,
   ]);
 
+  const openMovieDetailFromSearch = useCallback(
+    (
+      movie: Parameters<typeof selectMovie>[0],
+      meta: { searchQuery: string; searchFocusedMovieId: string },
+    ) => {
+      if (
+        playbackLaunchInFlightRef.current ||
+        launchingPlayback ||
+        playbackUiActive ||
+        Date.now() < playFocusGuardUntilRef.current
+      ) {
+        return false;
+      }
+
+      // Keep a browse snapshot for safety, but Search-origin close will not use it.
+      browseFocusSnapshotRef.current = createMoviesBrowseFocusSnapshot({
+        categoryId: selectedCategoryId,
+        movieId: movie.id,
+        movieIndex: Math.max(0, visibleMovies.findIndex((item) => item.id === movie.id)),
+        verticalOffset: viewportStateRef.current.offset,
+        visibleFirstIndex: viewportStateRef.current.firstIndex,
+        visibleLastIndex: viewportStateRef.current.lastIndex,
+        columns: getSeriesPosterColumns(width),
+      });
+
+      setDetailSource('search');
+      detailSourceRef.current = 'search';
+      searchQueryForSelectionRef.current = meta.searchQuery;
+      setSearchRestoreMovieId(meta.searchFocusedMovieId);
+      selectMovie(movie);
+      detailOpenRef.current = true;
+      const detailPromise = loadMovieDetail(movie, { origin: 'search' });
+      pendingDetailPromiseRef.current = detailPromise;
+      detailPromise.finally(() => {
+        if (pendingDetailPromiseRef.current === detailPromise) {
+          pendingDetailPromiseRef.current = null;
+        }
+      });
+      setDetailSuppressedForPlayback(false);
+      releasePostRestoreLatch('screen-change');
+      setDetailOpen(true);
+      setDetailFocusPhaseSafe('detail-open');
+      // Diagnostics-only shape snapshot at Search Detail open.
+      logMoviePlaybackShape({
+        origin: 'search-detail',
+        movieId: movie.id,
+        contentId: movie.id,
+        streamId: movie.id,
+        providerId: activeProviderId,
+        mediaType: 'movie',
+        containerExtension: movie.containerExtension,
+        title: movie.title,
+        posterUrl: movie.posterUrl,
+      });
+      logMoviesDetailFocusLifecycle({
+        token: null,
+        phase: 'detail-open',
+        targetMovieId: movie.id,
+        targetIndex: browseFocusSnapshotRef.current.movieIndex,
+        targetVisible: true,
+        currentOffset: viewportStateRef.current.offset,
+        scrollIssued: false,
+        focusIssued: false,
+        actuallyFocusedMovieId: movie.id,
+        highlightVisible: true,
+        overlayMounted: true,
+      });
+      return true;
+    },
+    [
+      activeProviderId,
+      launchingPlayback,
+      loadMovieDetail,
+      playbackUiActive,
+      releasePostRestoreLatch,
+      selectMovie,
+      selectedCategoryId,
+      setDetailFocusPhaseSafe,
+      visibleMovies,
+      width,
+    ],
+  );
+
   const handleSearchSelect = useCallback(
     (result: SearchResult) => {
       if (result.type !== 'movie') {
         return;
       }
+      if (searchPhaseRef.current === 'opening-detail' || searchPhaseRef.current === 'detail-open') {
+        return;
+      }
 
-      setSearchOpen(false);
-      setSearchOverlayReady(false);
-      const movie = {
+      const requestId = getActiveMoviesSearchRequestId();
+      const query = searchQueryForSelectionRef.current;
+      logMoviesSearchSelection({
+        requestId,
+        query,
+        movieId: result.id,
+        action: 'result-pressed',
+        searchPhase: searchPhaseRef.current,
+        detailSource: 'search',
+        searchOpen: true,
+        detailOpen: detailOpenRef.current,
+        selectedMovieStored: false,
+        overlayVisible: true,
+      });
+
+      setSearchPhase('opening-detail');
+      searchPhaseRef.current = 'opening-detail';
+
+      const movie = movieSummaryFromSearchResult({
         id: result.id,
-        categoryId: result.categoryId ?? selectedCategoryId,
         title: result.title,
         year: result.year,
         rating: result.rating,
-        genres: result.genres ?? ['Movies'],
+        genres: result.genres,
         posterUrl: result.posterUrl,
-        posterStyleKey: 'ember' as const,
-        description: 'Curated from your NovaCast movie library.',
-      };
-      selectMovie(movie);
-      focusMovie(movie);
-      void loadMovieDetail(movie);
-      setDetailSuppressedForPlayback(false);
-      setDetailOpen(true);
+        categoryId: result.categoryId,
+        containerExtension: result.containerExtension,
+        fallbackCategoryId: selectedCategoryId,
+      });
+
+      logMoviesSearchSelection({
+        requestId,
+        query,
+        movieId: movie.id,
+        action: 'movie-captured',
+        searchPhase: 'opening-detail',
+        detailSource: 'search',
+        searchOpen: true,
+        detailOpen: false,
+        selectedMovieStored: true,
+        overlayVisible: true,
+      });
+
+      logMoviesSearchSelection({
+        requestId,
+        query,
+        movieId: movie.id,
+        action: 'search-hiding',
+        searchPhase: 'opening-detail',
+        detailSource: 'search',
+        searchOpen: true,
+        detailOpen: false,
+        selectedMovieStored: true,
+        overlayVisible: false,
+      });
+
+      logMoviesSearchSelection({
+        requestId,
+        query,
+        movieId: movie.id,
+        action: 'detail-opening',
+        searchPhase: 'opening-detail',
+        detailSource: 'search',
+        searchOpen: true,
+        detailOpen: false,
+        selectedMovieStored: true,
+        overlayVisible: false,
+      });
+
+      const opened = openMovieDetailFromSearch(movie, {
+        searchQuery: query,
+        searchFocusedMovieId: movie.id,
+      });
+      if (!opened) {
+        setSearchPhase('open-results');
+        searchPhaseRef.current = 'open-results';
+        return;
+      }
+
+      setSearchPhase('detail-open');
+      searchPhaseRef.current = 'detail-open';
+      logMoviesSearchSelection({
+        requestId,
+        query,
+        movieId: movie.id,
+        action: 'detail-opened',
+        searchPhase: 'detail-open',
+        detailSource: 'search',
+        searchOpen: true,
+        detailOpen: true,
+        selectedMovieStored: true,
+        overlayVisible: false,
+      });
     },
-    [focusMovie, loadMovieDetail, selectMovie, selectedCategoryId],
+    [openMovieDetailFromSearch, selectedCategoryId],
   );
 
   const executeMovieSearch = useCallback(
-    (request: Parameters<typeof searchMovies>[2]) => searchMovies(activeProviderId, bundle?.movies, request),
+    async (request: Parameters<typeof searchMovies>[2]) => {
+      const selection = await resolveMoviesSearchDatasource({
+        providerId: activeProviderId,
+        query: request.query,
+        // Prefer the same SQLite browse source; never route to Xtream bundle when v2 is ready.
+        browseDataSource:
+          process.env.EXPO_PUBLIC_MOVIES_SQLITE_READS === 'true'
+            ? createSqliteMovieDataSource(activeProviderId)
+            : null,
+        bundleMovies: bundle?.movies,
+      });
+      return searchMovies(activeProviderId, selection.dataSource, request);
+    },
     [activeProviderId, bundle?.movies],
   );
 
@@ -1742,7 +2312,9 @@ export function MoviesScreen() {
     }
 
     moviesDetailRetryAttemptedRef.current = true;
-    void loadMovieDetail(movie);
+    void loadMovieDetail(movie, {
+      origin: detailSourceRef.current === 'search' ? 'search' : 'browse',
+    });
   }, [loadMovieDetail]);
 
   const handleSelectCategory = useCallback(
@@ -2192,7 +2764,18 @@ useEffect(() => {
                 });
               }}
               onSearchPress={() => {
-                if (!chromeFocusable || searchBlocksBrowse) {
+                const phase = searchPhaseRef.current;
+                if (shouldBlockMoviesSearchToolbar(phase)) {
+                  logMoviesSearchReopen({
+                    phase,
+                    searchOpen: true,
+                    overlayMounted: true,
+                    toolbarPressAccepted: false,
+                    blockedReason: 'detail-transition',
+                  });
+                  return;
+                }
+                if (!chromeFocusable || (searchBlocksBrowse && !shouldToggleCloseMoviesSearch(phase))) {
                   if (postRestoreActive) {
                     logMoviesSearchFocusBlocked({
                       token: postRestoreLatchRef.current?.token ?? null,
@@ -2200,24 +2783,53 @@ useEffect(() => {
                       source: 'MovieToolbar.onSearchPress',
                     });
                   }
+                  logMoviesSearchReopen({
+                    phase,
+                    searchOpen: searchOpen,
+                    overlayMounted: isMoviesSearchOverlayMounted(phase),
+                    toolbarPressAccepted: false,
+                    blockedReason: 'chrome-not-focusable',
+                  });
                   return;
                 }
                 logMoviesPlayback('search-open', {});
-                if (searchOpen) {
+                if (shouldToggleCloseMoviesSearch(phase)) {
+                  // Idempotent while already open: close fully and reset.
+                  logMoviesSearchReopen({
+                    phase,
+                    searchOpen: true,
+                    overlayMounted: true,
+                    toolbarPressAccepted: true,
+                    blockedReason: null,
+                  });
                   closeSearch();
                   return;
                 }
 
-                setSearchOpen(true);
+                setSearchPhase('open-input');
+                searchPhaseRef.current = 'open-input';
+                logMoviesSearchReopen({
+                  phase: 'open-input',
+                  searchOpen: true,
+                  overlayMounted: true,
+                  toolbarPressAccepted: true,
+                  blockedReason: null,
+                });
               }}
             />
           </View>
 
           <View style={styles.contentRow}>
             <MovieCategoryRail
-              categories={categories}
+              categories={railCategories}
               selectedCategoryId={selectedCategoryId}
-              preferredCategoryId={moviesMemory.selectedCategoryId}
+              preferredCategoryId={
+                selectedCategoryId && selectedCategoryId !== 'all'
+                  ? selectedCategoryId
+                  : moviesMemory.selectedCategoryId !== 'all'
+                    ? moviesMemory.selectedCategoryId
+                    : null
+              }
               suppressPreferredFocus={categoryPreferredSuppressed}
               focusable={chromeFocusable && !searchBlocksBrowse}
               discoverStatusMessage={discoverStatusMessage}
@@ -2368,14 +2980,49 @@ useEffect(() => {
         </>
 
       <SearchOverlay
-        visible={searchOpen && !playbackUiActive}
+        visible={searchOverlayVisible && !playbackUiActive}
+        // Keep Search controller/results alive across Detail + playback (no Modal while hidden).
+        retainMounted={searchOpen}
+        restoreFocusMovieId={searchPhase === 'returning' ? searchRestoreMovieId : null}
+        onRestoreFocusHandled={() => {
+          if (searchPhaseRef.current !== 'returning') {
+            return;
+          }
+          setSearchPhase('open-results');
+          searchPhaseRef.current = 'open-results';
+          logMoviesSearchSelection({
+            requestId: getActiveMoviesSearchRequestId(),
+            query: searchQueryForSelectionRef.current,
+            movieId: searchRestoreMovieId,
+            action: 'search-restored',
+            searchPhase: 'open-results',
+            detailSource: 'search',
+            searchOpen: true,
+            detailOpen: false,
+            selectedMovieStored: Boolean(searchRestoreMovieId),
+            overlayVisible: true,
+          });
+        }}
         scope="movie"
         providerId={activeProviderId}
         title="Search Movies"
         executeSearch={executeMovieSearch}
-        onReady={() => setSearchOverlayReady(true)}
+        onReady={() => {
+          setSearchOverlayReady(true);
+          if (searchPhaseRef.current === 'open-input') {
+            setSearchPhase('open-results');
+            searchPhaseRef.current = 'open-results';
+          }
+        }}
         onClose={closeSearch}
         onSelectResult={handleSearchSelect}
+        onQueryCommitted={(query) => {
+          searchQueryForSelectionRef.current = query;
+          if (searchPhaseRef.current === 'open-input') {
+            setSearchPhase('open-results');
+            searchPhaseRef.current = 'open-results';
+          }
+        }}
       />
 
       <WalkthroughOverlay

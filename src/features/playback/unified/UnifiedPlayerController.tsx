@@ -61,6 +61,7 @@ import {
 } from './unifiedRemoteDebug.ts';
 import { recordRecentItem } from '@/features/personalization/personalizationStore';
 import { normalizePlaybackFailure, playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
+import { noteMoviePlaybackFailed, noteMoviePlaybackStarted } from '@/features/movies/moviesPlaybackAudit';
 import { endMoviePlaybackAttemptDiag } from '@/features/providers/playbackSourceDiagnostics';
 
 function useUnifiedPlayerSnapshot() {
@@ -216,6 +217,7 @@ export function UnifiedPlayerController() {
         nativeStatus: 'readyToPlay',
         outcome: 'started',
       });
+      noteMoviePlaybackStarted(current.item.id);
     }
     playbackAnalyticsTracker.firstFrame();
     if (current.machineState === 'loading' || current.machineState === 'buffering') {
@@ -233,6 +235,9 @@ export function UnifiedPlayerController() {
     }
     if (snapshot.machineState === 'error' && previous.machineState !== 'error') {
       playbackAnalyticsTracker.failure(snapshot.errorMessage);
+      if (snapshot.item?.mediaType === 'movie') {
+        noteMoviePlaybackFailed(snapshot.errorMessage ?? 'player-error', snapshot.item.id);
+      }
     }
     if (snapshot.machineState === 'closing' && previous.machineState !== 'closing') {
       playbackAnalyticsTracker.stop('user_back');
@@ -414,6 +419,9 @@ export function UnifiedPlayerController() {
     // advancing playback, so use it only as the fallback source.
     if (isPlaying && player.status === 'readyToPlay') {
       playbackAnalyticsTracker.firstFrame('playing_transition');
+      if (current.item?.mediaType === 'movie') {
+        noteMoviePlaybackStarted(current.item.id);
+      }
     }
   }, [player]);
 

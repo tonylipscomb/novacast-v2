@@ -390,6 +390,10 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
       ? (movieId: string) => base.getMovieInfo!(movieId)
       : undefined,
 
+    enrichMovieInfo: base.enrichMovieInfo
+      ? (movieId: string) => base.enrichMovieInfo!(movieId)
+      : undefined,
+
     async getCategoryCount(categoryId) {
       if (isSectionCategoryId(categoryId)) {
         return 0;

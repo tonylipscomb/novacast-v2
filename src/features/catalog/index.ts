@@ -24,6 +24,7 @@ export {
   getCatalogProvider,
   getCatalogCategoryCounts,
   getCatalogItemsPage,
+  getCatalogMovieItem,
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
   logCatalogGenerationInventoryOnce,

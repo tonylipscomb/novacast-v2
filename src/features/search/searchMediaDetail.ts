@@ -14,6 +14,7 @@ export function movieSearchResultToSummary(result: MovieSearchResult): MovieSumm
     posterUrl: result.posterUrl,
     posterStyleKey: 'ember',
     description: 'From your NovaCast library search.',
+    containerExtension: result.containerExtension,
   };
 }
 

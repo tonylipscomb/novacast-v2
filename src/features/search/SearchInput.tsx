@@ -1,6 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { RefObject } from 'react';
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import * as ReactNative from 'react-native';
 import { findNodeHandle, Platform, Pressable, StyleSheet, TextInput, View, type TextInput as TextInputType } from 'react-native';
 
 import { novaTvFocus, createNovaTvFocusTextStyles, NOVA_TV_GLASS } from '@/components/nova/novaTvFocus';
@@ -11,6 +12,21 @@ import { logSearchEvent } from './searchDiagnostics';
 import { shouldRefocusSearchShellOnTextInputBlur } from './searchOverlayFocusPolicy';
 
 const focusText = createNovaTvFocusTextStyles(novaTheme);
+
+type TvEventPayload = { eventType?: string };
+
+function useMoviesSearchTvDownHandler(handler: (event: TvEventPayload) => void) {
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+
+  const rn = ReactNative as typeof ReactNative & {
+    useTVEventHandler?: (cb: (event: TvEventPayload) => void) => void;
+  };
+  const useTvEventHandler = rn.useTVEventHandler ?? ((_cb: (event: TvEventPayload) => void) => {});
+  useTvEventHandler((event) => {
+    handlerRef.current(event);
+  });
+}
 
 type SearchInputProps = {
   value: string;
@@ -32,6 +48,8 @@ type SearchInputProps = {
   onKeyboardActivate?: () => void;
   /** Opens the platform IME when the TV shell receives focus. */
   openKeyboardOnFocus?: boolean;
+  /** Stage 3G.2: explicit D-pad Down handoff to the first search result. */
+  onDown?: (meta: { imeVisible: boolean }) => void;
 };
 
 export function SearchInput({
@@ -52,9 +70,14 @@ export function SearchInput({
   onShellBlur,
   onKeyboardActivate,
   openKeyboardOnFocus = false,
+  onDown,
 }: SearchInputProps) {
   const usePressableShell = Platform.isTV;
   const [shellFocused, setShellFocused] = useState(false);
+  const onDownRef = useRef(onDown);
+  onDownRef.current = onDown;
+  const shellFocusedRef = useRef(false);
+  const imeVisibleRef = useRef(false);
   const [clearFocused, setClearFocused] = useState(false);
   const shellRef = useRef<View>(null);
   const internalInputRef = useRef<TextInputType>(null);
@@ -69,7 +92,7 @@ export function SearchInput({
   useLayoutEffect(() => {
     const handle = resolvedFocusRef.current ? findNodeHandle(resolvedFocusRef.current) ?? undefined : undefined;
     setFieldHandle((prev) => (prev === handle ? prev : handle));
-  }, [resolvedFocusRef, hasValue, preferredFocus]);
+  }, [resolvedFocusRef, hasValue, preferredFocus, focusDownHandle]);
 
   useLayoutEffect(() => {
     if (!hasValue) {
@@ -81,6 +104,63 @@ export function SearchInput({
     setClearHandle((prev) => (prev === handle ? prev : handle));
   }, [hasValue]);
 
+  const emitDown = () => {
+    if (!shellFocusedRef.current && !imeVisibleRef.current) {
+      return;
+    }
+    onDownRef.current?.({ imeVisible: imeVisibleRef.current });
+  };
+
+  useMoviesSearchTvDownHandler((event) => {
+    if (event.eventType !== 'down') {
+      return;
+    }
+    if (!onDownRef.current) {
+      return;
+    }
+    if (!shellFocusedRef.current && !imeVisibleRef.current) {
+      return;
+    }
+    emitDown();
+  });
+
+  // Fallback TVEventHandler for runtimes without useTVEventHandler.
+  useEffect(() => {
+    if (!onDown || !Platform.isTV) {
+      return;
+    }
+
+    const rn = ReactNative as typeof ReactNative & {
+      useTVEventHandler?: (handler: (event: TvEventPayload) => void) => void;
+      TVEventHandler?: new () => {
+        enable: (component: unknown, handler: (_comp: unknown, event: TvEventPayload) => void) => void;
+        disable: () => void;
+      };
+    };
+
+    // Prefer the hook path above; only enable legacy handler when the hook is absent.
+    if (typeof rn.useTVEventHandler === 'function') {
+      return;
+    }
+    if (typeof rn.TVEventHandler !== 'function') {
+      return;
+    }
+
+    const handler = new rn.TVEventHandler();
+    handler.enable(null, (_comp, event) => {
+      if (event.eventType === 'down') {
+        emitDown();
+      }
+    });
+    return () => {
+      try {
+        handler.disable();
+      } catch {
+        // ignore
+      }
+    };
+  }, [onDown]);
+
   const openKeyboard = () => {
     if (!showSoftKeyboard) {
       logSearchEvent('search_input_activate_skipped', { reason: 'soft-keyboard-disabled' });
@@ -88,6 +168,7 @@ export function SearchInput({
     }
     logSearchEvent('search_input_activate', { platform: Platform.OS });
     onKeyboardActivate?.();
+    imeVisibleRef.current = true;
     requestTvFocus({
       screen: 'search-overlay',
       source: 'SearchInput',
@@ -99,6 +180,7 @@ export function SearchInput({
 
   const handleShellFocus = () => {
     setShellFocused(true);
+    shellFocusedRef.current = true;
     logSearchEvent('search_input_shell_focus', {});
     onShellFocus?.();
     if (!usePressableShell && openKeyboardOnFocus) {
@@ -108,6 +190,7 @@ export function SearchInput({
 
   const handleShellBlur = () => {
     setShellFocused(false);
+    shellFocusedRef.current = false;
     onShellBlur?.();
   };
 
@@ -126,6 +209,7 @@ export function SearchInput({
   const fieldFocusProps = {
     ...(focusLeftHandle ? { nextFocusLeft: focusLeftHandle } : null),
     ...(focusUpHandle ? { nextFocusUp: focusUpHandle } : null),
+    // Stage 3G.2: when provided, this must be the first result tag — never self.
     ...(focusDownHandle ? { nextFocusDown: focusDownHandle } : null),
     ...(clearHandle ? { nextFocusRight: clearHandle } : null),
   };
@@ -146,10 +230,14 @@ export function SearchInput({
       onSubmitEditing={onSubmit}
       onFocus={() => {
         setShellFocused(true);
+        shellFocusedRef.current = true;
+        imeVisibleRef.current = true;
         onKeyboardActivate?.();
       }}
       onBlur={() => {
+        imeVisibleRef.current = false;
         setShellFocused(false);
+        shellFocusedRef.current = false;
         onShellBlur?.();
         if (shouldRefocusSearchShellOnTextInputBlur()) {
           requestTvFocus({

@@ -1,0 +1,183 @@
+# NovaCast Android release APK builds.
+#
+# - Push to main / workflow_dispatch: build + upload Actions artifact (no GitHub Release)
+# - Push tag v*: build + artifact + create/update GitHub Release with the APK
+#
+# Repository notes (verified before authoring):
+# - Lockfile: package-lock.json → npm ci
+# - Native android/ is generated (gitignored); CI runs expo prebuild first
+# - Wrapper: android/gradlew (after prebuild)
+# - APK: android/app/build/outputs/apk/release/app-release.apk
+# - Java: Temurin 17 (Gradle 9.x / current Expo Android toolchain)
+# - assembleRelease is already signed (Expo default debug keystore) unless
+#   optional NOVACAST_KEYSTORE_* secrets are provided
+
+name: Android Beta APK
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  EXPO_PUBLIC_MOVIES_SQLITE_READS: 'true'
+  EXPO_NO_TELEMETRY: '1'
+  CI: 'true'
+
+jobs:
+  build-apk:
+    name: Build release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version label
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+            IS_TAG=true
+          else
+            VERSION="beta-main-${GITHUB_RUN_NUMBER}"
+            IS_TAG=false
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "is_tag=${IS_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved VERSION=${VERSION} is_tag=${IS_TAG}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # No engines/.nvmrc pin in-repo; Node 22 matches local Expo SDK 57 builds.
+          node-version: '22'
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Set up Temurin Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate Android native project
+        run: npx expo prebuild --platform android --non-interactive
+
+      - name: Configure optional release signing
+        env:
+          NOVACAST_KEYSTORE_BASE64: ${{ secrets.NOVACAST_KEYSTORE_BASE64 }}
+          NOVACAST_KEYSTORE_PASSWORD: ${{ secrets.NOVACAST_KEYSTORE_PASSWORD }}
+          NOVACAST_KEY_ALIAS: ${{ secrets.NOVACAST_KEY_ALIAS }}
+          NOVACAST_KEY_PASSWORD: ${{ secrets.NOVACAST_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${NOVACAST_KEYSTORE_BASE64:-}" ]]; then
+            echo "No NOVACAST_KEYSTORE_BASE64 secret — preserving Expo debug-signed release config."
+            exit 0
+          fi
+
+          if [[ -z "${NOVACAST_KEYSTORE_PASSWORD:-}" || -z "${NOVACAST_KEY_ALIAS:-}" || -z "${NOVACAST_KEY_PASSWORD:-}" ]]; then
+            echo "::error::NOVACAST_KEYSTORE_BASE64 is set but one or more of NOVACAST_KEYSTORE_PASSWORD, NOVACAST_KEY_ALIAS, NOVACAST_KEY_PASSWORD is missing."
+            exit 1
+          fi
+
+          echo "$NOVACAST_KEYSTORE_BASE64" | base64 -d > android/app/novacast-release.jks
+          test -s android/app/novacast-release.jks
+          node scripts/ci-configure-android-release-signing.mjs
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x android/gradlew
+
+      - name: Build release APK
+        working-directory: android
+        env:
+          NOVACAST_KEYSTORE_PASSWORD: ${{ secrets.NOVACAST_KEYSTORE_PASSWORD }}
+          NOVACAST_KEY_ALIAS: ${{ secrets.NOVACAST_KEY_ALIAS }}
+          NOVACAST_KEY_PASSWORD: ${{ secrets.NOVACAST_KEY_PASSWORD }}
+          EXPO_PUBLIC_MOVIES_SQLITE_READS: 'true'
+        run: ./gradlew app:assembleRelease --no-daemon
+
+      - name: Verify APK exists
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          if [[ ! -f "$APK_PATH" ]]; then
+            echo "::error::Release APK missing at ${APK_PATH}"
+            ls -la android/app/build/outputs/apk/release || true
+            exit 1
+          fi
+          VERSION="${{ steps.meta.outputs.version }}"
+          mkdir -p dist
+          DEST="dist/NovaCast-${VERSION}.apk"
+          cp "$APK_PATH" "$DEST"
+          echo "path=${DEST}" >> "$GITHUB_OUTPUT"
+          echo "Built $(du -h "$DEST" | cut -f1) → ${DEST}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NovaCast-${{ steps.meta.outputs.version }}
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          APK_PATH: ${{ steps.apk.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IS_PRERELEASE=false
+          if echo "$TAG" | grep -Eiq '(beta|alpha|rc)'; then
+            IS_PRERELEASE=true
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — uploading/replacing APK."
+            gh release upload "$TAG" "$APK_PATH" --clobber
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              gh release edit "$TAG" --prerelease
+            fi
+          else
+            echo "Creating release ${TAG}."
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              gh release create "$TAG" \
+                "$APK_PATH" \
+                --title "NovaCast ${TAG}" \
+                --generate-notes \
+                --prerelease
+            else
+              gh release create "$TAG" \
+                "$APK_PATH" \
+                --title "NovaCast ${TAG}" \
+                --generate-notes
+            fi
+          fi
+
+      - name: Remove temporary release keystore
+        if: always()
+        shell: bash
+        run: |
+          rm -f android/app/novacast-release.jks
+          echo "Temporary keystore cleanup complete."

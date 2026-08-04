@@ -10,6 +10,7 @@ import { recoverFragmentedMovieCatalogOnce } from '../../catalog/catalogFragment
 import type { CatalogItemRecord, CatalogItemSort } from '../../catalog/catalogTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 import type { MediaDetail } from '../../media-browser/mediaTypes.ts';
+import { getActiveRepositoryBundle } from '../../providers/providerBundle.ts';
 import { publishMovieCatalogReady } from '../../providers/providerCatalogSync.ts';
 
 import type { MovieDataSource } from './MovieDataSource.ts';
@@ -19,6 +20,10 @@ import {
   MoviesCatalogNotReadyError,
   resolveMoviesCatalogReadiness,
 } from '../moviesCatalogReadiness.ts';
+import {
+  isMoviesCatalogRepairing,
+  repairDegradedMoviesCatalogIfNeeded,
+} from '../moviesSparseCatalogRepair.ts';
 import {
   buildLocalMovieDetailFromCatalogItem,
   getCachedProviderMovieInfo,
@@ -163,6 +168,37 @@ export function createSqliteMovieDataSource(
       const itemsGeneration = readiness.readableItemGeneration;
       const categoriesGeneration = readiness.categoriesGeneration;
       const previous = lastValidSqliteCategoriesByProvider.get(providerId);
+
+      // Stage 4.2D: active sparse generation must not stay interactive.
+      if (itemsGeneration > 0 && readiness.decision !== 'waiting-fresh-sync') {
+        const repairStatus = await repairDegradedMoviesCatalogIfNeeded(providerId, ({ providerId: pid }) => {
+          const bundle = getActiveRepositoryBundle();
+          if (!bundle || bundle.providerId !== pid) {
+            return;
+          }
+          void bundle.syncCatalog();
+        });
+        if (repairStatus === 'repairing' || isMoviesCatalogRepairing(providerId)) {
+          lastValidSqliteCategoriesByProvider.delete(providerId);
+          console.info(
+            '[NovaCast Movies Category Contract] ' +
+              JSON.stringify({
+                providerId,
+                readableGeneration: itemsGeneration,
+                categoriesGeneration,
+                itemsGeneration,
+                repositoryCategoryCount: readiness.categoryCount,
+                sqliteProviderCategoryCount: 0,
+                wrappedCategoryCount: 0,
+                appliedProviderCategoryCount: 0,
+                totalMovieCount: readiness.readableItemCount,
+                firstProviderCategoryIds: [],
+                reason: 'repairing-sparse-generation',
+              }),
+          );
+          return [];
+        }
+      }
 
       // Fresh install / no readable item generation: do not expose in-progress
       // category metadata as a usable rail (Stage 4.2A readiness barrier).

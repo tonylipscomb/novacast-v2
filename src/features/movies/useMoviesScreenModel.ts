@@ -24,6 +24,10 @@ import {
   isMoviesCatalogNotReadyError,
   resolveMoviesCatalogReadiness,
 } from './moviesCatalogReadiness';
+import {
+  isMoviesCatalogRepairing,
+  setMoviesCatalogRepairingUi,
+} from './moviesSparseCatalogRepair';
 import { subscribeMovieLibrary } from './smart/movieLibraryStore';
 import {
   getMoviesSettingsSync,
@@ -225,6 +229,7 @@ export function useMoviesScreenModel(
   const [loading, setLoading] = useState(false);
   const [categoryLoading, setCategoryLoading] = useState(false);
   const [loadStatus, setLoadStatus] = useState<MoviesLoadStatus>('loading');
+  const [catalogRepairing, setCatalogRepairing] = useState(false);
   const [loadErrorMessage, setLoadErrorMessage] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [searchQuery, setSearchQueryState] = useState('');
@@ -439,7 +444,8 @@ export function useMoviesScreenModel(
           setCategories([]);
           setSelectedCategoryId('');
           setLoadErrorMessage(null);
-          if (catalogPending) {
+          if (catalogPending || isMoviesCatalogRepairing(activeProviderId)) {
+            setCatalogRepairing(isMoviesCatalogRepairing(activeProviderId));
             setLoadStatus((current) => (current === 'error' ? current : 'loading'));
             console.info(
               '[NovaCast Movies Category Contract] ' +
@@ -452,7 +458,9 @@ export function useMoviesScreenModel(
                   appliedProviderCategoryCount: 0,
                   totalMovieCount: null,
                   firstProviderCategoryIds: [],
-                  reason: 'catalog-not-ready-categories-pending',
+                  reason: isMoviesCatalogRepairing(activeProviderId)
+                    ? 'repairing-sparse-generation'
+                    : 'catalog-not-ready-categories-pending',
                 }),
             );
             logMoviesPerf('categories_load_pending', {
@@ -481,6 +489,7 @@ export function useMoviesScreenModel(
           return;
         }
 
+        setCatalogRepairing(false);
         setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
         console.info(
           '[NovaCast Movies Category Contract] ' +
@@ -634,6 +643,9 @@ export function useMoviesScreenModel(
         providerId: activeProviderId,
         generation,
       });
+      // Fresh generation activated — clear sparse-repair UI and reload the rail.
+      setMoviesCatalogRepairingUi(activeProviderId, false);
+      setCatalogRepairing(false);
       // Item generation is now readable — reload categories, select initial category,
       // and let the first-page effect arm against the completed generation.
       setLoadStatus((current) => (current === 'error' ? current : 'loading'));
@@ -1224,6 +1236,7 @@ export function useMoviesScreenModel(
     loading: resolvedDataSource ? loading : false,
     categoryLoading: resolvedDataSource ? categoryLoading : false,
     loadStatus: resolvedDataSource ? loadStatus : 'error',
+    catalogRepairing: resolvedDataSource ? catalogRepairing : false,
     loadErrorMessage: resolvedDataSource ? loadErrorMessage : 'Provider is not connected.',
     hasMore: resolvedDataSource ? hasMore : false,
     selectCategory,

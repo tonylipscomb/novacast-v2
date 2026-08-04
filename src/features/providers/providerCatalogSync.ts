@@ -105,9 +105,11 @@ import {
 } from '../catalog/catalogRepository.ts';
 import {
   createVodCategoryProbeAccumulator,
+  evaluateSparsePerCategoryCoverage,
   evaluateVodCategoryFilterCapability,
   normalizeStreamCategoryId,
   readVodCategoryFilterCapability,
+  selectVodCategoryProbeIds,
   writeVodCategoryFilterCapability,
   type VodCategoryProbeSample,
 } from '../catalog/vodCategoryFilterCapability.ts';
@@ -116,9 +118,12 @@ import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 
 const PERF_LOG_PREFIX = '[NovaCast CatalogSync]';
 const CATALOG_SYNC_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const CATALOG_SYNC_CHECKPOINT_VERSION = 14; // Stage 3C.2: SQLite Movies item sync independent of smart categories
+// Stage 4.2D: bump invalidates stale "complete" checkpoints that skipped sparse repair.
+const CATALOG_SYNC_CHECKPOINT_VERSION = 15;
 const CATALOG_SYNC_CHECKPOINT_PREFIX = '@novacast/catalog-sync-checkpoint/';
 const syncInFlight = new Map<string, Promise<void>>();
+/** One-shot Movies full-dump force (sparse repair / capability invalidate). */
+const forceMoviesFullDumpByProvider = new Map<string, string>();
 
 /** Shell-settle delays before automatic catalog work (ms). Zeroed in unit tests. */
 let movieCatalogScheduleDelayMs = 2500;
@@ -1295,8 +1300,15 @@ export async function runMovieCatalogSync(
     const nativeAvailable = isNativeCatalogDecodeAvailable();
     const writerOnly = isCatalogSqliteWriterOnlyDiagnosticEnabled();
     const syncMovieItems = smartCategoriesEnabled || Boolean(sqliteHandle?.enabled);
-    let filteringReliable = true;
-    let movieSyncStrategy: 'full-dump-stream-category' | 'filtered-per-category' = 'filtered-per-category';
+    let filteringReliable = false;
+    let filterStatus: 'reliable' | 'unreliable' | 'inconclusive' = 'inconclusive';
+    let filterReason = 'insufficient-populated-probes';
+    let movieSyncStrategy: 'full-dump-stream-category' | 'filtered-per-category' = 'full-dump-stream-category';
+    let strategyFallbackUsed = false;
+    const forcedFullDumpReason = forceMoviesFullDumpByProvider.get(providerId) ?? null;
+    if (forcedFullDumpReason) {
+      forceMoviesFullDumpByProvider.delete(providerId);
+    }
 
     logSync(providerId, 'movie-filter-capability-gate', {
       nativeAvailable,
@@ -1304,33 +1316,50 @@ export async function runMovieCatalogSync(
       smartCategoriesEnabled,
       syncMovieItems,
       movieCategoryCount: movieCategories.length,
+      forcedFullDumpReason,
     });
 
-    if (nativeAvailable && sqliteHandle?.enabled) {
+    if (nativeAvailable && sqliteHandle?.enabled && !forcedFullDumpReason) {
       const cachedCapability = await readVodCategoryFilterCapability(providerId);
-      const providerCategoryIds = movieCategories
-        .map((category) => category.id)
-        .filter((id) => id && id !== 'all' && !String(id).startsWith('section:') && !String(id).startsWith('smart:'));
-      // Probe spread-out categories (not only the first two) so last-write-wins victims are included.
-      const probeCategoryIds =
-        providerCategoryIds.length >= 2
-          ? [
-              providerCategoryIds[Math.floor(providerCategoryIds.length * 0.2)]!,
-              providerCategoryIds[Math.floor(providerCategoryIds.length * 0.8)]!,
-            ]
-          : providerCategoryIds.slice(0, 2);
+      const providerCategoryIds = movieCategories.map((category) => category.id);
+      const probeCategoryIds = selectVodCategoryProbeIds(providerCategoryIds, {
+        countHints: setup.movieHintCounts,
+        limit: 6,
+      });
 
-      if (cachedCapability && Date.now() - cachedCapability.probedAt < 7 * 24 * 60 * 60 * 1000) {
-        filteringReliable = cachedCapability.filteringReliable;
+      if (
+        cachedCapability &&
+        cachedCapability.status === 'reliable' &&
+        Date.now() - cachedCapability.probedAt < 7 * 24 * 60 * 60 * 1000
+      ) {
+        filteringReliable = true;
+        filterStatus = 'reliable';
+        filterReason = cachedCapability.reason;
         logSync(providerId, 'movie-filter-capability-cache-hit', {
           filteringReliable,
-          reason: cachedCapability.reason,
+          status: filterStatus,
+          reason: filterReason,
         });
-      } else if (probeCategoryIds.length >= 2) {
+      } else if (probeCategoryIds.length >= 1) {
         const probes: VodCategoryProbeSample[] = [];
         for (const categoryId of probeCategoryIds) {
           if (isCancelled()) {
             return;
+          }
+          // Stop early only after reliability is strongly proven.
+          if (probes.filter((probe) => probe.returnedCount >= 50).length >= 2) {
+            const early = evaluateVodCategoryFilterCapability({
+              providerId,
+              probes,
+              metadataCategoryCount: providerCategoryIds.length,
+            });
+            if (early.status === 'reliable' || early.status === 'unreliable') {
+              filterStatus = early.status;
+              filteringReliable = early.filteringReliable;
+              filterReason = early.reason;
+              await writeVodCategoryFilterCapability(early);
+              break;
+            }
           }
           const probeUrl = movies.getCatalogListRequestUrl?.(categoryId) ?? null;
           if (!probeUrl) {
@@ -1363,7 +1392,7 @@ export async function runMovieCatalogSync(
             firstContentIds: accumulator.sample.firstContentIds,
           });
         }
-        if (probes.length >= 1) {
+        if (probes.length >= 1 && filterStatus === 'inconclusive') {
           const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie').catch(() => 0);
           const previousTotal =
             readableGeneration > 0
@@ -1376,10 +1405,13 @@ export async function runMovieCatalogSync(
               previousTotal,
               ...probes.map((probe) => probe.returnedCount),
             ),
+            metadataCategoryCount: providerCategoryIds.length,
           });
           await writeVodCategoryFilterCapability(capability);
           filteringReliable = capability.filteringReliable;
-        } else {
+          filterStatus = capability.status;
+          filterReason = capability.reason;
+        } else if (probes.length < 1) {
           logSync(providerId, 'movie-filter-capability-probe-failed', {
             reason: 'no-probe-samples',
             probeCategoryIds,
@@ -1391,9 +1423,19 @@ export async function runMovieCatalogSync(
           probeCategoryIds,
         });
       }
+    } else if (forcedFullDumpReason) {
+      filteringReliable = false;
+      filterStatus = 'unreliable';
+      filterReason = forcedFullDumpReason;
     }
 
-    if (!filteringReliable && nativeAvailable && sqliteHandle?.enabled) {
+    // Inconclusive and unreliable both use the safer full-dump strategy.
+    const useFullDump =
+      Boolean(forcedFullDumpReason) ||
+      !filteringReliable ||
+      filterStatus !== 'reliable';
+
+    if (useFullDump && nativeAvailable && sqliteHandle?.enabled) {
       movieSyncStrategy = 'full-dump-stream-category';
       const fullDumpUrl = movies.getCatalogListRequestUrl?.('all') ?? null;
       if (!fullDumpUrl) {
@@ -1517,8 +1559,10 @@ export async function runMovieCatalogSync(
             distinctStreamCategoryIds: distinctStreamCategoryIds.size,
             missingCategoryIdCount,
             filteringReliable: false,
+            filterStatus,
+            filterReason,
             strategy: movieSyncStrategy,
-            marker: 'stage3c2-vod-full-dump-sync-v1',
+            marker: 'stage4d-vod-ingestion-repair-v1',
           }),
       );
       console.info(
@@ -1526,7 +1570,7 @@ export async function runMovieCatalogSync(
           JSON.stringify({
             generation: sqliteHandle.generation,
             samples: assignmentSamples,
-            marker: 'stage3c2-vod-full-dump-sync-v1',
+            marker: 'stage4d-vod-ingestion-repair-v1',
           }),
       );
 
@@ -1537,7 +1581,7 @@ export async function runMovieCatalogSync(
         movieCategories.length,
         setup.resumeSeriesIndex,
       );
-    } else {
+    } else if (nativeAvailable && sqliteHandle?.enabled) {
       movieSyncStrategy = 'filtered-per-category';
       console.info(
         '[NovaCast Movies Full Dump Sync] ' +
@@ -1550,11 +1594,20 @@ export async function runMovieCatalogSync(
             metadataCategoryCount: movieCategories.length,
             distinctStreamCategoryIds: 0,
             missingCategoryIdCount: 0,
-            filteringReliable: true,
+            filteringReliable,
+            filterStatus,
+            filterReason,
             strategy: movieSyncStrategy,
-            marker: 'stage3c2-vod-full-dump-sync-v1',
+            marker: 'stage4d-vod-ingestion-repair-v1',
           }),
       );
+
+      let categoriesAttempted = 0;
+      let categoriesReturningItems = 0;
+      let categoriesReturningZero = 0;
+      let decodedItemCount = 0;
+      const distinctItemCategoryIds = new Set<string>();
+      let abortedForSparse = false;
 
       for (
         let movieCategoryIndex = setup.resumeMovieIndex;
@@ -1576,6 +1629,7 @@ export async function runMovieCatalogSync(
         markCatalogAuditCategory('movie', 'fetch_start', { categoryId: category.id });
         beginVodCategoryPhaseProfile(category.id);
         let items: Awaited<ReturnType<NonNullable<MovieDataSource['listCategoryMovies']>>> | null = null;
+        let categoryMatched = 0;
 
         try {
           if (syncMovieItems) {
@@ -1604,6 +1658,9 @@ export async function runMovieCatalogSync(
                     matched += records.length;
                     if (sqliteHandle) {
                       recordCatalogSqliteDecoded(sqliteHandle, records.length);
+                    }
+                    for (const record of records) {
+                      distinctItemCategoryIds.add(normalizeStreamCategoryId(record.categoryId));
                     }
                     if (sqliteWriterOnly) {
                       if (sqliteHandle?.enabled && records.length) {
@@ -1656,6 +1713,7 @@ export async function runMovieCatalogSync(
                 return;
               }
               matched = decodeResult.matched;
+              categoryMatched = matched;
               setup.movieCountMap[category.id] = matched;
               markCatalogAuditItems(matched, 'processed');
               addVodCategoryPhaseMs('jsonParseMs', Number(decodeResult.stats.downloadParseMs ?? 0));
@@ -1671,6 +1729,7 @@ export async function runMovieCatalogSync(
             } else {
               const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
               items = loaded.items;
+              categoryMatched = items.length;
               if (sqliteHandle) {
                 recordCatalogSqliteDecoded(sqliteHandle, items.length);
               }
@@ -1705,6 +1764,7 @@ export async function runMovieCatalogSync(
             }
           } else if (movies.getCategoryCount) {
             setup.movieCountMap[category.id] = await movies.getCategoryCount(category.id);
+            categoryMatched = setup.movieCountMap[category.id] ?? 0;
           }
 
           const durationMs = Date.now() - categoryStarted;
@@ -1723,6 +1783,260 @@ export async function runMovieCatalogSync(
             count: setup.movieCountMap[category.id] ?? 0,
             durationMs,
             mode: categoryMode,
+          });
+        } catch (error) {
+          finishVodCategoryPhaseProfile({
+            failed: true,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        } finally {
+          releaseBatch(`movie-category:${category.id}`, items);
+        }
+
+        if (syncMovieItems && category.id !== 'all' && !String(category.id).startsWith('section:') && !String(category.id).startsWith('smart:')) {
+          categoriesAttempted += 1;
+          decodedItemCount += categoryMatched;
+          if (categoryMatched > 0) {
+            categoriesReturningItems += 1;
+          } else {
+            categoriesReturningZero += 1;
+          }
+
+          const sparse = evaluateSparsePerCategoryCoverage({
+            categoriesAttempted,
+            categoriesReturningItems,
+            categoriesReturningZero,
+            metadataCategoryCount: movieCategories.length,
+            distinctItemCategoryIds: distinctItemCategoryIds.size,
+            decodedItemCount,
+          });
+          if (sparse.suspicious && !strategyFallbackUsed) {
+            abortedForSparse = true;
+            strategyFallbackUsed = true;
+            logSync(providerId, 'movie-sparse-per-category-abort', {
+              reason: sparse.reason,
+              categoriesAttempted,
+              categoriesReturningItems,
+              categoriesReturningZero,
+              decodedItemCount,
+              distinctItemCategoryIds: distinctItemCategoryIds.size,
+              metadataCategoryCount: movieCategories.length,
+            });
+            await writeVodCategoryFilterCapability({
+              providerId,
+              status: 'unreliable',
+              filteringReliable: false,
+              testedCategoryIds: [],
+              overlapRatio: 0,
+              returnedCategoryIdCounts: [],
+              reason: sparse.reason ?? 'sparse-per-category-coverage',
+              probedAt: Date.now(),
+              storageVersion: 4,
+            });
+            await finishCatalogSqliteMediaSync({
+              handle: sqliteHandle,
+              ok: false,
+              errorCode: 'sparse_per_category_ingestion',
+              nativeDone: false,
+            });
+            // One automatic strategy fallback: new generation + full dump.
+            sqliteHandle = await startCatalogSqliteMediaSync({
+              providerId,
+              mediaType: 'movie',
+              providerType: input.providerType ?? 'unknown',
+              displayName: input.displayName ?? null,
+            });
+            if (sqliteHandle.enabled) {
+              await writeCategoriesFromSourceBudgeted(
+                sqliteHandle,
+                movieCategories,
+                (category, index) => ({
+                  providerId,
+                  mediaType: 'movie' as const,
+                  categoryId: category.id,
+                  categoryName: category.name,
+                  sortOrder: index,
+                  syncGeneration: sqliteHandle!.generation,
+                }),
+                { isCancelled },
+              );
+            }
+            movieSyncStrategy = 'full-dump-stream-category';
+            filteringReliable = false;
+            filterStatus = 'unreliable';
+            filterReason = sparse.reason ?? 'sparse-per-category-coverage';
+            break;
+          }
+        }
+
+        await writeCatalogSyncCheckpointSafe(setup, runToken, 'movies', movieCategoryIndex + 1, setup.resumeSeriesIndex);
+        if (movieCategoryIndex === setup.resumeMovieIndex || (movieCategoryIndex + 1) % 5 === 0) {
+          publishCatalogProgress(setup);
+        }
+        await waitForCatalogSyncIdleSlot();
+      }
+
+      if (abortedForSparse && sqliteHandle?.enabled && movieSyncStrategy === 'full-dump-stream-category') {
+        // Fall through by re-entering full-dump via a nested path: schedule force and rethrow
+        // so the outer sync can restart cleanly is fragile — run full dump inline instead.
+        forceMoviesFullDumpByProvider.set(providerId, filterReason);
+        const fullDumpUrl = movies.getCatalogListRequestUrl?.('all') ?? null;
+        if (!fullDumpUrl) {
+          throw new Error('movie_full_dump_url_unavailable');
+        }
+        let rawStreamCount = 0;
+        let decodedStreamCount = 0;
+        let missingCategoryIdCount = 0;
+        const distinctStreamCategoryIds = new Set<string>();
+        const distinctContentIds = new Set<string>();
+        const fullDumpResult = await streamXtreamCategoryDecode({
+          requestUrl: fullDumpUrl,
+          mediaType: 'movie',
+          filterCategoryId: 'all',
+          providerId,
+          isCancelled,
+          onBatch: async (records) => {
+            rawStreamCount += records.length;
+            if (sqliteHandle) {
+              recordCatalogSqliteDecoded(sqliteHandle, records.length);
+            }
+            for (const record of records) {
+              const source =
+                record.categoryId != null && String(record.categoryId).trim() !== ''
+                  ? String(record.categoryId)
+                  : null;
+              if (!source) {
+                missingCategoryIdCount += 1;
+              }
+              distinctStreamCategoryIds.add(normalizeStreamCategoryId(record.categoryId));
+              if (record.contentId) {
+                distinctContentIds.add(record.contentId);
+              }
+            }
+            decodedStreamCount += records.length;
+            if (writerOnly) {
+              await writeCatalogItemsFromSourceBudgeted(
+                sqliteHandle!,
+                records,
+                (record) =>
+                  mapNativeRecordToCatalogItem(
+                    record,
+                    providerId,
+                    'movie',
+                    'all',
+                    sqliteHandle!.generation,
+                    { allowCategoryFallback: false },
+                  ),
+                { isCancelled, mapKind: 'movieMapping' },
+              );
+              return;
+            }
+            const mapped = records.map((record) => {
+              const categoryId = normalizeStreamCategoryId(record.categoryId);
+              return nativeRecordToMovieSummary({ ...record, categoryId }, categoryId) as MovieSummary;
+            });
+            if (movieIndex && mapped.length) {
+              await processTimeBudgeted(
+                mapped,
+                (movie) => {
+                  movieIndex.ingest([movie]);
+                },
+                { isCancelled },
+              );
+            }
+            if (sqliteHandle?.enabled && mapped.length) {
+              await writeCatalogItemsFromSourceBudgeted(
+                sqliteHandle,
+                mapped,
+                (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
+                { isCancelled, mapKind: 'movieMapping' },
+              );
+            }
+          },
+        });
+        if (fullDumpResult.cancelled || isCancelled()) {
+          return;
+        }
+        markCatalogAuditItems(decodedStreamCount, 'processed');
+        console.info(
+          '[NovaCast Movies Full Dump Sync] ' +
+            JSON.stringify({
+              providerId,
+              generation: sqliteHandle.generation,
+              rawStreamCount: fullDumpResult.stats.rawSeen ?? rawStreamCount,
+              decodedStreamCount,
+              distinctContentIds: distinctContentIds.size,
+              metadataCategoryCount: movieCategories.length,
+              distinctStreamCategoryIds: distinctStreamCategoryIds.size,
+              missingCategoryIdCount,
+              filteringReliable: false,
+              filterStatus,
+              filterReason,
+              strategy: 'full-dump-stream-category',
+              fallbackFrom: 'sparse_per_category_ingestion',
+              marker: 'stage4d-vod-ingestion-repair-v1',
+            }),
+        );
+        forceMoviesFullDumpByProvider.delete(providerId);
+      }
+    } else {
+      // Non-native / non-SQLite path: legacy per-category ingest (no capability gate).
+      movieSyncStrategy = 'filtered-per-category';
+      for (
+        let movieCategoryIndex = setup.resumeMovieIndex;
+        movieCategoryIndex < movieCategories.length;
+        movieCategoryIndex += 1
+      ) {
+        const category = movieCategories[movieCategoryIndex];
+        if (!(await yieldForPlaybackIfNeeded(providerId, `movie-category:${category.id}`, 'movies', runToken))) {
+          publishCatalogProgress(setup);
+          setup.progressThrottle.flush();
+          schedulePendingHeavySync(providerId, input);
+          return;
+        }
+        if (isCancelled()) {
+          return;
+        }
+
+        const categoryStarted = Date.now();
+        markCatalogAuditCategory('movie', 'fetch_start', { categoryId: category.id });
+        beginVodCategoryPhaseProfile(category.id);
+        let items: Awaited<ReturnType<NonNullable<MovieDataSource['listCategoryMovies']>>> | null = null;
+
+        try {
+          if (syncMovieItems) {
+            const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
+            items = loaded.items;
+            if (loaded.truncated && movieIndex) {
+              movieIndex.markCategoryLoadTruncated();
+            }
+            if (items.length && movieIndex) {
+              const ingestStarted = Date.now();
+              await processTimeBudgeted(
+                items,
+                (movie) => {
+                  movieIndex.ingest([movie]);
+                },
+                { isCancelled },
+              );
+              addVodCategoryPhaseMs('ingestMs', Date.now() - ingestStarted);
+            }
+            setup.movieCountMap[category.id] = items.length;
+            markCatalogAuditItems(items.length, 'processed');
+          } else if (movies.getCategoryCount) {
+            setup.movieCountMap[category.id] = await movies.getCategoryCount(category.id);
+          }
+
+          const durationMs = Date.now() - categoryStarted;
+          finishVodCategoryPhaseProfile({
+            mode: syncMovieItems ? 'full' : 'count-only',
+            durationMs,
+          });
+          markCatalogAuditCategory('movie', 'fetch_done', {
+            categoryId: category.id,
+            count: setup.movieCountMap[category.id] ?? 0,
+            durationMs,
           });
         } catch (error) {
           finishVodCategoryPhaseProfile({
@@ -2231,6 +2545,47 @@ export function scheduleProviderCatalogSync(input: ProviderCatalogSyncInput) {
   return startProviderCatalogSync(input, runToken);
 }
 
+/** Stage 4.2D: force the next Movies sync onto full-dump-stream-category. */
+export function forceMoviesFullDumpForProvider(providerId: string, reason: string) {
+  forceMoviesFullDumpByProvider.set(providerId, reason);
+}
+
+/** Invalidate the completed checkpoint so sparse catalogs cannot skip repair. */
+export async function invalidateMoviesCatalogSyncCheckpoint(providerId: string): Promise<void> {
+  if (typeof AsyncStorage.removeItem !== 'function') {
+    return;
+  }
+  await AsyncStorage.removeItem(catalogSyncCheckpointKey(providerId)).catch(() => undefined);
+}
+
+/**
+ * Movies-only sparse repair: force full dump, invalidate checkpoint, reschedule sync.
+ * Does not clear credentials, activation, Live TV, or Series data.
+ */
+export function scheduleMoviesCatalogRepair(input: {
+  providerId: string;
+  forceFullDump: boolean;
+  reason: string;
+  movies: MovieDataSource;
+  series: ProviderSeriesRepository;
+  live: ProviderLiveRepository;
+  providerType?: string;
+  displayName?: string;
+}) {
+  if (input.forceFullDump) {
+    forceMoviesFullDumpForProvider(input.providerId, input.reason);
+  }
+  void invalidateMoviesCatalogSyncCheckpoint(input.providerId);
+  return scheduleProviderCatalogSync({
+    providerId: input.providerId,
+    providerType: input.providerType,
+    displayName: input.displayName,
+    movies: input.movies,
+    series: input.series,
+    live: input.live,
+  });
+}
+
 export function cancelProviderCatalogSync(providerId?: string) {
   syncGeneration += 1;
   if (providerId) {
@@ -2275,6 +2630,7 @@ export function clearProviderCatalogSyncForTests() {
   syncListeners.clear();
   catalogSyncSetupCache.clear();
   mediaJobCompletion.clear();
+  forceMoviesFullDumpByProvider.clear();
   checkpointWriteChain = Promise.resolve();
   syncGeneration = 0;
   lastReleasedBatchLabel = null;
@@ -2282,6 +2638,10 @@ export function clearProviderCatalogSyncForTests() {
   seriesCatalogScheduleDelayMs = 0;
   lastCheckpointWriteAt = 0;
   clearCatalogSyncCoordinatorForTests();
+}
+
+export function getForceMoviesFullDumpReasonForTests(providerId: string) {
+  return forceMoviesFullDumpByProvider.get(providerId) ?? null;
 }
 
 export function setCatalogSyncShellDelaysForTests(delays: {

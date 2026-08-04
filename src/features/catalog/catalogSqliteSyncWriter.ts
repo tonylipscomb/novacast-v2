@@ -15,6 +15,7 @@ import {
   getCatalogGenerationItemStats,
   getCatalogGenerationLargestCategory,
   getCatalogGenerationPhysicalStats,
+  resolveReadableCatalogGeneration,
   upsertCatalogProvider,
   writeCatalogCategoriesBatch,
   writeCatalogItemsBatch,
@@ -610,7 +611,7 @@ export async function finishCatalogSqliteMediaSync(input: {
           return false;
         }
 
-        // Stage 3C.2: reject collapsed category distributions before activation.
+        // Stage 3C.2 / 4.2D: reject collapsed/sparse category distributions before activation.
         const physical = await getCatalogGenerationPhysicalStats(
           handle.providerId,
           handle.mediaType,
@@ -621,6 +622,28 @@ export async function finishCatalogSqliteMediaSync(input: {
           handle.mediaType,
           handle.generation,
         );
+        const previousReadable = await resolveReadableCatalogGeneration(
+          handle.providerId,
+          handle.mediaType,
+        ).catch(() => 0);
+        let previousTotalItems: number | null = null;
+        let previousNonzeroCategoryCount: number | null = null;
+        if (previousReadable > 0 && previousReadable !== handle.generation) {
+          const [prevPhysical, prevLargest] = await Promise.all([
+            getCatalogGenerationPhysicalStats(
+              handle.providerId,
+              handle.mediaType,
+              previousReadable,
+            ),
+            getCatalogGenerationLargestCategory(
+              handle.providerId,
+              handle.mediaType,
+              previousReadable,
+            ),
+          ]);
+          previousTotalItems = prevPhysical.itemRows;
+          previousNonzeroCategoryCount = prevLargest.nonzeroCategoryCount;
+        }
         const metadataCategoryCount =
           handle.pendingCategories?.length || physical.categoryRows;
         const distribution = validateMoviesCategoryDistribution({
@@ -631,6 +654,9 @@ export async function finishCatalogSqliteMediaSync(input: {
           nonzeroCategoryCount: largest.nonzeroCategoryCount,
           largestCategoryId: largest.categoryId,
           largestCategoryCount: largest.itemCount,
+          previousGeneration: previousReadable > 0 ? previousReadable : null,
+          previousTotalItems,
+          previousNonzeroCategoryCount,
         });
         if (!distribution.validationPassed) {
           await failCatalogSync(

@@ -22,6 +22,7 @@ const sync = read('src/features/providers/providerCatalogSync.ts');
 const loader = read('src/features/movies/moviesLoaderState.ts');
 const readiness = read('src/features/movies/moviesCatalogReadiness.ts');
 const searchDs = read('src/features/search/moviesSearchDatasource.ts');
+const moviesScreen = read('src/features/movies/MoviesScreen.tsx');
 
 test('1) categoriesGeneration=1 and readableItemGeneration=0 → waiting-fresh-sync', () => {
   assert.equal(
@@ -231,4 +232,13 @@ test('catalog-not-ready pending is distinct from completed-empty loadStatus', ()
   assert.match(model, /waiting-fresh-sync/);
   assert.match(model, /setLoadStatus\('empty'\)/);
   assert.match(model, /resolveMoviesCatalogReadiness\(activeProviderId\)/);
+});
+
+test('Stage 4.2D sparse active generation shows repairing, not empty rail', () => {
+  assert.match(sqlite, /repairing-sparse-generation/);
+  assert.match(sqlite, /repairDegradedMoviesCatalogIfNeeded/);
+  assert.match(model, /isMoviesCatalogRepairing/);
+  assert.match(model, /repairing-sparse-generation/);
+  assert.match(loader, /Repairing movie library…/);
+  assert.match(moviesScreen, /catalogRepairing/);
 });

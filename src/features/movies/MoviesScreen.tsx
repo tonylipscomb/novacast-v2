@@ -267,6 +267,7 @@ export function MoviesScreen() {
     loading,
     categoryLoading,
     loadStatus,
+    catalogRepairing,
     loadErrorMessage,
     hasMore,
     selectCategory,
@@ -2538,6 +2539,7 @@ useEffect(() => {
     primaryMode: primaryLoaderMode === 'hidden' && primaryLoaderVisible ? 'initial' : primaryLoaderMode,
     categoryDisplayName: categories.length > 0 ? selectedCategoryLabel : null,
     hasCategories: categories.length > 0,
+    catalogRepairing,
   });
   const firstPageReady =
     firstPageLoadGate.loadingCategoryId != null &&

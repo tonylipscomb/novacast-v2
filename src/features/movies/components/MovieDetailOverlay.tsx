@@ -2,10 +2,10 @@ import type { ComponentProps, ComponentType, ElementRef, ReactNode, RefObject } 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
 import {
+  AccessibilityInfo,
   findNodeHandle,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   useWindowDimensions,
@@ -26,23 +26,36 @@ import Animated, {
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
 import { createNovaTvFocusTextStyles, novaTvFocus } from '@/components/nova/novaTvFocus';
 import { MediaArtworkFallback } from '@/features/media-browser/MediaArtworkFallback';
-import type { MediaCastMember, MediaDetail } from '@/features/media-browser/mediaTypes';
+import type { MediaDetail } from '@/features/media-browser/mediaTypes';
 import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { novaTheme } from '@/theme';
 
 import {
+  buildMovieDetailMetaChips,
   deriveStreamQualityBadges,
+  formatCastLine,
   formatMovieRating,
-  heroBackdropUri,
+  joinMetaChips,
+  MOVIE_DETAIL_BLUR_MS,
+  MOVIE_DETAIL_CAST_LIMIT,
+  MOVIE_DETAIL_CLOSE_MS,
+  MOVIE_DETAIL_FOCUS_MS,
+  MOVIE_DETAIL_GENRE_LIMIT,
+  MOVIE_DETAIL_OPEN_MS,
+  MOVIE_DETAIL_RELATED_LIMIT,
+  MOVIE_DETAIL_SYNOPSIS_MAX_LINES,
+  MOVIE_DETAIL_TITLE_MAX_LINES,
+  resolveCompactDetailCardSize,
+  resolveContinueWatchingLabel,
   resolveContinueWatchingProgress,
+  resolveTitleFontSize,
+  shouldShowCompactRelatedRow,
   type RelatedMovieCandidate,
   type StreamQualityBadge,
 } from '../movieDetailOverlayModel';
 
 const focusText = createNovaTvFocusTextStyles(novaTheme);
-
-const OPEN_MS = 180;
 const OPEN_EASING = Easing.out(Easing.cubic);
 
 type ActionId = 'play' | 'watchlist' | 'trailer' | 'favorite' | 'retry';
@@ -77,15 +90,6 @@ export type MovieDetailOverlayProps = {
 
 function noopUseTVEventHandler(_handler: (event: TvEventPayload) => void) {}
 
-function initials(value: string) {
-  return value
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? '')
-    .join('');
-}
-
 function handleFor(ref: { current: ElementRef<typeof Pressable> | null } | undefined) {
   return ref?.current ? findNodeHandle(ref.current) ?? undefined : undefined;
 }
@@ -104,7 +108,9 @@ function OverlayAction({
   icon,
   onPress,
   primary = false,
+  compact = false,
   selected = false,
+  focused = false,
   disabled = false,
   preferred = false,
   buttonRef,
@@ -120,7 +126,9 @@ function OverlayAction({
   icon: ComponentProps<typeof MaterialCommunityIcons>['name'];
   onPress?: () => void;
   primary?: boolean;
+  compact?: boolean;
   selected?: boolean;
+  focused?: boolean;
   disabled?: boolean;
   preferred?: boolean;
   buttonRef?: (instance: ElementRef<typeof Pressable> | null) => void;
@@ -160,48 +168,58 @@ function OverlayAction({
       {...(Platform.isTV ? { onClick: activate } : {})}
       style={[
         styles.action,
-        primary ? styles.actionPrimary : styles.actionSecondary,
+        styles.actionFocusTransition,
+        primary ? styles.actionPrimary : compact ? styles.actionCompact : styles.actionSecondary,
         disabled && styles.actionDisabled,
+        selected && !primary && styles.actionSelected,
+        selected && primary && styles.actionPrimarySelected,
         novaTvFocus.base,
-        selected && styles.actionFocused,
-        selected && novaTvFocus.active,
+        focused && novaTvFocus.active,
       ]}>
       <MaterialCommunityIcons
         name={icon}
-        size={primary ? 22 : 18}
+        size={primary ? 22 : 20}
         color={primary ? '#FFFFFF' : novaTheme.colors.textPrimary}
       />
-      <Text style={[styles.actionLabel, primary && styles.actionLabelPrimary, disabled && styles.actionLabelDisabled]}>
-        {label}
-      </Text>
+      {primary || !compact ? (
+        <Text
+          style={[
+            styles.actionLabel,
+            primary && styles.actionLabelPrimary,
+            disabled && styles.actionLabelDisabled,
+          ]}>
+          {label}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }
 
-function RelatedCarousel({
+function RelatedCompactRow({
   movies,
   focusedId,
   onFocus,
   onSelect,
   firstRef,
+  cardWidth,
 }: {
   movies: RelatedMovieCandidate[];
   focusedId: string | null;
   onFocus: (id: string) => void;
   onSelect?: (movie: RelatedMovieCandidate) => void;
   firstRef?: (instance: ElementRef<typeof Pressable> | null) => void;
+  cardWidth: number;
 }) {
-  if (!movies.length) return null;
+  const limited = movies.slice(0, MOVIE_DETAIL_RELATED_LIMIT);
+  if (!limited.length) return null;
+
+  const posterWidth = Math.min(88, Math.max(64, Math.round((cardWidth - 48) / 6.2)));
 
   return (
-    <View style={styles.relatedSection}>
-      <Text style={styles.sectionLabel}>Related Titles</Text>
-      <ScrollView
-        focusable={false}
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.relatedRow}>
-        {movies.map((movie, index) => {
+    <View style={styles.relatedSection} focusable={false}>
+      <Text style={styles.sectionLabel}>More Like This</Text>
+      <View style={styles.relatedRow} focusable={false}>
+        {limited.map((movie, index) => {
           const focused = focusedId === `related:${movie.id}`;
           return (
             <Pressable
@@ -211,68 +229,31 @@ function RelatedCarousel({
               accessibilityLabel={movie.title}
               onFocus={() => onFocus(`related:${movie.id}`)}
               onPress={() => onSelect?.(movie)}
-              style={[styles.relatedCard, novaTvFocus.base, focused && styles.relatedCardFocused, focused && novaTvFocus.active]}>
+              style={[
+                styles.relatedCard,
+                { width: posterWidth },
+                novaTvFocus.base,
+                focused && styles.relatedCardFocused,
+                focused && novaTvFocus.active,
+              ]}>
               <View style={styles.relatedPoster}>
                 {movie.posterUrl ? (
-                  <TvRemoteImage uri={movie.posterUrl} style={styles.relatedPosterImage} />
+                  <TvRemoteImage uri={movie.posterUrl} style={styles.relatedPosterImage} resizeMode="cover" />
                 ) : (
-                  <MediaArtworkFallback title={movie.title} kind="movie" subtitle={movie.year ? String(movie.year) : undefined} />
+                  <MediaArtworkFallback
+                    title={movie.title}
+                    kind="movie"
+                    subtitle={movie.year ? String(movie.year) : undefined}
+                  />
                 )}
               </View>
-              <Text numberOfLines={2} style={[styles.relatedTitle, focused && focusText.title]}>
+              <Text numberOfLines={1} style={[styles.relatedTitle, focused && focusText.title]}>
                 {displayStreamTitle(movie.title) || movie.title}
               </Text>
             </Pressable>
           );
         })}
-      </ScrollView>
-    </View>
-  );
-}
-
-function CastCarousel({
-  cast,
-  focusedId,
-  onFocus,
-}: {
-  cast: MediaCastMember[];
-  focusedId: string | null;
-  onFocus: (id: string) => void;
-}) {
-  if (!cast.length) return null;
-
-  return (
-    <View style={styles.castSection}>
-      <Text style={styles.sectionLabel}>Cast</Text>
-      <ScrollView focusable={false} horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.castRow}>
-        {cast.slice(0, 10).map((member) => {
-          const focused = focusedId === `cast:${member.name}`;
-          return (
-            <Pressable
-              key={`${member.name}-${member.character ?? ''}`}
-              focusable
-              accessibilityLabel={member.name}
-              onFocus={() => onFocus(`cast:${member.name}`)}
-              style={[styles.castCard, novaTvFocus.base, focused && novaTvFocus.active]}>
-              <View style={styles.castAvatar}>
-                {member.imageUrl ? (
-                  <TvRemoteImage uri={member.imageUrl} style={styles.castImage} />
-                ) : (
-                  <Text style={styles.castInitials}>{initials(member.name)}</Text>
-                )}
-              </View>
-              <Text numberOfLines={1} style={[styles.castName, focused && focusText.title]}>
-                {member.name}
-              </Text>
-              {member.character ? (
-                <Text numberOfLines={1} style={styles.castCharacter}>
-                  {member.character}
-                </Text>
-              ) : null}
-            </Pressable>
-          );
-        })}
-      </ScrollView>
+      </View>
     </View>
   );
 }
@@ -302,21 +283,28 @@ function MovieDetailOverlayComponent({
   const { width, height } = useWindowDimensions();
   const [focusedTarget, setFocusedTarget] = useState<string | null>(null);
   const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
-  const [failedBackdropKey, setFailedBackdropKey] = useState<string | null>(null);
+  const [reducedMotion, setReducedMotion] = useState(false);
+
   const posterKey = detail ? `${detail.id}:${detail.posterUrl ?? ''}` : null;
-  const backdropKey = detail ? `${detail.id}:${detail.backdropUrl ?? detail.posterUrl ?? ''}` : null;
   const posterFailed = Boolean(posterKey) && failedPosterKey === posterKey;
-  const backdropFailed = Boolean(backdropKey) && failedBackdropKey === backdropKey;
 
   const progress = useSharedValue(0);
   const actionRefs = useRef(new Map<ActionId, ElementRef<typeof Pressable>>());
   const playRef = useRef<ElementRef<typeof Pressable> | null>(null);
+  const retryRef = useRef<ElementRef<typeof Pressable> | null>(null);
   const relatedFirstRef = useRef<ElementRef<typeof Pressable> | null>(null);
   const [actionHandles, setActionHandles] = useState<Record<string, number>>({});
   const [relatedHandle, setRelatedHandle] = useState<number | undefined>(undefined);
   const focusRetryCancelRef = useRef<(() => void) | null>(null);
   const wasVisibleRef = useRef(false);
   const lastPlayInvokeAtRef = useRef(0);
+
+  const cardSize = resolveCompactDetailCardSize(width, height);
+  const posterWidth = Math.round(cardSize.width * 0.27);
+  const titleFontSize = resolveTitleFontSize(width);
+  const showRelated = shouldShowCompactRelatedRow(height) && relatedMovies.length > 0;
+
+  const showRetry = Boolean(detailError && onRetry);
 
   const invokePlay = useCallback(() => {
     if (!onPlay) return;
@@ -338,16 +326,28 @@ function MovieDetailOverlayComponent({
     invokePlay();
   });
 
+  useEffect(() => {
+    let mounted = true;
+    void AccessibilityInfo.isReduceMotionEnabled()
+      .then((enabled) => {
+        if (mounted) setReducedMotion(enabled);
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const firstAction: ActionId | null = onPlay
     ? 'play'
-    : onWatchlistPress
-      ? 'watchlist'
-      : onTrailerPress
-        ? 'trailer'
-        : onFavoritePress
-          ? 'favorite'
-          : onRetry
-            ? 'retry'
+    : showRetry
+      ? 'retry'
+      : onWatchlistPress
+        ? 'watchlist'
+        : onTrailerPress
+          ? 'trailer'
+          : onFavoritePress
+            ? 'favorite'
             : null;
 
   const actionIds = [
@@ -355,6 +355,7 @@ function MovieDetailOverlayComponent({
     onWatchlistPress ? 'watchlist' : null,
     onTrailerPress ? 'trailer' : null,
     onFavoritePress ? 'favorite' : null,
+    showRetry ? 'retry' : null,
   ].filter((item): item is ActionId => Boolean(item));
   const actionGraphKey = actionIds.join('|');
 
@@ -370,7 +371,11 @@ function MovieDetailOverlayComponent({
 
     if (opening) {
       progress.value = 0;
-      progress.value = withTiming(1, { duration: OPEN_MS, easing: OPEN_EASING });
+      if (reducedMotion) {
+        progress.value = 1;
+      } else {
+        progress.value = withTiming(1, { duration: MOVIE_DETAIL_OPEN_MS, easing: OPEN_EASING });
+      }
     } else {
       progress.value = 1;
     }
@@ -418,7 +423,7 @@ function MovieDetailOverlayComponent({
       clearTimeout(focusTimer);
       stopFocusRetry();
     };
-  }, [actionGraphKey, detail?.id, firstAction, focusHandoffActive, progress, visible]);
+  }, [actionGraphKey, detail?.id, firstAction, focusHandoffActive, progress, reducedMotion, visible]);
 
   useEffect(() => {
     if (!visible) return;
@@ -430,24 +435,20 @@ function MovieDetailOverlayComponent({
         if (handle) nextHandles[id] = handle;
       });
       setActionHandles(nextHandles);
-      setRelatedHandle(handleFor(relatedFirstRef) ?? undefined);
+      setRelatedHandle(showRelated ? handleFor(relatedFirstRef) ?? undefined : undefined);
     });
     return () => cancelAnimationFrame(frame);
-  }, [actionGraphKey, detail?.id, relatedMovies.length, visible]);
+  }, [actionGraphKey, detail?.id, relatedMovies.length, showRelated, showRetry, visible]);
+
+  const blurStyle = useAnimatedStyle(() => ({
+    opacity: progress.value,
+  }));
 
   const shellStyle = useAnimatedStyle(() => ({
     opacity: progress.value,
     transform: [
-      { translateY: interpolate(progress.value, [0, 1], [28, 0]) },
-      { scale: interpolate(progress.value, [0, 1], [0.965, 1]) },
-    ],
-  }));
-
-  const posterStyle = useAnimatedStyle(() => ({
-    opacity: progress.value,
-    transform: [
-      { translateY: interpolate(progress.value, [0, 1], [36, 0]) },
-      { scale: interpolate(progress.value, [0, 1], [0.9, 1]) },
+      { translateY: interpolate(progress.value, [0, 1], [16, 0]) },
+      { scale: interpolate(progress.value, [0, 1], [0.97, 1]) },
     ],
   }));
 
@@ -464,11 +465,28 @@ function MovieDetailOverlayComponent({
     [detail],
   );
 
+  const metaChips = useMemo(
+    () =>
+      detail
+        ? buildMovieDetailMetaChips({
+            year: detail.year,
+            runtime: detail.runtime,
+            contentRating: detail.contentRating,
+            rating: detail.rating,
+            director: detail.director,
+            audio: detail.audio,
+          })
+        : [],
+    [detail],
+  );
+
   const resumeProgress = resolveContinueWatchingProgress(continueWatchingProgress);
   const rating = formatMovieRating(detail?.rating);
-  const backdropUri = heroBackdropUri(detail);
   const title = detail ? displayStreamTitle(detail.title) || detail.title : '';
-  const genres = detail?.genres.filter(Boolean).slice(0, 5) ?? [];
+  const genres = detail?.genres.filter(Boolean).slice(0, MOVIE_DETAIL_GENRE_LIMIT) ?? [];
+  const castLine = formatCastLine(detail?.cast, MOVIE_DETAIL_CAST_LIMIT);
+  const playLabel = continueWatchingLabel ?? resolveContinueWatchingLabel(continueWatchingProgress);
+  const metaLine = joinMetaChips(metaChips);
 
   const reactNative = ReactNative as typeof ReactNative & {
     TVFocusGuideView?: typeof View;
@@ -488,7 +506,6 @@ function MovieDetailOverlayComponent({
   if (!visible && !keepFocusTrap) return null;
 
   const panelVisible = visible;
-  const contentMaxWidth = Math.min(width - 64, 1280);
 
   const renderAction = (id: ActionId) => {
     const index = actionIds.indexOf(id);
@@ -506,7 +523,7 @@ function MovieDetailOverlayComponent({
               : onRetry;
     const label =
       id === 'play'
-        ? continueWatchingLabel ?? 'Play'
+        ? playLabel
         : id === 'watchlist'
           ? isWatchlisted
             ? 'In Watchlist'
@@ -533,6 +550,9 @@ function MovieDetailOverlayComponent({
                 : 'heart-outline'
               : 'refresh'
     ) as ComponentProps<typeof MaterialCommunityIcons>['name'];
+    const isSelected =
+      (id === 'favorite' && isFavorite) || (id === 'watchlist' && isWatchlisted);
+    const isFocused = focusedTarget === id;
 
     return (
       <OverlayAction
@@ -542,21 +562,25 @@ function MovieDetailOverlayComponent({
         icon={icon}
         onPress={focusHandoffActive ? undefined : onPress}
         primary={id === 'play'}
+        compact={id !== 'play'}
         preferred={!focusHandoffActive && id === firstAction}
-        selected={!focusHandoffActive && focusedTarget === id}
+        selected={isSelected}
+        focused={isFocused}
         disabled={focusHandoffActive || (id === 'trailer' && !onTrailerPress)}
         buttonRef={(instance) => {
           if (instance) {
             actionRefs.current.set(id, instance);
             if (id === 'play') playRef.current = instance;
+            if (id === 'retry') retryRef.current = instance;
           } else {
             actionRefs.current.delete(id);
+            if (id === 'retry') retryRef.current = null;
           }
         }}
         nextFocusLeft={actionHandles[left ?? id]}
         nextFocusRight={right ? actionHandles[right] : actionHandles[id]}
         nextFocusUp={actionHandles[id]}
-        nextFocusDown={relatedHandle ?? actionHandles[id]}
+        nextFocusDown={showRelated ? relatedHandle ?? actionHandles[id] : actionHandles[id]}
         onFocus={(actionId) => {
           focusRetryCancelRef.current?.();
           focusRetryCancelRef.current = null;
@@ -573,6 +597,7 @@ function MovieDetailOverlayComponent({
       pointerEvents={focusHandoffActive ? 'box-none' : panelVisible ? 'auto' : 'none'}
       accessibilityViewIsModal={panelVisible && !focusHandoffActive}
       importantForAccessibility={panelVisible && !focusHandoffActive ? 'yes' : 'no-hide-descendants'}>
+
       {focusHandoffActive ? (
         <Pressable
           ref={closeTargetRef}
@@ -584,35 +609,33 @@ function MovieDetailOverlayComponent({
         />
       ) : null}
 
+      {/* Full-screen blur of the mounted Movies grid — never focusable. */}
       <Animated.View
-        entering={FadeIn.duration(OPEN_MS)}
-        exiting={FadeOut.duration(120)}
-        style={StyleSheet.absoluteFill}
-        pointerEvents="none">
-        {backdropUri && !backdropFailed ? (
-          <TvRemoteImage
-            uri={backdropUri}
-            style={styles.heroImage}
-            onError={() => {
-              if (backdropKey) setFailedBackdropKey(backdropKey);
-            }}
-          />
-        ) : (
-          <View style={styles.heroFallback} />
-        )}
+        entering={FadeIn.duration(MOVIE_DETAIL_BLUR_MS)}
+        exiting={FadeOut.duration(MOVIE_DETAIL_CLOSE_MS)}
+        style={[StyleSheet.absoluteFill, blurStyle]}
+        pointerEvents={panelVisible && !focusHandoffActive ? 'auto' : 'none'}
+        focusable={false}
+        accessible={false}
+        importantForAccessibility="no-hide-descendants">
         {blurTarget ? (
           <BlurView
             blurTarget={blurTarget}
             blurMethod="dimezisBlurViewSdk31Plus"
-            intensity={64}
+            intensity={28}
             tint="dark"
-            style={styles.heroBlur}
+            style={styles.backgroundBlur}
+            pointerEvents="none"
           />
         ) : (
-          <BlurView intensity={70} tint="dark" style={styles.heroBlur} />
+          <BlurView
+            intensity={28}
+            tint="dark"
+            style={styles.backgroundBlur}
+            pointerEvents="none"
+          />
         )}
-        <View style={styles.heroScrim} />
-        <View style={styles.heroAccentGlow} />
+        <View style={styles.backgroundScrim} pointerEvents="none" focusable={false} />
       </Animated.View>
 
       <FocusBoundaryView
@@ -621,128 +644,132 @@ function MovieDetailOverlayComponent({
           ? { autoFocus: true, trapFocusLeft: true, trapFocusRight: true, trapFocusUp: true, trapFocusDown: true }
           : {})}
         pointerEvents={focusHandoffActive ? 'none' : 'auto'}>
-        <Animated.View style={[styles.shell, { maxWidth: contentMaxWidth, minHeight: Math.min(height * 0.78, 720) }, shellStyle]}>
+        <Animated.View
+          style={[
+            styles.compactCard,
+            {
+              width: cardSize.width,
+              maxWidth: cardSize.width,
+              height: cardSize.height,
+              maxHeight: cardSize.height,
+            },
+            shellStyle,
+          ]}>
+          <View style={styles.cardGlassFill} pointerEvents="none" />
+
           <Pressable
             focusable={false}
             onPress={onClose}
             style={styles.closeHint}
             accessibilityLabel="Close details">
-            <MaterialCommunityIcons name="close" size={22} color="rgba(255,255,255,0.72)" />
+            <MaterialCommunityIcons name="close" size={20} color="rgba(255,255,255,0.72)" />
           </Pressable>
 
-          <View style={styles.heroRow}>
-            <Animated.View style={[styles.posterFrame, posterStyle]}>
-              {detail.posterUrl && !posterFailed ? (
-                <TvRemoteImage
-                  uri={detail.posterUrl}
-                  style={styles.posterImage}
-                  onError={() => {
-                    if (posterKey) setFailedPosterKey(posterKey);
-                  }}
-                />
-              ) : (
-                <MediaArtworkFallback title={title} kind="movie" subtitle={detail.year} />
-              )}
-              {rating ? (
-                <View style={styles.posterRating}>
-                  <MaterialCommunityIcons name="star" size={14} color="#F6C85F" />
-                  <Text style={styles.posterRatingText}>{rating}</Text>
-                </View>
-              ) : null}
-            </Animated.View>
+          <View style={styles.cardBody}>
+            <View style={[styles.posterColumn, { width: posterWidth }]}>
+              <View style={styles.posterFrame}>
+                {detail.posterUrl && !posterFailed ? (
+                  <TvRemoteImage
+                    uri={detail.posterUrl}
+                    style={styles.posterImage}
+                    resizeMode="cover"
+                    onError={() => {
+                      if (posterKey) setFailedPosterKey(posterKey);
+                    }}
+                  />
+                ) : (
+                  <MediaArtworkFallback title={title} kind="movie" subtitle={detail.year} />
+                )}
+                {rating ? (
+                  <View style={styles.posterRating} pointerEvents="none">
+                    <MaterialCommunityIcons name="star" size={13} color="#F6C85F" />
+                    <Text style={styles.posterRatingText}>{rating}</Text>
+                  </View>
+                ) : null}
+              </View>
+            </View>
 
-            <View style={styles.glassCard}>
-              <View style={styles.glassFill} />
-              <ScrollView
-                focusable={false}
-                style={styles.infoScroll}
-                contentContainerStyle={styles.infoContent}
-                showsVerticalScrollIndicator={false}>
-                <Text numberOfLines={2} style={styles.title}>
-                  {title}
+            <View style={styles.infoColumn}>
+              <Text style={styles.eyebrow}>MOVIE</Text>
+
+              <Text
+                numberOfLines={MOVIE_DETAIL_TITLE_MAX_LINES}
+                style={[styles.title, { fontSize: titleFontSize, lineHeight: titleFontSize + 4 }]}>
+                {title}
+              </Text>
+
+              {metaLine ? (
+                <Text numberOfLines={1} style={styles.metaLine} accessibilityLabel={metaLine}>
+                  {metaLine}
                 </Text>
+              ) : null}
 
-                <View style={styles.metaRow}>
-                  {rating ? (
-                    <View style={styles.ratingChip}>
-                      <MaterialCommunityIcons name="star" size={14} color="#F6C85F" />
-                      <Text style={styles.ratingChipText}>{rating}</Text>
-                    </View>
-                  ) : null}
-                  {detail.year ? <Text style={styles.metaChip}>{detail.year}</Text> : null}
-                  {detail.runtime ? <Text style={styles.metaChip}>{detail.runtime}</Text> : null}
-                  {detail.contentRating ? <Text style={styles.metaChip}>{detail.contentRating}</Text> : null}
+              {(qualityBadges.length > 0 || genres.length > 0) ? (
+                <View style={styles.badgeGenreRow} focusable={false}>
                   {qualityBadges.map((badge) => (
                     <QualityBadge key={badge.id} badge={badge} />
                   ))}
-                </View>
-
-                {genres.length ? (
-                  <View style={styles.genreRow}>
-                    {genres.map((genre) => (
-                      <View key={genre} style={styles.genreChip}>
-                        <Text style={styles.genreChipText}>{genre}</Text>
-                      </View>
-                    ))}
-                  </View>
-                ) : null}
-
-                {resumeProgress != null ? (
-                  <View style={styles.progressBlock}>
-                    <View style={styles.progressTrack}>
-                      <View style={[styles.progressFill, { width: `${resumeProgress}%` }]} />
+                  {genres.map((genre) => (
+                    <View key={genre} style={styles.genreChip}>
+                      <Text style={styles.genreChipText}>{genre}</Text>
                     </View>
-                    <Text style={styles.progressLabel}>{resumeProgress}% watched</Text>
+                  ))}
+                </View>
+              ) : null}
+
+              {resumeProgress != null ? (
+                <View style={styles.progressBlock} focusable={false}>
+                  <View style={styles.progressTrack}>
+                    <View style={[styles.progressFill, { width: `${resumeProgress}%` }]} />
                   </View>
-                ) : null}
+                  <Text style={styles.progressLabel}>{resumeProgress}% watched</Text>
+                </View>
+              ) : null}
 
-                {detailLoading ? <Text style={styles.loadingText}>Updating details…</Text> : null}
-                {detailError ? (
-                  <View style={styles.inlineError}>
-                    <Text style={styles.inlineErrorText}>{detailError}</Text>
-                    {onRetry ? (
-                      <OverlayAction
-                        id="retry"
-                        label="Retry"
-                        icon="refresh"
-                        onPress={onRetry}
-                        selected={focusedTarget === 'retry'}
-                        onFocus={setFocusedTarget}
-                        onBlur={() => setFocusedTarget(null)}
-                      />
-                    ) : null}
-                  </View>
-                ) : null}
+              {detailLoading ? (
+                <View
+                  pointerEvents="none"
+                  focusable={false}
+                  accessibilityElementsHidden
+                  importantForAccessibility="no-hide-descendants">
+                  <Text style={styles.loadingText}>Updating details…</Text>
+                </View>
+              ) : null}
 
-                {detail.synopsis?.trim() ? (
-                  <Text numberOfLines={5} style={styles.synopsis}>
-                    {detail.synopsis.trim()}
-                  </Text>
-                ) : !detailLoading ? (
-                  <Text style={styles.synopsisMuted}>No synopsis available.</Text>
-                ) : null}
+              {detailError ? (
+                <View style={styles.inlineError} focusable={false}>
+                  <Text style={styles.inlineErrorText}>{detailError}</Text>
+                </View>
+              ) : null}
 
-                <View style={styles.actionRow}>{actionIds.map((id) => renderAction(id))}</View>
+              {detail.synopsis?.trim() ? (
+                <Text numberOfLines={MOVIE_DETAIL_SYNOPSIS_MAX_LINES} style={styles.synopsis}>
+                  {detail.synopsis.trim()}
+                </Text>
+              ) : !detailLoading ? (
+                <Text style={styles.synopsisMuted}>No synopsis available.</Text>
+              ) : null}
 
-                {!onTrailerPress ? (
-                  <View style={styles.trailerPlaceholder}>
-                    <MaterialCommunityIcons name="movie-open-outline" size={16} color={novaTheme.colors.textMuted} />
-                    <Text style={styles.trailerPlaceholderText}>Trailer coming soon</Text>
-                  </View>
-                ) : null}
+              {castLine ? (
+                <Text numberOfLines={1} style={styles.castLine} importantForAccessibility="yes">
+                  {castLine}
+                </Text>
+              ) : null}
 
-                <CastCarousel cast={detail.cast} focusedId={focusedTarget} onFocus={setFocusedTarget} />
+              <View style={styles.actionRow}>{actionIds.map((id) => renderAction(id))}</View>
 
-                <RelatedCarousel
+              {showRelated ? (
+                <RelatedCompactRow
                   movies={relatedMovies}
                   focusedId={focusedTarget}
                   onFocus={setFocusedTarget}
                   onSelect={focusHandoffActive ? undefined : onSelectRelated}
+                  cardWidth={cardSize.width}
                   firstRef={(instance) => {
                     relatedFirstRef.current = instance;
                   }}
                 />
-              </ScrollView>
+              ) : null}
             </View>
           </View>
         </Animated.View>
@@ -759,8 +786,6 @@ const styles = StyleSheet.create({
     zIndex: 40,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 28,
-    paddingVertical: 20,
   },
   rootHidden: {
     opacity: 0,
@@ -773,75 +798,73 @@ const styles = StyleSheet.create({
     left: 0,
     top: 0,
   },
-  heroImage: {
-    ...StyleSheet.absoluteFillObject,
-    width: '100%',
-    height: '100%',
-  },
-  heroFallback: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#0A1020',
-  },
-  heroBlur: {
+  backgroundBlur: {
     ...StyleSheet.absoluteFillObject,
   },
-  heroScrim: {
+  backgroundScrim: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(4, 8, 18, 0.72)',
-  },
-  heroAccentGlow: {
-    position: 'absolute',
-    left: '-10%',
-    right: '-10%',
-    bottom: '-20%',
-    height: '55%',
-    backgroundColor: 'rgba(59, 130, 246, 0.18)',
-    opacity: 0.9,
+    backgroundColor: 'rgba(4, 7, 12, 0.62)',
   },
   focusBoundary: {
     width: '100%',
-    maxWidth: 1280,
+    height: '100%',
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  shell: {
-    width: '100%',
-    borderRadius: 28,
+  compactCard: {
+    borderRadius: 24,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: 'rgba(10, 14, 22, 0.88)',
+    shadowColor: '#000000',
+    shadowOpacity: 0.45,
+    shadowRadius: 28,
+    shadowOffset: { width: 0, height: 16 },
+    elevation: 18,
+  },
+  cardGlassFill: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(255,255,255,0.03)',
   },
   closeHint: {
     position: 'absolute',
-    top: 14,
-    right: 14,
+    top: 12,
+    right: 12,
     zIndex: 2,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(8, 14, 28, 0.45)',
+    backgroundColor: 'rgba(8, 12, 20, 0.55)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
+    borderColor: 'rgba(255,255,255,0.12)',
   },
-  heroRow: {
+  cardBody: {
+    flex: 1,
     flexDirection: 'row',
-    gap: 28,
-    paddingHorizontal: 28,
-    paddingVertical: 28,
+    gap: 20,
+    paddingHorizontal: 22,
+    paddingVertical: 20,
     alignItems: 'stretch',
   },
+  posterColumn: {
+    justifyContent: 'center',
+  },
   posterFrame: {
-    width: 248,
+    width: '100%',
     aspectRatio: 2 / 3,
-    borderRadius: 18,
+    borderRadius: 14,
     overflow: 'hidden',
     backgroundColor: '#111827',
     borderWidth: 1,
-    borderColor: 'rgba(131, 180, 255, 0.28)',
-    shadowColor: '#3B82F6',
-    shadowOpacity: 0.35,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 12,
+    borderColor: 'rgba(255,255,255,0.14)',
+    shadowColor: '#000000',
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
   },
   posterImage: {
     width: '100%',
@@ -849,13 +872,13 @@ const styles = StyleSheet.create({
   },
   posterRating: {
     position: 'absolute',
-    left: 10,
-    bottom: 10,
+    left: 8,
+    bottom: 8,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
     borderRadius: 999,
     backgroundColor: 'rgba(8, 12, 22, 0.78)',
     borderWidth: 1,
@@ -863,116 +886,73 @@ const styles = StyleSheet.create({
   },
   posterRatingText: {
     color: '#F6C85F',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
   },
-  glassCard: {
+  infoColumn: {
     flex: 1,
-    minHeight: 360,
-    borderRadius: 24,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(131, 180, 255, 0.28)',
-    backgroundColor: 'rgba(12, 18, 32, 0.55)',
-    shadowColor: '#1D4ED8',
-    shadowOpacity: 0.28,
-    shadowRadius: 28,
-    shadowOffset: { width: 0, height: 16 },
+    minWidth: 0,
+    gap: 8,
+    justifyContent: 'flex-start',
   },
-  glassFill: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(18, 36, 72, 0.42)',
-  },
-  infoScroll: {
-    flex: 1,
-  },
-  infoContent: {
-    paddingHorizontal: 26,
-    paddingVertical: 24,
-    gap: 14,
+  eyebrow: {
+    color: novaTheme.colors.textMuted,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.6,
   },
   title: {
     color: novaTheme.colors.textPrimary,
-    fontSize: 34,
     fontWeight: '800',
     letterSpacing: 0.2,
-    textShadowColor: 'rgba(59, 130, 246, 0.35)',
-    textShadowOffset: { width: 0, height: 2 },
-    textShadowRadius: 12,
   },
-  metaRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    alignItems: 'center',
-  },
-  metaChip: {
+  metaLine: {
     color: novaTheme.colors.textSecondary,
     fontSize: 14,
     fontWeight: '600',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    overflow: 'hidden',
   },
-  ratingChip: {
+  badgeGenreRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 999,
-    backgroundColor: 'rgba(246, 200, 95, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(246, 200, 95, 0.28)',
-  },
-  ratingChipText: {
-    color: '#F6C85F',
-    fontSize: 14,
-    fontWeight: '700',
   },
   qualityBadge: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 8,
-    backgroundColor: 'rgba(59, 130, 246, 0.18)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 7,
+    backgroundColor: 'rgba(255,255,255,0.08)',
     borderWidth: 1,
-    borderColor: 'rgba(131, 180, 255, 0.35)',
+    borderColor: 'rgba(255,255,255,0.16)',
   },
   qualityBadgeHdr: {
-    backgroundColor: 'rgba(124, 58, 237, 0.22)',
-    borderColor: 'rgba(167, 139, 250, 0.45)',
+    backgroundColor: 'rgba(124, 58, 237, 0.2)',
+    borderColor: 'rgba(167, 139, 250, 0.35)',
   },
   qualityBadgeText: {
-    color: '#E0EAFF',
-    fontSize: 12,
+    color: '#E8EDF5',
+    fontSize: 11,
     fontWeight: '800',
     letterSpacing: 0.4,
   },
-  genreRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
   genreChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
     borderRadius: 999,
-    backgroundColor: 'rgba(99, 102, 241, 0.16)',
+    backgroundColor: 'rgba(255,255,255,0.06)',
     borderWidth: 1,
-    borderColor: 'rgba(165, 180, 252, 0.28)',
+    borderColor: 'rgba(255,255,255,0.12)',
   },
   genreChipText: {
-    color: '#C7D2FE',
-    fontSize: 13,
+    color: novaTheme.colors.textSecondary,
+    fontSize: 12,
     fontWeight: '600',
   },
   progressBlock: {
-    gap: 6,
+    gap: 4,
   },
   progressTrack: {
-    height: 6,
+    height: 5,
     borderRadius: 999,
     backgroundColor: 'rgba(255,255,255,0.12)',
     overflow: 'hidden',
@@ -984,66 +964,91 @@ const styles = StyleSheet.create({
   },
   progressLabel: {
     color: novaTheme.colors.textSecondary,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
   },
   loadingText: {
     color: novaTheme.colors.textMuted,
-    fontSize: 14,
+    fontSize: 13,
+    fontStyle: 'italic',
   },
   inlineError: {
-    gap: 10,
+    gap: 4,
   },
   inlineErrorText: {
     color: novaTheme.colors.danger,
-    fontSize: 14,
+    fontSize: 13,
   },
   synopsis: {
     color: 'rgba(236, 242, 255, 0.88)',
-    fontSize: 16,
-    lineHeight: 24,
+    fontSize: 14,
+    lineHeight: 20,
   },
   synopsisMuted: {
     color: novaTheme.colors.textMuted,
-    fontSize: 15,
+    fontSize: 13,
+  },
+  castLine: {
+    color: novaTheme.colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '500',
   },
   actionRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
-    marginTop: 4,
+    gap: 10,
+    marginTop: 2,
+    alignItems: 'center',
   },
   action: {
-    minHeight: 48,
-    paddingHorizontal: 18,
-    borderRadius: 14,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    borderRadius: 12,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
   },
+  actionFocusTransition: Platform.select({
+    web: {
+      transitionProperty: 'border-color, background-color',
+      transitionDuration: `${MOVIE_DETAIL_FOCUS_MS}ms`,
+    },
+    default: {},
+  }),
   actionPrimary: {
-    backgroundColor: 'rgba(59, 130, 246, 0.92)',
-    borderWidth: 1,
-    borderColor: 'rgba(147, 197, 253, 0.55)',
-    minWidth: 148,
+    backgroundColor: 'rgba(59, 130, 246, 0.95)',
+    borderWidth: 2,
+    borderColor: 'rgba(191, 219, 254, 0.75)',
+    minWidth: 140,
+    paddingHorizontal: 18,
+  },
+  actionPrimarySelected: {
+    backgroundColor: 'rgba(37, 99, 235, 0.98)',
   },
   actionSecondary: {
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: 'rgba(12, 20, 36, 0.55)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.16)',
   },
-  actionFocused: {
-    shadowColor: '#83B4FF',
-    shadowOpacity: 0.45,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 0 },
+  actionCompact: {
+    width: 44,
+    minWidth: 44,
+    paddingHorizontal: 0,
+    justifyContent: 'center',
+    backgroundColor: 'rgba(12, 20, 36, 0.55)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  actionSelected: {
+    backgroundColor: 'rgba(59, 130, 246, 0.28)',
+    borderColor: 'rgba(147, 197, 253, 0.55)',
   },
   actionDisabled: {
     opacity: 0.45,
   },
   actionLabel: {
     color: novaTheme.colors.textPrimary,
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
   },
   actionLabelPrimary: {
@@ -1052,93 +1057,35 @@ const styles = StyleSheet.create({
   actionLabelDisabled: {
     color: novaTheme.colors.textMuted,
   },
-  trailerPlaceholder: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    opacity: 0.7,
-  },
-  trailerPlaceholderText: {
-    color: novaTheme.colors.textMuted,
-    fontSize: 13,
-    fontWeight: '600',
-  },
   sectionLabel: {
     color: novaTheme.colors.textSecondary,
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '700',
     letterSpacing: 0.8,
     textTransform: 'uppercase',
-    marginBottom: 10,
-  },
-  castSection: {
-    marginTop: 8,
-  },
-  castRow: {
-    gap: 12,
-    paddingRight: 8,
-  },
-  castCard: {
-    width: 92,
-    alignItems: 'center',
-    gap: 6,
-    padding: 8,
-    borderRadius: 14,
-  },
-  castAvatar: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(59, 130, 246, 0.18)',
-    borderWidth: 1,
-    borderColor: 'rgba(131, 180, 255, 0.28)',
-  },
-  castImage: {
-    width: '100%',
-    height: '100%',
-  },
-  castInitials: {
-    color: '#DBEAFE',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  castName: {
-    color: novaTheme.colors.textPrimary,
-    fontSize: 12,
-    fontWeight: '600',
-    textAlign: 'center',
-    width: '100%',
-  },
-  castCharacter: {
-    color: novaTheme.colors.textMuted,
-    fontSize: 11,
-    textAlign: 'center',
-    width: '100%',
+    marginBottom: 6,
   },
   relatedSection: {
-    marginTop: 10,
-    marginBottom: 8,
+    marginTop: 'auto',
+    paddingTop: 4,
   },
   relatedRow: {
-    gap: 14,
-    paddingRight: 8,
+    flexDirection: 'row',
+    gap: 10,
+    alignItems: 'flex-start',
   },
   relatedCard: {
-    width: 112,
-    borderRadius: 14,
-    padding: 6,
-    gap: 8,
+    borderRadius: 10,
+    padding: 4,
+    gap: 4,
   },
   relatedCardFocused: {
-    backgroundColor: 'rgba(18, 36, 72, 0.55)',
+    backgroundColor: 'rgba(255,255,255,0.06)',
   },
   relatedPoster: {
     width: '100%',
     aspectRatio: 2 / 3,
-    borderRadius: 12,
+    borderRadius: 8,
     overflow: 'hidden',
     backgroundColor: '#111827',
   },
@@ -1148,8 +1095,7 @@ const styles = StyleSheet.create({
   },
   relatedTitle: {
     color: novaTheme.colors.textSecondary,
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
-    minHeight: 32,
   },
 });

@@ -48,6 +48,7 @@ import { MoviePosterGrid } from './components/MoviePosterGrid';
 import { MovieToolbar } from './components/MovieToolbar';
 import {
   resolveContinueWatchingLabel,
+  MOVIE_DETAIL_RELATED_LIMIT,
   selectRelatedMovies,
 } from './movieDetailOverlayModel';
 import { getMoviesScreenMemory, rememberMoviesScreenMemory } from './moviesScreenMemory';
@@ -207,6 +208,7 @@ export function MoviesScreen() {
   const restorationSequenceRef = useRef(0);
   const confirmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const overlayCloseTargetRef = useRef<ElementRef<typeof Pressable> | null>(null);
+  const browseLayerRef = useRef<View | null>(null);
   const [detailFocusPhase, setDetailFocusPhase] = useState<MoviesDetailFocusPhase>('browse');
   const detailFocusPhaseRef = useRef<MoviesDetailFocusPhase>('browse');
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
@@ -2483,7 +2485,7 @@ useEffect(() => {
 
   const relatedMovies = useMemo(() => {
     if (!selectedMovie) return [];
-    return selectRelatedMovies(selectedMovie, visibleMovies, 12);
+    return selectRelatedMovies(selectedMovie, visibleMovies, MOVIE_DETAIL_RELATED_LIMIT);
   }, [selectedMovie, visibleMovies]);
 
   const handleSelectRelatedMovie = useCallback(
@@ -2733,6 +2735,8 @@ useEffect(() => {
     <View style={styles.root}>
       <>
       <View
+        ref={browseLayerRef}
+        collapsable={false}
         style={[styles.browseLayer, playbackUiActive && styles.browseLayerHidden]}
         pointerEvents={
           // During Stage 3D closing, allow the exact target poster to receive focus
@@ -2967,6 +2971,7 @@ useEffect(() => {
         visible={detailOverlayVisible}
         focusHandoffActive={focusHandoffActive}
         closeTargetRef={overlayCloseTargetRef}
+        blurTarget={browseLayerRef}
         detail={
           selectedMovie
             ? movieDetail?.id === selectedMovie.id

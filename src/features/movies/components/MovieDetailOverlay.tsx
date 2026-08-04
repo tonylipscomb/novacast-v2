@@ -755,7 +755,11 @@ function MovieDetailOverlayComponent({
             pointerEvents="none"
           />
         )}
-        <View style={styles.backgroundScrim} pointerEvents="none" focusable={false} />
+        <View
+          style={[styles.backgroundScrim, focusHandoffActive && styles.backgroundScrimHandoff]}
+          pointerEvents="none"
+          focusable={false}
+        />
       </Animated.View>
 
       <FocusBoundaryView
@@ -962,6 +966,10 @@ const styles = StyleSheet.create({
   backgroundScrim: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(4, 7, 12, 0.62)',
+  },
+  /** Stage 4.2F: hide native +72 focus drift / corrective scroll under cover. */
+  backgroundScrimHandoff: {
+    backgroundColor: 'rgba(4, 7, 12, 0.94)',
   },
   focusBoundary: {
     width: '100%',

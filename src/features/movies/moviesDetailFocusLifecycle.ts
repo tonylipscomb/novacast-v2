@@ -208,6 +208,119 @@ export function shouldReRequestMoviesPosterFocusAfterCorrective(input: {
   return !input.targetFocusConfirmed;
 }
 
+/**
+ * Stage 4.2F — Evidence-driven detail return path selection.
+ * Fast path: mounted poster + same grid/category/generation → focus under cover,
+ * correct native drift once, then reveal. Fallback retains Stage 3D.1 restore.
+ */
+export type MoviesDetailReturnPath =
+  | 'fast-mounted-target'
+  | 'fallback-target-unmounted'
+  | 'fallback-generation-changed'
+  | 'fallback-category-changed'
+  | 'fallback-grid-instance-changed'
+  | 'fallback-movie-missing'
+  | 'fallback-provider-changed';
+
+export type MoviesDetailOpenContext = {
+  providerId: string;
+  readableGeneration: number | null;
+  gridInstanceId: string | null;
+};
+
+export const MOVIES_FOCUS_STAGE4F_MARKER = 'stage4f-movies-detail-return-v1';
+/** Fast path allows a single covered corrective restore (no initial scroll). */
+export const MOVIES_FAST_PATH_MAX_VIEWPORT_RESTORES = 1;
+
+export function selectMoviesDetailReturnPath(input: {
+  hasSnapshot: boolean;
+  snapshotCategoryId: string | null;
+  selectedCategoryId: string;
+  openProviderId: string | null;
+  activeProviderId: string;
+  openReadableGeneration: number | null;
+  activeReadableGeneration: number | null;
+  openGridInstanceId: string | null;
+  activeGridInstanceId: string | null;
+  targetMovieId: string | null;
+  targetInVisibleMovies: boolean;
+  targetNativeHandleExists: boolean;
+}): MoviesDetailReturnPath {
+  if (!input.hasSnapshot || !input.targetMovieId) {
+    return 'fallback-target-unmounted';
+  }
+  if (
+    input.openProviderId != null &&
+    input.openProviderId !== '' &&
+    input.openProviderId !== input.activeProviderId
+  ) {
+    return 'fallback-provider-changed';
+  }
+  if (
+    input.openReadableGeneration != null &&
+    input.activeReadableGeneration != null &&
+    input.openReadableGeneration !== input.activeReadableGeneration
+  ) {
+    return 'fallback-generation-changed';
+  }
+  if (
+    input.snapshotCategoryId != null &&
+    input.snapshotCategoryId !== '' &&
+    input.snapshotCategoryId !== input.selectedCategoryId
+  ) {
+    return 'fallback-category-changed';
+  }
+  if (
+    input.openGridInstanceId != null &&
+    input.activeGridInstanceId != null &&
+    input.openGridInstanceId !== input.activeGridInstanceId
+  ) {
+    return 'fallback-grid-instance-changed';
+  }
+  if (!input.targetInVisibleMovies) {
+    return 'fallback-movie-missing';
+  }
+  if (!input.targetNativeHandleExists) {
+    return 'fallback-target-unmounted';
+  }
+  return 'fast-mounted-target';
+}
+
+export function isMoviesDetailReturnFastPath(path: MoviesDetailReturnPath | null | undefined): boolean {
+  return path === 'fast-mounted-target';
+}
+
+export function shouldIssueMoviesInitialDetailRestore(
+  path: MoviesDetailReturnPath | null | undefined,
+): boolean {
+  return !isMoviesDetailReturnFastPath(path);
+}
+
+/** Skip no-op initial restore commands (ONN: duplicate delta-0 before focus). */
+export function shouldSkipZeroDeltaInitialRestore(input: {
+  requestedOffset: number;
+  currentOffset: number;
+  reason: 'initial' | 'corrective';
+  tolerancePx?: number;
+}): boolean {
+  if (input.reason !== 'initial') {
+    return false;
+  }
+  return isMoviesViewportOffsetStable({
+    currentOffset: input.currentOffset,
+    snapshotOffset: input.requestedOffset,
+    tolerancePx: input.tolerancePx,
+  });
+}
+
+export function resolveMoviesDetailReturnMaxViewportRestores(
+  path: MoviesDetailReturnPath | null | undefined,
+): number {
+  return isMoviesDetailReturnFastPath(path)
+    ? MOVIES_FAST_PATH_MAX_VIEWPORT_RESTORES
+    : MOVIES_MAX_VIEWPORT_RESTORES;
+}
+
 export function isMoviesDetailClosingPhase(phase: MoviesDetailFocusPhase): boolean {
   return (
     phase === 'closing-prepare' ||

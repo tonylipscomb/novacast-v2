@@ -3,6 +3,7 @@ import { useRouter } from 'expo-router';
 import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactNative, {
+  AppState,
   BackHandler,
   findNodeHandle,
   InteractionManager,
@@ -73,6 +74,7 @@ import {
   getOnnMoviesGridInstanceId,
   isOnnMoviesGridMounted,
   isOnnMoviesTraceEnabled,
+  maybeBeginOnnMoviesAutoTrace,
   noteOnnMoviesMount,
   noteOnnMoviesRender,
   noteOnnMoviesUnmount,
@@ -103,7 +105,11 @@ import {
 import { getActiveMoviesSearchRequestId } from '@/features/search/moviesSearchPerfDiagnostics';
 import { createSqliteMovieDataSource } from './data/SqliteMovieDataSource';
 import type { SearchResult } from '@/features/search/searchTypes';
-import { setMoviesDetailOpenForDiagnostics, setMoviesOnnTraceSnapshot } from './moviesDiagnosticsState';
+import {
+  getMoviesOnnTraceSnapshot,
+  setMoviesDetailOpenForDiagnostics,
+  setMoviesOnnTraceSnapshot,
+} from './moviesDiagnosticsState';
 import {
   deriveMoviesPaginationLoaderMode,
   deriveMoviesPrimaryLoaderModeFromGate,
@@ -119,6 +125,7 @@ import {
 } from './moviesLoaderState';
 import {
   MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS,
+  MOVIES_FOCUS_STAGE4F_MARKER,
   MOVIES_FOCUS_SUPPRESSION_RELEASE_MS,
   MOVIES_MAX_FOCUS_REQUESTS,
   MOVIES_MAX_VIEWPORT_RESTORES,
@@ -136,6 +143,7 @@ import {
   isMoviesDetailClosingPhase,
   isMoviesDetailFocusConfirmed,
   isMoviesDetailOverlayMounted,
+  isMoviesDetailReturnFastPath,
   isMoviesFocusSuppressionActive,
   isMoviesNativeFocusRowAlignmentDrift,
   isMoviesPostRestoreLatchActive,
@@ -148,14 +156,20 @@ import {
   logMoviesSearchFocusBlocked,
   logMoviesViewportLock,
   resolveMoviesClosingFocusableMovieId,
+  resolveMoviesDetailReturnMaxViewportRestores,
   resolveNearestVisiblePoster,
+  selectMoviesDetailReturnPath,
+  shouldIssueMoviesInitialDetailRestore,
   shouldReRequestMoviesPosterFocusAfterCorrective,
+  shouldSkipZeroDeltaInitialRestore,
   shouldSuppressMoviesCategoryFocus,
   shouldSuppressMoviesNavbarFocus,
   wasMoviesSnapshotTargetVisible,
   type MoviesBrowseFocusSnapshot,
   type MoviesDetailFocusPhase,
   type MoviesDetailFocusToken,
+  type MoviesDetailOpenContext,
+  type MoviesDetailReturnPath,
   type MoviesPostRestoreLatch,
   type MoviesPostRestoreReleaseReason,
   type MoviesRestoreTimingState,
@@ -207,6 +221,8 @@ export function MoviesScreen() {
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof Pressable>>>(new Map());
   const categoryFocusPendingRef = useRef<string | null>(null);
   const browseFocusSnapshotRef = useRef<MoviesBrowseFocusSnapshot | null>(null);
+  const detailOpenContextRef = useRef<MoviesDetailOpenContext | null>(null);
+  const detailReturnPathRef = useRef<MoviesDetailReturnPath | null>(null);
   const viewportStateRef = useRef({ offset: 0, firstIndex: null as number | null, lastIndex: null as number | null });
   const detailFocusTokenRef = useRef<MoviesDetailFocusToken | null>(null);
   const focusIssuedTokenRef = useRef<string | null>(null);
@@ -620,6 +636,17 @@ export function MoviesScreen() {
     tvPerfSetScreen('movies');
   }, []);
 
+  // Audit-only: env-driven ONN auto trace (no console / DevTools required).
+  useEffect(() => {
+    maybeBeginOnnMoviesAutoTrace({
+      source: 'MoviesScreen',
+      subscribeAppState: (handler) => {
+        const subscription = AppState.addEventListener('change', handler);
+        return () => subscription.remove();
+      },
+    });
+  }, []);
+
   // Stage 3D.2: directional input releases preferred ownership (not focusability).
   const reactNativeTv = ReactNative as typeof ReactNative & {
     useTVEventHandler?: (handler: (event: MoviesTvEventPayload) => void) => void;
@@ -721,6 +748,8 @@ export function MoviesScreen() {
       // Do not complete on focus alone — native TV auto-scroll may have drifted.
       if (targetFocusConfirmedRef.current && !viewportStable) {
         const rowDrift = isMoviesNativeFocusRowAlignmentDrift({ offsetDelta });
+        const returnPath = detailReturnPathRef.current;
+        const maxRestores = resolveMoviesDetailReturnMaxViewportRestores(returnPath);
         logMoviesViewportLock({
           token: token.token,
           phase: detailFocusPhaseRef.current,
@@ -731,15 +760,26 @@ export function MoviesScreen() {
           offsetDelta,
           targetRelativeRow: snapshot.targetRelativeRow,
           snapshotTargetWasVisible: snapshotWasVisible,
-          initialRestoreIssued: viewportRestoreCountRef.current >= 1,
-          correctiveRestoreIssued: viewportRestoreCountRef.current >= 2,
+          initialRestoreIssued: viewportRestoreCountRef.current >= 1 && !isMoviesDetailReturnFastPath(returnPath),
+          correctiveRestoreIssued: viewportRestoreCountRef.current >= maxRestores,
           focusRequestCount: focusRequestCountRef.current,
           targetFocusConfirmed: true,
           highlightVisible,
           viewportStable: false,
           overlayMounted: true,
         });
-        if (viewportRestoreCountRef.current < MOVIES_MAX_VIEWPORT_RESTORES) {
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Scroll', 'native_focus_drift_detected', {
+            token: token.token,
+            snapshotOffset: snapshot.verticalOffset,
+            focusedOffset: currentOffset,
+            delta: offsetDelta,
+            returnPath,
+            rowDrift,
+            marker: MOVIES_FOCUS_STAGE4F_MARKER,
+          });
+        }
+        if (viewportRestoreCountRef.current < maxRestores) {
           viewportRestoreCountRef.current += 1;
           if (restoreTimingRef.current) {
             restoreTimingRef.current.correctiveScrollUsed = true;
@@ -750,6 +790,17 @@ export function MoviesScreen() {
             offset: snapshot.verticalOffset,
             reason: 'corrective',
           });
+          if (isOnnMoviesTraceEnabled()) {
+            traceOnnMoviesEvent('Scroll', 'covered_corrective_scroll', {
+              token: token.token,
+              requestedOffset: snapshot.verticalOffset,
+              currentOffset,
+              delta: snapshot.verticalOffset - currentOffset,
+              returnPath,
+              overlayMounted: true,
+              marker: MOVIES_FOCUS_STAGE4F_MARKER,
+            });
+          }
           // Stage 3D.3: keep highlight via pinned chrome; do not re-request poster focus.
           if (shouldReRequestMoviesPosterFocusAfterCorrective({ targetFocusConfirmed: true })) {
             focusIssuedTokenRef.current = null;
@@ -762,6 +813,8 @@ export function MoviesScreen() {
                   phase: detailFocusPhaseRef.current,
                   note: 'native-focus-row-alignment-corrective',
                   offsetDelta,
+                  returnPath,
+                  marker: MOVIES_FOCUS_STAGE4F_MARKER,
                 }),
             );
           }
@@ -842,7 +895,7 @@ export function MoviesScreen() {
         columns: getSeriesPosterColumns(width),
       });
 
-      // Hide overlay only after focus + viewport both confirm.
+      // Hide overlay only after focus + viewport both confirm (Stage 4.2F reveal).
       setDetailOpen(false);
       detailOpenRef.current = false;
       setDetailSuppressedForPlayback(false);
@@ -879,16 +932,28 @@ export function MoviesScreen() {
         overlayMounted: false,
       });
       if (isOnnMoviesTraceEnabled()) {
+        const returnPath = detailReturnPathRef.current;
+        const correctionCount = viewportRestoreCountRef.current;
         traceOnnMoviesEvent('Focus', 'focus_confirmed', {
           movieId,
           offset: currentOffset,
           gridInstanceId: getOnnMoviesGridInstanceId(),
+          returnPath,
         });
         traceOnnMoviesScrollSample('post-poster-focus', { offset: currentOffset }, true);
+        traceOnnMoviesEvent('Overlay', 'browse_reveal', {
+          finalOffset: currentOffset,
+          focusConfirmed: true,
+          correctionCount,
+          userVisibleMovementExpected: false,
+          returnPath,
+          marker: MOVIES_FOCUS_STAGE4F_MARKER,
+        });
         traceOnnMoviesEvent('Overlay', 'browse_restored', {
           movieId,
           offset: currentOffset,
           gridInstanceId: getOnnMoviesGridInstanceId(),
+          returnPath,
         });
         traceOnnMoviesEvent('Overlay', 'overlay_unmounted', {
           movieId,
@@ -896,6 +961,7 @@ export function MoviesScreen() {
         });
         traceOnnMoviesScrollSample('post-restore-latch', { offset: currentOffset }, true);
       }
+      detailReturnPathRef.current = null;
       console.info(
         '[NovaCast Movies Restore Polish] ' +
           JSON.stringify({ marker: MOVIES_FOCUS_STAGE3D3_MARKER, token: token.token }),
@@ -1024,6 +1090,11 @@ export function MoviesScreen() {
         visibleLastIndex: viewportStateRef.current.lastIndex,
         columns: getSeriesPosterColumns(width),
       });
+      detailOpenContextRef.current = {
+        providerId: activeProviderId,
+        readableGeneration: getMoviesOnnTraceSnapshot().readableGeneration,
+        gridInstanceId: getOnnMoviesGridInstanceId(),
+      };
       setDetailSource('browse');
       detailSourceRef.current = 'browse';
       selectMovie(movie);
@@ -1368,6 +1439,25 @@ export function MoviesScreen() {
       }
 
       const token = `${source === 'detail-close' ? 'detail' : 'playback'}-${++restorationSequenceRef.current}`;
+      const openContext = detailOpenContextRef.current;
+      const targetNativeHandleExists = Boolean(
+        getValidatedPosterTarget(snapshot.movieId, snapshot.movieIndex >= 0 ? snapshot.movieIndex : undefined),
+      );
+      const returnPath = selectMoviesDetailReturnPath({
+        hasSnapshot: true,
+        snapshotCategoryId: snapshot.categoryId,
+        selectedCategoryId,
+        openProviderId: openContext?.providerId ?? null,
+        activeProviderId,
+        openReadableGeneration: openContext?.readableGeneration ?? null,
+        activeReadableGeneration: getMoviesOnnTraceSnapshot().readableGeneration,
+        openGridInstanceId: openContext?.gridInstanceId ?? null,
+        activeGridInstanceId: getOnnMoviesGridInstanceId(),
+        targetMovieId: snapshot.movieId,
+        targetInVisibleMovies: visibleMovies.some((movie) => movie.id === snapshot.movieId),
+        targetNativeHandleExists,
+      });
+      detailReturnPathRef.current = returnPath;
       if (isOnnMoviesTraceEnabled()) {
         traceOnnMoviesEvent('Focus', 'detail_close_requested', {
           source,
@@ -1382,6 +1472,16 @@ export function MoviesScreen() {
           gridInstanceId: getOnnMoviesGridInstanceId(),
           gridMounted: isOnnMoviesGridMounted(),
           currentOffset: viewportStateRef.current.offset,
+          returnPath,
+        });
+        traceOnnMoviesEvent('Focus', 'detail_return_path_selected', {
+          path: returnPath,
+          token,
+          movieId: snapshot.movieId,
+          categoryId: snapshot.categoryId,
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+          targetNativeHandleExists,
+          marker: MOVIES_FOCUS_STAGE4F_MARKER,
         });
       }
       detailFocusTokenRef.current = { token, source, snapshot };
@@ -1422,10 +1522,12 @@ export function MoviesScreen() {
         firstPosterAllowed: false,
       });
       console.info('[NovaCast Movies Focus Handoff]', {
-        marker: MOVIES_FOCUS_STAGE3D1_MARKER,
+        marker: MOVIES_FOCUS_STAGE4F_MARKER,
+        stage3d1Marker: MOVIES_FOCUS_STAGE3D1_MARKER,
         categoryId: selectedCategoryId,
         phase: 'closing-prepare',
         intendedMovieId: snapshot.movieId,
+        returnPath,
         focusRequested: true,
         detailOpened: true,
       });
@@ -1462,7 +1564,13 @@ export function MoviesScreen() {
 
       return true;
     },
-    [selectedCategoryId, setDetailFocusPhaseSafe, visibleMovies],
+    [
+      activeProviderId,
+      getValidatedPosterTarget,
+      selectedCategoryId,
+      setDetailFocusPhaseSafe,
+      visibleMovies,
+    ],
   );
 
   const closeDetail = useCallback((closeSource: 'back' | 'x' | 'other' = 'other') => {
@@ -1580,14 +1688,88 @@ export function MoviesScreen() {
     }
 
     if (phase === 'closing-viewport') {
-      // Always re-assert the saved offset (even when currently stable). Native
-      // TV focus may already have drifted, and same-offset scrollToOffset may
-      // not emit onScroll — so never transfer focus in the same turn.
+      const returnPath = detailReturnPathRef.current;
+      const fastPath = isMoviesDetailReturnFastPath(returnPath);
+
+      // Stage 4.2F fast path: skip initial scrollToOffset. Grid stayed mounted at
+      // the snapshot offset — focus under the covering overlay, then correct drift.
+      if (fastPath) {
+        viewportStableRef.current = true;
+        requestAnimationFrame(() => {
+          if (detailFocusTokenRef.current?.token !== token.token) {
+            return;
+          }
+          if (detailFocusPhaseRef.current !== 'closing-viewport') {
+            return;
+          }
+          if (restoreTimingRef.current?.token === token.token) {
+            restoreTimingRef.current.viewportConfirmedAt = Date.now();
+          }
+          setDetailFocusPhaseSafe('closing-focus');
+          logMoviesViewportLock({
+            token: token.token,
+            phase: 'closing-focus',
+            targetMovieId,
+            targetIndex,
+            snapshotOffset: snapshot.verticalOffset,
+            currentOffset: viewportStateRef.current.offset,
+            offsetDelta: viewportStateRef.current.offset - snapshot.verticalOffset,
+            targetRelativeRow: snapshot.targetRelativeRow,
+            snapshotTargetWasVisible: snapshotWasVisible,
+            initialRestoreIssued: false,
+            correctiveRestoreIssued: false,
+            focusRequestCount: focusRequestCountRef.current,
+            targetFocusConfirmed: false,
+            highlightVisible: false,
+            viewportStable: true,
+            overlayMounted: true,
+          });
+        });
+        return;
+      }
+
+      // Fallback: restore saved offset once before focus (Stage 3D.1), but never
+      // issue duplicate zero-delta initial commands when already on snapshot.
       if (
         viewportRestoreCountRef.current === 0 &&
         !restoreScrollBlockedRef.current &&
-        Number.isFinite(snapshot.verticalOffset)
+        Number.isFinite(snapshot.verticalOffset) &&
+        shouldIssueMoviesInitialDetailRestore(returnPath)
       ) {
+        if (
+          shouldSkipZeroDeltaInitialRestore({
+            reason: 'initial',
+            requestedOffset: snapshot.verticalOffset,
+            currentOffset,
+          })
+        ) {
+          if (isOnnMoviesTraceEnabled()) {
+            traceOnnMoviesEvent('Scroll', 'duplicate_initial_restore_prevented', {
+              token: token.token,
+              requestedOffset: snapshot.verticalOffset,
+              currentOffset,
+              delta: 0,
+              returnPath,
+            });
+          }
+          viewportStableRef.current = true;
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              if (detailFocusTokenRef.current?.token !== token.token) {
+                return;
+              }
+              if (detailFocusPhaseRef.current !== 'closing-viewport') {
+                return;
+              }
+              if (restoreTimingRef.current?.token === token.token) {
+                restoreTimingRef.current.viewportConfirmedAt = Date.now();
+              }
+              setDetailFocusPhaseSafe('closing-focus');
+            });
+          });
+          return;
+        }
+
         viewportRestoreCountRef.current = 1;
         scrollIssuedTokenRef.current = token.token;
         setViewportRestoreCommand({

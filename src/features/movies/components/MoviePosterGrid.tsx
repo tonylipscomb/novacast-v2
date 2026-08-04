@@ -30,6 +30,7 @@ import {
   traceOnnMoviesScrollCommand,
   traceOnnMoviesScrollSample,
 } from '@/features/diagnostics/onnMoviesTrace';
+import { shouldSkipZeroDeltaInitialRestore } from '../moviesDetailFocusLifecycle';
 
 type MoviePosterGridProps = {
   movies: MovieSummary[];
@@ -341,6 +342,25 @@ export function MoviePosterGrid({
     const offset = Math.max(0, viewportRestoreCommand.offset);
     try {
       const currentOffset = currentOffsetRef.current;
+      // Stage 4.2F: never execute duplicate zero-delta initial restores.
+      if (
+        shouldSkipZeroDeltaInitialRestore({
+          reason: viewportRestoreCommand.reason,
+          requestedOffset: offset,
+          currentOffset,
+        })
+      ) {
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Scroll', 'duplicate_initial_restore_prevented', {
+            token: viewportRestoreCommand.token,
+            requestedOffset: offset,
+            currentOffset,
+            delta: 0,
+            source: 'MoviePosterGrid',
+          });
+        }
+        return;
+      }
       console.info(
         '[NovaCast Movies Scroll Command] ' +
           JSON.stringify({
@@ -355,6 +375,7 @@ export function MoviePosterGrid({
             currentOffset,
             focusedMovieId: selectedMovieId,
             restorationActive: true,
+            covered: viewportRestoreCommand.reason === 'corrective',
             timestamp: Date.now(),
           }),
       );

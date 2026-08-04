@@ -9,6 +9,7 @@ const suites = [
   'movies-series-stabilization.test.mjs',
   'movies-diagnostics-json-v1.test.mjs',
   'onn-movies-trace.test.mjs',
+  'movies-stage4f-detail-return.test.mjs',
   'movies-catalog-generation-inventory.test.mjs',
   'catalog-stage3c-generation-safe.test.mjs',
   'movies-stage3c1-category-counts.test.mjs',

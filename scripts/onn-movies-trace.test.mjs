@@ -90,6 +90,7 @@ test('sanitize redacts credentials and URLs but keeps scroll delta fields', () =
     reason: 'initial-detail-restore',
     restorationToken: 'detail-3',
     delta: 20,
+    userVisibleMovementExpected: false,
   });
 
   assert.equal(sanitized.password, '[redacted]');
@@ -101,6 +102,8 @@ test('sanitize redacts credentials and URLs but keeps scroll delta fields', () =
   assert.equal(sanitized.reason, 'initial-detail-restore');
   assert.equal(sanitized.restorationToken, 'detail-3');
   assert.equal(sanitized.delta, 20);
+  assert.equal(sanitized.userVisibleMovementExpected, false);
+  assert.equal(typeof sanitized.userVisibleMovementExpected, 'boolean');
 });
 
 test('scroll events include command reason and delta', () => {

@@ -39,10 +39,45 @@ type TraceEvent = {
 };
 
 const LOG_PREFIX = '[NovaCast ONN Trace]';
-const SENSITIVE_KEY =
-  /(password|passwd|secret|credential|authorization|cookie|url|uri|hostname|host|baseUrl|player_api|username|user|pass|accessToken|refreshToken|authToken|apiToken)/i;
+/** Exact sensitive keys only — do not match fragments inside diagnostic field names. */
+const SENSITIVE_EXACT_KEY = new Set([
+  'password',
+  'passwd',
+  'secret',
+  'credential',
+  'credentials',
+  'authorization',
+  'cookie',
+  'url',
+  'uri',
+  'hostname',
+  'host',
+  'baseurl',
+  'player_api',
+  'username',
+  'user',
+  'pass',
+  'accesstoken',
+  'refreshtoken',
+  'authtoken',
+  'apitoken',
+  'streamurl',
+]);
+/** Substring match for compound credential-like keys (not plain "user" fragments). */
+const SENSITIVE_COMPOUND_KEY =
+  /(password|passwd|secret|credential|authorization|cookie|baseUrl|player_api|accessToken|refreshToken|authToken|apiToken|streamUrl)/i;
 /** Audit restore/focus tokens are safe identifiers, not credentials. */
 const AUDIT_TOKEN_KEY = /^(token|restorationToken|instanceToken|backPressId|traceId)$/i;
+
+function isSensitiveTraceKey(key: string): boolean {
+  if (AUDIT_TOKEN_KEY.test(key)) {
+    return false;
+  }
+  if (SENSITIVE_EXACT_KEY.has(key.toLowerCase())) {
+    return true;
+  }
+  return SENSITIVE_COMPOUND_KEY.test(key);
+}
 
 export const ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS = 600_000;
 export const ONN_MOVIES_TRACE_AUTO_BACKGROUND_MIN_MS = 10_000;
@@ -260,7 +295,7 @@ export function sanitizeOnnMoviesTracePayload(
       out._truncatedKeys = true;
       break;
     }
-    if (SENSITIVE_KEY.test(key) && !AUDIT_TOKEN_KEY.test(key)) {
+    if (isSensitiveTraceKey(key)) {
       out[key] = '[redacted]';
       keys += 1;
       continue;

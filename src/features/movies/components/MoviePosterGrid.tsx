@@ -61,14 +61,19 @@ type MoviePosterGridProps = {
   /** Stage 3D: after exact confirm, block any further restore scrolls. */
   restoreScrollBlocked?: boolean;
   /**
-   * Stage 3D.1: restore exact saved offset via scrollToOffset (never top-row align).
-   * `initial` once per close; `corrective` at most once after focus drift.
+   * Stage 3D.1 / 4.2G: restore exact saved offset via scrollToOffset (never top-row align).
+   * Stage 4.2G fast path: only `corrective` after measured native drift — never `initial`.
    */
   viewportRestoreCommand?: {
     token: string;
     offset: number;
     reason: 'initial' | 'corrective';
   } | null;
+  /**
+   * Stage 4.2G: when false, the offscreen saved-offset effect must not issue
+   * initial-detail-restore (prevents the physical ONN fast-path violation).
+   */
+  allowOffscreenInitialRestore?: boolean;
   /** Stage 3D: during closing, only this poster may be focusable. */
   closingFocusMovieId?: string | null;
   /**
@@ -125,6 +130,7 @@ export function MoviePosterGrid({
   restorationToken = null,
   restoreScrollBlocked = false,
   viewportRestoreCommand = null,
+  allowOffscreenInitialRestore = true,
   closingFocusMovieId = null,
   postRestorePreferredMovieId = null,
   pinnedHighlightMovieId = null,
@@ -333,6 +339,19 @@ export function MoviePosterGrid({
     if (restoreScrollBlocked || !viewportRestoreCommand) {
       return;
     }
+    // Stage 4.2G: natural/fast path must never execute initial-detail-restore.
+    if (!allowOffscreenInitialRestore && viewportRestoreCommand.reason === 'initial') {
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Scroll', 'fast_path_initial_restore_violation', {
+          token: viewportRestoreCommand.token,
+          reason: 'initial-detail-restore',
+          source: 'MoviePosterGrid.viewportRestoreCommand',
+          requestedOffset: viewportRestoreCommand.offset,
+          currentOffset: currentOffsetRef.current,
+        });
+      }
+      return;
+    }
     const commandKey = `${viewportRestoreCommand.token}:${viewportRestoreCommand.reason}`;
     if (viewportRestoreIssuedKeyRef.current === commandKey) {
       return;
@@ -431,6 +450,7 @@ export function MoviePosterGrid({
       viewportRestoreIssuedKeyRef.current = null;
     }
   }, [
+    allowOffscreenInitialRestore,
     restoreMovieId,
     restoreMovieIndex,
     restoreScrollBlocked,
@@ -444,8 +464,10 @@ export function MoviePosterGrid({
   // Offscreen-at-open fallback: restore the saved window with offset only.
   // Never top-row-align the target. Snapshot-visible targets must not use
   // index positioning even if live viewability is stale.
+  // Stage 4.2G: disabled for natural/fast mounted return (no initial restore).
   useEffect(() => {
     if (
+      !allowOffscreenInitialRestore ||
       restoreScrollBlocked ||
       viewportRestoreCommand ||
       snapshotTargetWasVisible ||
@@ -493,6 +515,7 @@ export function MoviePosterGrid({
       restorationScrollIssuedRef.current = null;
     }
   }, [
+    allowOffscreenInitialRestore,
     restoreMovieId,
     restoreMovieIndex,
     restoreScrollBlocked,

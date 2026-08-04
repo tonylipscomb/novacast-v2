@@ -265,7 +265,7 @@ test('duplicate zero-delta initial restore is prevented', () => {
 
 test('handoff scrim covers browse during corrective scroll', () => {
   assert.match(overlay, /backgroundScrimHandoff/);
-  assert.match(overlay, /focusHandoffActive && styles\.backgroundScrimHandoff/);
+  assert.match(overlay, /holdCoverActive && styles\.backgroundScrimHandoff/);
 });
 
 test('snapshot visibility helper still supports mounted-window targets', () => {

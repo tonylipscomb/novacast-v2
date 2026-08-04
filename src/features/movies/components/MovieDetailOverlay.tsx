@@ -76,6 +76,8 @@ export type MovieDetailOverlayProps = {
   visible: boolean;
   keepFocusTrap?: boolean;
   focusHandoffActive?: boolean;
+  /** Stage 4.2G: keep card + blur fully opaque until focus/offset confirm. */
+  visualHoldActive?: boolean;
   closeTargetRef?: RefObject<ElementRef<typeof Pressable> | null>;
   blurTarget?: RefObject<View | null>;
   detail: MediaDetail | null;
@@ -273,6 +275,7 @@ function MovieDetailOverlayComponent({
   visible,
   keepFocusTrap = false,
   focusHandoffActive = false,
+  visualHoldActive = false,
   closeTargetRef,
   blurTarget,
   detail,
@@ -474,6 +477,13 @@ function MovieDetailOverlayComponent({
   const actionGraphKey = actionIds.join('|');
 
   useEffect(() => {
+    // Stage 4.2G: visual hold keeps opacity fully on — never fade during handoff.
+    if (visualHoldActive) {
+      wasVisibleRef.current = true;
+      progress.value = 1;
+      return;
+    }
+
     if (!visible) {
       wasVisibleRef.current = false;
       progress.value = 0;
@@ -537,7 +547,16 @@ function MovieDetailOverlayComponent({
       clearTimeout(focusTimer);
       stopFocusRetry();
     };
-  }, [actionGraphKey, detail?.id, firstAction, focusHandoffActive, progress, reducedMotion, visible]);
+  }, [
+    actionGraphKey,
+    detail?.id,
+    firstAction,
+    focusHandoffActive,
+    progress,
+    reducedMotion,
+    visible,
+    visualHoldActive,
+  ]);
 
   useEffect(() => {
     if (!visible) return;
@@ -618,9 +637,11 @@ function MovieDetailOverlayComponent({
   }>;
 
   if (!detail) return null;
-  if (!visible && !keepFocusTrap) return null;
+  // Stage 4.2G: stay mounted + fully painted while visual hold is active.
+  if (!visible && !keepFocusTrap && !visualHoldActive) return null;
 
-  const panelVisible = visible;
+  const panelVisible = visible || visualHoldActive;
+  const holdCoverActive = focusHandoffActive || visualHoldActive;
 
   const renderAction = (id: ActionId) => {
     const index = actionIds.indexOf(id);
@@ -675,13 +696,13 @@ function MovieDetailOverlayComponent({
         id={id}
         label={label}
         icon={icon}
-        onPress={focusHandoffActive ? undefined : onPress}
+        onPress={holdCoverActive ? undefined : onPress}
         primary={id === 'play'}
         compact={id !== 'play'}
-        preferred={!focusHandoffActive && id === firstAction}
+        preferred={!holdCoverActive && id === firstAction}
         selected={isSelected}
         focused={isFocused}
-        disabled={focusHandoffActive || (id === 'trailer' && !onTrailerPress)}
+        disabled={holdCoverActive || (id === 'trailer' && !onTrailerPress)}
         buttonRef={(instance) => {
           if (instance) {
             actionRefs.current.set(id, instance);
@@ -709,16 +730,16 @@ function MovieDetailOverlayComponent({
 
   const playFocusHandle =
     (firstAction ? actionHandles[firstAction] : undefined) ?? actionHandles.play ?? closeHandle;
-  const closeFocusable = panelVisible && !focusHandoffActive;
+  const closeFocusable = panelVisible && !holdCoverActive;
 
   return (
     <View
       style={[styles.root, !panelVisible && styles.rootHidden]}
-      pointerEvents={focusHandoffActive ? 'box-none' : panelVisible ? 'auto' : 'none'}
-      accessibilityViewIsModal={panelVisible && !focusHandoffActive}
-      importantForAccessibility={panelVisible && !focusHandoffActive ? 'yes' : 'no-hide-descendants'}>
+      pointerEvents={holdCoverActive ? 'box-none' : panelVisible ? 'auto' : 'none'}
+      accessibilityViewIsModal={panelVisible && !holdCoverActive}
+      importantForAccessibility={panelVisible && !holdCoverActive ? 'yes' : 'no-hide-descendants'}>
 
-      {focusHandoffActive ? (
+      {holdCoverActive ? (
         <Pressable
           ref={closeTargetRef}
           focusable
@@ -731,10 +752,10 @@ function MovieDetailOverlayComponent({
 
       {/* Full-screen blur of the mounted Movies grid — never focusable. */}
       <Animated.View
-        entering={FadeIn.duration(MOVIE_DETAIL_BLUR_MS)}
-        exiting={FadeOut.duration(MOVIE_DETAIL_CLOSE_MS)}
-        style={[StyleSheet.absoluteFill, blurStyle]}
-        pointerEvents={panelVisible && !focusHandoffActive ? 'auto' : 'none'}
+        entering={visualHoldActive ? undefined : FadeIn.duration(MOVIE_DETAIL_BLUR_MS)}
+        exiting={visualHoldActive ? undefined : FadeOut.duration(MOVIE_DETAIL_CLOSE_MS)}
+        style={[StyleSheet.absoluteFill, visualHoldActive ? undefined : blurStyle, visualHoldActive && styles.visualHoldOpaque]}
+        pointerEvents={panelVisible && !holdCoverActive ? 'auto' : 'none'}
         focusable={false}
         accessible={false}
         importantForAccessibility="no-hide-descendants">
@@ -756,7 +777,11 @@ function MovieDetailOverlayComponent({
           />
         )}
         <View
-          style={[styles.backgroundScrim, focusHandoffActive && styles.backgroundScrimHandoff]}
+          style={[
+            styles.backgroundScrim,
+            holdCoverActive && styles.backgroundScrimHandoff,
+            visualHoldActive && styles.backgroundScrimVisualHold,
+          ]}
           pointerEvents="none"
           focusable={false}
         />
@@ -764,10 +789,10 @@ function MovieDetailOverlayComponent({
 
       <FocusBoundaryView
         style={styles.focusBoundary}
-        {...(Platform.OS === 'android' && !focusHandoffActive
+        {...(Platform.OS === 'android' && !holdCoverActive
           ? { autoFocus: true, trapFocusLeft: true, trapFocusRight: true, trapFocusUp: true, trapFocusDown: true }
           : {})}
-        pointerEvents={focusHandoffActive ? 'none' : 'auto'}>
+        pointerEvents={holdCoverActive ? 'none' : 'auto'}>
         <Animated.View
           style={[
             styles.compactCard,
@@ -777,7 +802,7 @@ function MovieDetailOverlayComponent({
               height: cardSize.height,
               maxHeight: cardSize.height,
             },
-            shellStyle,
+            visualHoldActive ? styles.visualHoldOpaque : shellStyle,
           ]}>
           <View style={styles.cardGlassFill} pointerEvents="none" />
 
@@ -967,9 +992,16 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(4, 7, 12, 0.62)',
   },
-  /** Stage 4.2F: hide native +72 focus drift / corrective scroll under cover. */
+  /** Stage 4.2F/G: hide native focus drift / corrective scroll under cover. */
   backgroundScrimHandoff: {
     backgroundColor: 'rgba(4, 7, 12, 0.94)',
+  },
+  /** Stage 4.2G: fully opaque handoff scrim (no black flash — matches detail card tone). */
+  backgroundScrimVisualHold: {
+    backgroundColor: 'rgba(8, 12, 20, 0.98)',
+  },
+  visualHoldOpaque: {
+    opacity: 1,
   },
   focusBoundary: {
     width: '100%',

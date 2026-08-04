@@ -1,11 +1,17 @@
 /**
- * Stage 3D / 3D.1 — Movies-only detail focus lifecycle.
+ * Stage 3D / 3D.1 / 4.2G — Movies-only detail focus lifecycle.
  * Pure helpers + diagnostics. MoviesScreen is the sole coordinator.
+ *
+ * Stage 4.2G natural return (mounted poster):
+ *   detail-open → return-focus-requested → return-focus-confirmed → browse-restored → browse
+ * Fallback (unmounted / generation change / etc.) retains closing-prepare → viewport → focus.
  */
 
 export type MoviesDetailFocusPhase =
   | 'browse'
   | 'detail-open'
+  | 'return-focus-requested'
+  | 'return-focus-confirmed'
   | 'closing-prepare'
   | 'closing-viewport'
   | 'closing-focus'
@@ -290,6 +296,24 @@ export function isMoviesDetailReturnFastPath(path: MoviesDetailReturnPath | null
   return path === 'fast-mounted-target';
 }
 
+/**
+ * Stage 4.2G natural mounted return: never emit initial-detail-restore or
+ * enter closing-viewport. Corrective scroll only after measured native drift.
+ */
+export function shouldUseMoviesNaturalReturnPath(
+  path: MoviesDetailReturnPath | null | undefined,
+): boolean {
+  return isMoviesDetailReturnFastPath(path);
+}
+
+/** Fast-path initial restore is a hard violation after Stage 4.2G. */
+export function isMoviesFastPathInitialRestoreViolation(input: {
+  returnPath: MoviesDetailReturnPath | null | undefined;
+  reason: 'initial' | 'corrective' | string;
+}): boolean {
+  return isMoviesDetailReturnFastPath(input.returnPath) && input.reason === 'initial';
+}
+
 export function shouldIssueMoviesInitialDetailRestore(
   path: MoviesDetailReturnPath | null | undefined,
 ): boolean {
@@ -321,8 +345,13 @@ export function resolveMoviesDetailReturnMaxViewportRestores(
     : MOVIES_MAX_VIEWPORT_RESTORES;
 }
 
+export function isMoviesNaturalReturnPhase(phase: MoviesDetailFocusPhase): boolean {
+  return phase === 'return-focus-requested' || phase === 'return-focus-confirmed';
+}
+
 export function isMoviesDetailClosingPhase(phase: MoviesDetailFocusPhase): boolean {
   return (
+    isMoviesNaturalReturnPhase(phase) ||
     phase === 'closing-prepare' ||
     phase === 'closing-viewport' ||
     phase === 'closing-focus' ||
@@ -330,9 +359,14 @@ export function isMoviesDetailClosingPhase(phase: MoviesDetailFocusPhase): boole
   );
 }
 
-/** Overlay stays mounted for open + every closing phase until exact confirm. */
+/** Overlay stays mounted for open + every closing/return phase until exact confirm. */
 export function isMoviesDetailOverlayMounted(phase: MoviesDetailFocusPhase): boolean {
   return phase === 'detail-open' || isMoviesDetailClosingPhase(phase);
+}
+
+/** Stage 4.2G: hold Detail fully opaque until focus + offset are confirmed. */
+export function shouldHoldMoviesDetailVisual(phase: MoviesDetailFocusPhase): boolean {
+  return isMoviesNaturalReturnPhase(phase) || phase === 'closing-confirm';
 }
 
 /**

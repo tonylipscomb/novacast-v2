@@ -93,6 +93,7 @@ export async function assessActiveMoviesCatalogIntegrity(
   ]);
 
   const integrity = assessMoviesCatalogIntegrity({
+    generation,
     metadataCategoryCount: physical.categoryRows,
     nonzeroCategoryCount: largest.nonzeroCategoryCount,
     distinctItemCategoryIds: physical.distinctItemCategoryIds,
@@ -124,26 +125,31 @@ export type MoviesSparseRepairScheduleFn = (input: {
  * If the active readable Movies generation is sparse/degraded, invalidate the
  * cached filter capability and schedule a Movies-only full-dump repair once.
  */
+/** Clear in-flight repair UI/schedule after a healthy generation activates. */
+export function clearMoviesSparseRepairSchedule(providerId: string) {
+  repairScheduled.delete(providerId);
+  setMoviesCatalogRepairingUi(providerId, false);
+}
+
 export async function repairDegradedMoviesCatalogIfNeeded(
   providerId: string,
   scheduleRepair: MoviesSparseRepairScheduleFn,
 ): Promise<'healthy' | 'repairing' | 'skipped'> {
-  if (repairInFlight.has(providerId) || repairScheduled.has(providerId)) {
-    if (repairScheduled.has(providerId)) {
-      setMoviesCatalogRepairingUi(providerId, true);
-      return 'repairing';
-    }
+  if (repairInFlight.has(providerId)) {
     return 'skipped';
+  }
+  if (repairScheduled.has(providerId)) {
+    // Repair already kicked off this session — wait for activation; do not relaunch.
+    return 'repairing';
   }
 
   const assessment = await assessActiveMoviesCatalogIntegrity(providerId);
   if (!assessment.degraded || assessment.generation <= 0) {
-    setMoviesCatalogRepairingUi(providerId, false);
+    clearMoviesSparseRepairSchedule(providerId);
     return 'healthy';
   }
   if (assessment.alreadyRepaired) {
-    // Bound: do not launch-loop. Still hide the bad rail while a sync may run.
-    setMoviesCatalogRepairingUi(providerId, true);
+    // Bound once per degraded generation — never launch gen N+1 for the same reason.
     return 'skipped';
   }
 

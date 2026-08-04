@@ -165,6 +165,8 @@ export function validateMoviesCategoryDistribution(input: {
 
 /** Integrity check for an already-active readable generation (startup repair). */
 export function assessMoviesCatalogIntegrity(input: {
+  /** Actual readable generation under assessment — never invent 0 when known. */
+  generation?: number;
   metadataCategoryCount: number;
   nonzeroCategoryCount: number;
   distinctItemCategoryIds: number;
@@ -172,7 +174,8 @@ export function assessMoviesCatalogIntegrity(input: {
   largestCategoryShare?: number;
 }): { healthy: boolean; degraded: boolean; reason: string | null } {
   const check = validateMoviesCategoryDistribution({
-    generation: 0,
+    generation:
+      typeof input.generation === 'number' && input.generation > 0 ? input.generation : 0,
     totalItems: input.totalItems,
     distinctCategoryIds: input.distinctItemCategoryIds,
     metadataCategoryCount: input.metadataCategoryCount,

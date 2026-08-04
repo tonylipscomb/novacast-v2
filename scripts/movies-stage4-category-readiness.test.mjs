@@ -199,7 +199,7 @@ test('selection helpers still work for completed usable categories', () => {
     rememberedCategoryId: null,
   });
   assert.equal(first.selectedCategoryId, '10');
-  assert.equal(first.reason, 'first-provider-category');
+  assert.equal(first.reason, 'first-populated-provider-category');
 
   const preserved = resolveMoviesInitialCategory({
     categories: completedCats,
@@ -237,8 +237,17 @@ test('catalog-not-ready pending is distinct from completed-empty loadStatus', ()
 test('Stage 4.2D sparse active generation shows repairing, not empty rail', () => {
   assert.match(sqlite, /repairing-sparse-generation/);
   assert.match(sqlite, /repairDegradedMoviesCatalogIfNeeded/);
-  assert.match(model, /isMoviesCatalogRepairing/);
-  assert.match(model, /repairing-sparse-generation/);
+  assert.match(model, /isMoviesCatalogRepairing|clearMoviesSparseRepairSchedule/);
+  assert.match(model, /repairing-sparse-generation|atomic_generation_swap/);
   assert.match(loader, /Repairing movie library…/);
   assert.match(moviesScreen, /catalogRepairing/);
+});
+
+test('Stage 4.2E preserving path pins categoriesGeneration to readable item generation', () => {
+  assert.match(sqlite, /categoryReadGeneration = itemsGeneration/);
+  assert.match(sqlite, /categoriesGeneration: itemsGeneration/);
+  assert.match(sqlite, /generationAligned: true/);
+  assert.match(sqlite, /filterInteractiveMovieCategories/);
+  assert.match(sqlite, /stage4e-atomic-generation-pinning-v1/);
+  assert.match(model, /atomic_generation_swap_committed|atomicBrowseCommitRef/);
 });

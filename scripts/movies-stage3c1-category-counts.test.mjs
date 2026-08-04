@@ -158,10 +158,14 @@ test('All Movies count comes from total rows and counts appear without selection
   assert.equal(all?.countKnown, true);
 
   const provider = categories.filter((category) => category.id !== 'all');
-  // Stage 4: zero-count metadata categories remain visible for the rail.
-  assert.equal(provider.length, 3);
+  // Stage 4.2E: known-zero metadata categories are hidden from the interactive rail.
+  assert.equal(provider.length, 2);
   assert.ok(provider.every((category) => category.countKnown === true));
-  assert.ok(provider.some((category) => category.id === 'c3' && category.count === 0));
+  assert.ok(provider.every((category) => category.count > 0));
+  assert.equal(
+    provider.some((category) => category.id === 'c3'),
+    false,
+  );
   assert.equal(await getCatalogTotalCount('p1', 'movie'), 3);
 });
 
@@ -170,7 +174,7 @@ test('category 0 placeholders are replaced before interaction', async () => {
   const source = createSqliteMovieDataSource('p1');
   const categories = await source.getCategories();
   assert.ok(categories.every((category) => category.countKnown !== false));
-  assert.ok(categories.some((category) => category.id === 'c3' && category.count === 0));
+  assert.ok(categories.every((category) => category.id === 'all' || category.count > 0));
   assert.match(countPolicy, /countKnown === false/);
   assert.match(countPolicy, /return '\.\.\.'/);
 });

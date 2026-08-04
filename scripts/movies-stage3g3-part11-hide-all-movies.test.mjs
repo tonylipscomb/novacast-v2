@@ -50,7 +50,7 @@ test('3. first nonzero provider category is selected once', () => {
     rememberedCategoryId: 'all',
   });
   assert.equal(decision.selectedCategoryId, 'cat-b');
-  assert.equal(decision.reason, 'first-provider-category');
+  assert.equal(decision.reason, 'first-populated-provider-category');
   assert.equal(decision.usedAllMoviesFallback, false);
   assert.equal(decision.shouldLog, true);
 });
@@ -164,7 +164,7 @@ test('11. Stage 3G.3 Search behavior remains unchanged', () => {
 
 test('12. diagnostics + guard wiring', () => {
   assert.match(helper, /\[NovaCast Movies Initial Category\]/);
-  assert.match(helper, /first-provider-category/);
+  assert.match(helper, /first-populated-provider-category/);
   assert.match(helper, /no-visible-categories/);
   assert.match(model, /logMoviesInitialCategory/);
   assert.match(model, /decision\.shouldLog/);

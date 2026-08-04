@@ -25,6 +25,7 @@ import {
   resolveMoviesCatalogReadiness,
 } from './moviesCatalogReadiness';
 import {
+  clearMoviesSparseRepairSchedule,
   isMoviesCatalogRepairing,
   setMoviesCatalogRepairingUi,
 } from './moviesSparseCatalogRepair';
@@ -253,6 +254,8 @@ export function useMoviesScreenModel(
   const categoryCountQueueRef = useRef<ReturnType<typeof createSerialCategoryCountQueue> | null>(null);
   const detailRequestIdRef = useRef(0);
   const [reloadToken, setReloadToken] = useState(0);
+  /** Stage 4.2E: skip the follow-up page effect after an atomic generation swap. */
+  const atomicBrowseCommitRef = useRef<{ categoryId: string; generation: number } | null>(null);
 
   const updateVisibleMovies = useCallback(
     (
@@ -643,14 +646,104 @@ export function useMoviesScreenModel(
         providerId: activeProviderId,
         generation,
       });
-      // Fresh generation activated — clear sparse-repair UI and reload the rail.
+      // Fresh generation activated — clear sparse-repair UI and atomically swap the rail + page.
+      clearMoviesSparseRepairSchedule(activeProviderId);
       setMoviesCatalogRepairingUi(activeProviderId, false);
       setCatalogRepairing(false);
-      // Item generation is now readable — reload categories, select initial category,
-      // and let the first-page effect arm against the completed generation.
       setLoadStatus((current) => (current === 'error' ? current : 'loading'));
-      void loadCategories();
-      reloadSmartCategoryGridIfNeeded();
+
+      void (async () => {
+        if (!resolvedDataSource) {
+          return;
+        }
+        const previousCategoryId = selectedCategoryIdRef.current;
+        const nextCategories = await resolvedDataSource.getCategories();
+        if (!mounted) {
+          return;
+        }
+        const warmedCategories = warmUnresolvedCategoryCounts(nextCategories);
+        const decision = resolveMoviesInitialCategory({
+          categories: warmedCategories,
+          previousCategoryId,
+          rememberedCategoryId: options.initialSelectedCategoryId ?? providerMemory.selectedCategoryId,
+        });
+        let selectedId = decision.selectedCategoryId;
+        let page =
+          selectedId && !selectedId.startsWith('section:')
+            ? await resolvedDataSource.getMoviesPage({
+                categoryId: selectedId,
+                offset: 0,
+                limit: MOVIE_PAGE_SIZE,
+                sort: getMoviesSettingsSync().movieSortOption,
+              })
+            : { items: [], totalCount: 0, hasMore: false };
+
+        // If the kept selection somehow has no rows, re-pick first populated before paint.
+        if (
+          page.items.length === 0 &&
+          selectedId &&
+          selectedId !== ALL_MOVIES_CATEGORY_ID &&
+          !selectedId.startsWith('smart:')
+        ) {
+          const fallback = resolveMoviesInitialCategory({
+            categories: warmedCategories,
+            previousCategoryId: null,
+            rememberedCategoryId: null,
+          });
+          if (fallback.selectedCategoryId !== selectedId) {
+            selectedId = fallback.selectedCategoryId;
+            page = await resolvedDataSource.getMoviesPage({
+              categoryId: selectedId,
+              offset: 0,
+              limit: MOVIE_PAGE_SIZE,
+              sort: getMoviesSettingsSync().movieSortOption,
+            });
+          }
+        }
+
+        if (!mounted) {
+          return;
+        }
+
+        atomicBrowseCommitRef.current = { categoryId: selectedId, generation };
+        setCatalogRepairing(false);
+        setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
+        setSelectedCategoryId(selectedId);
+        rememberMoviesScreenMemory(activeProviderId, { selectedCategoryId: selectedId });
+        offsetRef.current = page.items.length;
+        updateVisibleMovies(page.items, 'atomic-generation-swap');
+        setHasMore(page.hasMore);
+        setFocusedMovieId(page.items[0]?.id ?? null);
+        setLoadStatus(page.items.length > 0 ? 'ready' : 'empty');
+        setLoading(false);
+        setCategoryLoading(false);
+        setFirstPageLoadGate({
+          loadingCategoryId: selectedId,
+          loadingRequestToken: `atomic:${generation}:${selectedId}`,
+          firstPageResolvedCategoryId: selectedId,
+        });
+        logMoviesPerf('atomic_generation_swap_committed', {
+          providerId: activeProviderId,
+          generation,
+          selectedCategoryId: selectedId,
+          categoryCount: warmedCategories.length,
+          itemCount: page.items.length,
+          previousCategoryId,
+          marker: 'stage4e-atomic-generation-pinning-v1',
+        });
+        if (decision.shouldLog || previousCategoryId !== selectedId) {
+          logMoviesInitialCategory({
+            providerId: activeProviderId,
+            readableGeneration: generation,
+            previousCategoryId: previousCategoryId || null,
+            selectedCategoryId: selectedId,
+            visibleCategoryCount: decision.visibleCategoryCount,
+            usedAllMoviesFallback: decision.usedAllMoviesFallback,
+            reason: decision.reason,
+          });
+        }
+        reloadSmartCategoryGridIfNeeded();
+      })();
     });
 
     const unsubscribeCounts = subscribeCategoryCountIndex(() => {
@@ -719,6 +812,15 @@ export function useMoviesScreenModel(
 
   useEffect(() => {
     if (!resolvedDataSource || (!isSearchMode && (!selectedCategoryId || selectedCategoryId.startsWith('section:')))) {
+      return;
+    }
+
+    // Stage 4.2E: atomic generation swap already committed categories + first page together.
+    if (
+      atomicBrowseCommitRef.current &&
+      atomicBrowseCommitRef.current.categoryId === selectedCategoryId
+    ) {
+      atomicBrowseCommitRef.current = null;
       return;
     }
 

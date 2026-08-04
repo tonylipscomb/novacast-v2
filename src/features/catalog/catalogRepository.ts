@@ -1618,14 +1618,28 @@ export async function getCatalogCategoryCounts(
       merged.length <= 2 &&
       merged.length < metadataRows.length * 0.2;
 
+    const nonzeroCategoryCount = groupedCountRows.filter(
+      (row) => asNumber(row.item_count) > 0,
+    ).length;
+    const zeroCountCategoryCount = Math.max(0, metadataRows.length - nonzeroCategoryCount);
+    const interactiveCategoryCount = includeZeroCountCategories
+      ? nonzeroCategoryCount
+      : merged.length;
+
     console.info(
       '[NovaCast Movies Category Counts] ' +
         JSON.stringify({
           providerId,
           readableGeneration: generation,
+          categoriesGeneration: generation,
+          itemsGeneration: generation,
+          generationAligned: true,
+          metadataCategoryCount: metadataRows.length,
           categoryMetadataCount: metadataRows.length,
           groupedCountRows: groupedCountRows.length,
-          nonzeroCategoryCount: merged.length,
+          nonzeroCategoryCount,
+          zeroCountCategoryCount,
+          interactiveCategoryCount,
           appliedCategoryCount: merged.length,
           allMoviesTotal,
           collapsedCategoryIds: looksCollapsed,
@@ -1638,7 +1652,7 @@ export async function getCatalogCategoryCounts(
             : includeZeroCountCategories
               ? 'grouped-items-v2-metadata-including-zero'
               : 'grouped-items-v2-merge',
-          marker: 'stage3c2-vod-full-dump-sync-v1',
+          marker: 'stage4e-atomic-generation-pinning-v1',
         }),
     );
 

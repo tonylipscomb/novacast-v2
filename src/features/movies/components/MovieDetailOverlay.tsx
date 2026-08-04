@@ -78,6 +78,13 @@ export type MovieDetailOverlayProps = {
   focusHandoffActive?: boolean;
   /** Stage 4.2G: keep card + blur fully opaque until focus/offset confirm. */
   visualHoldActive?: boolean;
+  /**
+   * Stage 4.2H: X currently owns focus — keep Close native-focusable during handoff
+   * and do not mount the hidden handoff sentinel.
+   */
+  preserveCloseButtonFocus?: boolean;
+  /** Stage 4.2H: duplicate X activation lock (onPress + onClick). */
+  closeActivationLocked?: boolean;
   closeTargetRef?: RefObject<ElementRef<typeof Pressable> | null>;
   blurTarget?: RefObject<View | null>;
   detail: MediaDetail | null;
@@ -276,6 +283,8 @@ function MovieDetailOverlayComponent({
   keepFocusTrap = false,
   focusHandoffActive = false,
   visualHoldActive = false,
+  preserveCloseButtonFocus = false,
+  closeActivationLocked = false,
   closeTargetRef,
   blurTarget,
   detail,
@@ -418,7 +427,8 @@ function MovieDetailOverlayComponent({
   }, [onPlay]);
 
   const invokeClose = useCallback(() => {
-    if (!visible || focusHandoffActive) return;
+    // Stage 4.2H: lock duplicate X activation without making Close non-focusable.
+    if (!visible || closeActivationLocked || focusHandoffActive) return;
     const now = Date.now();
     if (now - lastCloseInvokeAtRef.current < 400) return;
     lastCloseInvokeAtRef.current = now;
@@ -429,7 +439,7 @@ function MovieDetailOverlayComponent({
       reason: 'close-button',
     });
     onClose();
-  }, [detail?.id, focusHandoffActive, onClose, visible]);
+  }, [closeActivationLocked, detail?.id, focusHandoffActive, onClose, visible]);
 
   const reactNativeTv = ReactNative as typeof ReactNative & {
     useTVEventHandler?: (handler: (event: TvEventPayload) => void) => void;
@@ -642,6 +652,9 @@ function MovieDetailOverlayComponent({
 
   const panelVisible = visible || visualHoldActive;
   const holdCoverActive = focusHandoffActive || visualHoldActive;
+  // Stage 4.2H: X-owned handoff keeps Close native-focusable; no hidden sentinel.
+  const xOwnedHandoff = preserveCloseButtonFocus && holdCoverActive;
+  const mountHiddenHandoffTarget = holdCoverActive && !preserveCloseButtonFocus;
 
   const renderAction = (id: ActionId) => {
     const index = actionIds.indexOf(id);
@@ -730,7 +743,14 @@ function MovieDetailOverlayComponent({
 
   const playFocusHandle =
     (firstAction ? actionHandles[firstAction] : undefined) ?? actionHandles.play ?? closeHandle;
-  const closeFocusable = panelVisible && !holdCoverActive;
+  // Stage 4.2H: never strip Close focusability while X owns the handoff.
+  // Duplicate activation is locked via closeActivationLocked / invokeClose — not via focusable=false.
+  const closeFocusable = panelVisible && (!holdCoverActive || preserveCloseButtonFocus);
+  const focusBoundaryPointerEvents = xOwnedHandoff
+    ? 'box-none'
+    : holdCoverActive
+      ? 'none'
+      : 'auto';
 
   return (
     <View
@@ -739,7 +759,7 @@ function MovieDetailOverlayComponent({
       accessibilityViewIsModal={panelVisible && !holdCoverActive}
       importantForAccessibility={panelVisible && !holdCoverActive ? 'yes' : 'no-hide-descendants'}>
 
-      {holdCoverActive ? (
+      {mountHiddenHandoffTarget ? (
         <Pressable
           ref={closeTargetRef}
           focusable
@@ -792,7 +812,7 @@ function MovieDetailOverlayComponent({
         {...(Platform.OS === 'android' && !holdCoverActive
           ? { autoFocus: true, trapFocusLeft: true, trapFocusRight: true, trapFocusUp: true, trapFocusDown: true }
           : {})}
-        pointerEvents={holdCoverActive ? 'none' : 'auto'}>
+        pointerEvents={focusBoundaryPointerEvents}>
         <Animated.View
           style={[
             styles.compactCard,

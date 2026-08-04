@@ -2,23 +2,37 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
+import { setTimeout as delay } from 'node:timers/promises';
+
 import {
   beginOnnMoviesTrace,
   clearOnnMoviesTraceForTests,
   endOnnMoviesTrace,
   getActiveOnnMoviesTraceId,
+  getOnnMoviesTraceAutoDurationMs,
+  getOnnMoviesTraceAutoScenario,
   getOnnMoviesTraceTestState,
   isOnnMoviesTraceEnabled,
+  maybeBeginOnnMoviesAutoTrace,
+  maybeEndOnnMoviesAutoTraceOnBackground,
   nextOnnMoviesGridInstanceId,
+  ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS,
   sanitizeOnnMoviesTracePayload,
   setOnnMoviesGridMounted,
   setOnnMoviesTraceEnabledForTests,
+  setOnnMoviesTraceStartedAtForTests,
   startOnnMoviesScenario,
   traceOnnMoviesCategoriesCleared,
   traceOnnMoviesEvent,
   traceOnnMoviesScrollCommand,
   wrapOnnMoviesBackHandler,
 } from '../src/features/diagnostics/onnMoviesTrace.ts';
+
+function parseTraceLogs(logs) {
+  return logs
+    .filter((line) => line.includes('[NovaCast ONN Trace]'))
+    .map((line) => JSON.parse(line.replace('[NovaCast ONN Trace] ', '')));
+}
 
 const SOURCE = {
   trace: fs.readFileSync('src/features/diagnostics/onnMoviesTrace.ts', 'utf8'),
@@ -43,6 +57,8 @@ const SOURCE = {
 test.afterEach(() => {
   clearOnnMoviesTraceForTests();
   delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE;
+  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO;
+  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS;
 });
 
 test('trace helper is disabled by default', () => {
@@ -250,4 +266,140 @@ test('scenario helper and back handlers are wired for ONN collection', () => {
   assert.match(SOURCE.trace, /__NOVACAST_ONN_MOVIES_TRACE__/);
   assert.match(SOURCE.screen, /movie_grid_gate_changed/);
   assert.match(SOURCE.grid, /traceOnnMoviesScrollCommand/);
+});
+
+test('auto trace is disabled by default', () => {
+  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE;
+  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO;
+  clearOnnMoviesTraceForTests();
+  assert.equal(isOnnMoviesTraceEnabled(), false);
+  assert.equal(getOnnMoviesTraceAutoScenario(), null);
+  assert.equal(maybeBeginOnnMoviesAutoTrace({ source: 'MoviesScreen' }), null);
+  assert.equal(getActiveOnnMoviesTraceId(), null);
+});
+
+test('auto trace begins once only for AUTO_SCENARIO', () => {
+  setOnnMoviesTraceEnabledForTests(true);
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO = 'onn-audit-pass-1';
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS = '600000';
+
+  const logs = [];
+  const original = console.info;
+  console.info = (...args) => logs.push(args.join(' '));
+  try {
+    const first = maybeBeginOnnMoviesAutoTrace({ source: 'MoviesScreen' });
+    const second = maybeBeginOnnMoviesAutoTrace({ source: 'MoviesScreen' });
+    assert.ok(first);
+    assert.equal(second, first);
+    assert.match(first, /^onn-\d{8}-\d{6}-onn-audit-pass-1$/);
+  } finally {
+    console.info = original;
+  }
+
+  const started = parseTraceLogs(logs).filter((row) => row.event === 'auto_trace_started');
+  assert.equal(started.length, 1);
+  assert.equal(started[0].payload.scenario, 'onn-audit-pass-1');
+  assert.equal(started[0].payload.source, 'MoviesScreen');
+  assert.equal(getOnnMoviesTraceTestState().autoTraceAttemptedThisProcess, true);
+});
+
+test('invalid AUTO_DURATION_MS uses default 600000', () => {
+  setOnnMoviesTraceEnabledForTests(true);
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS = 'not-a-number';
+  assert.equal(getOnnMoviesTraceAutoDurationMs(), ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS);
+
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS = '-5';
+  assert.equal(getOnnMoviesTraceAutoDurationMs(), ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS);
+
+  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS;
+  assert.equal(getOnnMoviesTraceAutoDurationMs(), 600000);
+});
+
+test('auto trace timeout ends the active trace', async () => {
+  setOnnMoviesTraceEnabledForTests(true);
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO = 'onn-audit-pass-1';
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS = '30';
+
+  const logs = [];
+  const original = console.info;
+  console.info = (...args) => logs.push(args.join(' '));
+  try {
+    const id = maybeBeginOnnMoviesAutoTrace({ source: 'MoviesScreen' });
+    assert.ok(id);
+    assert.equal(getActiveOnnMoviesTraceId(), id);
+    await delay(80);
+    assert.equal(getActiveOnnMoviesTraceId(), null);
+  } finally {
+    console.info = original;
+  }
+
+  const parsed = parseTraceLogs(logs);
+  assert.ok(parsed.some((row) => row.event === 'auto_trace_timeout'));
+  assert.ok(
+    parsed.some((row) => row.event === 'trace_end' && row.payload.result === 'auto-timeout'),
+  );
+});
+
+test('MoviesScreen remount/rerender path does not restart auto trace', () => {
+  setOnnMoviesTraceEnabledForTests(true);
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO = 'onn-audit-pass-1';
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS = '600000';
+
+  const logs = [];
+  const original = console.info;
+  console.info = (...args) => logs.push(args.join(' '));
+  try {
+    // Simulate first mount + later remount/rerender effect invocations.
+    maybeBeginOnnMoviesAutoTrace({ source: 'MoviesScreen' });
+    maybeBeginOnnMoviesAutoTrace({ source: 'MoviesScreen' });
+    maybeBeginOnnMoviesAutoTrace({ source: 'MoviesScreen' });
+  } finally {
+    console.info = original;
+  }
+
+  const started = parseTraceLogs(logs).filter((row) => row.event === 'auto_trace_started');
+  const begins = parseTraceLogs(logs).filter((row) => row.event === 'trace_begin');
+  assert.equal(started.length, 1);
+  assert.equal(begins.length, 1);
+  assert.match(SOURCE.screen, /maybeBeginOnnMoviesAutoTrace/);
+  assert.match(SOURCE.screen, /subscribeAppState/);
+});
+
+test('auto background end requires 10s elapsed and does not touch product state', () => {
+  setOnnMoviesTraceEnabledForTests(true);
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO = 'onn-audit-pass-1';
+  process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS = '600000';
+
+  const productState = { route: 'movies', selectedCategoryId: '287', mutated: false };
+  const logs = [];
+  const original = console.info;
+  console.info = (...args) => logs.push(args.join(' '));
+  try {
+    maybeBeginOnnMoviesAutoTrace({ source: 'MoviesScreen' });
+    assert.equal(maybeEndOnnMoviesAutoTraceOnBackground('background'), false);
+    assert.ok(getActiveOnnMoviesTraceId());
+
+    setOnnMoviesTraceStartedAtForTests(Date.now() - 11_000);
+    assert.equal(maybeEndOnnMoviesAutoTraceOnBackground('background'), true);
+    assert.equal(getActiveOnnMoviesTraceId(), null);
+  } finally {
+    console.info = original;
+  }
+
+  assert.equal(productState.route, 'movies');
+  assert.equal(productState.selectedCategoryId, '287');
+  assert.equal(productState.mutated, false);
+
+  const parsed = parseTraceLogs(logs);
+  assert.ok(parsed.some((row) => row.event === 'auto_trace_app_background'));
+  assert.ok(
+    parsed.some((row) => row.event === 'trace_end' && row.payload.result === 'auto-background'),
+  );
+
+  // Auto helper must remain diagnostics-only in MoviesScreen (no navigation/selection writes).
+  const autoEffect = SOURCE.screen.match(
+    /maybeBeginOnnMoviesAutoTrace\(\{[\s\S]*?\}\);/,
+  );
+  assert.ok(autoEffect);
+  assert.doesNotMatch(autoEffect[0], /router\.|setSelected|selectCategory|closeDetail|launchPlayback/);
 });

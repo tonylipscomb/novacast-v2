@@ -15,7 +15,7 @@ export type OnnMoviesTraceTag =
   | 'Scroll'
   | 'Overlay';
 
-export type OnnMoviesTraceScenario =
+export type OnnMoviesNamedScenario =
   | 'detail-back'
   | 'detail-x'
   | 'playback-back'
@@ -25,6 +25,9 @@ export type OnnMoviesTraceScenario =
   | 'refresh-during-detail'
   | 'repair-with-healthy-snapshot'
   | 'manual';
+
+/** Named presets plus arbitrary AUTO_SCENARIO strings (e.g. onn-audit-pass-1). */
+export type OnnMoviesTraceScenario = OnnMoviesNamedScenario | (string & {});
 
 type TraceEvent = {
   traceId: string;
@@ -40,6 +43,9 @@ const SENSITIVE_KEY =
   /(password|passwd|secret|credential|authorization|cookie|url|uri|hostname|host|baseUrl|player_api|username|user|pass|accessToken|refreshToken|authToken|apiToken)/i;
 /** Audit restore/focus tokens are safe identifiers, not credentials. */
 const AUDIT_TOKEN_KEY = /^(token|restorationToken|instanceToken|backPressId|traceId)$/i;
+
+export const ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS = 600_000;
+export const ONN_MOVIES_TRACE_AUTO_BACKGROUND_MIN_MS = 10_000;
 
 let enabledCache: boolean | null = null;
 
@@ -80,13 +86,160 @@ let gridInstanceSeq = 0;
 let activeGridInstanceId: string | null = null;
 let gridMounted = false;
 
+/** Process-once auto scenario (env-driven). */
+let autoTraceAttemptedThisProcess = false;
+let autoTraceOwned = false;
+let autoTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+let autoBackgroundUnsubscribe: (() => void) | null = null;
+let autoBackgroundInstalled = false;
+let autoDurationMsApplied = ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS;
+
 function pad2(value: number) {
   return String(value).padStart(2, '0');
 }
 
+function sanitizeScenarioId(scenario: string): string {
+  const trimmed = scenario.trim();
+  const normalized = trimmed.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized.slice(0, 80) || 'manual';
+}
+
 function formatTraceId(scenario: string, at = new Date()): string {
   const stamp = `${at.getFullYear()}${pad2(at.getMonth() + 1)}${pad2(at.getDate())}-${pad2(at.getHours())}${pad2(at.getMinutes())}${pad2(at.getSeconds())}`;
-  return `onn-${stamp}-${scenario}`;
+  return `onn-${stamp}-${sanitizeScenarioId(scenario)}`;
+}
+
+function clearAutoTimeoutHandle() {
+  if (autoTimeoutHandle != null) {
+    clearTimeout(autoTimeoutHandle);
+    autoTimeoutHandle = null;
+  }
+}
+
+function scheduleAutoTimeout(durationMs: number) {
+  clearAutoTimeoutHandle();
+  autoDurationMsApplied = durationMs;
+  autoTimeoutHandle = setTimeout(() => {
+    autoTimeoutHandle = null;
+    if (!activeTraceId || !autoTraceOwned) {
+      return;
+    }
+    emit('Movies', 'auto_trace_timeout', {
+      durationMs,
+      scenario: activeScenario,
+      traceId: activeTraceId,
+    });
+    endOnnMoviesTrace('auto-timeout');
+  }, durationMs);
+}
+
+export function getOnnMoviesTraceAutoScenario(): string | null {
+  if (!isOnnMoviesTraceEnabled()) {
+    return null;
+  }
+  const raw = typeof process !== 'undefined' ? process.env?.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO : undefined;
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return sanitizeScenarioId(trimmed);
+}
+
+export function getOnnMoviesTraceAutoDurationMs(): number {
+  const raw =
+    typeof process !== 'undefined'
+      ? process.env?.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS
+      : undefined;
+  if (raw == null || raw === '') {
+    return ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS;
+  }
+  return Math.floor(parsed);
+}
+
+export type OnnMoviesAutoTraceAppStateStatus = 'active' | 'background' | 'inactive' | string;
+
+export type OnnMoviesAutoTraceOptions = {
+  source?: string;
+  /** Optional AppState bridge so Node tests need not load react-native. */
+  subscribeAppState?: (
+    handler: (status: OnnMoviesAutoTraceAppStateStatus) => void,
+  ) => () => void;
+};
+
+/**
+ * Begin env-configured auto scenario exactly once per app process.
+ * Intended to be called from MoviesScreen first mount.
+ */
+export function maybeBeginOnnMoviesAutoTrace(
+  options: OnnMoviesAutoTraceOptions = {},
+): string | null {
+  if (!isOnnMoviesTraceEnabled()) {
+    return null;
+  }
+  if (autoTraceAttemptedThisProcess) {
+    return activeTraceId;
+  }
+
+  const scenario = getOnnMoviesTraceAutoScenario();
+  if (!scenario) {
+    return null;
+  }
+
+  autoTraceAttemptedThisProcess = true;
+  const durationMs = getOnnMoviesTraceAutoDurationMs();
+  const source = options.source ?? 'MoviesScreen';
+  const traceId = beginOnnMoviesTrace(scenario);
+  if (!traceId) {
+    return null;
+  }
+
+  autoTraceOwned = true;
+  scheduleAutoTimeout(durationMs);
+  emit('Movies', 'auto_trace_started', {
+    scenario,
+    durationMs,
+    source,
+    traceId,
+  });
+
+  if (!autoBackgroundInstalled && typeof options.subscribeAppState === 'function') {
+    autoBackgroundInstalled = true;
+    autoBackgroundUnsubscribe = options.subscribeAppState((status) => {
+      if (status === 'active') {
+        return;
+      }
+      maybeEndOnnMoviesAutoTraceOnBackground(status);
+    });
+  }
+
+  return traceId;
+}
+
+export function maybeEndOnnMoviesAutoTraceOnBackground(
+  status: OnnMoviesAutoTraceAppStateStatus = 'background',
+): boolean {
+  if (!isOnnMoviesTraceEnabled() || !autoTraceOwned || !activeTraceId) {
+    return false;
+  }
+  const elapsedMs = Date.now() - startedAt;
+  if (elapsedMs < ONN_MOVIES_TRACE_AUTO_BACKGROUND_MIN_MS) {
+    return false;
+  }
+  emit('Movies', 'auto_trace_app_background', {
+    status,
+    elapsedMs,
+    scenario: activeScenario,
+    traceId: activeTraceId,
+  });
+  endOnnMoviesTrace('auto-background');
+  return true;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -191,14 +344,19 @@ export function beginOnnMoviesTrace(scenario: OnnMoviesTraceScenario = 'manual')
   if (activeTraceId) {
     endOnnMoviesTrace('superseded');
   }
-  activeScenario = scenario;
-  activeTraceId = formatTraceId(scenario);
+  const safeScenario = sanitizeScenarioId(String(scenario || 'manual'));
+  activeScenario = safeScenario;
+  activeTraceId = formatTraceId(safeScenario);
   startedAt = Date.now();
   sequence = 0;
   eventCount = 0;
   renderCounts.clear();
   lastScrollTraceAt.clear();
-  emit('Movies', 'trace_begin', { scenario, traceId: activeTraceId });
+  // Manual begin does not own auto timeout/background end.
+  if (!autoTraceOwned) {
+    clearAutoTimeoutHandle();
+  }
+  emit('Movies', 'trace_begin', { scenario: safeScenario, traceId: activeTraceId });
   return activeTraceId;
 }
 
@@ -207,6 +365,9 @@ export function getActiveOnnMoviesTraceId(): string | null {
 }
 
 export function endOnnMoviesTrace(result: string = 'complete'): void {
+  clearAutoTimeoutHandle();
+  const wasAutoOwned = autoTraceOwned;
+  autoTraceOwned = false;
   if (!isOnnMoviesTraceEnabled() || !activeTraceId) {
     activeTraceId = null;
     activeScenario = null;
@@ -218,6 +379,7 @@ export function endOnnMoviesTrace(result: string = 'complete'): void {
     eventCount,
     gridMounted,
     activeGridInstanceId,
+    autoOwned: wasAutoOwned,
   });
   activeTraceId = null;
   activeScenario = null;
@@ -397,6 +559,15 @@ export function startOnnMoviesScenario(scenario: OnnMoviesTraceScenario): string
 }
 
 export function clearOnnMoviesTraceForTests() {
+  clearAutoTimeoutHandle();
+  if (autoBackgroundUnsubscribe) {
+    try {
+      autoBackgroundUnsubscribe();
+    } catch {
+      // test cleanup
+    }
+    autoBackgroundUnsubscribe = null;
+  }
   activeTraceId = null;
   activeScenario = null;
   startedAt = 0;
@@ -409,6 +580,12 @@ export function clearOnnMoviesTraceForTests() {
   gridMounted = false;
   activeGridInstanceId = null;
   enabledCache = null;
+  autoTraceAttemptedThisProcess = false;
+  autoTraceOwned = false;
+  autoBackgroundInstalled = false;
+  autoDurationMsApplied = ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS;
+  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO;
+  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS;
 }
 
 export function getOnnMoviesTraceTestState() {
@@ -420,7 +597,17 @@ export function getOnnMoviesTraceTestState() {
     gridMounted,
     activeGridInstanceId,
     maxEventsPerTrace: MAX_EVENTS_PER_TRACE,
+    autoTraceAttemptedThisProcess,
+    autoTraceOwned,
+    autoDurationMsApplied,
+    defaultAutoDurationMs: ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS,
+    startedAt,
   };
+}
+
+/** Test-only: shift start clock for background min-elapsed checks. */
+export function setOnnMoviesTraceStartedAtForTests(at: number) {
+  startedAt = at;
 }
 
 export type OnnMoviesTraceConsoleApi = {

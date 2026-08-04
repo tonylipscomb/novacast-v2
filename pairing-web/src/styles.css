@@ -91,6 +91,157 @@ select { width: 100%; min-height: 50px; padding: 0 14px; border: 1px solid rgba(
 @media (max-width: 760px) { .adminGrid { grid-template-columns: 1fr; gap: 12px; } .adminHeader { align-items: start; flex-direction: column; } }
 @media (max-width: 480px) { .card { padding: 28px 20px; border-radius: 18px; } .brand { margin-bottom: 28px; } .brand img { width: 64px; height: 64px; } }
 
+/* Connect homepage + download */
+.homeShell { padding: clamp(28px, 5vw, 56px) 18px; }
+.homeCard, .downloadCard { width: min(100%, 920px); }
+.homeNavGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 34px;
+}
+.homeNavCard {
+  display: grid;
+  gap: 8px;
+  min-height: 148px;
+  padding: 20px 18px;
+  border: 1px solid rgba(61, 127, 220, .42);
+  border-radius: 16px;
+  color: inherit;
+  text-decoration: none;
+  background:
+    linear-gradient(145deg, rgba(8, 28, 65, .88), rgba(6, 14, 36, .9));
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 255, .08);
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.homeNavCard:hover,
+.homeNavCard:focus-visible {
+  outline: none;
+  border-color: rgba(24, 215, 255, .72);
+  box-shadow: 0 0 0 3px rgba(0, 174, 239, .16), 0 0 28px rgba(0, 123, 255, .18);
+  transform: translateY(-2px);
+}
+.homeNavLabel {
+  color: #18d7ff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+.homeNavCard strong {
+  color: #f5f8ff;
+  font-size: clamp(20px, 3vw, 26px);
+  letter-spacing: -.02em;
+}
+.homeNavCard small {
+  color: #8fa4c8;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.downloadBadge {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 22px;
+  padding: 8px 12px;
+  border: 1px solid rgba(66, 227, 155, .45);
+  border-radius: 999px;
+  color: #b9ffd9;
+  background: rgba(21, 123, 78, .2);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+a.downloadButton {
+  display: grid;
+  place-items: center;
+  margin-top: 22px;
+  text-decoration: none;
+}
+.downloadMeta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 22px;
+}
+.downloadMetaBlock {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid rgba(61, 127, 220, .35);
+  border-radius: 14px;
+  background: rgba(6, 20, 48, .72);
+}
+.downloadMetaBlock span {
+  color: #6e9fd7;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+.downloaderCode,
+.downloadUrlText {
+  color: #f5f8ff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: clamp(18px, 3vw, 28px);
+  letter-spacing: .08em;
+  overflow-wrap: anywhere;
+}
+.downloadSectionTitle {
+  margin: 8px 0 0;
+  color: #f5f8ff;
+  font-size: 20px;
+}
+.downloadSteps {
+  margin: 14px 0 0;
+  padding-left: 20px;
+  color: #a8b9d7;
+  line-height: 1.7;
+}
+.downloadSteps code {
+  color: #18d7ff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 800;
+}
+.downloadNote,
+.downloadWarning {
+  margin: 16px 0 0;
+  color: #8fa4c8;
+  line-height: 1.55;
+}
+.downloadWarning {
+  padding: 12px 14px;
+  border: 1px solid rgba(245, 158, 11, .4);
+  border-radius: 10px;
+  color: #ffd7a1;
+  background: rgba(120, 72, 12, .22);
+}
+.downloadLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 18px;
+  margin-top: 22px;
+}
+.downloadLinks a {
+  color: #7edaff;
+  font-weight: 700;
+  text-decoration: none;
+}
+.downloadLinks a:hover,
+.downloadLinks a:focus-visible {
+  color: #fff;
+  text-decoration: underline;
+}
+@media (max-width: 720px) {
+  .homeNavGrid,
+  .downloadMeta {
+    grid-template-columns: 1fr;
+  }
+  .homeNavCard {
+    min-height: 0;
+  }
+}
+
 /* Cloud Admin dashboard */
 .adminApp { position: relative; z-index: 1; display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: 100vh; background: rgba(2, 7, 18, .72); }
 .adminSidebar { position: sticky; top: 0; display: flex; min-height: 100vh; flex-direction: column; padding: 24px 14px 16px; border-right: 1px solid rgba(74, 124, 205, .2); background: rgba(3, 10, 22, .94); }

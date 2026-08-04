@@ -52,6 +52,13 @@
       "typedRoutes": true,
       "reactCompiler": true
     },
-    "backgroundColor": "#32145F"
+    "backgroundColor": "#32145F",
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "0d343f80-34a6-4058-adc0-c3a2e8150beb"
+      }
+    },
+    "owner": "novacast"
   }
 }

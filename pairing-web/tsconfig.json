@@ -17,5 +17,9 @@
     "jsx": "react-jsx"
   },
   "include": ["src", "vite.config.ts"],
-  "exclude": ["src/pairing.test.ts"]
+  "exclude": [
+    "src/pairing.test.ts",
+    "src/routing.test.ts",
+    "src/siteConfig.test.ts"
+  ]
 }

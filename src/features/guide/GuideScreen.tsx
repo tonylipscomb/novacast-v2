@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 
 import { NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
@@ -348,31 +349,43 @@ export function GuideScreen() {
   useEffect(() => {
     if (Platform.OS !== 'android') return;
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (guide.visible) return true;
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'guide-screen',
+        () => {
+          if (guide.visible) return true;
 
-      if (searchOpen) {
-        setSearchOpen(false);
-        setSearchQuery('');
-        requestAnimationFrame(() => searchRef.current?.focus());
-        return true;
-      }
+          if (searchOpen) {
+            setSearchOpen(false);
+            setSearchQuery('');
+            requestAnimationFrame(() => searchRef.current?.focus());
+            return true;
+          }
 
-      if (filter !== 'all') {
-        setFilter('all');
-        requestAnimationFrame(() => filterRef.current?.focus());
-        return true;
-      }
+          if (filter !== 'all') {
+            setFilter('all');
+            requestAnimationFrame(() => filterRef.current?.focus());
+            return true;
+          }
 
-      if (!categoryRailFocusedRef.current) {
-        requestAnimationFrame(() => focusCategoryRail());
-        return true;
-      }
+          if (!categoryRailFocusedRef.current) {
+            requestAnimationFrame(() => focusCategoryRail());
+            return true;
+          }
 
-      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) return true;
-      router.replace(TV_HOME_ROUTE);
-      return true;
-    });
+          if (!tryAcquireTvNavigationGate(navigationGateRef.current)) return true;
+          router.replace(TV_HOME_ROUTE);
+          return true;
+        },
+        () => ({
+          screen: 'GuideScreen',
+          guideVisible: guide.visible,
+          searchOpen,
+          filter,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [filter, focusCategoryRail, guide.visible, router, searchOpen]);

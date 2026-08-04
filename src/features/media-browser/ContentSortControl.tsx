@@ -3,6 +3,7 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, 
 import { BackHandler, findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -60,10 +61,20 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
     const frame = requestAnimationFrame(() => {
       setOptionHandles(optionRefs.current.map((instance) => findNodeHandle(instance)));
     });
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      close();
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'sort-menu',
+        () => {
+          close();
+          return true;
+        },
+        () => ({
+          screen: 'ContentSortControl',
+          open,
+        }),
+      ),
+    );
     return () => {
       cancelAnimationFrame(frame);
       subscription.remove();

@@ -19,6 +19,7 @@ import {
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { markOnboardingGuideSeen, useOnboardingStore } from '@/features/onboarding/onboardingStore';
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { ExitConfirmOverlay } from '@/features/navigation/ExitConfirmOverlay';
 import { PairingScreen } from '@/features/pairing/PairingScreen';
 import { factoryResetNovacast, resetPairingKeepDevice } from '@/features/pairing/resetPairing';
@@ -605,21 +606,33 @@ export function NovaPortalScreen() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (pairingVisible) {
-        closePairing();
-        return true;
-      }
-      if (panel) {
-        setPanel(null);
-        return true;
-      }
-      if (exitConfirmVisible) {
-        return true;
-      }
-      setExitConfirmVisible(true);
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'portal',
+        () => {
+          if (pairingVisible) {
+            closePairing();
+            return true;
+          }
+          if (panel) {
+            setPanel(null);
+            return true;
+          }
+          if (exitConfirmVisible) {
+            return true;
+          }
+          setExitConfirmVisible(true);
+          return true;
+        },
+        () => ({
+          screen: 'NovaPortalScreen',
+          pairingVisible,
+          panel,
+          exitConfirmVisible,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [closePairing, exitConfirmVisible, pairingVisible, panel]);

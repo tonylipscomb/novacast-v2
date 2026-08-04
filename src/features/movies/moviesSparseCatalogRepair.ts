@@ -170,6 +170,20 @@ export async function repairDegradedMoviesCatalogIfNeeded(
         }),
     );
 
+    const { isOnnMoviesTraceEnabled, traceOnnMoviesEvent } = await import(
+      '@/features/diagnostics/onnMoviesTrace'
+    );
+    if (isOnnMoviesTraceEnabled()) {
+      traceOnnMoviesEvent('Catalog', 'sparse_repair_scheduled', {
+        providerId,
+        eventGeneration: assessment.generation,
+        reason: assessment.reason ?? 'sparse-active-generation',
+        metadataCategoryCount: assessment.metadataCategoryCount,
+        nonzeroCategoryCount: assessment.nonzeroCategoryCount,
+        totalItems: assessment.totalItems,
+      });
+    }
+
     await invalidateVodCategoryFilterCapability(providerId);
     await markRepairedGeneration(providerId, assessment.generation);
     repairScheduled.add(providerId);
@@ -193,6 +207,14 @@ export async function repairDegradedMoviesCatalogIfNeeded(
       forceFullDump: true,
       reason: assessment.reason ?? 'sparse-active-generation',
     });
+    if (isOnnMoviesTraceEnabled()) {
+      traceOnnMoviesEvent('Catalog', 'sparse_repair_completed', {
+        providerId,
+        eventGeneration: assessment.generation,
+        reason: assessment.reason ?? 'sparse-active-generation',
+        outcome: 'scheduled',
+      });
+    }
     return 'repairing';
   } finally {
     repairInFlight.delete(providerId);

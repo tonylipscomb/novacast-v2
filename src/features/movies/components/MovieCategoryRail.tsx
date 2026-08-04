@@ -1,8 +1,14 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useMemo, useRef, useState, type ElementRef } from 'react';
+import { useEffect, useMemo, useRef, useState, type ElementRef } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { isProviderCategory } from '@/features/media-browser/mediaCategoryUtils';
+import {
+  isOnnMoviesTraceEnabled,
+  noteOnnMoviesMount,
+  noteOnnMoviesRender,
+  noteOnnMoviesUnmount,
+} from '@/features/diagnostics/onnMoviesTrace';
 import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
@@ -50,6 +56,20 @@ export function MovieCategoryRail({
   const [focusedCategoryId, setFocusedCategoryId] = useState<string | null>(null);
   const preferredFocusConsumedRef = useRef(false);
   const initialPreferredCategoryIdRef = useRef(preferredCategoryId);
+
+  if (isOnnMoviesTraceEnabled()) {
+    noteOnnMoviesRender('MovieCategoryRail');
+  }
+
+  useEffect(() => {
+    if (!isOnnMoviesTraceEnabled()) {
+      return;
+    }
+    noteOnnMoviesMount('MovieCategoryRail', { categoryCount: categories.length });
+    return () => {
+      noteOnnMoviesUnmount('MovieCategoryRail', { categoryCount: categories.length });
+    };
+  }, [categories.length]);
 
   return (
     <View style={styles.panel}>

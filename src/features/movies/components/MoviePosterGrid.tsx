@@ -11,9 +11,25 @@ import { estimatePosterRowHeight, TV_POSTER_LIST_TUNING } from '@/features/media
 import { tvPerfRecordPosterRender, tvPerfSetVisiblePosters } from '@/features/perf/tvPerfStore';
 
 import type { MovieSummary } from '../movieTypes';
-import { getMoviesDetailOpenForDiagnostics } from '../moviesDiagnosticsState';
+import {
+  getMoviesDetailOpenForDiagnostics,
+  getMoviesOnnTraceSnapshot,
+  inferMovieGridUnmountReason,
+} from '../moviesDiagnosticsState';
 import { MoviePosterCard } from './MoviePosterCard';
 import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
+import {
+  getOnnMoviesGridInstanceId,
+  isOnnMoviesTraceEnabled,
+  nextOnnMoviesGridInstanceId,
+  noteOnnMoviesMount,
+  noteOnnMoviesRender,
+  noteOnnMoviesUnmount,
+  setOnnMoviesGridMounted,
+  traceOnnMoviesEvent,
+  traceOnnMoviesScrollCommand,
+  traceOnnMoviesScrollSample,
+} from '@/features/diagnostics/onnMoviesTrace';
 
 type MoviePosterGridProps = {
   movies: MovieSummary[];
@@ -137,6 +153,9 @@ export function MoviePosterGrid({
   const visibleRangeRef = useRef({ firstIndex: null as number | null, lastIndex: null as number | null });
   const restorationScrollIssuedRef = useRef<string | null>(null);
   const viewportRestoreIssuedKeyRef = useRef<string | null>(null);
+  const gridInstanceIdRef = useRef<string | null>(null);
+  const selectedCategoryIdRef = useRef(selectedCategoryId);
+  selectedCategoryIdRef.current = selectedCategoryId;
 
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -148,6 +167,10 @@ export function MoviePosterGrid({
   // without widening the mount/unmount effect dependencies.
   moviesDiagnosticsRef.current = movies;
   restorationTokenDiagnosticsRef.current = restorationToken;
+
+  if (isOnnMoviesTraceEnabled()) {
+    noteOnnMoviesRender('MoviePosterGrid');
+  }
 
   useEffect(() => {
     const previous = previousMoviesDataRef.current;
@@ -169,6 +192,25 @@ export function MoviePosterGrid({
   }, [columns, movies]);
 
   useEffect(() => {
+    const instanceId = nextOnnMoviesGridInstanceId();
+    gridInstanceIdRef.current = instanceId;
+    setOnnMoviesGridMounted(true, instanceId);
+    const snap = getMoviesOnnTraceSnapshot();
+    noteOnnMoviesMount('MoviePosterGrid', {
+      instanceId,
+      columns,
+      categoryId: selectedCategoryIdRef.current,
+      movieCount: moviesDiagnosticsRef.current.length,
+    });
+    traceOnnMoviesEvent('Render', 'movie_grid_mount', {
+      instanceId,
+      columns,
+      categoryId: selectedCategoryIdRef.current,
+      movieCount: moviesDiagnosticsRef.current.length,
+      generation: snap.readableGeneration,
+      detailOpen: getMoviesDetailOpenForDiagnostics(),
+      restorationActive: Boolean(restorationTokenDiagnosticsRef.current),
+    });
     console.info(
       '[NovaCast Movies FlatList] ' +
         JSON.stringify({
@@ -182,6 +224,28 @@ export function MoviePosterGrid({
         }),
     );
     return () => {
+      const lastCategoryId = selectedCategoryIdRef.current;
+      const lastMovieCount = moviesDiagnosticsRef.current.length;
+      const snap = getMoviesOnnTraceSnapshot();
+      noteOnnMoviesUnmount('MoviePosterGrid', {
+        instanceId,
+        categoryId: lastCategoryId,
+        movieCount: lastMovieCount,
+      });
+      traceOnnMoviesEvent('Render', 'movie_grid_unmount', {
+        instanceId,
+        lastCategoryId,
+        lastMovieCount,
+        categoriesLength: snap.categoriesLength,
+        loadStatus: snap.loadStatus,
+        detailOpen: getMoviesDetailOpenForDiagnostics(),
+        restorationActive: Boolean(restorationTokenDiagnosticsRef.current),
+        reason: inferMovieGridUnmountReason(),
+      });
+      setOnnMoviesGridMounted(false, instanceId);
+      if (getOnnMoviesGridInstanceId() === instanceId) {
+        gridInstanceIdRef.current = null;
+      }
       console.info(
         '[NovaCast Movies FlatList] ' +
           JSON.stringify({
@@ -276,6 +340,7 @@ export function MoviePosterGrid({
 
     const offset = Math.max(0, viewportRestoreCommand.offset);
     try {
+      const currentOffset = currentOffsetRef.current;
       console.info(
         '[NovaCast Movies Scroll Command] ' +
           JSON.stringify({
@@ -287,13 +352,40 @@ export function MoviePosterGrid({
             method: 'scrollToOffset',
             requestedIndex: restoreMovieIndex,
             requestedOffset: offset,
-            currentOffset: currentOffsetRef.current,
+            currentOffset,
             focusedMovieId: selectedMovieId,
             restorationActive: true,
             timestamp: Date.now(),
           }),
       );
+      traceOnnMoviesScrollCommand({
+        requestedOffset: offset,
+        currentOffset,
+        animated: false,
+        reason:
+          viewportRestoreCommand.reason === 'corrective'
+            ? 'corrective-native-focus-drift'
+            : 'initial-detail-restore',
+        restorationToken: viewportRestoreCommand.token,
+        restoreAttempt: viewportRestoreCommand.reason === 'corrective' ? 2 : 1,
+        detailPhase: getMoviesOnnTraceSnapshot().detailFocusPhase,
+        categoryId: selectedCategoryIdRef.current,
+      });
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesScrollSample(
+          'scroll-before-request',
+          { offset: currentOffset, requestedOffset: offset },
+          true,
+        );
+      }
       listRef.current?.scrollToOffset({ offset, animated: false });
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesScrollSample(
+          'scroll-first-after-request',
+          { offset: currentOffsetRef.current, requestedOffset: offset },
+          true,
+        );
+      }
       console.info(
         '[NovaCast Movies Viewport Restore] ' +
           JSON.stringify({
@@ -350,6 +442,7 @@ export function MoviePosterGrid({
     restorationScrollIssuedRef.current = restorationToken;
     const offset = Math.max(0, restoreScrollOffset);
     try {
+      const currentOffset = currentOffsetRef.current;
       console.info(
         '[NovaCast Movies Scroll Command] ' +
           JSON.stringify({
@@ -358,12 +451,22 @@ export function MoviePosterGrid({
             method: 'scrollToOffset',
             requestedIndex: restoreMovieIndex,
             requestedOffset: offset,
-            currentOffset: currentOffsetRef.current,
+            currentOffset,
             focusedMovieId: selectedMovieId,
             restorationActive: true,
             timestamp: Date.now(),
           }),
       );
+      traceOnnMoviesScrollCommand({
+        requestedOffset: offset,
+        currentOffset,
+        animated: false,
+        reason: 'initial-detail-restore',
+        restorationToken,
+        restoreAttempt: 1,
+        detailPhase: getMoviesOnnTraceSnapshot().detailFocusPhase,
+        categoryId: selectedCategoryIdRef.current,
+      });
       listRef.current?.scrollToOffset({ offset, animated: false });
     } catch {
       restorationScrollIssuedRef.current = null;
@@ -382,6 +485,16 @@ export function MoviePosterGrid({
   const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const offset = Math.max(0, event.nativeEvent.contentOffset.y);
     currentOffsetRef.current = offset;
+    if (isOnnMoviesTraceEnabled()) {
+      traceOnnMoviesScrollSample('movies-grid', {
+        offset,
+        firstIndex: visibleRangeRef.current.firstIndex,
+        lastIndex: visibleRangeRef.current.lastIndex,
+        categoryId: selectedCategoryIdRef.current,
+        gridInstanceId: gridInstanceIdRef.current,
+        restorationActive: Boolean(restorationTokenDiagnosticsRef.current),
+      });
+    }
     onViewportChange?.({ offset, ...visibleRangeRef.current });
   }, [onViewportChange]);
 
@@ -429,6 +542,7 @@ export function MoviePosterGrid({
               ? pinnedHighlightMovieId === item.id
               : closingFocusMovieId === item.id || postRestorePreferredMovieId === item.id
           }
+          auditSelected={selectedMovieId != null && selectedMovieId === item.id}
           hasPreferredFocus={
             // Stage 3D.2: restored poster retains preferred ownership after confirm.
             postRestorePreferredMovieId != null

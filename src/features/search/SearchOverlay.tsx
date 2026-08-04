@@ -5,6 +5,7 @@ import { BackHandler, findNodeHandle, Modal, Platform, Pressable, StyleSheet, Te
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
 
@@ -370,11 +371,23 @@ function SearchOverlayContent({
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      logSearchEvent('search_overlay_back', { scope });
-      onClose();
-      return true;
-    });
+    const handlerId = scope === 'movies' ? 'movies-search-overlay' : 'search-overlay';
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        handlerId,
+        () => {
+          logSearchEvent('search_overlay_back', { scope });
+          onClose();
+          return true;
+        },
+        () => ({
+          screen: 'SearchOverlay',
+          scope,
+          visible,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [onClose, scope, visible]);

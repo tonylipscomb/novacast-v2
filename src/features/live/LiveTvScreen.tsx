@@ -23,6 +23,7 @@ import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-vid
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
 import type { PlaybackItem } from '@/features/playback/unified/types';
 import { playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
@@ -429,37 +430,48 @@ export function LiveTvScreen() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (guide.visible) {
-        return true;
-      }
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'live-screen',
+        () => {
+          if (guide.visible) {
+            return true;
+          }
 
-      const action = decideLiveTvBackAction(
-        fullscreenChannelIdRef.current,
-        isRestoringFullscreenFocusRef.current,
-      );
+          const action = decideLiveTvBackAction(
+            fullscreenChannelIdRef.current,
+            isRestoringFullscreenFocusRef.current,
+          );
 
-      if (action === 'close-fullscreen') {
-        setState((current) => closeLiveFullscreen(current ?? liveState ?? bootstrapState ?? createInitialLiveTvState('', '')));
-        return true;
-      }
+          if (action === 'close-fullscreen') {
+            setState((current) => closeLiveFullscreen(current ?? liveState ?? bootstrapState ?? createInitialLiveTvState('', '')));
+            return true;
+          }
 
-      if (action === 'swallow') {
-        // Native focus is still being restored onto the control that launched
-        // fullscreen (bounded animation frames via requestTvFocus).
-        // fullscreenChannelId is already cleared at this instant, so without this
-        // guard a stray/rapid second Back during that brief window would open the
-        // Content Hub instead of leaving focus to settle on this screen.
-        return true;
-      }
+          if (action === 'swallow') {
+            // Native focus is still being restored onto the control that launched
+            // fullscreen (bounded animation frames via requestTvFocus).
+            // fullscreenChannelId is already cleared at this instant, so without this
+            // guard a stray/rapid second Back during that brief window would open the
+            // Content Hub instead of leaving focus to settle on this screen.
+            return true;
+          }
 
-      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
-        return true;
-      }
+          if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
+            return true;
+          }
 
-      router.replace(returnRoute);
-      return true;
-    });
+          router.replace(returnRoute);
+          return true;
+        },
+        () => ({
+          screen: 'LiveTvScreen',
+          guideVisible: guide.visible,
+          fullscreenChannelId: fullscreenChannelIdRef.current,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [bootstrapState, guide.visible, liveState, returnRoute, router]);

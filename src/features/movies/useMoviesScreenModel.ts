@@ -49,6 +49,14 @@ import {
 import { subscribeSmartCategoryCache } from '@/features/providers/smartCategoryCacheStore';
 import { isSmartCategoryId, normalizeSelectedSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
 import {
+  getOnnMoviesGridInstanceId,
+  isOnnMoviesGridMounted,
+  isOnnMoviesTraceEnabled,
+  traceOnnMoviesCategoriesCleared,
+  traceOnnMoviesEvent,
+} from '@/features/diagnostics/onnMoviesTrace';
+import { getMoviesDetailOpenForDiagnostics } from './moviesDiagnosticsState';
+import {
   categoriesNeedingCountWarm,
   createSerialCategoryCountQueue,
   shouldNetworkFetchCategoryCountOnWarm,
@@ -278,6 +286,15 @@ export function useMoviesScreenModel(
               nextLastId: next[next.length - 1]?.id ?? null,
             }),
         );
+        if (isOnnMoviesTraceEnabled() && (next.length === 0 || current !== next)) {
+          traceOnnMoviesEvent('Catalog', next.length === 0 ? 'visible_movies_cleared' : 'visible_movies_replaced', {
+            reason,
+            previousLength: current.length,
+            nextLength: next.length,
+            selectedCategoryId: selectedCategoryIdRef.current,
+            gridMounted: isOnnMoviesGridMounted(),
+          });
+        }
         return next;
       });
     },
@@ -416,7 +433,19 @@ export function useMoviesScreenModel(
 
     const loadCategories = async () => {
       const startedAt = Date.now();
+      const categoriesBefore = categoriesRef.current.length;
+      const moviesBefore = visibleMoviesRef.current.length;
       logMoviesPerf('categories_load_start', { providerId: activeProviderId });
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Catalog', 'load_categories_start', {
+          providerId: activeProviderId,
+          categoriesBefore,
+          visibleMoviesBefore: moviesBefore,
+          selectedCategoryId: selectedCategoryIdRef.current,
+          gridMounted: isOnnMoviesGridMounted(),
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+        });
+      }
       try {
         const nextCategories = await resolvedDataSource.getCategories();
         if (!mounted) {
@@ -444,6 +473,22 @@ export function useMoviesScreenModel(
             readiness.decision === 'waiting-fresh-sync' ||
             readiness.readableItemGeneration <= 0;
 
+          const clearReason = isMoviesCatalogRepairing(activeProviderId)
+            ? 'repairing-sparse-generation'
+            : catalogPending
+              ? 'catalog-not-ready-categories-pending'
+              : 'completed-empty-provider-rail';
+          traceOnnMoviesCategoriesCleared(clearReason, {
+            providerId: activeProviderId,
+            categoriesBefore,
+            categoriesAfter: 0,
+            visibleMoviesBefore: moviesBefore,
+            readableGeneration: readiness?.readableItemGeneration ?? null,
+            syncingGeneration: readiness?.syncingGeneration ?? null,
+            decision: readiness?.decision ?? null,
+            detailOpen: getMoviesDetailOpenForDiagnostics(),
+            gridMounted: isOnnMoviesGridMounted(),
+          });
           setCategories([]);
           setSelectedCategoryId('');
           setLoadErrorMessage(null);
@@ -494,6 +539,17 @@ export function useMoviesScreenModel(
 
         setCatalogRepairing(false);
         setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Catalog', 'load_categories_end', {
+            providerId: activeProviderId,
+            categoriesBefore,
+            categoriesAfter: warmedCategories.length,
+            visibleMoviesBefore: moviesBefore,
+            selectedCategoryId: selectedCategoryIdRef.current,
+            gridMounted: isOnnMoviesGridMounted(),
+            hasProviderCategories: true,
+          });
+        }
         console.info(
           '[NovaCast Movies Category Contract] ' +
             JSON.stringify({
@@ -582,6 +638,13 @@ export function useMoviesScreenModel(
           elapsedMs: Date.now() - startedAt,
           message: error instanceof Error ? error.message : String(error),
         });
+        traceOnnMoviesCategoriesCleared('categories_load_error', {
+          providerId: activeProviderId,
+          categoriesBefore,
+          categoriesAfter: 0,
+          visibleMoviesBefore: moviesBefore,
+          message: error instanceof Error ? error.message : String(error),
+        });
         setCategories([]);
         setLoadStatus('error');
         setLoadErrorMessage(error instanceof Error ? error.message : 'Unable to load movie categories.');
@@ -625,6 +688,17 @@ export function useMoviesScreenModel(
           generation: payload.generation,
           categoryCount: payload.categoryCount,
         });
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Catalog', 'movie_categories_updated', {
+            providerId: activeProviderId,
+            eventGeneration: payload.generation,
+            categoryCount: payload.categoryCount,
+            categoriesBefore: categoriesRef.current.length,
+            visibleMoviesBefore: visibleMoviesRef.current.length,
+            selectedCategoryId: selectedCategoryIdRef.current,
+            gridMounted: isOnnMoviesGridMounted(),
+          });
+        }
         void loadCategories();
       },
     );
@@ -646,6 +720,23 @@ export function useMoviesScreenModel(
         providerId: activeProviderId,
         generation,
       });
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Catalog', 'movie_catalog_ready', {
+          providerId: activeProviderId,
+          eventGeneration: generation,
+          categoriesBefore: categoriesRef.current.length,
+          visibleMoviesBefore: visibleMoviesRef.current.length,
+          selectedCategoryId: selectedCategoryIdRef.current,
+          gridMounted: isOnnMoviesGridMounted(),
+        });
+        traceOnnMoviesEvent('Catalog', 'atomic_generation_swap_start', {
+          providerId: activeProviderId,
+          eventGeneration: generation,
+          categoriesBefore: categoriesRef.current.length,
+          visibleMoviesBefore: visibleMoviesRef.current.length,
+          selectedCategoryId: selectedCategoryIdRef.current,
+        });
+      }
       // Fresh generation activated — clear sparse-repair UI and atomically swap the rail + page.
       clearMoviesSparseRepairSchedule(activeProviderId);
       setMoviesCatalogRepairingUi(activeProviderId, false);
@@ -691,6 +782,15 @@ export function useMoviesScreenModel(
             rememberedCategoryId: null,
           });
           if (fallback.selectedCategoryId !== selectedId) {
+            if (isOnnMoviesTraceEnabled()) {
+              traceOnnMoviesEvent('Catalog', 'selected_category_correction', {
+                providerId: activeProviderId,
+                previousCategoryId: selectedId,
+                nextCategoryId: fallback.selectedCategoryId,
+                reason: 'atomic-swap-empty-page',
+                eventGeneration: generation,
+              });
+            }
             selectedId = fallback.selectedCategoryId;
             page = await resolvedDataSource.getMoviesPage({
               categoryId: selectedId,
@@ -707,6 +807,8 @@ export function useMoviesScreenModel(
 
         atomicBrowseCommitRef.current = { categoryId: selectedId, generation };
         setCatalogRepairing(false);
+        const categoriesBeforeSwap = categoriesRef.current.length;
+        const moviesBeforeSwap = visibleMoviesRef.current.length;
         setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
         setSelectedCategoryId(selectedId);
         rememberMoviesScreenMemory(activeProviderId, { selectedCategoryId: selectedId });
@@ -722,6 +824,19 @@ export function useMoviesScreenModel(
           loadingRequestToken: `atomic:${generation}:${selectedId}`,
           firstPageResolvedCategoryId: selectedId,
         });
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Catalog', 'atomic_generation_swap_end', {
+            providerId: activeProviderId,
+            eventGeneration: generation,
+            previousCategoryId,
+            selectedCategoryId: selectedId,
+            categoriesBefore: categoriesBeforeSwap,
+            categoriesAfter: warmedCategories.length,
+            visibleMoviesBefore: moviesBeforeSwap,
+            visibleMoviesAfter: page.items.length,
+            gridMounted: isOnnMoviesGridMounted(),
+          });
+        }
         logMoviesPerf('atomic_generation_swap_committed', {
           providerId: activeProviderId,
           generation,
@@ -762,7 +877,20 @@ export function useMoviesScreenModel(
     });
 
     const unsubscribeSync = subscribeCatalogSyncPhase(activeProviderId, (phase) => {
-      if (!mounted || phase === 'syncing') {
+      if (!mounted) {
+        return;
+      }
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Catalog', 'catalog_sync_phase', {
+          providerId: activeProviderId,
+          phase,
+          categoriesBefore: categoriesRef.current.length,
+          visibleMoviesBefore: visibleMoviesRef.current.length,
+          selectedCategoryId: selectedCategoryIdRef.current,
+          gridMounted: isOnnMoviesGridMounted(),
+        });
+      }
+      if (phase === 'syncing') {
         return;
       }
       if (phase === 'ready' || phase === 'smart-building') {
@@ -883,6 +1011,16 @@ export function useMoviesScreenModel(
         categoryId: selectedCategoryId,
         search: isSearchMode,
       });
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Catalog', 'page_load_start', {
+          providerId: activeProviderId,
+          categoryId: selectedCategoryId,
+          search: isSearchMode,
+          categoriesCount: categoriesRef.current.length,
+          visibleMoviesBefore: visibleMoviesRef.current.length,
+          gridMounted: isOnnMoviesGridMounted(),
+        });
+      }
 
       try {
         const page =
@@ -936,6 +1074,16 @@ export function useMoviesScreenModel(
           elapsedMs: Date.now() - pageStartedAt,
           countQueue: categoryCountQueueRef.current?.getStats() ?? null,
         });
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Catalog', 'page_load_end', {
+            providerId: activeProviderId,
+            categoryId: selectedCategoryId,
+            itemCount: page.items.length,
+            totalCount: page.totalCount,
+            elapsedMs: Date.now() - pageStartedAt,
+            gridMounted: isOnnMoviesGridMounted(),
+          });
+        }
         const restoredFocusId =
           page.items.find((movie) => movie.id === previousFocusedMovieId)?.id ?? page.items[0]?.id ?? null;
         setFocusedMovieId(restoredFocusId);

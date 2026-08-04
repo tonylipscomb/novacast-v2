@@ -13,6 +13,7 @@ import * as ReactNative from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { novaTheme } from '@/theme';
 
 const focusText = createNovaTvFocusTextStyles(novaTheme);
@@ -85,10 +86,20 @@ export function WalkthroughOverlay({
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      onDismiss();
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'walkthrough',
+        () => {
+          onDismiss();
+          return true;
+        },
+        () => ({
+          screen: 'WalkthroughOverlay',
+          visible,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [onDismiss, visible]);

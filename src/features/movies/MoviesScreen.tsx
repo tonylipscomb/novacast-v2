@@ -68,6 +68,18 @@ import {
 } from '@/features/media-browser/posterGridFocusPolicy';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { beginFocusAuditCycle, recordFocusAudit } from '@/features/navigation/focusRequestAudit';
+import {
+  captureOnnMoviesScreenState,
+  getOnnMoviesGridInstanceId,
+  isOnnMoviesGridMounted,
+  isOnnMoviesTraceEnabled,
+  noteOnnMoviesMount,
+  noteOnnMoviesRender,
+  noteOnnMoviesUnmount,
+  traceOnnMoviesEvent,
+  traceOnnMoviesScrollSample,
+  wrapOnnMoviesBackHandler,
+} from '@/features/diagnostics/onnMoviesTrace';
 import { PLAYBACK_NOTIFICATION_DURATION_MS, PLAYBACK_NOTIFICATION_ID } from '@/features/playback/unified/unifiedPlayerLogic';
 import { SearchOverlay } from '@/features/search/SearchOverlay';
 import { searchMovies } from '@/features/search/repositories/movieSearchRepository';
@@ -91,7 +103,7 @@ import {
 import { getActiveMoviesSearchRequestId } from '@/features/search/moviesSearchPerfDiagnostics';
 import { createSqliteMovieDataSource } from './data/SqliteMovieDataSource';
 import type { SearchResult } from '@/features/search/searchTypes';
-import { setMoviesDetailOpenForDiagnostics } from './moviesDiagnosticsState';
+import { setMoviesDetailOpenForDiagnostics, setMoviesOnnTraceSnapshot } from './moviesDiagnosticsState';
 import {
   deriveMoviesPaginationLoaderMode,
   deriveMoviesPrimaryLoaderModeFromGate,
@@ -296,6 +308,11 @@ export function MoviesScreen() {
   // without widening effect dependencies.
   moviesAuditRef.current.selectedMovieId = selectedMovie?.id ?? null;
   moviesAuditRef.current.focusedMovieId = getFocusedMovieId();
+  if (isOnnMoviesTraceEnabled()) {
+    noteOnnMoviesRender('MoviesScreen');
+  }
+  const detailCloseSourceRef = useRef<'back' | 'x' | 'other'>('other');
+  const gridGateOpenRef = useRef<boolean | null>(null);
   const playbackUiActive = playbackActive || playbackClosing || launchingPlayback;
   const detailClosing = isMoviesDetailClosingPhase(detailFocusPhase);
   const detailOverlayMounted = isMoviesDetailOverlayMounted(detailFocusPhase);
@@ -335,9 +352,36 @@ export function MoviesScreen() {
     : false;
 
   const setDetailFocusPhaseSafe = useCallback((phase: MoviesDetailFocusPhase) => {
+    const previous = detailFocusPhaseRef.current;
     detailFocusPhaseRef.current = phase;
     setDetailFocusPhase(phase);
-  }, []);
+    if (isOnnMoviesTraceEnabled() && previous !== phase) {
+      const phaseEvent =
+        phase === 'closing-prepare'
+          ? 'closing_prepare'
+          : phase === 'closing-viewport'
+            ? 'closing_viewport'
+            : phase === 'closing-focus'
+              ? 'closing_focus'
+              : phase === 'browse-restored'
+                ? 'browse_restored'
+                : phase === 'detail-open'
+                  ? 'detail_open_phase'
+                  : 'detail_phase_changed';
+      traceOnnMoviesEvent('Focus', phaseEvent, {
+        previousPhase: previous,
+        phase,
+        selectedCategoryId,
+        selectedMovieId: moviesAuditRef.current.selectedMovieId,
+        focusedMovieId: moviesAuditRef.current.focusedMovieId,
+        gridMounted: isOnnMoviesGridMounted(),
+        gridInstanceId: getOnnMoviesGridInstanceId(),
+        listOffset: viewportStateRef.current.offset,
+        firstVisibleIndex: viewportStateRef.current.firstIndex,
+        lastVisibleIndex: viewportStateRef.current.lastIndex,
+      });
+    }
+  }, [selectedCategoryId]);
 
   const releasePostRestoreLatch = useCallback((reason: MoviesPostRestoreReleaseReason) => {
     const latch = postRestoreLatchRef.current;
@@ -459,6 +503,118 @@ export function MoviesScreen() {
     detailOpenRef.current = detailOpen;
     setMoviesDetailOpenForDiagnostics(detailOpen || detailClosing);
   }, [detailClosing, detailOpen]);
+
+  // Audit-only: keep grid unmount / gate inference in sync with screen state.
+  useEffect(() => {
+    if (!isOnnMoviesTraceEnabled()) {
+      return;
+    }
+    setMoviesOnnTraceSnapshot({
+      providerId: activeProviderId,
+      route: 'movies',
+      selectedCategoryId,
+      selectedMovieId: selectedMovie?.id ?? null,
+      focusedMovieId: getFocusedMovieId(),
+      detailOpen: detailOpen || detailClosing,
+      detailFocusPhase,
+      searchPhase,
+      playbackActive,
+      playbackClosing,
+      restoringBrowseFocus,
+      categoriesLength: categories.length,
+      visibleMoviesLength: visibleMovies.length,
+      loadStatus,
+      readableGeneration: null,
+      syncingGeneration: null,
+      activeProviderGeneration: null,
+      catalogRepairing,
+    });
+  }, [
+    activeProviderId,
+    catalogRepairing,
+    categories.length,
+    detailClosing,
+    detailFocusPhase,
+    detailOpen,
+    getFocusedMovieId,
+    loadStatus,
+    playbackActive,
+    playbackClosing,
+    restoringBrowseFocus,
+    searchPhase,
+    selectedCategoryId,
+    selectedMovie?.id,
+    visibleMovies.length,
+  ]);
+
+  useEffect(() => {
+    if (!isOnnMoviesTraceEnabled()) {
+      return;
+    }
+    const nextGate = categories.length > 0;
+    const previousGate = gridGateOpenRef.current;
+    if (previousGate === nextGate) {
+      return;
+    }
+    gridGateOpenRef.current = nextGate;
+    if (previousGate == null) {
+      return;
+    }
+    const reason = !nextGate
+      ? catalogRepairing
+        ? 'categories-empty-repairing'
+        : loadStatus === 'loading'
+          ? 'categories-empty-loading'
+          : 'categories-empty'
+      : loadStatus === 'ready'
+        ? 'categories-ready'
+        : 'categories-nonempty';
+    traceOnnMoviesEvent('Render', 'movie_grid_gate_changed', {
+      previousGate,
+      nextGate,
+      categoriesLength: categories.length,
+      visibleMoviesLength: visibleMovies.length,
+      loadStatus,
+      catalogRepairing,
+      reason,
+      detailOpen: detailOpen || detailClosing,
+      gridInstanceId: getOnnMoviesGridInstanceId(),
+    });
+    captureOnnMoviesScreenState({
+      providerId: activeProviderId,
+      route: 'movies',
+      selectedCategoryId,
+      selectedMovieId: selectedMovie?.id ?? null,
+      focusedMovieId: getFocusedMovieId(),
+      detailOpen: detailOpen || detailClosing,
+      detailFocusPhase,
+      searchPhase,
+      playbackActive,
+      playbackClosing,
+      restoringBrowseFocus,
+      categoriesLength: categories.length,
+      visibleMoviesLength: visibleMovies.length,
+      loadStatus,
+      catalogRepairing,
+      gridGate: nextGate,
+    });
+  }, [
+    activeProviderId,
+    catalogRepairing,
+    categories.length,
+    detailClosing,
+    detailFocusPhase,
+    detailOpen,
+    getFocusedMovieId,
+    loadStatus,
+    playbackActive,
+    playbackClosing,
+    restoringBrowseFocus,
+    searchPhase,
+    selectedCategoryId,
+    selectedMovie?.id,
+    visibleMovies.length,
+  ]);
 
   useEffect(() => {
     tvPerfSetScreen('movies');
@@ -722,6 +878,24 @@ export function MoviesScreen() {
         highlightVisible: true,
         overlayMounted: false,
       });
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Focus', 'focus_confirmed', {
+          movieId,
+          offset: currentOffset,
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+        });
+        traceOnnMoviesScrollSample('post-poster-focus', { offset: currentOffset }, true);
+        traceOnnMoviesEvent('Overlay', 'browse_restored', {
+          movieId,
+          offset: currentOffset,
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+        });
+        traceOnnMoviesEvent('Overlay', 'overlay_unmounted', {
+          movieId,
+          offset: currentOffset,
+        });
+        traceOnnMoviesScrollSample('post-restore-latch', { offset: currentOffset }, true);
+      }
       console.info(
         '[NovaCast Movies Restore Polish] ' +
           JSON.stringify({ marker: MOVIES_FOCUS_STAGE3D3_MARKER, token: token.token }),
@@ -749,6 +923,20 @@ export function MoviesScreen() {
     (movie: { id: string }) => {
       if (playbackUiActive || Date.now() < playFocusGuardUntilRef.current) {
         return;
+      }
+      if (isOnnMoviesTraceEnabled()) {
+        const targetId =
+          closingFocusMovieId ?? detailFocusTokenRef.current?.snapshot.movieId ?? null;
+        traceOnnMoviesEvent('Focus', 'poster_focus', {
+          movieId: movie.id,
+          offsetAtFocus: viewportStateRef.current.offset,
+          firstVisibleIndex: viewportStateRef.current.firstIndex,
+          lastVisibleIndex: viewportStateRef.current.lastIndex,
+          detailPhase: detailFocusPhaseRef.current,
+          matchesRequestedTarget: targetId == null ? null : movie.id === targetId,
+          requestedTargetMovieId: targetId,
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+        });
       }
       tvPerfSetFocus('MoviePosterCard', movie.id);
       actualFocusedComponentRef.current = 'MoviePosterCard';
@@ -851,6 +1039,22 @@ export function MoviesScreen() {
       releasePostRestoreLatch('screen-change');
       setDetailOpen(true);
       setDetailFocusPhaseSafe('detail-open');
+      if (isOnnMoviesTraceEnabled()) {
+        const snap = browseFocusSnapshotRef.current;
+        traceOnnMoviesEvent('Overlay', 'detail_open', {
+          movieId: movie.id,
+          categoryId: selectedCategoryId,
+          renderedIndex: snap?.movieIndex ?? null,
+          listOffset: snap?.verticalOffset ?? viewportStateRef.current.offset,
+          firstVisibleIndex: snap?.firstVisibleIndex ?? null,
+          lastVisibleIndex: snap?.lastVisibleIndex ?? null,
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+          gridMounted: isOnnMoviesGridMounted(),
+          categoriesLength: categories.length,
+          visibleMoviesLength: visibleMovies.length,
+          loadStatus,
+        });
+      }
       // Diagnostics-only shape snapshot at browse Detail open.
       logMoviePlaybackShape({
         origin: 'browse-detail',
@@ -1164,6 +1368,22 @@ export function MoviesScreen() {
       }
 
       const token = `${source === 'detail-close' ? 'detail' : 'playback'}-${++restorationSequenceRef.current}`;
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Focus', 'detail_close_requested', {
+          source,
+          closeSource: detailCloseSourceRef.current,
+          token,
+          movieId: snapshot.movieId,
+          categoryId: snapshot.categoryId,
+          renderedIndex: snapshot.movieIndex,
+          listOffset: snapshot.verticalOffset,
+          firstVisibleIndex: snapshot.firstVisibleIndex,
+          lastVisibleIndex: snapshot.lastVisibleIndex,
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+          gridMounted: isOnnMoviesGridMounted(),
+          currentOffset: viewportStateRef.current.offset,
+        });
+      }
       detailFocusTokenRef.current = { token, source, snapshot };
       focusIssuedTokenRef.current = null;
       scrollIssuedTokenRef.current = null;
@@ -1245,7 +1465,8 @@ export function MoviesScreen() {
     [selectedCategoryId, setDetailFocusPhaseSafe, visibleMovies],
   );
 
-  const closeDetail = useCallback(() => {
+  const closeDetail = useCallback((closeSource: 'back' | 'x' | 'other' = 'other') => {
+    detailCloseSourceRef.current = closeSource;
     if (!canBeginMoviesDetailClose(detailFocusPhaseRef.current)) {
       // One close transition only — swallow duplicate Back during closing.
       return;
@@ -1512,6 +1733,27 @@ export function MoviesScreen() {
         setLockScrollForFocusRestore(false);
         return;
       }
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Focus', 'focus_request', {
+          targetMovieId,
+          requestReason:
+            token.source === 'detail-close'
+              ? 'restore-exact-poster-after-detail-close'
+              : 'restore-after-playback-exact-poster',
+          attemptNumber: focusRequestCountRef.current,
+          detailPhase: detailFocusPhaseRef.current,
+          gridOffset: viewportStateRef.current.offset,
+          firstVisibleIndex: viewportStateRef.current.firstIndex,
+          lastVisibleIndex: viewportStateRef.current.lastIndex,
+          targetVisible: snapshotWasVisible,
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+        });
+        traceOnnMoviesScrollSample(
+          'pre-poster-focus',
+          { offset: viewportStateRef.current.offset },
+          true,
+        );
+      }
       requestTvFocus({
         screen: 'movies',
         source: 'MoviesScreen',
@@ -1576,80 +1818,106 @@ export function MoviesScreen() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (guide.visible) {
-        if (isUnifiedRemoteDebugEnabled()) {
-          logUnifiedRemoteEvent({
-            source: 'BackHandler',
-            eventType: 'hardwareBackPress',
-            disposition: 'consumed',
-            actionTaken: 'ignored-guide-visible',
-          });
+    const onHardwareBackPress = wrapOnnMoviesBackHandler(
+      'movies-screen',
+      () => {
+        if (guide.visible) {
+          if (isUnifiedRemoteDebugEnabled()) {
+            logUnifiedRemoteEvent({
+              source: 'BackHandler',
+              eventType: 'hardwareBackPress',
+              disposition: 'consumed',
+              actionTaken: 'ignored-guide-visible',
+            });
+          }
+          return true;
         }
-        return true;
-      }
 
-      if (playbackClosing || launchingPlayback || playbackActive) {
+        if (playbackClosing || launchingPlayback || playbackActive) {
+          if (isUnifiedRemoteDebugEnabled()) {
+            logUnifiedRemoteEvent({
+              source: 'BackHandler',
+              eventType: 'hardwareBackPress',
+              disposition: 'consumed',
+              actionTaken:
+                playbackClosing || launchingPlayback
+                  ? 'ignored-playback-closing'
+                  : 'movies-shell-close-playback',
+            });
+          }
+          if (playbackActive && !playbackClosing) {
+            closePlayback();
+          }
+          return true;
+        }
+
+        if (
+          shouldHandleMoviesDetailBack({
+            playbackUiActive: false,
+            detailOpen: detailOpen || detailOverlayMounted,
+            detailClosing,
+          })
+        ) {
+          closeDetail('back');
+          return true;
+        }
+
+        if (searchOpen) {
+          closeSearch();
+          return true;
+        }
+
+        const action = decideMoviesBackAction(playbackActive, isRestoringPlaybackFocusRef.current);
+
         if (isUnifiedRemoteDebugEnabled()) {
           logUnifiedRemoteEvent({
             source: 'BackHandler',
             eventType: 'hardwareBackPress',
-            disposition: 'consumed',
-            actionTaken: playbackClosing || launchingPlayback ? 'ignored-playback-closing' : 'movies-shell-close-playback',
+            disposition: action === 'leave-screen' ? 'accepted' : 'consumed',
+            actionTaken: `movies-shell-${action}`,
           });
         }
-        if (playbackActive && !playbackClosing) {
+
+        if (action === 'close-playback') {
           closePlayback();
+          return true;
         }
+
+        if (action === 'swallow') {
+          return true;
+        }
+
+        if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
+          return true;
+        }
+
+        router.replace(TV_HOME_ROUTE);
         return true;
-      }
+      },
+      () => ({
+        screen: 'MoviesScreen',
+        guideVisible: guide.visible,
+        playbackActive,
+        playbackClosing,
+        launchingPlayback,
+        detailOpen,
+        detailOverlayMounted,
+        detailClosing,
+        searchOpen,
+        detailFocusPhase: detailFocusPhaseRef.current,
+        selectedCategoryId,
+        categoriesLength: categories.length,
+        visibleMoviesLength: visibleMovies.length,
+        loadStatus,
+        gridMounted: isOnnMoviesGridMounted(),
+      }),
+    );
 
-      if (
-        shouldHandleMoviesDetailBack({
-          playbackUiActive: false,
-          detailOpen: detailOpen || detailOverlayMounted,
-          detailClosing,
-        })
-      ) {
-        closeDetail();
-        return true;
-      }
-
-      if (searchOpen) {
-        closeSearch();
-        return true;
-      }
-
-      const action = decideMoviesBackAction(playbackActive, isRestoringPlaybackFocusRef.current);
-
-      if (isUnifiedRemoteDebugEnabled()) {
-        logUnifiedRemoteEvent({
-          source: 'BackHandler',
-          eventType: 'hardwareBackPress',
-          disposition: action === 'leave-screen' ? 'accepted' : 'consumed',
-          actionTaken: `movies-shell-${action}`,
-        });
-      }
-
-      if (action === 'close-playback') {
-        closePlayback();
-        return true;
-      }
-
-      if (action === 'swallow') {
-        return true;
-      }
-
-      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
-        return true;
-      }
-
-      router.replace(TV_HOME_ROUTE);
-      return true;
-    });
+    const subscription = BackHandler.addEventListener('hardwareBackPress', onHardwareBackPress);
 
     return () => subscription.remove();
   }, [
+    categories.length,
     closeDetail,
     closePlayback,
     closeSearch,
@@ -1658,10 +1926,13 @@ export function MoviesScreen() {
     detailOverlayMounted,
     guide.visible,
     launchingPlayback,
+    loadStatus,
     playbackActive,
     playbackClosing,
     router,
     searchOpen,
+    selectedCategoryId,
+    visibleMovies.length,
   ]);
 
   useEffect(() => {
@@ -2988,7 +3259,7 @@ useEffect(() => {
         relatedMovies={relatedMovies}
         isFavorite={selectedMovie ? library.isFavorite(selectedMovie.id) : false}
         isWatchlisted={selectedMovie ? library.isWatchlisted(selectedMovie.id) : false}
-        onClose={closeDetail}
+        onClose={() => closeDetail('x')}
         onPlay={focusHandoffActive ? undefined : selectedMovie ? startPlayback : undefined}
         onRetry={focusHandoffActive ? undefined : selectedMovie ? handleDetailRetry : undefined}
         onSelectRelated={focusHandoffActive ? undefined : handleSelectRelatedMovie}

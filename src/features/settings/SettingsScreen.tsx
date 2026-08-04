@@ -4,6 +4,7 @@ import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 
 import { NovaTvShell } from '@/components/nova';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
@@ -150,18 +151,28 @@ export function SettingsScreen() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (guide.visible) {
-        return true;
-      }
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'settings',
+        () => {
+          if (guide.visible) {
+            return true;
+          }
 
-      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
-        return true;
-      }
+          if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
+            return true;
+          }
 
-      router.replace(TV_HOME_ROUTE);
-      return true;
-    });
+          router.replace(TV_HOME_ROUTE);
+          return true;
+        },
+        () => ({
+          screen: 'SettingsScreen',
+          guideVisible: guide.visible,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [guide.visible, router]);

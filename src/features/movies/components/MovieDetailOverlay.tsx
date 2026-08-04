@@ -32,6 +32,13 @@ import { displayStreamTitle } from '@/features/series/metadata/titleNormalizatio
 import { novaTheme } from '@/theme';
 
 import {
+  isOnnMoviesTraceEnabled,
+  noteOnnMoviesMount,
+  noteOnnMoviesRender,
+  noteOnnMoviesUnmount,
+  traceOnnMoviesEvent,
+} from '@/features/diagnostics/onnMoviesTrace';
+import {
   buildMovieDetailMetaChips,
   deriveStreamQualityBadges,
   formatCastLine,
@@ -305,6 +312,92 @@ function MovieDetailOverlayComponent({
   const wasVisibleRef = useRef(false);
   const lastPlayInvokeAtRef = useRef(0);
   const lastCloseInvokeAtRef = useRef(0);
+  const blurMountedRef = useRef(false);
+  const lastRootPointerRef = useRef<string | null>(null);
+  const lastBrowsePointerRef = useRef<string | null>(null);
+
+  if (isOnnMoviesTraceEnabled()) {
+    noteOnnMoviesRender('MovieDetailOverlay');
+  }
+
+  useEffect(() => {
+    if (!isOnnMoviesTraceEnabled()) {
+      return;
+    }
+    noteOnnMoviesMount('MovieDetailOverlay', { movieId: detail?.id ?? null, visible });
+    return () => {
+      noteOnnMoviesUnmount('MovieDetailOverlay', { movieId: detail?.id ?? null });
+    };
+  }, [detail?.id, visible]);
+
+  useEffect(() => {
+    if (!isOnnMoviesTraceEnabled()) {
+      return;
+    }
+    if (visible && !blurMountedRef.current) {
+      blurMountedRef.current = true;
+      traceOnnMoviesEvent('Overlay', 'blur_view_mount', {
+        movieId: detail?.id ?? null,
+        hasBlurTarget: Boolean(blurTarget),
+      });
+      traceOnnMoviesEvent('Overlay', 'blur_view_fade_start', {
+        movieId: detail?.id ?? null,
+        durationMs: MOVIE_DETAIL_BLUR_MS,
+        direction: 'in',
+      });
+      traceOnnMoviesEvent('Overlay', 'detail_card_mount', {
+        movieId: detail?.id ?? null,
+      });
+    }
+    if (!visible && blurMountedRef.current) {
+      blurMountedRef.current = false;
+      traceOnnMoviesEvent('Overlay', 'blur_view_fade_start', {
+        movieId: detail?.id ?? null,
+        durationMs: MOVIE_DETAIL_CLOSE_MS,
+        direction: 'out',
+      });
+      traceOnnMoviesEvent('Overlay', 'blur_view_unmount', {
+        movieId: detail?.id ?? null,
+      });
+      traceOnnMoviesEvent('Overlay', 'detail_card_unmount', {
+        movieId: detail?.id ?? null,
+      });
+    }
+  }, [blurTarget, detail?.id, visible]);
+
+  useEffect(() => {
+    if (!isOnnMoviesTraceEnabled()) {
+      return;
+    }
+    const rootPointer = focusHandoffActive ? 'box-none' : visible ? 'auto' : 'none';
+    if (lastRootPointerRef.current !== rootPointer) {
+      lastRootPointerRef.current = rootPointer;
+      traceOnnMoviesEvent('Overlay', 'overlay_pointer_events_changed', {
+        target: 'detail-root',
+        pointerEvents: rootPointer,
+        focusHandoffActive,
+        visible,
+        movieId: detail?.id ?? null,
+      });
+    }
+    const blurPointer = visible && !focusHandoffActive ? 'auto' : 'none';
+    if (lastBrowsePointerRef.current !== blurPointer) {
+      lastBrowsePointerRef.current = blurPointer;
+      traceOnnMoviesEvent('Overlay', 'blur_view_pointer_events_changed', {
+        pointerEvents: blurPointer,
+        focusHandoffActive,
+        visible,
+        movieId: detail?.id ?? null,
+      });
+      traceOnnMoviesEvent('Overlay', 'browse_layer_pointer_events_changed', {
+        // Browse layer is dimmed/blocked by overlay pointer ownership; log companion value.
+        pointerEvents: focusHandoffActive ? 'auto' : visible ? 'none' : 'auto',
+        focusHandoffActive,
+        visible,
+        movieId: detail?.id ?? null,
+      });
+    }
+  }, [detail?.id, focusHandoffActive, visible]);
 
   const cardSize = resolveCompactDetailCardSize(width, height);
   const posterWidth = Math.round(cardSize.width * 0.27);

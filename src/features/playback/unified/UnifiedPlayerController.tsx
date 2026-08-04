@@ -3,6 +3,7 @@ import type { PlayingChangeEventPayload, StatusChangeEventPayload, TimeUpdateEve
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import { BackHandler, Platform } from 'react-native';
 
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import {
@@ -628,14 +629,25 @@ export function UnifiedPlayerController() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (snapshot.machineState === 'closing') {
-        return true;
-      }
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'unified-player',
+        () => {
+          if (snapshot.machineState === 'closing') {
+            return true;
+          }
 
-      handleBack();
-      return true;
-    });
+          handleBack();
+          return true;
+        },
+        () => ({
+          screen: 'UnifiedPlayerController',
+          machineState: snapshot.machineState,
+          playbackActive,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [handleBack, playbackActive, snapshot.machineState]);

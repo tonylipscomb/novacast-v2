@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { BackHandler, Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -22,10 +23,20 @@ export function ExitConfirmOverlay({ visible, onCancel, onConfirm }: ExitConfirm
     }
 
     setFocused('cancel');
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      onCancel();
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'exit-confirm',
+        () => {
+          onCancel();
+          return true;
+        },
+        () => ({
+          screen: 'ExitConfirmOverlay',
+          visible,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [onCancel, visible]);
@@ -82,13 +93,24 @@ export function useExitConfirmOnBack(enabled = true) {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (visible) {
-        return true;
-      }
-      setVisible(true);
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'exit-confirm',
+        () => {
+          if (visible) {
+            return true;
+          }
+          setVisible(true);
+          return true;
+        },
+        () => ({
+          screen: 'useExitConfirmOnBack',
+          enabled,
+          visible,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [enabled, visible]);

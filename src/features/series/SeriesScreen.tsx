@@ -12,6 +12,7 @@ import {
   finishUnifiedPlaybackClose,
   useUnifiedPlayer,
 } from '@/features/playback/unified';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
@@ -295,37 +296,51 @@ export function SeriesScreen() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (guide.visible) {
-        return true;
-      }
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'series-screen',
+        () => {
+          if (guide.visible) {
+            return true;
+          }
 
-      if (searchOpen) {
-        closeSearch();
-        return true;
-      }
+          if (searchOpen) {
+            closeSearch();
+            return true;
+          }
 
-      if (detailOpen) {
-        closeDetail();
-        return true;
-      }
+          if (detailOpen) {
+            closeDetail();
+            return true;
+          }
 
-      if (playbackClosing) {
-        return true;
-      }
+          if (playbackClosing) {
+            return true;
+          }
 
-      if (playbackActive) {
-        closePlayback();
-        return true;
-      }
+          if (playbackActive) {
+            closePlayback();
+            return true;
+          }
 
-      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
-        return true;
-      }
+          if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
+            return true;
+          }
 
-      router.replace(TV_HOME_ROUTE);
-      return true;
-    });
+          router.replace(TV_HOME_ROUTE);
+          return true;
+        },
+        () => ({
+          screen: 'SeriesScreen',
+          guideVisible: guide.visible,
+          searchOpen,
+          detailOpen,
+          playbackActive,
+          playbackClosing,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [closeDetail, closePlayback, closeSearch, detailOpen, guide.visible, playbackActive, playbackClosing, router, searchOpen]);

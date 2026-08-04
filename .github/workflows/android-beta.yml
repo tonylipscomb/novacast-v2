@@ -17,6 +17,7 @@ env:
   SENTRY_DISABLE_AUTO_UPLOAD: 'true'
   EXPO_NO_TELEMETRY: '1'
   CI: 'true'
+  EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 
   EXPO_PUBLIC_CLOSED_BETA_MODE: 'true'
   EXPO_PUBLIC_DEVICE_REGISTRATION_ENABLED: 'true'
@@ -52,8 +53,14 @@ jobs:
             VERSION="beta-main-${GITHUB_RUN_NUMBER}"
           fi
 
+          IS_PRERELEASE=false
+          if echo "$VERSION" | grep -Eiq '(beta|alpha|rc)'; then
+            IS_PRERELEASE=true
+          fi
+
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Resolved VERSION=${VERSION}"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "Resolved VERSION=${VERSION} prerelease=${IS_PRERELEASE}"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -64,12 +71,17 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Verify pairing env for activation builds
+      - name: Verify Expo token and pairing env
         shell: bash
         run: |
           set -euo pipefail
 
           missing=0
+
+          if [[ -z "${EXPO_TOKEN:-}" ]]; then
+            echo "::error::Missing GitHub secret EXPO_TOKEN"
+            missing=1
+          fi
 
           if [[ -z "${EXPO_PUBLIC_NOVACAST_PAIRING_API_URL:-}" ]]; then
             echo "::error::Missing GitHub secret EXPO_PUBLIC_NOVACAST_PAIRING_API_URL"
@@ -90,6 +102,7 @@ jobs:
             exit 1
           fi
 
+          npx expo whoami
           echo "Closed-beta configuration is present."
 
       - name: Set up Temurin Java 17
@@ -142,7 +155,7 @@ jobs:
           NOVACAST_KEY_PASSWORD: ${{ secrets.NOVACAST_KEY_PASSWORD }}
         run: ./gradlew app:assembleRelease --no-daemon
 
-      - name: Verify APK exists
+      - name: Package novacast.apk artifacts
         id: apk
         shell: bash
         run: |
@@ -159,22 +172,27 @@ jobs:
 
           mkdir -p dist
 
+          STABLE_APK="dist/novacast.apk"
           VERSIONED_APK="dist/NovaCast-${VERSION}.apk"
-          STABLE_APK="dist/NovaCast-Beta.apk"
+          CHECKSUM_PATH="dist/novacast.apk.sha256"
 
-          cp "$APK_PATH" "$VERSIONED_APK"
           cp "$APK_PATH" "$STABLE_APK"
+          cp "$APK_PATH" "$VERSIONED_APK"
+          sha256sum "$STABLE_APK" | awk '{print $1 "  novacast.apk"}' > "$CHECKSUM_PATH"
 
-          echo "versioned_path=${VERSIONED_APK}" >> "$GITHUB_OUTPUT"
           echo "stable_path=${STABLE_APK}" >> "$GITHUB_OUTPUT"
+          echo "versioned_path=${VERSIONED_APK}" >> "$GITHUB_OUTPUT"
+          echo "checksum_path=${CHECKSUM_PATH}" >> "$GITHUB_OUTPUT"
+          echo "Packaged novacast.apk + checksum for ${VERSION}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: NovaCast-${{ steps.meta.outputs.version }}
           path: |
-            ${{ steps.apk.outputs.versioned_path }}
             ${{ steps.apk.outputs.stable_path }}
+            ${{ steps.apk.outputs.versioned_path }}
+            ${{ steps.apk.outputs.checksum_path }}
           retention-days: 30
           if-no-files-found: error
 
@@ -184,26 +202,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          VERSIONED_APK: ${{ steps.apk.outputs.versioned_path }}
+          IS_PRERELEASE: ${{ steps.meta.outputs.is_prerelease }}
           STABLE_APK: ${{ steps.apk.outputs.stable_path }}
+          VERSIONED_APK: ${{ steps.apk.outputs.versioned_path }}
+          CHECKSUM_PATH: ${{ steps.apk.outputs.checksum_path }}
         run: |
           set -euo pipefail
 
           PRERELEASE_ARGS=()
-
-          if echo "$TAG" | grep -Eiq '(beta|alpha|rc)'; then
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
             PRERELEASE_ARGS+=(--prerelease)
           fi
 
+          # Stable (non-prerelease) releases update GitHub /releases/latest,
+          # which powers novacast-connect.netlify.app/downloads/novacast.apk.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
-              "$VERSIONED_APK" \
               "$STABLE_APK" \
+              "$CHECKSUM_PATH" \
+              "$VERSIONED_APK" \
               --clobber
           else
             gh release create "$TAG" \
-              "$VERSIONED_APK" \
               "$STABLE_APK" \
+              "$CHECKSUM_PATH" \
+              "$VERSIONED_APK" \
               --title "NovaCast ${TAG}" \
               --generate-notes \
               "${PRERELEASE_ARGS[@]}"

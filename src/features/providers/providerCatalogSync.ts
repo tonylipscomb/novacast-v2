@@ -367,10 +367,14 @@ function notifyMovieCategoriesUpdated(providerId: string, generation: number, ca
   }
   lastMovieCategoriesUpdatedSignature.set(providerId, signature);
   const listeners = movieCategoriesUpdatedListeners.get(providerId);
+  // Metadata-only: must not imply the Movies library is ready for browsing.
+  // Item activation + resolveReadableCatalogGeneration still gate usable reads.
   console.info('[NovaCast Movies] movie-categories-updated', {
     providerId,
     generation,
     categoryCount,
+    preparing: true,
+    message: 'Preparing movie library',
     listenerCount: listeners?.size ?? 0,
   });
   listeners?.forEach((listener) => listener({ generation, categoryCount }));

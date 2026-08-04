@@ -357,9 +357,9 @@ export async function writeCategoriesFromSourceBudgeted<T>(
     return 0;
   }
 
-  // Stage 4 category-rail: stage pendingCategories for the atomic ready
-  // transition, then fall through and stream category rows immediately so the
-  // Movies rail can read them before item sync completes.
+  // Stage 4 / 4.2A: stage pendingCategories for the atomic ready transition,
+  // then stream category rows for sync progress. Movies UI must not treat
+  // these as a usable rail until the item generation is readable/active.
   if (handle.mediaType === 'movie') {
     handle.pendingCategories = categories.map(mapCategory);
   }

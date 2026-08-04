@@ -268,6 +268,34 @@ test('close/back remain lifecycle-driven one-press contracts', () => {
   assert.match(screen, /moviesDetailFocusLifecycle|detailFocusPhase|focusHandoffActive/);
 });
 
+test('Stage 4.2C: Close button is TV-focusable inside the focus trap', () => {
+  assert.match(overlay, /closeButtonRef/);
+  assert.match(overlay, /ref=\{closeButtonRef\}/);
+  assert.match(overlay, /setCloseHandle\(handleFor\(closeButtonRef\)/);
+  assert.match(overlay, /focusable=\{closeFocusable\}/);
+  assert.match(overlay, /hasTVPreferredFocus=\{false\}/);
+  assert.match(overlay, /accessibilityLabel=\"Close movie details\"/);
+  // Close is not preferred initial focus — Play remains preferred.
+  assert.match(overlay, /hasTVPreferredFocus=\{preferred && focusable\}/);
+  assert.match(overlay, /preferred=\{!focusHandoffActive && id === firstAction\}/);
+  // Action Up → Close; Close Down → Play.
+  assert.match(overlay, /nextFocusUp=\{closeHandle \?\? actionHandles\[id\]\}/);
+  assert.match(overlay, /nextFocusDown: playFocusHandle/);
+  // Related Up stays on actions, not Close.
+  assert.match(overlay, /nextFocusUp=\{playFocusHandle\}/);
+  // Same external close callback with debounce (no duplicate activate).
+  assert.match(overlay, /invokeClose/);
+  assert.match(overlay, /lastCloseInvokeAtRef/);
+  assert.match(overlay, /onClose\(\)/);
+  assert.match(overlay, /now - lastCloseInvokeAtRef\.current < 400/);
+  assert.match(overlay, /action: 'close_focus'/);
+  assert.match(overlay, /action: 'close_activate'/);
+  assert.match(overlay, /closeHintFocused/);
+  // Screen wires X and Back through the same closeDetail lifecycle.
+  assert.match(screen, /onClose=\{closeDetail\}/);
+  assert.match(screen, /pointerEvents=\{[\s\S]{0,220}detailOpen \|\| searchBlocksBrowse/);
+});
+
 test('model keeps truthful badge derivation contract documented', () => {
   assert.match(model, /Never invents quality metadata/);
   assert.match(model, /Related titles from already-cached/);

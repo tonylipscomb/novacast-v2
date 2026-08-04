@@ -8,6 +8,7 @@ import {
   resolveMoviesInitialCategory,
   getMovieCategoryRailCategories,
 } from '../src/features/movies/moviesVisibleCategories.ts';
+import { decideMoviesCatalogReadiness } from '../src/features/movies/moviesCatalogReadiness.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -19,80 +20,102 @@ const smart = read('src/features/movies/smart/SmartMovieDataSource.ts');
 const model = read('src/features/movies/useMoviesScreenModel.ts');
 const sync = read('src/features/providers/providerCatalogSync.ts');
 const loader = read('src/features/movies/moviesLoaderState.ts');
+const readiness = read('src/features/movies/moviesCatalogReadiness.ts');
 const searchDs = read('src/features/search/moviesSearchDatasource.ts');
 
-test('fresh install: category resolver can use syncing generation independently of item resolver', () => {
-  assert.match(repository, /export async function resolveReadableCategoryGeneration/);
-  assert.match(repository, /\[NovaCast Category Read Generation\]/);
-  assert.match(repository, /current-sync-category-generation/);
-  assert.match(repository, /completed-category-generation/);
-  assert.match(repository, /no-readable-category-generation/);
-  assert.match(repository, /includeZeroCountCategories/);
-  // Item resolver remains separate and still requires readable item rows.
-  assert.match(repository, /export async function resolveReadableCatalogGeneration/);
-  assert.match(repository, /no-readable-generation/);
-  assert.match(sqlite, /resolveReadableCategoryGeneration/);
-  assert.match(sqlite, /resolveReadableCatalogGeneration/);
-  assert.match(sqlite, /category-generation-separated-from-item-generation/);
+test('1) categoriesGeneration=1 and readableItemGeneration=0 → waiting-fresh-sync', () => {
+  assert.equal(
+    decideMoviesCatalogReadiness({
+      categoriesGeneration: 1,
+      readableItemGeneration: 0,
+      syncingGeneration: 1,
+      syncStatus: 'syncing',
+      previousReadableGeneration: 0,
+    }),
+    'waiting-fresh-sync',
+  );
+
+  assert.match(sqlite, /waiting-fresh-sync/);
+  assert.match(sqlite, /waiting-fresh-sync-categories-pending/);
+  assert.match(sqlite, /return \[\]/);
+  assert.match(model, /catalog-not-ready-categories-pending/);
+  assert.match(model, /setSelectedCategoryId\(''\)/);
+  assert.match(model, /setLoadStatus\(\(current\) => \(current === 'error' \? current : 'loading'\)\)/);
+  assert.match(loader, /Preparing movie library…/);
+  // Must not arm a first-page request against an empty / gen-0 rail.
+  assert.match(model, /movies_page_gated_waiting_categories/);
 });
 
-test('categories not arrived: loading state, no smart-wrapper substitute', () => {
-  assert.match(smart, /provider-categories-pending/);
-  assert.match(smart, /usesSqliteReads/);
-  assert.match(smart, /return \[\]/);
-  assert.match(loader, /Loading provider categories…/);
-  // SQLite path must not emit smart-wrapper when provider cats missing.
-  const sqliteBranch = smart.slice(smart.indexOf('if (usesSqliteReads)'));
-  assert.doesNotMatch(sqliteBranch.slice(0, 900), /reason: 'smart-wrapper'/);
-});
+test('2) generation 1 becomes active → activating then usable categories + first page', () => {
+  assert.equal(
+    decideMoviesCatalogReadiness({
+      categoriesGeneration: 1,
+      readableItemGeneration: 1,
+      syncingGeneration: 1,
+      syncStatus: 'ready',
+      previousReadableGeneration: 0,
+    }),
+    'activating-completed-generation',
+  );
 
-test('categories arrive after mount via movie-categories-updated', () => {
-  assert.match(writer, /Stage 4 category-rail/);
-  assert.match(writer, /sqlite-categories-streamed/);
-  assert.match(writer, /pendingCategories/);
-  assert.match(sync, /publishMovieCategoriesUpdated/);
-  assert.match(sync, /movie-categories-updated/);
-  assert.match(model, /subscribeMovieCategoriesUpdated/);
-  assert.match(model, /movie_categories_updated_received/);
+  assert.match(sqlite, /resolveMoviesCatalogReadiness/);
+  assert.match(sqlite, /categoryReadGeneration = itemsGeneration/);
+  assert.match(sqlite, /MoviesCatalogNotReadyError/);
+  assert.match(model, /catalog_ready_received/);
   assert.match(model, /void loadCategories\(\)/);
-});
-
-test('completed-library path still uses completed category generation wording', () => {
-  assert.match(repository, /completed-category-generation/);
+  assert.match(model, /subscribeMovieCatalogReady/);
   assert.match(sqlite, /provider-categories-applied/);
-  assert.match(smart, /provider-categories-applied/);
-  assert.match(model, /provider-categories-applied/);
 });
 
-test('selection preservation and smart/legacy fallback', () => {
-  const syncingCats = [
-    { id: 'all', name: 'All Movies', kind: 'provider', count: 0, countKnown: false },
-    { id: '10', name: 'Action', kind: 'provider', count: 0, countKnown: false },
-    { id: '20', name: 'Comedy', kind: 'provider', count: 0, countKnown: false },
-  ];
+test('3) generation 44 readable while 45 syncs → preserve completed rail', () => {
+  assert.equal(
+    decideMoviesCatalogReadiness({
+      categoriesGeneration: 45,
+      readableItemGeneration: 44,
+      syncingGeneration: 45,
+      syncStatus: 'syncing',
+      previousReadableGeneration: 44,
+    }),
+    'preserving-completed-generation',
+  );
 
-  const firstWhileSyncing = resolveMoviesInitialCategory({
-    categories: syncingCats,
-    previousCategoryId: null,
-    rememberedCategoryId: null,
-  });
-  assert.equal(firstWhileSyncing.selectedCategoryId, '10');
-  assert.equal(firstWhileSyncing.reason, 'first-provider-category');
+  assert.match(sqlite, /preserving-completed-generation/);
+  assert.match(sqlite, /previous\.categories/);
+  // Categories are read from the readable item generation, not the syncing category stream.
+  assert.match(sqlite, /categoryReadGeneration = itemsGeneration/);
+  assert.doesNotMatch(sqlite, /resolveReadableCategoryGeneration\(providerId, 'movie'\)/);
+});
 
-  const preserved = resolveMoviesInitialCategory({
-    categories: syncingCats,
-    previousCategoryId: '20',
-    rememberedCategoryId: '10',
-  });
-  assert.equal(preserved.selectedCategoryId, '20');
+test('4) catalog-not-ready must not become loadStatus empty', () => {
+  assert.match(model, /isMoviesCatalogNotReadyError/);
+  assert.match(model, /movies_page_catalog_not_ready/);
+  assert.match(model, /keepPendingForCatalogReady/);
+  assert.match(readiness, /MoviesCatalogNotReadyError/);
+  assert.match(readiness, /catalog-not-ready/);
+  // When not-ready, loadStatus stays loading — never coerced to empty from gen-0.
+  const notReadyIdx = model.indexOf('movies_page_catalog_not_ready');
+  assert.ok(notReadyIdx >= 0);
+  const notReadyBlock = model.slice(notReadyIdx, notReadyIdx + 500);
+  assert.match(notReadyBlock, /setLoadStatus\('loading'\)/);
+  assert.doesNotMatch(notReadyBlock, /setLoadStatus\('empty'\)/);
+});
 
-  const fromSmart = resolveMoviesInitialCategory({
-    categories: syncingCats,
-    previousCategoryId: 'smart:favorites',
-    rememberedCategoryId: 'smart:continue-watching',
-  });
-  assert.equal(fromSmart.selectedCategoryId, '10');
-  assert.equal(fromSmart.selectedCategoryId.startsWith('smart:'), false);
+test('5) completed category with zero real rows may still show genuine empty', () => {
+  // After a successful page from a readable generation, empty arrays are allowed.
+  assert.match(model, /Genuine completed-generation zero-result categories may show empty/);
+  assert.match(model, /setLoadStatus\(page\.items\.length > 0 \? 'ready' : 'empty'\)/);
+  assert.equal(
+    decideMoviesCatalogReadiness({
+      categoriesGeneration: 1,
+      readableItemGeneration: 1,
+      syncingGeneration: 1,
+      syncStatus: 'ready',
+      previousReadableGeneration: 1,
+      readableItemCount: 0,
+    }),
+    'completed-empty',
+  );
+  assert.match(model, /reason: 'completed-empty'/);
 
   const completedCats = [
     { id: 'all', name: 'All Movies', kind: 'provider', count: 10, countKnown: true },
@@ -105,29 +128,107 @@ test('selection preservation and smart/legacy fallback', () => {
     rememberedCategoryId: 'all',
   });
   assert.equal(skipKnownEmpty.selectedCategoryId, 'live');
-
-  const rail = getMovieCategoryRailCategories(syncingCats);
-  assert.ok(rail.every((category) => category.id !== 'all'));
-  assert.ok(rail.some((category) => category.id === '10'));
 });
 
-test('category integrity: blanks filtered, same-name kept, duplicate ids get render keys', () => {
-  assert.match(sqlite, /NovaCast Movies Category Duplicate/);
-  assert.match(sqlite, /Category Duplicate/);
-  assert.match(sqlite, /categoryId\.trim\(\)|category\.categoryId\.trim/);
-  assert.match(sqlite, /categoryName\.trim\(\)|category\.categoryName\.trim/);
-  assert.match(repository, /includeZeroCountCategories/);
-});
-
-test('search generation safety remains completed-item based', () => {
-  assert.match(searchDs, /resolveReadableCatalogGeneration/);
-  assert.doesNotMatch(searchDs, /resolveReadableCategoryGeneration/);
-  assert.match(searchDs, /providerFallbackAllowed/);
-});
-
-test('no direct provider fallback reintroduced on Movies SQLite path', () => {
+test('6) no provider/network fallback is introduced', () => {
   assert.match(sqlite, /sourceKind: 'sqlite'/);
   assert.doesNotMatch(sqlite, /getVodStreams|xtream|fetchCategoriesFromProvider/);
   assert.match(model, /createSqliteMovieDataSource/);
   assert.match(smart, /SQLite path: provider-only list|no smart-wrapper substitute/i);
+  assert.match(smart, /provider-categories-pending/);
+});
+
+test('7) no direct reads from an incomplete generation', () => {
+  assert.match(sqlite, /readableGeneration <= 0/);
+  assert.match(sqlite, /throw new MoviesCatalogNotReadyError/);
+  assert.match(sqlite, /category-item-readiness-barrier/);
+  // Page queries must use resolveReadableCatalogGeneration (items), not category-only gen.
+  assert.match(sqlite, /resolveReadableCatalogGeneration\(providerId, 'movie'\)/);
+  assert.doesNotMatch(
+    sqlite.slice(sqlite.indexOf('async getMoviesPage')),
+    /resolveReadableCategoryGeneration/,
+  );
+});
+
+test('bounded readiness diagnostic event', () => {
+  assert.match(readiness, /\[NovaCast Movies Catalog Readiness\]/);
+  assert.match(readiness, /waiting-fresh-sync/);
+  assert.match(readiness, /preserving-completed-generation/);
+  assert.match(readiness, /activating-completed-generation/);
+  assert.match(readiness, /completed-empty/);
+  assert.match(readiness, /readableItemGeneration/);
+  assert.match(readiness, /activeProviderGeneration/);
+  assert.match(readiness, /readableItemCount/);
+  assert.match(readiness, /inProgressItemCount/);
+  assert.match(readiness, /previousReadableGeneration/);
+  assert.match(sqlite, /logMoviesCatalogReadiness/);
+});
+
+test('movie-categories-updated is metadata-only preparing signal', () => {
+  assert.match(writer, /Stage 4 \/ 4\.2A/);
+  assert.match(writer, /sqlite-categories-streamed/);
+  assert.match(sync, /publishMovieCategoriesUpdated/);
+  assert.match(sync, /Preparing movie library/);
+  assert.match(sync, /must not imply the Movies library is ready/);
+  assert.match(model, /subscribeMovieCategoriesUpdated/);
+  assert.match(model, /movie_categories_updated_received/);
+  // Categories-updated may reload, but incomplete cats stay non-interactive via barrier.
+  assert.match(model, /catalog-not-ready-categories-pending/);
+});
+
+test('category resolver still exists for sync diagnostics; Movies UI gates on item readiness', () => {
+  assert.match(repository, /export async function resolveReadableCategoryGeneration/);
+  assert.match(repository, /current-sync-category-generation/);
+  assert.match(repository, /export async function resolveReadableCatalogGeneration/);
+  assert.match(repository, /no-readable-generation/);
+  assert.match(searchDs, /resolveReadableCatalogGeneration/);
+  assert.doesNotMatch(searchDs, /resolveReadableCategoryGeneration/);
+});
+
+test('selection helpers still work for completed usable categories', () => {
+  const completedCats = [
+    { id: 'all', name: 'All Movies', kind: 'provider', count: 10, countKnown: true },
+    { id: '10', name: 'Action', kind: 'provider', count: 5, countKnown: true },
+    { id: '20', name: 'Comedy', kind: 'provider', count: 3, countKnown: true },
+  ];
+
+  const first = resolveMoviesInitialCategory({
+    categories: completedCats,
+    previousCategoryId: null,
+    rememberedCategoryId: null,
+  });
+  assert.equal(first.selectedCategoryId, '10');
+  assert.equal(first.reason, 'first-provider-category');
+
+  const preserved = resolveMoviesInitialCategory({
+    categories: completedCats,
+    previousCategoryId: '20',
+    rememberedCategoryId: '10',
+  });
+  assert.equal(preserved.selectedCategoryId, '20');
+
+  const rail = getMovieCategoryRailCategories(completedCats);
+  assert.ok(rail.every((category) => category.id !== 'all'));
+  assert.ok(rail.some((category) => category.id === '10'));
+});
+
+test('ready decision when completed generation is stable', () => {
+  assert.equal(
+    decideMoviesCatalogReadiness({
+      categoriesGeneration: 44,
+      readableItemGeneration: 44,
+      syncingGeneration: 44,
+      syncStatus: 'ready',
+      previousReadableGeneration: 44,
+      readableItemCount: 1200,
+    }),
+    'ready',
+  );
+});
+
+test('catalog-not-ready pending is distinct from completed-empty loadStatus', () => {
+  assert.match(model, /catalogPending/);
+  assert.match(model, /waiting-fresh-sync/);
+  assert.match(model, /setLoadStatus\('empty'\)/);
+  assert.match(model, /resolveMoviesCatalogReadiness\(activeProviderId\)/);
 });

@@ -17,7 +17,7 @@ import {
 
 const screen = fs.readFileSync('src/features/movies/MoviesScreen.tsx', 'utf8');
 const grid = fs.readFileSync('src/features/movies/components/MoviePosterGrid.tsx', 'utf8');
-const overlay = fs.readFileSync('src/components/media/MediaDetailOverlay.tsx', 'utf8');
+const overlay = fs.readFileSync('src/features/movies/components/MovieDetailOverlay.tsx', 'utf8');
 const lifecycle = fs.readFileSync('src/features/movies/moviesDetailFocusLifecycle.ts', 'utf8');
 const shell = fs.readFileSync('src/components/nova/NovaTvShell.tsx', 'utf8');
 const category = fs.readFileSync('src/features/movies/components/MovieCategoryRail.tsx', 'utf8');
@@ -29,9 +29,9 @@ test('1. MoviePosterGrid remains mounted while detail is open', () => {
   assert.match(screen, /pointerEvents=\{/);
   assert.match(screen, /detailClosing/);
   assert.match(screen, /<MoviePosterGrid/);
-  assert.match(screen, /<MediaDetailOverlay/);
+  assert.match(screen, /<MovieDetailOverlay/);
   // Overlay is sibling, not a replacement of the grid branch.
-  assert.doesNotMatch(screen, /detailOpen \? \s*<MediaDetailOverlay[\s\S]*: \s*<MoviePosterGrid/);
+  assert.doesNotMatch(screen, /detailOpen \? \s*<MovieDetailOverlay[\s\S]*: \s*<MoviePosterGrid/);
 });
 
 test('2. FlatList key does not change on detail open/close', () => {

@@ -20,6 +20,10 @@ import {
   logMoviesInitialCategory,
   resolveMoviesInitialCategory,
 } from './moviesVisibleCategories';
+import {
+  isMoviesCatalogNotReadyError,
+  resolveMoviesCatalogReadiness,
+} from './moviesCatalogReadiness';
 import { subscribeMovieLibrary } from './smart/movieLibraryStore';
 import {
   getMoviesSettingsSync,
@@ -412,6 +416,71 @@ export function useMoviesScreenModel(
         }
 
         const warmedCategories = warmUnresolvedCategoryCounts(nextCategories);
+        const hasProviderCategories = warmedCategories.some(
+          (category) => category.kind === 'provider' && category.id !== ALL_MOVIES_CATEGORY_ID,
+        );
+
+        // Stage 4.2A/C: incomplete category metadata must not become interactive.
+        // Keep the loader pending; never select All Movies / arm a gen-0 page query.
+        if (!hasProviderCategories) {
+          const readiness =
+            resolvedDataSource.sourceKind === 'sqlite'
+              ? await resolveMoviesCatalogReadiness(activeProviderId)
+              : null;
+          if (!mounted) {
+            return;
+          }
+
+          const catalogPending =
+            !readiness ||
+            readiness.decision === 'waiting-fresh-sync' ||
+            readiness.readableItemGeneration <= 0;
+
+          setCategories([]);
+          setSelectedCategoryId('');
+          setLoadErrorMessage(null);
+          if (catalogPending) {
+            setLoadStatus((current) => (current === 'error' ? current : 'loading'));
+            console.info(
+              '[NovaCast Movies Category Contract] ' +
+                JSON.stringify({
+                  providerId: activeProviderId,
+                  readableGeneration: readiness?.readableItemGeneration ?? null,
+                  repositoryCategoryCount: nextCategories.length,
+                  sqliteProviderCategoryCount: 0,
+                  wrappedCategoryCount: 0,
+                  appliedProviderCategoryCount: 0,
+                  totalMovieCount: null,
+                  firstProviderCategoryIds: [],
+                  reason: 'catalog-not-ready-categories-pending',
+                }),
+            );
+            logMoviesPerf('categories_load_pending', {
+              providerId: activeProviderId,
+              elapsedMs: Date.now() - startedAt,
+            });
+            return;
+          }
+
+          // Completed generation with a genuinely empty provider rail.
+          setLoadStatus('empty');
+          console.info(
+            '[NovaCast Movies Category Contract] ' +
+              JSON.stringify({
+                providerId: activeProviderId,
+                readableGeneration: readiness.readableItemGeneration,
+                repositoryCategoryCount: 0,
+                sqliteProviderCategoryCount: 0,
+                wrappedCategoryCount: 0,
+                appliedProviderCategoryCount: 0,
+                totalMovieCount: readiness.readableItemCount,
+                firstProviderCategoryIds: [],
+                reason: 'completed-empty',
+              }),
+          );
+          return;
+        }
+
         setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
         console.info(
           '[NovaCast Movies Category Contract] ' +
@@ -429,13 +498,7 @@ export function useMoviesScreenModel(
                 .filter((category) => category.kind === 'provider' && category.id !== 'all')
                 .slice(0, 5)
                 .map((category) => category.id),
-              reason: warmedCategories.some(
-                (category) => category.kind === 'provider' && category.id !== 'all',
-              )
-                ? 'provider-categories-applied'
-                : warmedCategories.length
-                  ? 'model-apply'
-                  : 'empty-refresh-preserved',
+              reason: 'provider-categories-applied',
             }),
         );
         logMoviesPerf('categories_state_applied', {
@@ -567,7 +630,13 @@ export function useMoviesScreenModel(
         return;
       }
       lastPublishedGeneration = Math.max(lastPublishedGeneration, generation);
-      logMoviesPerf('catalog_ready_received', { providerId: activeProviderId });
+      logMoviesPerf('catalog_ready_received', {
+        providerId: activeProviderId,
+        generation,
+      });
+      // Item generation is now readable — reload categories, select initial category,
+      // and let the first-page effect arm against the completed generation.
+      setLoadStatus((current) => (current === 'error' ? current : 'loading'));
       void loadCategories();
       reloadSmartCategoryGridIfNeeded();
     });
@@ -688,6 +757,7 @@ export function useMoviesScreenModel(
       // category first-page load. Replace on success; clear only on error.
       setCategoryHasRatings(true);
       offsetRef.current = 0;
+      let keepPendingForCatalogReady = false;
 
       logMoviesAction('page-requested', {
         categoryId: selectedCategoryId,
@@ -770,6 +840,8 @@ export function useMoviesScreenModel(
           // explicit poster activation.
           return null;
         });
+        // Genuine completed-generation zero-result categories may show empty.
+        // Catalog-not-ready must never reach here (gated / typed error below).
         setLoadStatus(page.items.length > 0 ? 'ready' : 'empty');
 
         logMoviesAction('page-loaded', {
@@ -791,6 +863,19 @@ export function useMoviesScreenModel(
           return;
         }
 
+        // Stage 4.2A: generation-0 / incomplete catalog is pending, not empty/error.
+        if (isMoviesCatalogNotReadyError(error)) {
+          keepPendingForCatalogReady = true;
+          logMoviesPerf('movies_page_catalog_not_ready', {
+            providerId: activeProviderId,
+            categoryId: selectedCategoryId,
+          });
+          setLoadStatus('loading');
+          setLoadErrorMessage(null);
+          // Keep the primary-loader gate armed; do not resolve first-page readiness.
+          return;
+        }
+
         updateVisibleMovies([], 'category-first-page-error');
         setHasMore(false);
         setLoadStatus('error');
@@ -806,14 +891,18 @@ export function useMoviesScreenModel(
           };
         });
       } finally {
-        if (!cancelled && buildContentSortRequestKey({
-          providerId: activeProviderId,
-          contentType: 'movie',
-          categoryId: selectedCategoryId,
-          sort: sortOption,
-          offset: 0,
-          generation,
-        }) === requestKey) {
+        if (
+          !keepPendingForCatalogReady &&
+          !cancelled &&
+          buildContentSortRequestKey({
+            providerId: activeProviderId,
+            contentType: 'movie',
+            categoryId: selectedCategoryId,
+            sort: sortOption,
+            offset: 0,
+            generation,
+          }) === requestKey
+        ) {
           setLoading(false);
           setCategoryLoading(false);
         }

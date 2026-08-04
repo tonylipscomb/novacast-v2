@@ -202,6 +202,7 @@ function RelatedCompactRow({
   onSelect,
   firstRef,
   cardWidth,
+  nextFocusUp,
 }: {
   movies: RelatedMovieCandidate[];
   focusedId: string | null;
@@ -209,6 +210,8 @@ function RelatedCompactRow({
   onSelect?: (movie: RelatedMovieCandidate) => void;
   firstRef?: (instance: ElementRef<typeof Pressable> | null) => void;
   cardWidth: number;
+  /** Keep related Up on the action row — never jump to Close. */
+  nextFocusUp?: number;
 }) {
   const limited = movies.slice(0, MOVIE_DETAIL_RELATED_LIMIT);
   if (!limited.length) return null;
@@ -227,6 +230,7 @@ function RelatedCompactRow({
               ref={index === 0 ? firstRef : undefined}
               focusable={Boolean(onSelect)}
               accessibilityLabel={movie.title}
+              {...(nextFocusUp ? { nextFocusUp } : {})}
               onFocus={() => onFocus(`related:${movie.id}`)}
               onPress={() => onSelect?.(movie)}
               style={[
@@ -292,12 +296,15 @@ function MovieDetailOverlayComponent({
   const actionRefs = useRef(new Map<ActionId, ElementRef<typeof Pressable>>());
   const playRef = useRef<ElementRef<typeof Pressable> | null>(null);
   const retryRef = useRef<ElementRef<typeof Pressable> | null>(null);
+  const closeButtonRef = useRef<ElementRef<typeof Pressable> | null>(null);
   const relatedFirstRef = useRef<ElementRef<typeof Pressable> | null>(null);
   const [actionHandles, setActionHandles] = useState<Record<string, number>>({});
+  const [closeHandle, setCloseHandle] = useState<number | undefined>(undefined);
   const [relatedHandle, setRelatedHandle] = useState<number | undefined>(undefined);
   const focusRetryCancelRef = useRef<(() => void) | null>(null);
   const wasVisibleRef = useRef(false);
   const lastPlayInvokeAtRef = useRef(0);
+  const lastCloseInvokeAtRef = useRef(0);
 
   const cardSize = resolveCompactDetailCardSize(width, height);
   const posterWidth = Math.round(cardSize.width * 0.27);
@@ -313,6 +320,20 @@ function MovieDetailOverlayComponent({
     lastPlayInvokeAtRef.current = now;
     onPlay();
   }, [onPlay]);
+
+  const invokeClose = useCallback(() => {
+    if (!visible || focusHandoffActive) return;
+    const now = Date.now();
+    if (now - lastCloseInvokeAtRef.current < 400) return;
+    lastCloseInvokeAtRef.current = now;
+    recordFocusAudit({
+      component: 'MovieDetailOverlay',
+      action: 'close_activate',
+      itemId: detail?.id ?? null,
+      reason: 'close-button',
+    });
+    onClose();
+  }, [detail?.id, focusHandoffActive, onClose, visible]);
 
   const reactNativeTv = ReactNative as typeof ReactNative & {
     useTVEventHandler?: (handler: (event: TvEventPayload) => void) => void;
@@ -435,6 +456,7 @@ function MovieDetailOverlayComponent({
         if (handle) nextHandles[id] = handle;
       });
       setActionHandles(nextHandles);
+      setCloseHandle(handleFor(closeButtonRef) ?? undefined);
       setRelatedHandle(showRelated ? handleFor(relatedFirstRef) ?? undefined : undefined);
     });
     return () => cancelAnimationFrame(frame);
@@ -579,7 +601,8 @@ function MovieDetailOverlayComponent({
         }}
         nextFocusLeft={actionHandles[left ?? id]}
         nextFocusRight={right ? actionHandles[right] : actionHandles[id]}
-        nextFocusUp={actionHandles[id]}
+        // Up from the action row reaches Close; Close is never preferred focus.
+        nextFocusUp={closeHandle ?? actionHandles[id]}
         nextFocusDown={showRelated ? relatedHandle ?? actionHandles[id] : actionHandles[id]}
         onFocus={(actionId) => {
           focusRetryCancelRef.current?.();
@@ -590,6 +613,10 @@ function MovieDetailOverlayComponent({
       />
     );
   };
+
+  const playFocusHandle =
+    (firstAction ? actionHandles[firstAction] : undefined) ?? actionHandles.play ?? closeHandle;
+  const closeFocusable = panelVisible && !focusHandoffActive;
 
   return (
     <View
@@ -658,11 +685,48 @@ function MovieDetailOverlayComponent({
           <View style={styles.cardGlassFill} pointerEvents="none" />
 
           <Pressable
-            focusable={false}
-            onPress={onClose}
-            style={styles.closeHint}
-            accessibilityLabel="Close details">
-            <MaterialCommunityIcons name="close" size={20} color="rgba(255,255,255,0.72)" />
+            ref={closeButtonRef}
+            focusable={closeFocusable}
+            disabled={!closeFocusable}
+            hasTVPreferredFocus={false}
+            accessibilityRole="button"
+            accessibilityLabel="Close movie details"
+            {...(closeHandle
+              ? {
+                  nextFocusLeft: closeHandle,
+                  nextFocusRight: closeHandle,
+                  nextFocusUp: closeHandle,
+                }
+              : {})}
+            {...(playFocusHandle ? { nextFocusDown: playFocusHandle } : {})}
+            onFocus={() => {
+              focusRetryCancelRef.current?.();
+              focusRetryCancelRef.current = null;
+              setFocusedTarget('close');
+              recordFocusAudit({
+                component: 'MovieDetailOverlay',
+                action: 'close_focus',
+                itemId: detail.id,
+                reason: 'close-button',
+              });
+            }}
+            onBlur={() =>
+              setFocusedTarget((current) => (current === 'close' ? null : current))
+            }
+            onPress={invokeClose}
+            {...(Platform.isTV ? { onClick: invokeClose } : {})}
+            style={[
+              styles.closeHint,
+              styles.closeHintFocusTransition,
+              novaTvFocus.base,
+              focusedTarget === 'close' && styles.closeHintFocused,
+              focusedTarget === 'close' && novaTvFocus.active,
+            ]}>
+            <MaterialCommunityIcons
+              name="close"
+              size={20}
+              color={focusedTarget === 'close' ? '#FFFFFF' : 'rgba(255,255,255,0.72)'}
+            />
           </Pressable>
 
           <View style={styles.cardBody}>
@@ -765,6 +829,7 @@ function MovieDetailOverlayComponent({
                   onFocus={setFocusedTarget}
                   onSelect={focusHandoffActive ? undefined : onSelectRelated}
                   cardWidth={cardSize.width}
+                  nextFocusUp={playFocusHandle}
                   firstRef={(instance) => {
                     relatedFirstRef.current = instance;
                   }}
@@ -832,14 +897,28 @@ const styles = StyleSheet.create({
     top: 12,
     right: 12,
     zIndex: 2,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 44,
+    height: 44,
+    minWidth: 44,
+    minHeight: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(8, 12, 20, 0.55)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: 'rgba(8, 12, 20, 0.62)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  closeHintFocusTransition: Platform.select({
+    web: {
+      transitionProperty: 'border-color, background-color, transform',
+      transitionDuration: `${MOVIE_DETAIL_FOCUS_MS}ms`,
+    },
+    default: {},
+  }),
+  closeHintFocused: {
+    backgroundColor: 'rgba(20, 32, 52, 0.95)',
+    borderColor: 'rgba(191, 219, 254, 0.95)',
+    transform: [{ scale: 1.08 }],
   },
   cardBody: {
     flex: 1,

@@ -15,6 +15,7 @@ const suites = [
   'movies-stage4i-readable-snapshot-recovery.test.mjs',
   'movies-stage4j-deterministic-detail-close.test.mjs',
   'movies-stage4k-instant-covered-detail-close.test.mjs',
+  'movies-stage4k1-category-rail-visibility.test.mjs',
   'movies-catalog-generation-inventory.test.mjs',
   'catalog-stage3c-generation-safe.test.mjs',
   'movies-stage3c1-category-counts.test.mjs',

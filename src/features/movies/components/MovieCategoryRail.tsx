@@ -32,6 +32,8 @@ type MovieCategoryRailProps = {
   focusable?: boolean;
   discoverStatusMessage?: string | null;
   contentType?: ProviderCategoryContentType;
+  /** Stage 4.2K.1: stable diagnostics identity — must not be used as a React key. */
+  railInstanceId?: string;
   onSelectCategory: (categoryId: string) => void;
   onPrefetchCategoryCount?: (categoryId: string, kind?: MovieCategory['kind']) => void;
   registerItemRef?: (categoryId: string, instance: ElementRef<typeof Pressable> | null) => void;
@@ -46,6 +48,7 @@ export function MovieCategoryRail({
   focusable = true,
   discoverStatusMessage,
   contentType = 'movie',
+  railInstanceId,
   onSelectCategory,
   onPrefetchCategoryCount,
   registerItemRef,
@@ -65,14 +68,22 @@ export function MovieCategoryRail({
     if (!isOnnMoviesTraceEnabled()) {
       return;
     }
-    noteOnnMoviesMount('MovieCategoryRail', { categoryCount: categories.length });
+    noteOnnMoviesMount('MovieCategoryRail', {
+      categoryCount: categories.length,
+      railInstanceId: railInstanceId ?? null,
+    });
     return () => {
-      noteOnnMoviesUnmount('MovieCategoryRail', { categoryCount: categories.length });
+      noteOnnMoviesUnmount('MovieCategoryRail', {
+        categoryCount: categories.length,
+        railInstanceId: railInstanceId ?? null,
+      });
     };
-  }, [categories.length]);
+    // Stage 4.2K.1: identity is railInstanceId — do not remount on categoryCount/detail phase.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [railInstanceId]);
 
   return (
-    <View style={styles.panel}>
+    <View style={styles.panel} collapsable={false}>
       <View style={styles.header}>
         <Text style={styles.title}>Categories</Text>
         <MaterialCommunityIcons name="view-list-outline" size={18} color={theme.colors.textMuted} />

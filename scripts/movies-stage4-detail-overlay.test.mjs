@@ -227,7 +227,8 @@ test('loading is non-focusable; focused and selected action states are distinct'
 });
 
 test('disabled and unavailable actions are not focusable; retry joins graph when available', () => {
-  assert.match(overlay, /const focusable = Boolean\(onPress\) && !disabled/);
+  // Stage 4.2H/J: forceFocusable keeps the preserved Detail owner native-focusable during handoff.
+  assert.match(overlay, /const focusable = \(Boolean\(onPress\) \|\| Boolean\(forceFocusable\)\) && !disabled/);
   assert.match(overlay, /showRetry \? 'retry'/);
   assert.match(overlay, /id === 'retry'/);
   assert.match(overlay, /Boolean\(detailError && onRetry\)|showRetry =/);
@@ -263,7 +264,8 @@ test('related selection updates detail in place without catalog refetch', () => 
 });
 
 test('close/back remain lifecycle-driven one-press contracts', () => {
-  assert.match(screen, /onClose=\{closeDetail\}/);
+  // Stage 4.2H: X close routes through closeDetail('x') for activation lock ownership.
+  assert.match(screen, /onClose=\{\(\) => closeDetail\('x'\)\}/);
   assert.match(overlay, /onClose/);
   assert.match(screen, /moviesDetailFocusLifecycle|detailFocusPhase|focusHandoffActive/);
 });
@@ -303,8 +305,8 @@ test('Stage 4.2C: Close button is TV-focusable inside the focus trap', () => {
   assert.match(overlay, /action: 'close_focus'/);
   assert.match(overlay, /action: 'close_activate'/);
   assert.match(overlay, /closeHintFocused/);
-  // Screen wires X and Back through the same closeDetail lifecycle.
-  assert.match(screen, /onClose=\{closeDetail\}/);
+  // Screen wires X through closeDetail('x'); Back uses the same closeDetail lifecycle.
+  assert.match(screen, /onClose=\{\(\) => closeDetail\('x'\)\}/);
   assert.match(screen, /pointerEvents=\{[\s\S]{0,220}detailOpen \|\| searchBlocksBrowse/);
 });
 

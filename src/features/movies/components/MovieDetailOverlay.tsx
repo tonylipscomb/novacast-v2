@@ -432,6 +432,36 @@ function MovieDetailOverlayComponent({
     }
   }, [detail?.id, focusHandoffActive, visible]);
 
+  const panelVisibleForShell = visible || visualHoldActive;
+
+  // Stage 4.2K.1: closed-shell neutrality diagnostics (not during open/hold paint).
+  useEffect(() => {
+    if (!isOnnMoviesTraceEnabled()) {
+      return;
+    }
+    if (panelVisibleForShell) {
+      return;
+    }
+    traceOnnMoviesEvent('Overlay', 'movie_detail_overlay_closed_shell_state', {
+      overlayInstanceId: overlayInstanceId ?? null,
+      panelVisible: false,
+      visualIsolationActive,
+      holdCoverActive: false,
+      focusHandoffActive: false,
+      pointerEvents: 'none',
+      hasBackdrop: false,
+      hasBlur: false,
+      hasCard: false,
+      isolationCoverMounted: visualIsolationActive,
+      layoutWidth: visualIsolationActive ? null : 0,
+      marker: 'stage4k1-movies-category-rail-visibility-v1',
+    });
+  }, [
+    overlayInstanceId,
+    panelVisibleForShell,
+    visualIsolationActive,
+  ]);
+
   const cardSize = resolveCompactDetailCardSize(width, height);
   const posterWidth = Math.round(cardSize.width * 0.27);
   const titleFontSize = resolveTitleFontSize(width);
@@ -667,19 +697,28 @@ function MovieDetailOverlayComponent({
     trapFocusDown?: boolean;
   }>;
 
+  // Stage 4.2K: keepFocusTrap keeps the shell mounted; panelVisible controls paint.
+  const panelVisible = visible || visualHoldActive;
+  const holdCoverActive = focusHandoffActive || visualHoldActive;
+
   // Stage 4.2K: stable shell — stay mounted for MoviesScreen lifetime via keepFocusTrap.
   // Content may be null while suppressed/closed; do not remount the shell.
-  if (!detail && !keepFocusTrap && !visualHoldActive) return null;
-  if (!visible && !keepFocusTrap && !visualHoldActive) return null;
+  if (!detail && !keepFocusTrap && !visualHoldActive && !visualIsolationActive) return null;
+  if (!visible && !keepFocusTrap && !visualHoldActive && !visualIsolationActive) return null;
 
-  if (!detail) {
-    return (
-      <View
-        style={[styles.root, styles.rootHidden]}
-        pointerEvents="none"
-        focusable={false}
-        importantForAccessibility="no-hide-descendants">
-        {visualIsolationActive ? (
+  // Stage 4.2K.1: closed shell must be visually empty — never keep blur/card/elevation
+  // under opacity:0 absoluteFill (Android TV elevated layers still cover the category rail).
+  if (!panelVisible) {
+    if (visualIsolationActive) {
+      // Temporary close-token cover only — no blur/card/elevation children.
+      return (
+        <View
+          style={styles.rootIsolationOnly}
+          pointerEvents="none"
+          focusable={false}
+          accessible={false}
+          importantForAccessibility="no-hide-descendants"
+          collapsable={false}>
           <View
             style={[StyleSheet.absoluteFill, styles.visualIsolationCover]}
             pointerEvents="none"
@@ -687,14 +726,21 @@ function MovieDetailOverlayComponent({
             accessible={false}
             importantForAccessibility="no-hide-descendants"
           />
-        ) : null}
-      </View>
+        </View>
+      );
+    }
+    return (
+      <View
+        style={styles.rootClosedInert}
+        pointerEvents="none"
+        focusable={false}
+        accessible={false}
+        importantForAccessibility="no-hide-descendants"
+        collapsable={false}
+      />
     );
   }
 
-  // Stage 4.2K: keepFocusTrap keeps the shell mounted; panelVisible controls paint.
-  const panelVisible = visible || visualHoldActive;
-  const holdCoverActive = focusHandoffActive || visualHoldActive;
   // Stage 4.2H/J: preserved Detail focus owner stays native-focusable; no hidden sentinel.
   const ownerPreservedHandoff = preserveCloseButtonFocus && holdCoverActive;
   const mountHiddenHandoffTarget = holdCoverActive && !preserveCloseButtonFocus;
@@ -1067,6 +1113,28 @@ const styles = StyleSheet.create({
   },
   rootHidden: {
     opacity: 0,
+  },
+  /**
+   * Stage 4.2K.1: permanently mounted closed shell — zero paint, zero layout,
+   * zero elevation. Must not cover the category rail on Android TV.
+   */
+  rootClosedInert: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+    opacity: 0,
+    overflow: 'hidden',
+    elevation: 0,
+    zIndex: 0,
+  },
+  /** Stage 4.2K.1: isolation-only cover while a close token owns it (no card/blur). */
+  rootIsolationOnly: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 40,
+    elevation: 0,
+    backgroundColor: 'transparent',
   },
   closeFocusTarget: {
     position: 'absolute',

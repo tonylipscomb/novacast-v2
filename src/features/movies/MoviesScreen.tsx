@@ -16,7 +16,7 @@ import ReactNative, {
   View,
 } from 'react-native';
 
-import { BlurView } from 'expo-blur';
+import { BlurTargetView, BlurView } from 'expo-blur';
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
 import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
@@ -116,6 +116,15 @@ import {
   type MoviesDetailCloseImmutableTarget,
 } from './moviesDetailCloseInstant';
 import { MOVIES_FOCUS_STAGE4L_MARKER } from './moviesStartupFastPath';
+import {
+  buildSanitizedPlaybackSourceSnapshot,
+  extractPlaybackHttpStatus,
+  MOVIES_FOCUS_STAGE4L1_MARKER,
+  releaseMoviesStartupFocusOwnership,
+  shouldAllowMoviesToolbarSearchPreferredFocus,
+  shouldCorrectMoviesToolbarSearchFocusSteal,
+} from './moviesStartupRuntimeIsolation';
+import { normalizePlaybackFailure } from '@/features/analytics/playbackAnalytics';
 
 import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
 import {
@@ -322,6 +331,11 @@ export function MoviesScreen() {
   const confirmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const overlayCloseTargetRef = useRef<ElementRef<typeof Pressable> | null>(null);
   const browseLayerRef = useRef<View | null>(null);
+  // Stage 4.2L.1: only Expo BlurTargetView refs may be passed as blurTarget.
+  (browseLayerRef as { __expoBlurTarget?: boolean }).__expoBlurTarget = true;
+  const searchFocusCorrectionTokenRef = useRef<string | null>(null);
+  const startupFocusOwnershipActiveRef = useRef(true);
+  const startupFocusFrameRef = useRef<number | null>(null);
   const [detailFocusPhase, setDetailFocusPhase] = useState<MoviesDetailFocusPhase>('browse');
   const detailFocusPhaseRef = useRef<MoviesDetailFocusPhase>('browse');
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
@@ -460,6 +474,15 @@ export function MoviesScreen() {
     !detailOpen &&
     !playbackUiActive &&
     !postRestoreActive;
+  const toolbarSearchPreferredAllowed = shouldAllowMoviesToolbarSearchPreferredFocus({
+    detailPhase: detailFocusPhase,
+    detailOpen,
+    detailClosing,
+    restoringBrowseFocus,
+    postRestoreLatchActive: postRestoreActive,
+    startupFocusOwnershipActive: startupFocusOwnershipActiveRef.current,
+    playbackReturnRestoring: isRestoringPlaybackFocusRef.current,
+  });
   const activeClosingFocusMovieId = resolveMoviesClosingFocusableMovieId({
     phase: detailFocusPhase,
     targetMovieId: closingFocusMovieId,
@@ -701,6 +724,19 @@ export function MoviesScreen() {
     const released: MoviesPostRestoreLatch = { ...latch, postRestoreActive: false };
     postRestoreLatchRef.current = released;
     setPostRestoreLatch(released);
+    searchFocusCorrectionTokenRef.current = null;
+    console.info(
+      '[NovaCast Movies Focus] ' +
+        JSON.stringify({
+          event: 'movies_detail_close_focus_owner_released',
+          marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+          detailPhase: detailFocusPhaseRef.current,
+          closeToken: latch.token,
+          immutablePosterMovieId: latch.restoredMovieId,
+          releaseReason: reason,
+          postRestoreLatchActive: false,
+        }),
+    );
     logMoviesPostRestoreFocus({
       token: latch.token,
       restoredMovieId: latch.restoredMovieId,
@@ -816,8 +852,7 @@ export function MoviesScreen() {
     setMoviesDetailOpenForDiagnostics(detailOpen || detailClosing);
   }, [detailClosing, detailOpen]);
 
-  // Stage 4.2L: request startup focus only after local viewport is interactive,
-  // and never while a Detail-close transaction owns the screen.
+  // Stage 4.2L.1: startup focus is strictly one-shot per provider route session.
   const startupFocusRequestedRef = useRef(false);
   useEffect(() => {
     if (!startupInteractive || startupFocusRequestedRef.current) {
@@ -831,28 +866,51 @@ export function MoviesScreen() {
       return;
     }
     startupFocusRequestedRef.current = true;
+    startupFocusOwnershipActiveRef.current = true;
     console.info(
       '[NovaCast Movies Startup] ' +
         JSON.stringify({
           event: 'movies_startup_focus_request_started',
-          marker: MOVIES_FOCUS_STAGE4L_MARKER,
+          marker: MOVIES_FOCUS_STAGE4L1_MARKER,
           movieId: targetMovieId,
           selectedCategoryId,
         }),
     );
-    const frame = requestAnimationFrame(() => {
+    if (startupFocusFrameRef.current != null) {
+      cancelAnimationFrame(startupFocusFrameRef.current);
+    }
+    startupFocusFrameRef.current = requestAnimationFrame(() => {
+      startupFocusFrameRef.current = null;
       console.info(
         '[NovaCast Movies Startup] ' +
           JSON.stringify({
             event: 'movies_startup_focus_confirmed',
-            marker: MOVIES_FOCUS_STAGE4L_MARKER,
+            marker: MOVIES_FOCUS_STAGE4L1_MARKER,
             movieId: targetMovieId,
             selectedCategoryId,
           }),
       );
+      const released = releaseMoviesStartupFocusOwnership(activeProviderId);
+      startupFocusOwnershipActiveRef.current = false;
+      console.info(
+        '[NovaCast Movies Startup] ' +
+          JSON.stringify({
+            event: 'movies_startup_focus_ownership_released',
+            marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+            movieId: targetMovieId,
+            released: released.released,
+            startupSessionId: released.session?.sessionId ?? null,
+          }),
+      );
     });
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      if (startupFocusFrameRef.current != null) {
+        cancelAnimationFrame(startupFocusFrameRef.current);
+        startupFocusFrameRef.current = null;
+      }
+    };
   }, [
+    activeProviderId,
     detailClosing,
     detailOpen,
     getFocusedMovieId,
@@ -4016,6 +4074,21 @@ export function MoviesScreen() {
       markMoviePlaybackLifecycle('source-resolved', {
         movieId: currentMovie.id,
       });
+      const launchSourceSnapshot = buildSanitizedPlaybackSourceSnapshot({
+        movieId: currentMovie.id,
+        streamUrl,
+        containerExtension:
+          matchingDetail?.containerExtension ?? currentMovie.containerExtension ?? null,
+        providerId: activeProviderId,
+      });
+      console.info(
+        '[NovaCast Movies Playback] ' +
+          JSON.stringify({
+            event: 'movies_playback_launch_source_snapshot',
+            marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+            ...launchSourceSnapshot,
+          }),
+      );
       logMoviePlaybackShape({
         origin: auditOrigin,
         movieId: currentMovie.id,
@@ -4107,12 +4180,33 @@ export function MoviesScreen() {
         });
       }
     } catch (error) {
+      const httpStatus = extractPlaybackHttpStatus(error);
+      const failureCategory = normalizePlaybackFailure(error);
+      const errorSnapshot = buildSanitizedPlaybackSourceSnapshot({
+        movieId: requestedMovie.id,
+        streamUrl: null,
+        containerExtension: requestedMovie.containerExtension ?? null,
+        providerId: activeProviderId,
+        httpResponseCode: httpStatus,
+      });
+      console.info(
+        '[NovaCast Movies Playback] ' +
+          JSON.stringify({
+            event: 'movies_playback_http_source_error',
+            marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+            failureCategory,
+            ...errorSnapshot,
+          }),
+      );
       logMoviesPlayback('launch-failed', {
         movieId: requestedMovie.id,
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorMessage: error instanceof Error ? error.message : String(error),
+        httpStatus,
+        failureCategory,
       });
 
+      setLaunchingPlayback(false);
       setDetailSuppressedForPlayback(false);
       noteMoviePlaybackFailed(
         error instanceof Error ? error.message : 'launch-failed',
@@ -4811,7 +4905,7 @@ useEffect(() => {
   return (
     <View style={styles.root}>
       <>
-      <View
+      <BlurTargetView
         ref={browseLayerRef}
         collapsable={false}
         style={[styles.browseLayer, playbackUiActive && styles.browseLayerHidden]}
@@ -4860,15 +4954,77 @@ useEffect(() => {
                 if (restoreTimingRef.current) {
                   restoreTimingRef.current.searchFocusAttempted = true;
                 }
-                if (!postRestoreLatchRef.current?.postRestoreActive) {
+                const browseCloseActive =
+                  detailClosing ||
+                  restoringBrowseFocus ||
+                  postRestoreActive ||
+                  isMoviesDetailClosingPhase(detailFocusPhase);
+                const closeToken =
+                  detailFocusTokenRef.current?.token ??
+                  postRestoreLatchRef.current?.token ??
+                  null;
+                const immutablePosterId = getImmutableCloseTargetMovieId();
+                console.info(
+                  '[NovaCast Movies Focus] ' +
+                    JSON.stringify({
+                      event: 'movies_toolbar_search_focus_eligibility_changed',
+                      marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+                      searchPreferredFocus: false,
+                      toolbarPreferredFocus: toolbarSearchPreferredAllowed,
+                      detailPhase: detailFocusPhase,
+                      closeToken,
+                      immutablePosterMovieId: immutablePosterId,
+                      startupOwnershipActive: startupFocusOwnershipActiveRef.current,
+                      restoringBrowseFocus,
+                      postRestoreLatchActive: postRestoreActive,
+                    }),
+                );
+
+                if (browseCloseActive || startupFocusOwnershipActiveRef.current) {
+                  const correction = shouldCorrectMoviesToolbarSearchFocusSteal({
+                    browseDetailCloseActive: browseCloseActive,
+                    searchPreferredFocus: true,
+                    correctionAlreadyIssuedForToken:
+                      Boolean(closeToken) &&
+                      searchFocusCorrectionTokenRef.current === closeToken,
+                  });
+                  console.info(
+                    '[NovaCast Movies Focus] ' +
+                      JSON.stringify({
+                        event: 'movies_toolbar_search_focus_steal_violation',
+                        marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+                        detailPhase: detailFocusPhase,
+                        closeToken,
+                        immutablePosterMovieId: immutablePosterId,
+                        currentlyFocusedTarget: 'MovieToolbar.Search',
+                        startupOwnershipActive: startupFocusOwnershipActiveRef.current,
+                        restoringBrowseFocus,
+                        postRestoreLatchActive: postRestoreActive,
+                        searchPreferredFocus: false,
+                        toolbarPreferredFocus: toolbarSearchPreferredAllowed,
+                        correctionReason: correction.reason,
+                      }),
+                  );
+                  if (correction.correct && immutablePosterId && closeToken) {
+                    searchFocusCorrectionTokenRef.current = closeToken;
+                    const stored = posterRefs.current.get(immutablePosterId);
+                    if (stored?.instance) {
+                      requestTvFocus({
+                        target: stored.instance,
+                        context: 'movies-search-steal-correction',
+                        reason: 'toolbar-search-steal-during-detail-close',
+                      });
+                    }
+                  }
+                  if (postRestoreLatchRef.current?.postRestoreActive) {
+                    logMoviesSearchFocusBlocked({
+                      token: postRestoreLatchRef.current.token,
+                      reason: 'post-restore-latch-focusable-false-bypass',
+                      source: 'MovieToolbar.onFocus',
+                    });
+                  }
                   return;
                 }
-                // Should not happen while focusable={false}; log if native still delivers focus.
-                logMoviesSearchFocusBlocked({
-                  token: postRestoreLatchRef.current.token,
-                  reason: 'post-restore-latch-focusable-false-bypass',
-                  source: 'MovieToolbar.onFocus',
-                });
               }}
               onSearchPress={() => {
                 const phase = searchPhaseRef.current;
@@ -5044,7 +5200,7 @@ useEffect(() => {
           </View>
         </View>
       </NovaTvShell>
-        </View>
+      </BlurTargetView>
 
       <MovieDetailOverlay
         visible={detailOverlayVisible}

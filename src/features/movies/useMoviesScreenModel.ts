@@ -83,6 +83,14 @@ import {
   type MoviesStartupQueryMode,
   type MoviesStartupReadinessLevel,
 } from './moviesStartupFastPath';
+import {
+  beginMoviesStartupSession,
+  getMoviesStartupSession,
+  markMoviesStartupSessionInteractive,
+  MOVIES_FOCUS_STAGE4L1_MARKER,
+  shouldBlockMoviesStartupReentry,
+  shouldDropLateMoviesStartupFocusResult,
+} from './moviesStartupRuntimeIsolation';
 
 const MOVIES_SQLITE_READS_ENABLED =
   process.env.EXPO_PUBLIC_MOVIES_SQLITE_READS === 'true';
@@ -337,8 +345,11 @@ export function useMoviesScreenModel(
     state.interactive = true;
     state.level = 'interactive';
     state.interactiveElapsedMs = Date.now() - routeMountedAtRef.current;
+    markMoviesStartupSessionInteractive(activeProviderId);
     setStartupInteractive(true);
     emitMoviesStartup('movies_startup_interactive', {
+      startupSessionId: getMoviesStartupSession(activeProviderId)?.sessionId ?? null,
+      marker: MOVIES_FOCUS_STAGE4L1_MARKER,
       categoriesElapsedMs: state.categoriesElapsedMs,
       firstViewportElapsedMs: state.firstViewportElapsedMs,
       interactiveElapsedMs: state.interactiveElapsedMs,
@@ -367,10 +378,11 @@ export function useMoviesScreenModel(
     if (state.pendingSmartCountRefresh) {
       state.pendingSmartCountRefresh = false;
     }
-  }, [emitMoviesStartup]);
+  }, [activeProviderId, emitMoviesStartup]);
 
   useEffect(() => {
     routeMountedAtRef.current = Date.now();
+    const session = beginMoviesStartupSession(activeProviderId);
     startupStateRef.current = {
       level: 'shell',
       durableCategoriesReady: false,
@@ -390,6 +402,8 @@ export function useMoviesScreenModel(
     setStartupInteractive(false);
     emitMoviesStartup('movies_startup_shell_mounted', {
       level: 'shell',
+      startupSessionId: session.sessionId,
+      marker: MOVIES_FOCUS_STAGE4L1_MARKER,
     });
   }, [activeProviderId, emitMoviesStartup]);
 
@@ -1401,6 +1415,13 @@ export function useMoviesScreenModel(
                 offset: 0,
                 limit: MOVIE_PAGE_SIZE,
                 sort: sortOption,
+                queryPurpose: startupStateRef.current.interactive
+                  ? 'runtime'
+                  : 'startup-viewport',
+                pinnedGeneration:
+                  getMoviesStartupSession(activeProviderId)?.pinnedGeneration || undefined,
+                startupSessionId:
+                  getMoviesStartupSession(activeProviderId)?.sessionId ?? null,
               });
 
         if (cancelled || buildContentSortRequestKey({
@@ -1411,6 +1432,29 @@ export function useMoviesScreenModel(
           offset: 0,
           generation,
         }) !== requestKey) {
+          return;
+        }
+
+        const startupSession = getMoviesStartupSession(activeProviderId);
+        const detailActive = getMoviesDetailOpenForDiagnostics();
+        const dropLateStartup = shouldDropLateMoviesStartupFocusResult({
+          startupInteractive: startupStateRef.current.interactive,
+          startupFocusReleased: Boolean(startupSession?.focusReleased),
+          detailOpen: detailActive,
+          detailClosing: detailActive,
+        });
+
+        // After startup focus is released / session interactive, Detail-active
+        // completions must not mutate browse focus or preferred targets.
+        if (dropLateStartup && detailActive) {
+          emitMoviesStartup('movies_startup_late_focus_result_dropped', {
+            categoryId: selectedCategoryId,
+            returnedCount: page.items.length,
+            reason: startupSession?.focusReleased
+              ? 'startup-focus-released'
+              : 'detail-active',
+            marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+          });
           return;
         }
 
@@ -1451,57 +1495,67 @@ export function useMoviesScreenModel(
             gridMounted: isOnnMoviesGridMounted(),
           });
         }
-        const startupFocus = resolveMoviesStartupFocusTarget({
-          savedMovieId: previousFocusedMovieId,
-          selectedMovieId: selectedMovieId,
-          viewportMovieIds: page.items.map((movie) => movie.id),
-          hasCategories: categoriesRef.current.length > 0,
-        });
-        if (!startupStateRef.current.firstViewportReady && page.items.length > 0) {
-          startupStateRef.current.firstViewportReady = true;
-          startupStateRef.current.level = 'first-viewport';
-          startupStateRef.current.firstViewportElapsedMs =
-            Date.now() - routeMountedAtRef.current;
-          emitMoviesStartup('movies_startup_first_viewport_ready', {
-            categoryId: selectedCategoryId,
-            returnedCount: page.items.length,
-            firstViewportElapsedMs: startupStateRef.current.firstViewportElapsedMs,
+
+        if (!startupStateRef.current.interactive) {
+          const startupFocus = resolveMoviesStartupFocusTarget({
             savedMovieId: previousFocusedMovieId,
-            savedMovieFound: startupFocus.reason === 'saved-focused',
+            selectedMovieId: selectedMovieId,
+            viewportMovieIds: page.items.map((movie) => movie.id),
+            hasCategories: categoriesRef.current.length > 0,
           });
-          emitMoviesStartup('movies_startup_focus_target_selected', {
-            movieId: startupFocus.movieId,
-            reason: startupFocus.reason,
-            fallbackUsed: startupFocus.fallbackUsed,
-          });
-          if (startupFocus.fallbackUsed) {
-            emitMoviesStartup('movies_startup_focus_fallback_used', {
+          if (!startupStateRef.current.firstViewportReady && page.items.length > 0) {
+            startupStateRef.current.firstViewportReady = true;
+            startupStateRef.current.level = 'first-viewport';
+            startupStateRef.current.firstViewportElapsedMs =
+              Date.now() - routeMountedAtRef.current;
+            emitMoviesStartup('movies_startup_first_viewport_ready', {
+              categoryId: selectedCategoryId,
+              returnedCount: page.items.length,
+              firstViewportElapsedMs: startupStateRef.current.firstViewportElapsedMs,
+              savedMovieId: previousFocusedMovieId,
+              savedMovieFound: startupFocus.reason === 'saved-focused',
+            });
+            emitMoviesStartup('movies_startup_focus_target_selected', {
               movieId: startupFocus.movieId,
               reason: startupFocus.reason,
-              savedMovieId: previousFocusedMovieId,
+              fallbackUsed: startupFocus.fallbackUsed,
             });
+            if (startupFocus.fallbackUsed) {
+              emitMoviesStartup('movies_startup_focus_fallback_used', {
+                movieId: startupFocus.movieId,
+                reason: startupFocus.reason,
+                savedMovieId: previousFocusedMovieId,
+              });
+            }
           }
-        }
-        const restoredFocusId = startupFocus.movieId;
-        setFocusedMovieId(restoredFocusId);
-        if (page.items.length > 0) {
-          markStartupInteractiveIfReady();
-          if (
-            startupStateRef.current.interactive &&
-            startupStateRef.current.pendingSmartCountRefresh
-          ) {
-            startupStateRef.current.pendingSmartCountRefresh = false;
-            void refreshSmartCategoryCounts(activeProviderId, categoriesRef.current).then(
-              (refreshed) => {
-                if (!cancelled) {
-                  setCategories((current) =>
-                    mergeCategoriesPreservingCounts(current, refreshed),
-                  );
-                }
-              },
-            );
+          setFocusedMovieId(startupFocus.movieId);
+          if (page.items.length > 0) {
+            markStartupInteractiveIfReady();
+            if (
+              startupStateRef.current.interactive &&
+              startupStateRef.current.pendingSmartCountRefresh
+            ) {
+              startupStateRef.current.pendingSmartCountRefresh = false;
+              void refreshSmartCategoryCounts(activeProviderId, categoriesRef.current).then(
+                (refreshed) => {
+                  if (!cancelled) {
+                    setCategories((current) =>
+                      mergeCategoriesPreservingCounts(current, refreshed),
+                    );
+                  }
+                },
+              );
+            }
           }
+        } else {
+          // Runtime category/page loads: bounded focus restore, not startup-owned.
+          const restoredFocusId =
+            page.items.find((movie) => movie.id === previousFocusedMovieId)?.id ??
+            page.items[0]?.id ??
+            null;
+          setFocusedMovieId(restoredFocusId);
         }
+
         setSelectedMovieId((current) => {
           if (current && page.items.some((movie) => movie.id === current)) {
             return current;

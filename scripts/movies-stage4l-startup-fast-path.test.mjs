@@ -79,8 +79,9 @@ test('1. Durable categories render before provider refresh completes', () => {
 });
 
 test('2. First readable viewport renders before provider refresh completes', () => {
-  assert.match(sqlite, /skipTotalCount: isStartupViewport/);
+  assert.match(sqlite, /skipTotalCount: true/);
   assert.match(sqlite, /MOVIES_STARTUP_VIEWPORT_LIMIT/);
+  assert.match(sqlite, /pinned-generation-sql/);
   assert.match(model, /movies_startup_first_viewport_ready/);
   assert.ok(MOVIES_STARTUP_VIEWPORT_LIMIT <= 48);
 });
@@ -246,8 +247,11 @@ test('16. Category query does not use an N+1 count loop', () => {
   assert.doesNotMatch(metaBlock, /getCatalogCategoryCounts/);
   // Fast-path branch uses metadata-only, not GROUP BY counts.
   const fastStart = sqlite.indexOf('Stage 4.2L fast path');
-  const forceFullIdx = sqlite.indexOf('forceFull === true', fastStart);
-  const fastBlock = sqlite.slice(fastStart, forceFullIdx > fastStart ? forceFullIdx : fastStart + 8000);
+  const networkFallbackIdx = sqlite.indexOf('movies_startup_network_fallback_started', fastStart);
+  const fastBlock = sqlite.slice(
+    fastStart,
+    networkFallbackIdx > fastStart ? networkFallbackIdx : fastStart + 12000,
+  );
   assert.match(fastBlock, /getCatalogCategoryMetadataOnly/);
   assert.doesNotMatch(fastBlock, /getCatalogCategoryCounts/);
 });
@@ -255,7 +259,8 @@ test('16. Category query does not use an N+1 count loop', () => {
 test('17. First viewport query is bounded and does not decode the full catalog', () => {
   assert.ok(MOVIES_STARTUP_VIEWPORT_LIMIT > 0);
   assert.match(sqlite, /Math\.min\(input\.limit, MOVIES_STARTUP_VIEWPORT_LIMIT\)/);
-  assert.match(sqlite, /skipTotalCount: isStartupViewport/);
+  assert.match(sqlite, /skipTotalCount: true/);
+  assert.match(sqlite, /pinned-generation-sql/);
   assert.doesNotMatch(sqlite, /listCategoryMovies\(/);
 });
 

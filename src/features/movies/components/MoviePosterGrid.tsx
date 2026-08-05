@@ -591,14 +591,16 @@ export function MoviePosterGrid({
             // Stage 3D.2: restored poster retains preferred ownership after confirm.
             postRestorePreferredMovieId != null
               ? postRestorePreferredMovieId === item.id
-              : // Stage 3D: never let first-poster preferred focus compete during close.
-                closingFocusMovieId != null || suppressPreferredFocus
-                ? false
-                : shouldClaimPreferredPosterFocus({
-                    focusClaimed: focusClaimedRef.current || selectedMovieId != null,
-                    itemId: item.id,
-                    seedId: focusSeedRef.current,
-                  })
+              : // Stage 4.2L.1: immutable close target is the only preferred owner during close.
+                closingFocusMovieId != null
+                ? closingFocusMovieId === item.id
+                : suppressPreferredFocus
+                  ? false
+                  : shouldClaimPreferredPosterFocus({
+                      focusClaimed: focusClaimedRef.current || selectedMovieId != null,
+                      itemId: item.id,
+                      seedId: focusSeedRef.current,
+                    })
           }
           onFocus={handleFocusMovie}
           onPress={handleSelectMovie}

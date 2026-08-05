@@ -61,7 +61,12 @@ import {
   logUnifiedRemoteEvent,
 } from './unifiedRemoteDebug.ts';
 import { recordRecentItem } from '@/features/personalization/personalizationStore';
-import { normalizePlaybackFailure, playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
+import {
+  extractPlaybackHttpStatus,
+  normalizePlaybackFailure,
+  playbackAnalyticsTracker,
+} from '@/features/analytics/playbackAnalytics';
+import { buildSanitizedPlaybackSourceSnapshot } from '@/features/movies/moviesStartupRuntimeIsolation';
 import { noteMoviePlaybackFailed, noteMoviePlaybackStarted } from '@/features/movies/moviesPlaybackAudit';
 import { endMoviePlaybackAttemptDiag } from '@/features/providers/playbackSourceDiagnostics';
 
@@ -132,13 +137,30 @@ export function UnifiedPlayerController() {
       if (!current.item) {
         return;
       }
+      const failureCategory = normalizePlaybackFailure(message);
+      const httpStatus = extractPlaybackHttpStatus(message);
       if (current.item.mediaType === 'movie') {
         endMoviePlaybackAttemptDiag({
           streamId: current.item.id,
           nativeStatus: 'error',
-          errorCategory: normalizePlaybackFailure(message),
+          errorCategory: failureCategory,
           outcome: 'error',
         });
+        if (httpStatus != null) {
+          console.info(
+            '[NovaCast Movies Playback] ' +
+              JSON.stringify({
+                event: 'movies_playback_http_source_error',
+                failureCategory,
+                ...buildSanitizedPlaybackSourceSnapshot({
+                  movieId: current.item.id,
+                  streamUrl: current.item.streamUrl,
+                  providerId: current.item.providerId ?? null,
+                  httpResponseCode: httpStatus,
+                }),
+              }),
+          );
+        }
       }
       playbackAnalyticsTracker.failure(message);
       setUnifiedPlayerError(sanitizePlaybackErrorMessage(message));

@@ -58,6 +58,12 @@ import {
   saveMoviesStartupDurableSnapshot,
 } from '../moviesStartupSnapshotStore.ts';
 import {
+  getMoviesStartupSession,
+  MOVIES_FOCUS_STAGE4L1_MARKER,
+  setMoviesStartupPinnedGeneration,
+  shouldBlockMoviesStartupReentry,
+} from '../moviesStartupRuntimeIsolation.ts';
+import {
   buildLocalMovieDetailFromCatalogItem,
   getCachedProviderMovieInfo,
   isLocalMovieDetailComplete,
@@ -171,6 +177,9 @@ export function resetLastValidSqliteMovieCategoriesForTests() {
   deferredFullCategoryRefreshInFlight.clear();
   forceNextCategoriesFullLoad.clear();
 }
+
+// Re-export for tests that clear the L.1 session alongside SQLite pins.
+export { resetMoviesStartupSessionsForTests } from '../moviesStartupRuntimeIsolation.ts';
 
 export function getLastValidMoviesCatalogReadSnapshotForTests(providerId: string) {
   return lastValidSqliteCategoriesByProvider.get(providerId)?.snapshot ?? null;
@@ -366,9 +375,48 @@ export function createSqliteMovieDataSource(
       const queryStartedAt = Date.now();
       const forceFull =
         options?.forceFull === true || forceNextCategoriesFullLoad.delete(providerId);
+      const startupBlocked = !forceFull && shouldBlockMoviesStartupReentry(providerId);
 
       // ── Stage 4.2L fast path: durable / session / metadata before heavy work ──
       if (!forceFull) {
+        if (startupBlocked) {
+          emitMoviesStartupTrace('movies_startup_reentry_blocked', {
+            providerId,
+            marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+            reason: 'session-already-interactive',
+          });
+          const memory = lastValidSqliteCategoriesByProvider.get(providerId);
+          if (memory && memory.categories.length > 0) {
+            return filterInteractiveMovieCategories(memory.categories);
+          }
+          const durableSilent = await loadMoviesStartupDurableSnapshot(providerId);
+          if (durableSilent) {
+            const rowCount = await getCatalogGenerationRowCount(
+              providerId,
+              'movie',
+              durableSilent.generation,
+            );
+            if (
+              isMoviesStartupDurableSnapshotValidForProvider({
+                snapshot: durableSilent,
+                providerId,
+                readableItemCount: rowCount,
+              })
+            ) {
+              const preserved = filterInteractiveMovieCategories(durableSilent.categories);
+              pinStartupCategories(
+                providerId,
+                durableSilent.generation,
+                preserved,
+                durableSilent.totalMovieCount,
+                durableSilent.categoryRows || preserved.length,
+                durableSilent.distinctItemCategoryIds || 0,
+              );
+              return preserved;
+            }
+          }
+          // Runtime full path below — not labeled as startup.
+        } else {
         emitMoviesStartupTrace('movies_startup_categories_query_started', {
           providerId,
           queryMode: 'startup-fast',
@@ -379,6 +427,7 @@ export function createSqliteMovieDataSource(
         if (memory && memory.generation > 0 && memory.categories.length > 0) {
           const preserved = filterInteractiveMovieCategories(memory.categories);
           if (preserved.length > 0) {
+            setMoviesStartupPinnedGeneration(providerId, memory.generation);
             const needsCounts = preserved.some(
               (category) =>
                 category.id !== SQLITE_MOVIES_DISCOVER_ID && category.countKnown === false,
@@ -437,6 +486,7 @@ export function createSqliteMovieDataSource(
               durable.categoryRows || preserved.length,
               durable.distinctItemCategoryIds || 0,
             );
+            setMoviesStartupPinnedGeneration(providerId, durable.generation);
             setCachedMoviesReadableGeneration({
               providerId,
               generation: durable.generation,
@@ -553,6 +603,7 @@ export function createSqliteMovieDataSource(
                 metadata.length,
                 0,
               );
+              setMoviesStartupPinnedGeneration(providerId, peekGeneration);
               emitMoviesStartupTrace('movies_startup_categories_query_finished', {
                 providerId,
                 generation: peekGeneration,
@@ -588,6 +639,7 @@ export function createSqliteMovieDataSource(
           reason: 'no-local-snapshot',
           elapsedMs: Date.now() - queryStartedAt,
         });
+        } // end !startupBlocked startup fast path
       }
 
       await logSqliteMovieDiagnostic(providerId, 'get-categories-before-query');
@@ -948,6 +1000,7 @@ export function createSqliteMovieDataSource(
         totalCount,
         snapshot,
       });
+      setMoviesStartupPinnedGeneration(providerId, categoryReadGeneration);
       void persistStartupDurableSnapshot(
         providerId,
         categoryReadGeneration,
@@ -1013,26 +1066,29 @@ export function createSqliteMovieDataSource(
             reason: 'grouped-counts-applied',
           }),
       );
-      emitMoviesStartupTrace('movies_startup_categories_query_finished', {
-        providerId,
-        generation: categoryReadGeneration,
-        rowCount: nextCategories.length,
-        queryElapsedMs: Date.now() - queryStartedAt,
-        totalElapsedMs: Date.now() - queryStartedAt,
-        usedCachedResult: false,
-        queryMode: 'full-counts' satisfies MoviesStartupQueryMode,
-      });
-      emitMoviesStartupTrace('movies_startup_readable_generation_selected', {
-        providerId,
-        generation: categoryReadGeneration,
-        source: 'full-integrity' satisfies MoviesStartupGenerationSource,
-        categoryCount: nextCategories.length,
-        selectedCategoryId: null,
-        savedCategoryFound: Boolean(previous),
-        readableMovieCount: totalCount,
-        fallbackReason: null,
-        elapsedMs: Date.now() - queryStartedAt,
-      });
+      // Stage 4.2L.1: after interactive, full recounts are runtime — not startup queries.
+      if (!shouldBlockMoviesStartupReentry(providerId)) {
+        emitMoviesStartupTrace('movies_startup_categories_query_finished', {
+          providerId,
+          generation: categoryReadGeneration,
+          rowCount: nextCategories.length,
+          queryElapsedMs: Date.now() - queryStartedAt,
+          totalElapsedMs: Date.now() - queryStartedAt,
+          usedCachedResult: false,
+          queryMode: 'full-counts' satisfies MoviesStartupQueryMode,
+        });
+        emitMoviesStartupTrace('movies_startup_readable_generation_selected', {
+          providerId,
+          generation: categoryReadGeneration,
+          source: 'full-integrity' satisfies MoviesStartupGenerationSource,
+          categoryCount: nextCategories.length,
+          selectedCategoryId: null,
+          savedCategoryFound: Boolean(previous),
+          readableMovieCount: totalCount,
+          fallbackReason: null,
+          elapsedMs: Date.now() - queryStartedAt,
+        });
+      }
 
       return nextCategories;
   }
@@ -1042,19 +1098,92 @@ export function createSqliteMovieDataSource(
     offset: number;
     limit: number;
     sort?: ContentSortOption;
+    pinnedGeneration?: number;
+    startupSessionId?: string | null;
+    queryPurpose?: 'startup-viewport' | 'runtime';
   }) {
       const queryStartedAt = Date.now();
-      const isStartupViewport = input.offset === 0;
+      const session = getMoviesStartupSession(providerId);
       const pinned = lastValidSqliteCategoriesByProvider.get(providerId);
+      const categoryId =
+        input.categoryId && input.categoryId !== SQLITE_MOVIES_DISCOVER_ID
+          ? input.categoryId
+          : undefined;
 
-      // Stage 4.2L: prefer pinned readable generation — do not wait on full integrity
-      // when a validated startup pin already exists.
-      let itemsGeneration = 0;
-      let readableGeneration = 0;
-      if (pinned && pinned.generation > 0) {
-        itemsGeneration = pinned.generation;
-        readableGeneration = pinned.generation;
-      } else {
+      // Stage 4.2L.1: true pinned-generation viewport — bounded SQL only.
+      const pinnedGeneration =
+        (input.pinnedGeneration && input.pinnedGeneration > 0
+          ? input.pinnedGeneration
+          : 0) ||
+        (session && session.pinnedGeneration > 0 ? session.pinnedGeneration : 0) ||
+        (pinned && pinned.generation > 0 ? pinned.generation : 0);
+
+      const isStartupViewport =
+        input.queryPurpose === 'startup-viewport' ||
+        (input.queryPurpose !== 'runtime' &&
+          input.offset === 0 &&
+          Boolean(session) &&
+          !session!.interactive &&
+          !shouldBlockMoviesStartupReentry(providerId));
+
+      if (isStartupViewport && pinnedGeneration > 0) {
+        const requestedLimit = Math.min(input.limit, MOVIES_STARTUP_VIEWPORT_LIMIT);
+        emitMoviesStartupTrace('movies_startup_viewport_query_started', {
+          providerId,
+          categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
+          generation: pinnedGeneration,
+          requestedLimit,
+          startupSessionId: input.startupSessionId ?? session?.sessionId ?? null,
+          marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+          queryMode: 'pinned-generation-sql',
+        });
+        const page = await getCatalogItemsPage({
+          providerId,
+          mediaType: 'movie',
+          categoryId,
+          offset: input.offset,
+          limit: requestedLimit,
+          sort: mapSort(input.sort),
+          generation: pinnedGeneration,
+          skipTotalCount: true,
+        });
+        emitMoviesStartupTrace('movies_startup_viewport_query_finished', {
+          providerId,
+          categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
+          generation: pinnedGeneration,
+          requestedLimit,
+          returnedCount: page.items.length,
+          savedMovieId: null,
+          savedMovieFound: false,
+          savedOffset: input.offset,
+          queryElapsedMs: Date.now() - queryStartedAt,
+          totalElapsedMs: Date.now() - queryStartedAt,
+          marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+          queryMode: 'pinned-generation-sql',
+        });
+        console.info('[Movies SQLite] first-page', {
+          providerId,
+          categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
+          offset: page.offset,
+          itemCount: page.items.length,
+          totalCount: page.totalCount,
+          generation: pinnedGeneration,
+          readableGeneration: pinnedGeneration,
+          skipTotalCount: true,
+          queryMode: 'pinned-generation-sql',
+          marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+        });
+        return {
+          items: page.items.map(mapCatalogItemToMovie),
+          totalCount: page.totalCount,
+          hasMore: page.hasMore,
+        };
+      }
+
+      // Runtime / post-interactive page loads — never labeled as startup.
+      let itemsGeneration = pinnedGeneration;
+      let readableGeneration = pinnedGeneration;
+      if (itemsGeneration <= 0) {
         readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie');
         itemsGeneration = readableGeneration;
       }
@@ -1062,36 +1191,20 @@ export function createSqliteMovieDataSource(
         throw new MoviesCatalogNotReadyError(providerId, readableGeneration);
       }
 
-      const categoryId =
-        input.categoryId && input.categoryId !== SQLITE_MOVIES_DISCOVER_ID
-          ? input.categoryId
-          : undefined;
-      const requestedLimit = isStartupViewport
-        ? Math.min(input.limit, MOVIES_STARTUP_VIEWPORT_LIMIT)
-        : input.limit;
-
-      if (isStartupViewport) {
-        emitMoviesStartupTrace('movies_startup_viewport_query_started', {
-          providerId,
-          categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
-          generation: itemsGeneration,
-          requestedLimit,
-        });
-      }
-
       const page = await getCatalogItemsPage({
         providerId,
         mediaType: 'movie',
         categoryId,
         offset: input.offset,
-        limit: requestedLimit,
+        limit: input.limit,
         sort: mapSort(input.sort),
         generation: itemsGeneration,
-        // Stage 4.2L: first viewport must not wait on a full-generation COUNT.
-        skipTotalCount: isStartupViewport,
+        skipTotalCount: input.offset === 0,
       });
 
-      await logSqliteMovieDiagnostic(providerId, 'first-page-after-query');
+      if (input.offset === 0) {
+        await logSqliteMovieDiagnostic(providerId, 'first-page-after-query');
+      }
       console.info('[Movies SQLite] first-page', {
         providerId,
         categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
@@ -1103,24 +1216,10 @@ export function createSqliteMovieDataSource(
         categoriesGeneration: itemsGeneration,
         itemsGeneration,
         generationAligned: itemsGeneration === readableGeneration,
-        skipTotalCount: isStartupViewport,
+        skipTotalCount: input.offset === 0,
+        queryMode: 'runtime',
         marker: 'stage4e-atomic-generation-pinning-v1',
       });
-
-      if (isStartupViewport) {
-        emitMoviesStartupTrace('movies_startup_viewport_query_finished', {
-          providerId,
-          categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
-          generation: itemsGeneration,
-          requestedLimit,
-          returnedCount: page.items.length,
-          savedMovieId: null,
-          savedMovieFound: false,
-          savedOffset: input.offset,
-          queryElapsedMs: Date.now() - queryStartedAt,
-          totalElapsedMs: Date.now() - queryStartedAt,
-        });
-      }
 
       return {
         items: page.items.map(mapCatalogItemToMovie),

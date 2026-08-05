@@ -13,6 +13,13 @@ export interface MovieDataSource {
     offset: number;
     limit: number;
     sort?: ContentSortOption;
+    /**
+     * Stage 4.2L.1: when set with queryPurpose 'startup-viewport', read only the
+     * bounded SQL page for this generation — no readiness/recovery/inventory.
+     */
+    pinnedGeneration?: number;
+    startupSessionId?: string | null;
+    queryPurpose?: 'startup-viewport' | 'runtime';
   }): Promise<{
     items: MovieSummary[];
     totalCount: number;

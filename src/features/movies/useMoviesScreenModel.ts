@@ -4,7 +4,10 @@ import { useProviderStore } from '@/features/providers/providerStore';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 
 import type { MovieDataSource } from './data/MovieDataSource';
-import { createSqliteMovieDataSource } from './data/SqliteMovieDataSource';
+import {
+  createSqliteMovieDataSource,
+  requestSqliteMovieCategoriesFullRefresh,
+} from './data/SqliteMovieDataSource';
 import { MOVIE_PAGE_SIZE } from './movieMockData';
 import type { MovieCategory, MovieSummary } from './movieTypes';
 import type { MovieDetailEnrichmentOrigin } from './movieDetailEnrichment';
@@ -70,6 +73,16 @@ import {
   shouldNetworkFetchCategoryCountOnWarm,
   shouldPrefetchMovieCategoryCount,
 } from './movieCategoryCountPolicy';
+import {
+  evaluateMoviesStartupBudgets,
+  MOVIES_FOCUS_STAGE4L_MARKER,
+  MOVIES_STARTUP_VIEWPORT_LIMIT,
+  resolveMoviesStartupFocusTarget,
+  shouldDeferMoviesBackgroundGenerationSwap,
+  shouldRunMoviesStartupBackgroundWork,
+  type MoviesStartupQueryMode,
+  type MoviesStartupReadinessLevel,
+} from './moviesStartupFastPath';
 
 const MOVIES_SQLITE_READS_ENABLED =
   process.env.EXPO_PUBLIC_MOVIES_SQLITE_READS === 'true';
@@ -276,6 +289,109 @@ export function useMoviesScreenModel(
   const deferredBrowseCommitsRef = useRef<
     Array<{ kind: MoviesDeferredBrowseCommitKind; apply: () => void; focusedMovieId: string | null }>
   >([]);
+  /** Stage 4.2L: Movies route mount clock + readiness (interactive before provider refresh). */
+  const routeMountedAtRef = useRef(Date.now());
+  const startupStateRef = useRef({
+    level: 'shell' as MoviesStartupReadinessLevel,
+    durableCategoriesReady: false,
+    firstViewportReady: false,
+    interactive: false,
+    backgroundRefreshStarted: false,
+    backgroundRefreshFinished: false,
+    categoriesElapsedMs: null as number | null,
+    firstViewportElapsedMs: null as number | null,
+    interactiveElapsedMs: null as number | null,
+    startupMode: 'unavailable' as MoviesStartupQueryMode,
+    categoryReplacements: 0,
+    movieReplacements: 0,
+    budgetEmitted: false,
+    pendingSmartCountRefresh: false,
+  });
+  const [startupInteractive, setStartupInteractive] = useState(false);
+
+  const emitMoviesStartup = useCallback(
+    (event: string, payload: Record<string, unknown> = {}) => {
+      const body = {
+        event,
+        marker: MOVIES_FOCUS_STAGE4L_MARKER,
+        providerId: activeProviderId,
+        elapsedMs: Date.now() - routeMountedAtRef.current,
+        ...payload,
+      };
+      console.info('[NovaCast Movies Startup] ' + JSON.stringify(body));
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Startup', event, body);
+      }
+    },
+    [activeProviderId],
+  );
+
+  const markStartupInteractiveIfReady = useCallback(() => {
+    const state = startupStateRef.current;
+    if (state.interactive) {
+      return;
+    }
+    if (!state.durableCategoriesReady || !state.firstViewportReady) {
+      return;
+    }
+    state.interactive = true;
+    state.level = 'interactive';
+    state.interactiveElapsedMs = Date.now() - routeMountedAtRef.current;
+    setStartupInteractive(true);
+    emitMoviesStartup('movies_startup_interactive', {
+      categoriesElapsedMs: state.categoriesElapsedMs,
+      firstViewportElapsedMs: state.firstViewportElapsedMs,
+      interactiveElapsedMs: state.interactiveElapsedMs,
+      startupMode: state.startupMode,
+      categoryReplacements: state.categoryReplacements,
+      movieReplacements: state.movieReplacements,
+    });
+    if (!state.budgetEmitted) {
+      state.budgetEmitted = true;
+      const budgets = evaluateMoviesStartupBudgets({
+        categoriesElapsedMs: state.categoriesElapsedMs,
+        firstViewportElapsedMs: state.firstViewportElapsedMs,
+        interactiveElapsedMs: state.interactiveElapsedMs,
+        startupMode: state.startupMode,
+        providerRefreshStillRunning: !state.backgroundRefreshFinished,
+      });
+      emitMoviesStartup('movies_startup_budget_result', {
+        categoriesElapsedMs: state.categoriesElapsedMs,
+        firstViewportElapsedMs: state.firstViewportElapsedMs,
+        interactiveElapsedMs: state.interactiveElapsedMs,
+        ...budgets,
+        startupMode: state.startupMode,
+        providerRefreshStillRunning: !state.backgroundRefreshFinished,
+      });
+    }
+    if (state.pendingSmartCountRefresh) {
+      state.pendingSmartCountRefresh = false;
+    }
+  }, [emitMoviesStartup]);
+
+  useEffect(() => {
+    routeMountedAtRef.current = Date.now();
+    startupStateRef.current = {
+      level: 'shell',
+      durableCategoriesReady: false,
+      firstViewportReady: false,
+      interactive: false,
+      backgroundRefreshStarted: false,
+      backgroundRefreshFinished: false,
+      categoriesElapsedMs: null,
+      firstViewportElapsedMs: null,
+      interactiveElapsedMs: null,
+      startupMode: 'unavailable',
+      categoryReplacements: 0,
+      movieReplacements: 0,
+      budgetEmitted: false,
+      pendingSmartCountRefresh: false,
+    };
+    setStartupInteractive(false);
+    emitMoviesStartup('movies_startup_shell_mounted', {
+      level: 'shell',
+    });
+  }, [activeProviderId, emitMoviesStartup]);
 
   const flushDeferredBrowseCommits = useCallback(() => {
     if (isMoviesBrowseUiFrozenForDetail()) {
@@ -643,7 +759,21 @@ export function useMoviesScreenModel(
         }
 
         setCatalogRepairing(false);
+        const startup = startupStateRef.current;
+        startup.categoryReplacements += 1;
         setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
+        if (!startup.durableCategoriesReady) {
+          startup.durableCategoriesReady = true;
+          startup.level = 'durable-categories';
+          startup.categoriesElapsedMs = Date.now() - routeMountedAtRef.current;
+          startup.startupMode =
+            categoriesBefore > 0 ? 'memory-cache' : ('durable-snapshot' as MoviesStartupQueryMode);
+          emitMoviesStartup('movies_startup_durable_categories_ready', {
+            categoryCount: warmedCategories.length,
+            categoriesElapsedMs: startup.categoriesElapsedMs,
+            startupMode: startup.startupMode,
+          });
+        }
         if (isOnnMoviesTraceEnabled()) {
           traceOnnMoviesEvent('Catalog', 'load_categories_end', {
             providerId: activeProviderId,
@@ -682,7 +812,12 @@ export function useMoviesScreenModel(
           ).length,
           hasAllMovies: warmedCategories.some((category) => category.id === 'all'),
         });
-        scheduleSmartCountRefresh();
+        // Stage 4.2L: defer network count warm until the route is interactive.
+        if (startup.interactive) {
+          scheduleSmartCountRefresh();
+        } else {
+          startup.pendingSmartCountRefresh = true;
+        }
         setSelectedCategoryId((current) => {
           const remembered = options.initialSelectedCategoryId ?? providerMemory.selectedCategoryId;
           const decision = resolveMoviesInitialCategory({
@@ -757,6 +892,10 @@ export function useMoviesScreenModel(
     };
 
     const scheduleSmartCountRefresh = () => {
+      if (!startupStateRef.current.interactive) {
+        startupStateRef.current.pendingSmartCountRefresh = true;
+        return;
+      }
       if (indexDebounceTimer) {
         clearTimeout(indexDebounceTimer);
       }
@@ -842,17 +981,32 @@ export function useMoviesScreenModel(
           selectedCategoryId: selectedCategoryIdRef.current,
         });
       }
-      // Fresh generation activated — clear sparse-repair UI and atomically swap the rail + page.
+      // Fresh generation activated — clear sparse-repair UI and atomically swap when safe.
       clearMoviesSparseRepairSchedule(activeProviderId);
       setMoviesCatalogRepairingUi(activeProviderId, false);
       setCatalogRepairing(false);
-      setLoadStatus((current) => (current === 'error' ? current : 'loading'));
+      const hadInteractiveSnapshot =
+        categoriesRef.current.length > 0 && visibleMoviesRef.current.length > 0;
+      // Stage 4.2L: never blank an interactive rail/grid while background refresh runs.
+      if (!hadInteractiveSnapshot) {
+        setLoadStatus((current) => (current === 'error' ? current : 'loading'));
+      } else {
+        startupStateRef.current.backgroundRefreshStarted = true;
+        emitMoviesStartup('movies_startup_background_refresh_started', {
+          eventGeneration: generation,
+          reason: 'catalog-ready',
+        });
+      }
 
       void (async () => {
         if (!resolvedDataSource) {
           return;
         }
         const previousCategoryId = selectedCategoryIdRef.current;
+        const previousFocusedMovieId = focusedMovieIdRef.current;
+        const previousOffset = offsetRef.current;
+        // Stage 4.2L: catalog_ready must load the new generation, not the startup pin.
+        requestSqliteMovieCategoriesFullRefresh(activeProviderId);
         const nextCategories = await resolvedDataSource.getCategories();
         if (!mounted) {
           return;
@@ -863,16 +1017,21 @@ export function useMoviesScreenModel(
           previousCategoryId,
           rememberedCategoryId: options.initialSelectedCategoryId ?? providerMemory.selectedCategoryId,
         });
-        let selectedId = decision.selectedCategoryId;
+        // Prefer keeping the active category when the replacement still contains it.
+        let selectedId =
+          previousCategoryId &&
+          warmedCategories.some((category) => category.id === previousCategoryId)
+            ? previousCategoryId
+            : decision.selectedCategoryId;
         let page =
           selectedId && !selectedId.startsWith('section:')
             ? await resolvedDataSource.getMoviesPage({
                 categoryId: selectedId,
                 offset: 0,
-                limit: MOVIE_PAGE_SIZE,
+                limit: Math.max(MOVIE_PAGE_SIZE, MOVIES_STARTUP_VIEWPORT_LIMIT),
                 sort: getMoviesSettingsSync().movieSortOption,
               })
-            : { items: [], totalCount: 0, hasMore: false };
+            : { items: [] as MovieSummary[], totalCount: 0, hasMore: false };
 
         // If the kept selection somehow has no rows, re-pick first populated before paint.
         if (
@@ -900,7 +1059,7 @@ export function useMoviesScreenModel(
             page = await resolvedDataSource.getMoviesPage({
               categoryId: selectedId,
               offset: 0,
-              limit: MOVIE_PAGE_SIZE,
+              limit: Math.max(MOVIE_PAGE_SIZE, MOVIES_STARTUP_VIEWPORT_LIMIT),
               sort: getMoviesSettingsSync().movieSortOption,
             });
           }
@@ -910,24 +1069,119 @@ export function useMoviesScreenModel(
           return;
         }
 
+        const activeCategoryExists = warmedCategories.some(
+          (category) => category.id === previousCategoryId,
+        );
+        const focusedMovieExists =
+          !previousFocusedMovieId ||
+          page.items.some((movie) => movie.id === previousFocusedMovieId) ||
+          visibleMoviesRef.current.some((movie) => movie.id === previousFocusedMovieId);
+        const deferDecision = shouldDeferMoviesBackgroundGenerationSwap({
+          detailOpen: getMoviesDetailOpenForDiagnostics(),
+          detailClosing: getMoviesDetailOpenForDiagnostics(),
+          restoringBrowseFocus: false,
+          playbackActive: false,
+          userNavigating: false,
+          activeCategoryExistsInReplacement: Boolean(previousCategoryId) ? activeCategoryExists : true,
+          focusedMovieExistsInReplacement: focusedMovieExists,
+        });
+
+        emitMoviesStartup('movies_background_generation_ready', {
+          eventGeneration: generation,
+          selectedCategoryId: selectedId,
+          categoryCount: warmedCategories.length,
+          itemCount: page.items.length,
+          previousCategoryId,
+          previousFocusedMovieId,
+        });
+
+        if (
+          hadInteractiveSnapshot &&
+          (deferDecision.defer ||
+            warmedCategories.length === 0 ||
+            (page.items.length === 0 && visibleMoviesRef.current.length > 0))
+        ) {
+          emitMoviesStartup('movies_background_generation_swap_deferred', {
+            eventGeneration: generation,
+            reason:
+              warmedCategories.length === 0
+                ? 'empty-categories'
+                : page.items.length === 0
+                  ? 'empty-grid'
+                  : deferDecision.reason,
+            previousCategoryId,
+            previousFocusedMovieId,
+            previousOffset,
+          });
+          startupStateRef.current.backgroundRefreshFinished = true;
+          emitMoviesStartup('movies_startup_background_refresh_finished', {
+            eventGeneration: generation,
+            deferred: true,
+          });
+          return;
+        }
+
+        if (
+          !shouldRunMoviesStartupBackgroundWork({
+            detailOpen: getMoviesDetailOpenForDiagnostics(),
+            detailClosing: getMoviesDetailOpenForDiagnostics(),
+          })
+        ) {
+          emitMoviesStartup('movies_background_generation_swap_deferred', {
+            eventGeneration: generation,
+            reason: 'detail-active',
+            previousCategoryId,
+            previousFocusedMovieId,
+            previousOffset,
+          });
+          return;
+        }
+
         atomicBrowseCommitRef.current = { categoryId: selectedId, generation };
         setCatalogRepairing(false);
         const categoriesBeforeSwap = categoriesRef.current.length;
         const moviesBeforeSwap = visibleMoviesRef.current.length;
+        startupStateRef.current.categoryReplacements += 1;
+        startupStateRef.current.movieReplacements += 1;
+        // Atomic rail + page commit (Stage 4.2E) — keep these three state writes contiguous.
         setCategories((current) => mergeCategoriesPreservingCounts(current, warmedCategories));
         setSelectedCategoryId(selectedId);
-        rememberMoviesScreenMemory(activeProviderId, { selectedCategoryId: selectedId });
-        offsetRef.current = page.items.length;
         updateVisibleMovies(page.items, 'atomic-generation-swap');
+        rememberMoviesScreenMemory(activeProviderId, { selectedCategoryId: selectedId });
+        // Preserve prior offset identity when the focused movie remains in the page.
+        const preservedFocus =
+          previousFocusedMovieId &&
+          page.items.some((movie) => movie.id === previousFocusedMovieId)
+            ? previousFocusedMovieId
+            : page.items[0]?.id ?? null;
+        offsetRef.current = Math.max(page.items.length, previousOffset);
         setHasMore(page.hasMore);
-        setFocusedMovieId(page.items[0]?.id ?? null);
-        setLoadStatus(page.items.length > 0 ? 'ready' : 'empty');
+        setFocusedMovieId(preservedFocus);
+        setLoadStatus(page.items.length > 0 ? 'ready' : hadInteractiveSnapshot ? 'ready' : 'empty');
         setLoading(false);
         setCategoryLoading(false);
         setFirstPageLoadGate({
           loadingCategoryId: selectedId,
           loadingRequestToken: `atomic:${generation}:${selectedId}`,
           firstPageResolvedCategoryId: selectedId,
+        });
+        emitMoviesStartup('movies_background_generation_swap_committed', {
+          eventGeneration: generation,
+          reason: deferDecision.reason,
+          previousCategoryId,
+          selectedCategoryId: selectedId,
+          previousFocusedMovieId,
+          preservedFocus,
+          previousOffset,
+          categoriesBefore: categoriesBeforeSwap,
+          categoriesAfter: warmedCategories.length,
+          visibleMoviesBefore: moviesBeforeSwap,
+          visibleMoviesAfter: page.items.length,
+        });
+        startupStateRef.current.backgroundRefreshFinished = true;
+        emitMoviesStartup('movies_startup_background_refresh_finished', {
+          eventGeneration: generation,
+          deferred: false,
         });
         if (isOnnMoviesTraceEnabled()) {
           traceOnnMoviesEvent('Catalog', 'atomic_generation_swap_end', {
@@ -1037,7 +1291,14 @@ export function useMoviesScreenModel(
       unsubscribeLibrary();
       unsubscribeSettings();
     };
-  }, [activeProviderId, resolvedDataSource]);
+  }, [
+    activeProviderId,
+    emitMoviesStartup,
+    options.initialSelectedCategoryId,
+    providerMemory.selectedCategoryId,
+    resolvedDataSource,
+    warmUnresolvedCategoryCounts,
+  ]);
 
   useEffect(() => {
     focusedMovieIdRef.current = focusedMovieId;
@@ -1154,6 +1415,7 @@ export function useMoviesScreenModel(
         }
 
         offsetRef.current = page.items.length;
+        startupStateRef.current.movieReplacements += 1;
         updateVisibleMovies(page.items, retainVisible ? 'category-first-page-replace' : 'category-first-page-load');
         setHasMore(page.hasMore);
         if ('hasValidRatings' in page) {
@@ -1189,9 +1451,57 @@ export function useMoviesScreenModel(
             gridMounted: isOnnMoviesGridMounted(),
           });
         }
-        const restoredFocusId =
-          page.items.find((movie) => movie.id === previousFocusedMovieId)?.id ?? page.items[0]?.id ?? null;
+        const startupFocus = resolveMoviesStartupFocusTarget({
+          savedMovieId: previousFocusedMovieId,
+          selectedMovieId: selectedMovieId,
+          viewportMovieIds: page.items.map((movie) => movie.id),
+          hasCategories: categoriesRef.current.length > 0,
+        });
+        if (!startupStateRef.current.firstViewportReady && page.items.length > 0) {
+          startupStateRef.current.firstViewportReady = true;
+          startupStateRef.current.level = 'first-viewport';
+          startupStateRef.current.firstViewportElapsedMs =
+            Date.now() - routeMountedAtRef.current;
+          emitMoviesStartup('movies_startup_first_viewport_ready', {
+            categoryId: selectedCategoryId,
+            returnedCount: page.items.length,
+            firstViewportElapsedMs: startupStateRef.current.firstViewportElapsedMs,
+            savedMovieId: previousFocusedMovieId,
+            savedMovieFound: startupFocus.reason === 'saved-focused',
+          });
+          emitMoviesStartup('movies_startup_focus_target_selected', {
+            movieId: startupFocus.movieId,
+            reason: startupFocus.reason,
+            fallbackUsed: startupFocus.fallbackUsed,
+          });
+          if (startupFocus.fallbackUsed) {
+            emitMoviesStartup('movies_startup_focus_fallback_used', {
+              movieId: startupFocus.movieId,
+              reason: startupFocus.reason,
+              savedMovieId: previousFocusedMovieId,
+            });
+          }
+        }
+        const restoredFocusId = startupFocus.movieId;
         setFocusedMovieId(restoredFocusId);
+        if (page.items.length > 0) {
+          markStartupInteractiveIfReady();
+          if (
+            startupStateRef.current.interactive &&
+            startupStateRef.current.pendingSmartCountRefresh
+          ) {
+            startupStateRef.current.pendingSmartCountRefresh = false;
+            void refreshSmartCategoryCounts(activeProviderId, categoriesRef.current).then(
+              (refreshed) => {
+                if (!cancelled) {
+                  setCategories((current) =>
+                    mergeCategoriesPreservingCounts(current, refreshed),
+                  );
+                }
+              },
+            );
+          }
+        }
         setSelectedMovieId((current) => {
           if (current && page.items.some((movie) => movie.id === current)) {
             return current;
@@ -1281,7 +1591,21 @@ export function useMoviesScreenModel(
     return () => {
       cancelled = true;
     };
-  }, [activeProviderId, categories.length, isSearchMode, queryMode, reloadToken, resolvedDataSource, selectedCategoryId, sortOption, syncCategoryCount, updateVisibleMovies]);
+  }, [
+    activeProviderId,
+    categories.length,
+    emitMoviesStartup,
+    isSearchMode,
+    markStartupInteractiveIfReady,
+    queryMode,
+    reloadToken,
+    resolvedDataSource,
+    selectedCategoryId,
+    selectedMovieId,
+    sortOption,
+    syncCategoryCount,
+    updateVisibleMovies,
+  ]);
 
   const focusedMovie = useMemo(
     () => visibleMovies.find((movie) => movie.id === focusedMovieId) ?? visibleMovies[0] ?? null,
@@ -1630,5 +1954,8 @@ export function useMoviesScreenModel(
     setSort,
     categoryHasRatings,
     hasDataSource: Boolean(resolvedDataSource),
+    /** Stage 4.2L: true once durable categories + first viewport are ready. */
+    startupInteractive,
+    getStartupDiagnostics: () => ({ ...startupStateRef.current }),
   };
 }

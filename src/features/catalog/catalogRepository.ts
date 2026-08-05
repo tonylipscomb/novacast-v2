@@ -1147,6 +1147,64 @@ export async function getCatalogGenerationItemCount(
   return stats.itemRows;
 }
 
+/**
+ * Stage 4.2L: lightweight generation presence check — COUNT(*) only.
+ * Avoids COUNT(DISTINCT …) used by physical stats during startup.
+ */
+export async function getCatalogGenerationRowCount(
+  providerId: string,
+  mediaType: CatalogMediaType,
+  generation: number,
+): Promise<number> {
+  if (generation <= 0) {
+    return 0;
+  }
+  const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable(mediaType);
+  const row = await db.getFirst<{ total: number | string }>(
+    `SELECT COUNT(*) AS total
+     FROM ${itemsTable}
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+    [providerId, mediaType, generation],
+  );
+  return asNumber(row?.total);
+}
+
+/**
+ * Stage 4.2L: category rail metadata without GROUP BY item counts.
+ * Startup paints the rail immediately; counts refresh in the background.
+ */
+export async function getCatalogCategoryMetadataOnly(
+  providerId: string,
+  mediaType: CatalogMediaType,
+  options?: { generation?: number },
+): Promise<Array<{ categoryId: string; categoryName: string; sortOrder: number | null }>> {
+  const db = await getCatalogDatabase();
+  const generation = options?.generation ?? (await resolveActiveGeneration(providerId, mediaType));
+  if (generation <= 0) {
+    return [];
+  }
+  const categoriesTable = catalogCategoriesTable(mediaType);
+  const metadataRows = await db.getAll<{
+    category_id: string;
+    category_name: string;
+    sort_order: number | string | null;
+  }>(
+    `SELECT category_id, category_name, sort_order
+     FROM ${categoriesTable}
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
+     ORDER BY (sort_order IS NULL) ASC, sort_order ASC, category_name ASC`,
+    [providerId, mediaType, generation],
+  );
+  return metadataRows
+    .map((row) => ({
+      categoryId: asString(row.category_id),
+      categoryName: asString(row.category_name),
+      sortOrder: asNullableNumber(row.sort_order),
+    }))
+    .filter((row) => row.categoryId.trim() && row.categoryName.trim());
+}
+
 export async function getCatalogGenerationItemStats(
   providerId: string,
   mediaType: CatalogMediaType,

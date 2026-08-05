@@ -1,8 +1,15 @@
 import {
+  getCachedMoviesReadableGeneration,
+  setCachedMoviesReadableGeneration,
+} from '../../catalog/moviesReadableGenerationCache.ts';
+import {
   getCatalogCategoryCounts,
+  getCatalogCategoryMetadataOnly,
   getCatalogDiagnosticSnapshot,
+  getCatalogGenerationRowCount,
   getCatalogItemsPage,
   getCatalogMovieItem,
+  getCatalogProvider,
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
 } from '../../catalog/catalogRepository.ts';
@@ -11,7 +18,15 @@ import type { CatalogItemRecord, CatalogItemSort } from '../../catalog/catalogTy
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 import type { MediaDetail } from '../../media-browser/mediaTypes.ts';
 import { getActiveRepositoryBundle } from '../../providers/providerBundle.ts';
-import { publishMovieCatalogReady } from '../../providers/providerCatalogSync.ts';
+import {
+  publishMovieCatalogReady,
+  publishMovieCategoriesUpdated,
+} from '../../providers/providerCatalogSync.ts';
+import {
+  isOnnMoviesTraceEnabled,
+  traceOnnMoviesEvent,
+} from '@/features/diagnostics/onnMoviesTrace';
+import { getMoviesDetailOpenForDiagnostics } from '../moviesDiagnosticsState.ts';
 
 import type { MovieDataSource } from './MovieDataSource.ts';
 import type { MovieCategory, MovieSummary } from '../movieTypes.ts';
@@ -31,6 +46,17 @@ import {
   clearMoviesSparseRepairSchedule,
   repairDegradedMoviesCatalogIfNeeded,
 } from '../moviesSparseCatalogRepair.ts';
+import {
+  isMoviesStartupDurableSnapshotValidForProvider,
+  MOVIES_FOCUS_STAGE4L_MARKER,
+  MOVIES_STARTUP_VIEWPORT_LIMIT,
+  type MoviesStartupGenerationSource,
+  type MoviesStartupQueryMode,
+} from '../moviesStartupFastPath.ts';
+import {
+  loadMoviesStartupDurableSnapshot,
+  saveMoviesStartupDurableSnapshot,
+} from '../moviesStartupSnapshotStore.ts';
 import {
   buildLocalMovieDetailFromCatalogItem,
   getCachedProviderMovieInfo,
@@ -128,13 +154,184 @@ type CachedSqliteCategories = {
 };
 
 const lastValidSqliteCategoriesByProvider = new Map<string, CachedSqliteCategories>();
+/** Stage 4.2L: one deferred full-count refresh per provider after a fast-path return. */
+const deferredFullCategoryRefreshByProvider = new Set<string>();
+const deferredFullCategoryRefreshInFlight = new Set<string>();
+
+/** Stage 4.2L: next getCategories() runs the full-count path (e.g. catalog_ready). */
+const forceNextCategoriesFullLoad = new Set<string>();
+
+export function requestSqliteMovieCategoriesFullRefresh(providerId: string): void {
+  forceNextCategoriesFullLoad.add(providerId);
+}
 
 export function resetLastValidSqliteMovieCategoriesForTests() {
   lastValidSqliteCategoriesByProvider.clear();
+  deferredFullCategoryRefreshByProvider.clear();
+  deferredFullCategoryRefreshInFlight.clear();
+  forceNextCategoriesFullLoad.clear();
 }
 
 export function getLastValidMoviesCatalogReadSnapshotForTests(providerId: string) {
   return lastValidSqliteCategoriesByProvider.get(providerId)?.snapshot ?? null;
+}
+
+function emitMoviesStartupTrace(
+  event: string,
+  payload: Record<string, unknown>,
+): void {
+  const body = {
+    event,
+    marker: MOVIES_FOCUS_STAGE4L_MARKER,
+    ...payload,
+  };
+  console.info('[NovaCast Movies Startup] ' + JSON.stringify(body));
+  if (isOnnMoviesTraceEnabled()) {
+    traceOnnMoviesEvent('Startup', event, body);
+  }
+}
+
+function buildStartupCategoriesFromMetadata(
+  metadata: Array<{ categoryId: string; categoryName: string }>,
+  totalMovieCount: number,
+): MovieCategory[] {
+  const seenIds = new Map<string, number>();
+  const providerCategories: MovieCategory[] = metadata.map((category) => {
+    const id = category.categoryId;
+    const occurrence = (seenIds.get(id) ?? 0) + 1;
+    seenIds.set(id, occurrence);
+    const renderKey = occurrence === 1 ? id : `${id}::${occurrence}`;
+    return {
+      id,
+      renderKey,
+      name: category.categoryName,
+      rawName: category.categoryName,
+      count: 0,
+      countKnown: false,
+      kind: 'provider' as const,
+      section: 'provider' as const,
+    };
+  });
+
+  return filterInteractiveMovieCategories([
+    {
+      id: SQLITE_MOVIES_DISCOVER_ID,
+      renderKey: SQLITE_MOVIES_DISCOVER_ID,
+      name: 'All Movies',
+      count: totalMovieCount,
+      countKnown: totalMovieCount > 0,
+      kind: 'provider',
+      section: 'provider',
+    },
+    ...providerCategories,
+  ]);
+}
+
+function pinStartupCategories(
+  providerId: string,
+  generation: number,
+  categories: MovieCategory[],
+  totalCount: number,
+  metadataCategoryCount: number,
+  groupedCountRows: number,
+): MoviesCatalogReadSnapshot {
+  const snapshot = buildMoviesCatalogReadSnapshot({
+    providerId,
+    readableGeneration: generation,
+    categories,
+    metadataCategoryCount,
+    groupedCountRows,
+    totalMovieCount: totalCount,
+  });
+  lastValidSqliteCategoriesByProvider.set(providerId, {
+    generation,
+    categories,
+    totalCount,
+    snapshot,
+  });
+  return snapshot;
+}
+
+function scheduleDeferredFullCategoryRefresh(
+  providerId: string,
+  loadFull: () => Promise<MovieCategory[]>,
+  reason: string,
+): void {
+  if (
+    deferredFullCategoryRefreshByProvider.has(providerId) ||
+    deferredFullCategoryRefreshInFlight.has(providerId)
+  ) {
+    return;
+  }
+  if (getMoviesDetailOpenForDiagnostics()) {
+    return;
+  }
+  deferredFullCategoryRefreshByProvider.add(providerId);
+  emitMoviesStartupTrace('movies_startup_background_refresh_started', {
+    providerId,
+    reason,
+  });
+  queueMicrotask(() => {
+    void (async () => {
+      if (deferredFullCategoryRefreshInFlight.has(providerId)) {
+        return;
+      }
+      if (getMoviesDetailOpenForDiagnostics()) {
+        deferredFullCategoryRefreshByProvider.delete(providerId);
+        return;
+      }
+      deferredFullCategoryRefreshInFlight.add(providerId);
+      const startedAt = Date.now();
+      try {
+        const categories = await loadFull();
+        const pinned = lastValidSqliteCategoriesByProvider.get(providerId);
+        if (pinned && categories.length > 0) {
+          publishMovieCategoriesUpdated(providerId, pinned.generation, categories.length);
+        }
+        emitMoviesStartupTrace('movies_startup_background_refresh_finished', {
+          providerId,
+          reason,
+          categoryCount: categories.length,
+          generation: pinned?.generation ?? 0,
+          elapsedMs: Date.now() - startedAt,
+        });
+      } catch (error) {
+        emitMoviesStartupTrace('movies_startup_background_refresh_finished', {
+          providerId,
+          reason,
+          error: error instanceof Error ? error.message : String(error),
+          elapsedMs: Date.now() - startedAt,
+        });
+      } finally {
+        deferredFullCategoryRefreshInFlight.delete(providerId);
+        deferredFullCategoryRefreshByProvider.delete(providerId);
+      }
+    })();
+  });
+}
+
+async function persistStartupDurableSnapshot(
+  providerId: string,
+  generation: number,
+  categories: MovieCategory[],
+  totalCount: number,
+): Promise<void> {
+  if (generation <= 0 || categories.length === 0) {
+    return;
+  }
+  try {
+    const itemRows = await getCatalogGenerationRowCount(providerId, 'movie', generation);
+    await saveMoviesStartupDurableSnapshot({
+      providerId,
+      generation,
+      categories,
+      totalMovieCount: totalCount,
+      itemRows,
+      categoryRows: categories.length,
+    });
+  } catch {
+    // Best-effort — session pin still accelerates startup.
+  }
 }
 
 export type SqliteMovieDataSourceOptions = {
@@ -163,10 +360,236 @@ export function createSqliteMovieDataSource(
     return detail;
   }
 
-  return {
-    sourceKind: 'sqlite',
+  async function getCategoriesImpl(options?: {
+    forceFull?: boolean;
+  }): Promise<MovieCategory[]> {
+      const queryStartedAt = Date.now();
+      const forceFull =
+        options?.forceFull === true || forceNextCategoriesFullLoad.delete(providerId);
 
-    async getCategories(): Promise<MovieCategory[]> {
+      // ── Stage 4.2L fast path: durable / session / metadata before heavy work ──
+      if (!forceFull) {
+        emitMoviesStartupTrace('movies_startup_categories_query_started', {
+          providerId,
+          queryMode: 'startup-fast',
+          forceFull: false,
+        });
+
+        const memory = lastValidSqliteCategoriesByProvider.get(providerId);
+        if (memory && memory.generation > 0 && memory.categories.length > 0) {
+          const preserved = filterInteractiveMovieCategories(memory.categories);
+          if (preserved.length > 0) {
+            const needsCounts = preserved.some(
+              (category) =>
+                category.id !== SQLITE_MOVIES_DISCOVER_ID && category.countKnown === false,
+            );
+            emitMoviesStartupTrace('movies_startup_categories_query_finished', {
+              providerId,
+              generation: memory.generation,
+              rowCount: preserved.length,
+              queryElapsedMs: Date.now() - queryStartedAt,
+              totalElapsedMs: Date.now() - queryStartedAt,
+              usedCachedResult: true,
+              queryMode: 'memory-cache' satisfies MoviesStartupQueryMode,
+            });
+            emitMoviesStartupTrace('movies_startup_readable_generation_selected', {
+              providerId,
+              generation: memory.generation,
+              source: 'memory-cache' satisfies MoviesStartupGenerationSource,
+              categoryCount: preserved.length,
+              selectedCategoryId: null,
+              savedCategoryFound: true,
+              readableMovieCount: memory.totalCount,
+              fallbackReason: null,
+              elapsedMs: Date.now() - queryStartedAt,
+            });
+            if (needsCounts) {
+              scheduleDeferredFullCategoryRefresh(
+                providerId,
+                () => getCategoriesImpl({ forceFull: true }),
+                'memory-unknown-counts',
+              );
+            }
+            return preserved;
+          }
+        }
+
+        const durable = await loadMoviesStartupDurableSnapshot(providerId);
+        if (durable) {
+          const rowCount = await getCatalogGenerationRowCount(
+            providerId,
+            'movie',
+            durable.generation,
+          );
+          if (
+            isMoviesStartupDurableSnapshotValidForProvider({
+              snapshot: durable,
+              providerId,
+              readableItemCount: rowCount,
+            })
+          ) {
+            const preserved = filterInteractiveMovieCategories(durable.categories);
+            pinStartupCategories(
+              providerId,
+              durable.generation,
+              preserved,
+              durable.totalMovieCount,
+              durable.categoryRows || preserved.length,
+              durable.distinctItemCategoryIds || 0,
+            );
+            setCachedMoviesReadableGeneration({
+              providerId,
+              generation: durable.generation,
+              resolvedAt: Date.now(),
+              itemRows: rowCount,
+              categoryRows: durable.categoryRows || preserved.length,
+              distinctItemCategoryIds: durable.distinctItemCategoryIds || 0,
+            });
+            emitMoviesStartupTrace('movies_startup_categories_query_finished', {
+              providerId,
+              generation: durable.generation,
+              rowCount: preserved.length,
+              queryElapsedMs: Date.now() - queryStartedAt,
+              totalElapsedMs: Date.now() - queryStartedAt,
+              usedCachedResult: true,
+              queryMode: 'durable-snapshot' satisfies MoviesStartupQueryMode,
+            });
+            emitMoviesStartupTrace('movies_startup_readable_generation_selected', {
+              providerId,
+              generation: durable.generation,
+              source: 'durable-snapshot' satisfies MoviesStartupGenerationSource,
+              categoryCount: preserved.length,
+              selectedCategoryId: durable.selectedCategoryId,
+              savedCategoryFound: true,
+              readableMovieCount: rowCount,
+              fallbackReason: null,
+              elapsedMs: Date.now() - queryStartedAt,
+            });
+            const needsCounts = preserved.some(
+              (category) =>
+                category.id !== SQLITE_MOVIES_DISCOVER_ID && category.countKnown === false,
+            );
+            if (needsCounts) {
+              scheduleDeferredFullCategoryRefresh(
+                providerId,
+                () => getCategoriesImpl({ forceFull: true }),
+                'durable-unknown-counts',
+              );
+            }
+            return preserved;
+          }
+          emitMoviesStartupTrace('movies_startup_snapshot_unavailable', {
+            providerId,
+            generation: durable.generation,
+            reason:
+              durable.providerId !== providerId
+                ? 'provider-mismatch'
+                : rowCount <= 0
+                  ? 'unreadable-generation'
+                  : 'invalid-snapshot',
+            readableItemCount: rowCount,
+            elapsedMs: Date.now() - queryStartedAt,
+          });
+        }
+
+        let peekGeneration = 0;
+        let peekSource: MoviesStartupGenerationSource = 'none';
+        const cachedReadable = getCachedMoviesReadableGeneration(providerId);
+        if (cachedReadable && cachedReadable.generation > 0) {
+          const rows = await getCatalogGenerationRowCount(
+            providerId,
+            'movie',
+            cachedReadable.generation,
+          );
+          if (rows > 0) {
+            peekGeneration = cachedReadable.generation;
+            peekSource = 'session-cache';
+          }
+        }
+        if (peekGeneration <= 0) {
+          const provider = await getCatalogProvider(providerId);
+          const activeGeneration = provider?.catalogGeneration ?? 0;
+          if (activeGeneration > 0) {
+            const rows = await getCatalogGenerationRowCount(
+              providerId,
+              'movie',
+              activeGeneration,
+            );
+            if (rows > 0) {
+              peekGeneration = activeGeneration;
+              peekSource = 'active-pointer-fast';
+              setCachedMoviesReadableGeneration({
+                providerId,
+                generation: activeGeneration,
+                resolvedAt: Date.now(),
+                itemRows: rows,
+                categoryRows: 0,
+                distinctItemCategoryIds: 0,
+              });
+            }
+          }
+        }
+
+        if (peekGeneration > 0) {
+          const metadata = await getCatalogCategoryMetadataOnly(providerId, 'movie', {
+            generation: peekGeneration,
+          });
+          if (metadata.length > 0) {
+            const totalEstimate = await getCatalogGenerationRowCount(
+              providerId,
+              'movie',
+              peekGeneration,
+            );
+            const nextCategories = buildStartupCategoriesFromMetadata(
+              metadata,
+              totalEstimate,
+            );
+            if (nextCategories.some((category) => category.id !== SQLITE_MOVIES_DISCOVER_ID)) {
+              pinStartupCategories(
+                providerId,
+                peekGeneration,
+                nextCategories,
+                totalEstimate,
+                metadata.length,
+                0,
+              );
+              emitMoviesStartupTrace('movies_startup_categories_query_finished', {
+                providerId,
+                generation: peekGeneration,
+                rowCount: nextCategories.length,
+                queryElapsedMs: Date.now() - queryStartedAt,
+                totalElapsedMs: Date.now() - queryStartedAt,
+                usedCachedResult: false,
+                queryMode: 'startup-metadata' satisfies MoviesStartupQueryMode,
+              });
+              emitMoviesStartupTrace('movies_startup_readable_generation_selected', {
+                providerId,
+                generation: peekGeneration,
+                source: peekSource,
+                categoryCount: nextCategories.length,
+                selectedCategoryId: null,
+                savedCategoryFound: false,
+                readableMovieCount: totalEstimate,
+                fallbackReason: null,
+                elapsedMs: Date.now() - queryStartedAt,
+              });
+              scheduleDeferredFullCategoryRefresh(
+                providerId,
+                () => getCategoriesImpl({ forceFull: true }),
+                'startup-metadata-full-counts',
+              );
+              return nextCategories;
+            }
+          }
+        }
+
+        emitMoviesStartupTrace('movies_startup_network_fallback_started', {
+          providerId,
+          reason: 'no-local-snapshot',
+          elapsedMs: Date.now() - queryStartedAt,
+        });
+      }
+
       await logSqliteMovieDiagnostic(providerId, 'get-categories-before-query');
       // Stage 3C: one-time merge of verified legacy fragments into generation-safe v2.
       const recovery = await recoverFragmentedMovieCatalogOnce(providerId);
@@ -525,6 +948,12 @@ export function createSqliteMovieDataSource(
         totalCount,
         snapshot,
       });
+      void persistStartupDurableSnapshot(
+        providerId,
+        categoryReadGeneration,
+        nextCategories,
+        totalCount,
+      );
 
       logMoviesCatalogReadSnapshot(snapshot, 'provider-categories-applied');
       console.info(
@@ -584,38 +1013,82 @@ export function createSqliteMovieDataSource(
             reason: 'grouped-counts-applied',
           }),
       );
+      emitMoviesStartupTrace('movies_startup_categories_query_finished', {
+        providerId,
+        generation: categoryReadGeneration,
+        rowCount: nextCategories.length,
+        queryElapsedMs: Date.now() - queryStartedAt,
+        totalElapsedMs: Date.now() - queryStartedAt,
+        usedCachedResult: false,
+        queryMode: 'full-counts' satisfies MoviesStartupQueryMode,
+      });
+      emitMoviesStartupTrace('movies_startup_readable_generation_selected', {
+        providerId,
+        generation: categoryReadGeneration,
+        source: 'full-integrity' satisfies MoviesStartupGenerationSource,
+        categoryCount: nextCategories.length,
+        selectedCategoryId: null,
+        savedCategoryFound: Boolean(previous),
+        readableMovieCount: totalCount,
+        fallbackReason: null,
+        elapsedMs: Date.now() - queryStartedAt,
+      });
 
       return nextCategories;
-    },
+  }
 
-    async getMoviesPage(input) {
-      const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie');
+  async function getMoviesPageImpl(input: {
+    categoryId: string;
+    offset: number;
+    limit: number;
+    sort?: ContentSortOption;
+  }) {
+      const queryStartedAt = Date.now();
+      const isStartupViewport = input.offset === 0;
+      const pinned = lastValidSqliteCategoriesByProvider.get(providerId);
+
+      // Stage 4.2L: prefer pinned readable generation — do not wait on full integrity
+      // when a validated startup pin already exists.
+      let itemsGeneration = 0;
+      let readableGeneration = 0;
+      if (pinned && pinned.generation > 0) {
+        itemsGeneration = pinned.generation;
+        readableGeneration = pinned.generation;
+      } else {
+        readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie');
+        itemsGeneration = readableGeneration;
+      }
       if (readableGeneration <= 0) {
         throw new MoviesCatalogNotReadyError(providerId, readableGeneration);
       }
-
-      // Prefer the pinned interactive snapshot generation while a newer sync is writing.
-      const pinned = lastValidSqliteCategoriesByProvider.get(providerId);
-      const itemsGeneration =
-        pinned &&
-        pinned.generation > 0 &&
-        pinned.generation === readableGeneration
-          ? pinned.generation
-          : readableGeneration;
 
       const categoryId =
         input.categoryId && input.categoryId !== SQLITE_MOVIES_DISCOVER_ID
           ? input.categoryId
           : undefined;
+      const requestedLimit = isStartupViewport
+        ? Math.min(input.limit, MOVIES_STARTUP_VIEWPORT_LIMIT)
+        : input.limit;
+
+      if (isStartupViewport) {
+        emitMoviesStartupTrace('movies_startup_viewport_query_started', {
+          providerId,
+          categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
+          generation: itemsGeneration,
+          requestedLimit,
+        });
+      }
 
       const page = await getCatalogItemsPage({
         providerId,
         mediaType: 'movie',
         categoryId,
         offset: input.offset,
-        limit: input.limit,
+        limit: requestedLimit,
         sort: mapSort(input.sort),
         generation: itemsGeneration,
+        // Stage 4.2L: first viewport must not wait on a full-generation COUNT.
+        skipTotalCount: isStartupViewport,
       });
 
       await logSqliteMovieDiagnostic(providerId, 'first-page-after-query');
@@ -630,14 +1103,41 @@ export function createSqliteMovieDataSource(
         categoriesGeneration: itemsGeneration,
         itemsGeneration,
         generationAligned: itemsGeneration === readableGeneration,
+        skipTotalCount: isStartupViewport,
         marker: 'stage4e-atomic-generation-pinning-v1',
       });
+
+      if (isStartupViewport) {
+        emitMoviesStartupTrace('movies_startup_viewport_query_finished', {
+          providerId,
+          categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
+          generation: itemsGeneration,
+          requestedLimit,
+          returnedCount: page.items.length,
+          savedMovieId: null,
+          savedMovieFound: false,
+          savedOffset: input.offset,
+          queryElapsedMs: Date.now() - queryStartedAt,
+          totalElapsedMs: Date.now() - queryStartedAt,
+        });
+      }
 
       return {
         items: page.items.map(mapCatalogItemToMovie),
         totalCount: page.totalCount,
         hasMore: page.hasMore,
       };
+  }
+
+  return {
+    sourceKind: 'sqlite',
+
+    getCategories(): Promise<MovieCategory[]> {
+      return getCategoriesImpl();
+    },
+
+    getMoviesPage(input) {
+      return getMoviesPageImpl(input);
     },
 
     async searchMovies(input) {

@@ -115,6 +115,7 @@ import {
   type MoviesDetailCloseFocusConfirmation,
   type MoviesDetailCloseImmutableTarget,
 } from './moviesDetailCloseInstant';
+import { MOVIES_FOCUS_STAGE4L_MARKER } from './moviesStartupFastPath';
 
 import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
 import {
@@ -401,6 +402,7 @@ export function MoviesScreen() {
     getFocusedMovieId,
     getListOffset,
     firstPageLoadGate,
+    startupInteractive,
   } = useMoviesScreenModel(undefined, {
     initialSelectedCategoryId: moviesMemory.selectedCategoryId,
     initialFocusedMovieId: moviesMemory.focusedMovieId,
@@ -813,6 +815,51 @@ export function MoviesScreen() {
     detailOpenRef.current = detailOpen;
     setMoviesDetailOpenForDiagnostics(detailOpen || detailClosing);
   }, [detailClosing, detailOpen]);
+
+  // Stage 4.2L: request startup focus only after local viewport is interactive,
+  // and never while a Detail-close transaction owns the screen.
+  const startupFocusRequestedRef = useRef(false);
+  useEffect(() => {
+    if (!startupInteractive || startupFocusRequestedRef.current) {
+      return;
+    }
+    if (detailOpen || detailClosing || restoringBrowseFocus) {
+      return;
+    }
+    const targetMovieId = getFocusedMovieId();
+    if (!targetMovieId) {
+      return;
+    }
+    startupFocusRequestedRef.current = true;
+    console.info(
+      '[NovaCast Movies Startup] ' +
+        JSON.stringify({
+          event: 'movies_startup_focus_request_started',
+          marker: MOVIES_FOCUS_STAGE4L_MARKER,
+          movieId: targetMovieId,
+          selectedCategoryId,
+        }),
+    );
+    const frame = requestAnimationFrame(() => {
+      console.info(
+        '[NovaCast Movies Startup] ' +
+          JSON.stringify({
+            event: 'movies_startup_focus_confirmed',
+            marker: MOVIES_FOCUS_STAGE4L_MARKER,
+            movieId: targetMovieId,
+            selectedCategoryId,
+          }),
+      );
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [
+    detailClosing,
+    detailOpen,
+    getFocusedMovieId,
+    restoringBrowseFocus,
+    selectedCategoryId,
+    startupInteractive,
+  ]);
 
   // Audit-only: keep grid unmount / gate inference in sync with screen state.
   useEffect(() => {

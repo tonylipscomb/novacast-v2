@@ -1,10 +1,11 @@
 /**
- * Stage 4.2K / 4.2K.1 — Instant, fully covered Movie Detail close.
+ * Stage 4.2K / 4.2K.1 / 4.2K.2 — Instant, fully covered Movie Detail close.
  * Pure helpers. MoviesScreen remains the sole coordinator.
  */
 
 export const MOVIES_FOCUS_STAGE4K_MARKER = 'stage4k-movies-instant-covered-detail-close-v1';
 export const MOVIES_FOCUS_STAGE4K1_MARKER = 'stage4k1-movies-category-rail-visibility-v1';
+export const MOVIES_FOCUS_STAGE4K2_MARKER = 'stage4k2-movies-fallback-target-lock-v1';
 
 /** Confirmation wait after a native-ready focus request (replaces 2200 ms). */
 export const MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS_V2 = 350;
@@ -18,8 +19,210 @@ export const MOVIES_DETAIL_CLOSE_TARGET_MS = 500;
 /** Fallback / deep-row budget. */
 export const MOVIES_DETAIL_CLOSE_FALLBACK_TARGET_MS = 750;
 
+/**
+ * Stage 4.2K.2: hard ceiling for a single close transaction.
+ * Prevents permanent closing-focus / isolation deadlock.
+ */
+export const MOVIES_DETAIL_CLOSE_WATCHDOG_MS = 1400;
+
 /** Stable Movies category rail width (layout invariant). */
 export const MOVIES_CATEGORY_RAIL_WIDTH = 260;
+
+/** Stage 4.2K.2: immutable close target locked at transaction start. */
+export type MoviesDetailCloseImmutableTarget = {
+  token: string;
+  source: string;
+  origin: string;
+  movieId: string;
+  categoryId: string;
+  renderedIndex: number;
+  nativeHandle: number | null;
+  gridInstanceId: string | null;
+  listRevision: number;
+  originalOffset: number;
+  firstVisibleIndex: number | null;
+  lastVisibleIndex: number | null;
+  targetVisible: boolean;
+};
+
+/** Stage 4.2K.2: currently executing focus request attempt (mutable). */
+export type MoviesDetailCloseFocusAttempt = {
+  attemptId: string;
+  attemptNumber: number;
+  token: string;
+  targetMovieId: string;
+  requestStartedAt: number | null;
+  requestSettledAt: number | null;
+  confirmationDeadline: number | null;
+  retryRafId: number | null;
+};
+
+/** Stage 4.2K.2: accepted focus confirmation (separate from attempt). */
+export type MoviesDetailCloseFocusConfirmation = {
+  token: string;
+  movieId: string;
+  acceptedAt: number;
+  late: boolean;
+};
+
+export function createMoviesDetailCloseImmutableTarget(input: {
+  token: string;
+  source: string;
+  origin: string;
+  movieId: string;
+  categoryId: string;
+  renderedIndex: number;
+  nativeHandle?: number | null;
+  gridInstanceId?: string | null;
+  listRevision?: number;
+  originalOffset: number;
+  firstVisibleIndex?: number | null;
+  lastVisibleIndex?: number | null;
+  targetVisible: boolean;
+}): MoviesDetailCloseImmutableTarget {
+  return {
+    token: input.token,
+    source: input.source,
+    origin: input.origin,
+    movieId: input.movieId,
+    categoryId: input.categoryId,
+    renderedIndex: input.renderedIndex,
+    nativeHandle: input.nativeHandle ?? null,
+    gridInstanceId: input.gridInstanceId ?? null,
+    listRevision: input.listRevision ?? 0,
+    originalOffset: input.originalOffset,
+    firstVisibleIndex: input.firstVisibleIndex ?? null,
+    lastVisibleIndex: input.lastVisibleIndex ?? null,
+    targetVisible: input.targetVisible,
+  };
+}
+
+export function createMoviesDetailCloseFocusAttempt(input: {
+  token: string;
+  targetMovieId: string;
+  attemptNumber: number;
+  now?: number;
+}): MoviesDetailCloseFocusAttempt {
+  const now = input.now ?? Date.now();
+  return {
+    attemptId: `${input.token}:attempt-${input.attemptNumber}-${now}`,
+    attemptNumber: input.attemptNumber,
+    token: input.token,
+    targetMovieId: input.targetMovieId,
+    requestStartedAt: null,
+    requestSettledAt: null,
+    confirmationDeadline: null,
+    retryRafId: null,
+  };
+}
+
+export function isMoviesDetailCloseTargetMutation(input: {
+  immutableMovieId: string;
+  requestMovieId: string;
+}): boolean {
+  return input.requestMovieId !== input.immutableMovieId;
+}
+
+/** Confirmation timer starts only after the focus request has settled. */
+export function shouldStartMoviesDetailFocusConfirmTimer(input: {
+  token: string;
+  activeToken: string | null;
+  attemptId: string;
+  currentAttemptId: string | null;
+  focusConfirmed: boolean;
+  requestSettled: boolean;
+}): boolean {
+  return (
+    input.requestSettled &&
+    input.activeToken === input.token &&
+    input.currentAttemptId === input.attemptId &&
+    !input.focusConfirmed
+  );
+}
+
+export function shouldAcceptMoviesDetailCloseLateFocus(input: {
+  token: string;
+  activeToken: string | null;
+  movieId: string;
+  immutableMovieId: string | null;
+  gridInstanceId: string | null;
+  activeGridInstanceId: string | null;
+  revealCommitted: boolean;
+  cancelled: boolean;
+}): boolean {
+  if (input.cancelled || input.revealCommitted) {
+    return false;
+  }
+  if (!input.activeToken || input.activeToken !== input.token) {
+    return false;
+  }
+  if (!input.immutableMovieId || input.movieId !== input.immutableMovieId) {
+    return false;
+  }
+  if (
+    input.gridInstanceId &&
+    input.activeGridInstanceId &&
+    input.gridInstanceId !== input.activeGridInstanceId
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function resolveMoviesDetailCloseRetryTarget(input: {
+  immutableMovieId: string;
+  resolvedMovieId: string | null;
+  nativeHandle: number | null;
+  refMatched: boolean;
+  gridInstanceMatched: boolean;
+  listRevisionMatched: boolean;
+}): {
+  ok: boolean;
+  immutableMovieId: string;
+  resolvedMovieId: string | null;
+  nativeHandle: number | null;
+  refMatched: boolean;
+  gridInstanceMatched: boolean;
+  listRevisionMatched: boolean;
+} {
+  const resolvedMatches =
+    Boolean(input.resolvedMovieId) && input.resolvedMovieId === input.immutableMovieId;
+  return {
+    ok:
+      resolvedMatches &&
+      input.refMatched &&
+      input.gridInstanceMatched &&
+      input.listRevisionMatched &&
+      input.nativeHandle != null,
+    immutableMovieId: input.immutableMovieId,
+    resolvedMovieId: input.resolvedMovieId,
+    nativeHandle: input.nativeHandle,
+    refMatched: input.refMatched,
+    gridInstanceMatched: input.gridInstanceMatched,
+    listRevisionMatched: input.listRevisionMatched,
+  };
+}
+
+export function shouldAbortMoviesDetailCloseAfterFailedAttempts(input: {
+  focusRequestCount: number;
+  maxFocusRequests: number;
+  focusConfirmed: boolean;
+}): boolean {
+  return !input.focusConfirmed && input.focusRequestCount >= input.maxFocusRequests;
+}
+
+export function shouldFireMoviesDetailCloseWatchdog(input: {
+  startedAt: number;
+  now: number;
+  watchdogMs: number;
+  revealCommitted: boolean;
+  cancelled: boolean;
+}): boolean {
+  if (input.revealCommitted || input.cancelled) {
+    return false;
+  }
+  return input.now - input.startedAt >= input.watchdogMs;
+}
 
 export function shouldIssueMoviesDetailCloseFocusRequest(input: {
   phase: string;

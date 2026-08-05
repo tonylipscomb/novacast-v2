@@ -37,9 +37,11 @@ test('Stage 3B.2 uses one larger centered transparent loader', () => {
 });
 
 test('exact restoration does not fall back to the first poster while pending', () => {
-  assert.match(screen, /nearest-visible|timeout-nearest-visible-fallback/);
+  // Stage 4.2K.2: immutable close target — no nearest-poster retarget on timeout.
+  assert.match(screen, /getImmutableCloseTargetMovieId|detail_close_immutable_target_locked/);
   assert.match(screen, /closingFocusMovieId/);
   assert.doesNotMatch(screen, /availableIds\[0\]/);
+  assert.doesNotMatch(screen, /timeout-nearest-visible-fallback/);
 });
 
 test('Stage 3B.2 focus and selection remain separate', () => {
@@ -61,7 +63,8 @@ test('Stage 3B.2 poster refs use instance identity and focus confirmation', asyn
   assert.match(screen, /NovaCast Movie Poster Ref/);
   assert.match(screen, /completeDetailFocusRestore/);
   assert.match(screen, /status === 'timeout'/);
-  assert.match(screen, /movie\.id !== targetId/);
+  // Stage 4.2K.2: close confirms against immutable transaction target.
+  assert.match(screen, /movie\.id !== immutableTargetId/);
 });
 
 test('Stage 3B.2 does not let category focus override an active restore token', () => {

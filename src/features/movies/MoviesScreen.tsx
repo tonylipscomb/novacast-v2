@@ -90,18 +90,30 @@ import {
 } from './moviesDetailCloseTransaction';
 import {
   createMoviesCategoryRailInstanceId,
+  createMoviesDetailCloseFocusAttempt,
+  createMoviesDetailCloseImmutableTarget,
   createMoviesDetailOverlayInstanceId,
   isMoviesCategoryRailExpectedVisible,
   isMoviesCategoryRailVisibilityViolation,
   isMoviesDetailCloseCorrectionUncovered,
+  isMoviesDetailCloseTargetMutation,
   MOVIES_CATEGORY_RAIL_WIDTH,
+  MOVIES_DETAIL_CLOSE_WATCHDOG_MS,
   MOVIES_DETAIL_FOCUS_MAX_RETRIES,
   MOVIES_FOCUS_STAGE4K_MARKER,
   MOVIES_FOCUS_STAGE4K1_MARKER,
+  MOVIES_FOCUS_STAGE4K2_MARKER,
+  resolveMoviesDetailCloseRetryTarget,
   shouldAcceptMoviesDetailCloseFocusConfirmation,
+  shouldAcceptMoviesDetailCloseLateFocus,
+  shouldAbortMoviesDetailCloseAfterFailedAttempts,
   shouldIssueMoviesDetailCloseFocusRequest,
   shouldReleaseMoviesDetailVisualIsolation,
   shouldScheduleMoviesDetailFocusRetry,
+  shouldStartMoviesDetailFocusConfirmTimer,
+  type MoviesDetailCloseFocusAttempt,
+  type MoviesDetailCloseFocusConfirmation,
+  type MoviesDetailCloseImmutableTarget,
 } from './moviesDetailCloseInstant';
 
 import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
@@ -203,7 +215,6 @@ import {
   logMoviesViewportLock,
   resolveMoviesClosingFocusableMovieId,
   resolveMoviesDetailReturnMaxViewportRestores,
-  resolveNearestVisiblePoster,
   selectMoviesDetailReturnPath,
   shouldHoldMoviesDetailVisual,
   shouldIssueMoviesInitialDetailRestore,
@@ -285,6 +296,11 @@ export function MoviesScreen() {
   const overlayInstanceIdRef = useRef(createMoviesDetailOverlayInstanceId());
   /** Stage 4.2K.1: stable category rail identity across Detail open/close. */
   const railInstanceIdRef = useRef(createMoviesCategoryRailInstanceId());
+  /** Stage 4.2K.2: immutable target / attempt / confirmation ownership. */
+  const immutableCloseTargetRef = useRef<MoviesDetailCloseImmutableTarget | null>(null);
+  const focusAttemptRef = useRef<MoviesDetailCloseFocusAttempt | null>(null);
+  const focusConfirmationRef = useRef<MoviesDetailCloseFocusConfirmation | null>(null);
+  const closeWatchdogTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const viewportStateRef = useRef({ offset: 0, firstIndex: null as number | null, lastIndex: null as number | null });
   const detailFocusTokenRef = useRef<MoviesDetailFocusToken | null>(null);
   /** Stage 4.2J: one reveal commit per close token. */
@@ -497,6 +513,32 @@ export function MoviesScreen() {
     [setDetailVisualHoldSafe, setVisualIsolationSafe],
   );
 
+  /** Stage 4.2K.2: cancel request-scoped confirm timer, retry RAF, and watchdog. */
+  const clearCloseAttemptTimers = useCallback((opts?: { includeWatchdog?: boolean }) => {
+    if (confirmTimeoutRef.current) {
+      clearTimeout(confirmTimeoutRef.current);
+      confirmTimeoutRef.current = null;
+    }
+    const attempt = focusAttemptRef.current;
+    if (attempt?.retryRafId != null) {
+      cancelAnimationFrame(attempt.retryRafId);
+      focusAttemptRef.current = { ...attempt, retryRafId: null };
+    }
+    if (opts?.includeWatchdog !== false && closeWatchdogTimeoutRef.current) {
+      clearTimeout(closeWatchdogTimeoutRef.current);
+      closeWatchdogTimeoutRef.current = null;
+    }
+  }, []);
+
+  const getImmutableCloseTargetMovieId = useCallback((): string | null => {
+    return (
+      immutableCloseTargetRef.current?.movieId ??
+      closeTransactionRef.current?.targetMovieId ??
+      detailFocusTokenRef.current?.snapshot.movieId ??
+      null
+    );
+  }, []);
+
   const setDetailFocusPhaseSafe = useCallback((phase: MoviesDetailFocusPhase) => {
     const previous = detailFocusPhaseRef.current;
     detailFocusPhaseRef.current = phase;
@@ -535,6 +577,115 @@ export function MoviesScreen() {
       });
     }
   }, [selectedCategoryId]);
+
+  /**
+   * Stage 4.2K.2: safely abort a stuck close — restore the same Detail movie,
+   * clear isolation/handoff, and allow a fresh Back/X transaction.
+   */
+  const abortDetailCloseTransaction = useCallback(
+    (input: { reason: string; token?: string | null }) => {
+      const token =
+        input.token ??
+        closeTransactionRef.current?.token ??
+        detailFocusTokenRef.current?.token ??
+        null;
+      const movieId =
+        getImmutableCloseTargetMovieId() ??
+        selectedMovie?.id ??
+        null;
+      const focusedControl =
+        closeTransactionRef.current?.focusedDetailControl ??
+        actualFocusedComponentRef.current ??
+        null;
+
+      clearCloseAttemptTimers({ includeWatchdog: true });
+      for (const rafId of closeRafIdsRef.current) {
+        cancelAnimationFrame(rafId);
+      }
+      closeRafIdsRef.current = [];
+
+      if (closeTransactionRef.current && !closeTransactionRef.current.cancelled) {
+        closeTransactionRef.current = {
+          ...closeTransactionRef.current,
+          cancelled: true,
+        };
+      }
+
+      if (isOnnMoviesTraceEnabled()) {
+        if (input.reason === 'watchdog') {
+          traceOnnMoviesEvent('Overlay', 'detail_close_transaction_watchdog_expired', {
+            token,
+            movieId,
+            elapsedMs: closeTransactionRef.current
+              ? Date.now() - closeTransactionRef.current.startedAt
+              : null,
+            marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+          });
+        }
+        traceOnnMoviesEvent('Overlay', 'detail_close_transaction_aborted', {
+          token,
+          reason: input.reason,
+          movieId,
+          marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+        });
+      }
+
+      cleanupDetailCloseVisualState({
+        forced: true,
+        token,
+        reason: `abort:${input.reason}`,
+      });
+
+      focusAttemptRef.current = null;
+      focusConfirmationRef.current = null;
+      focusConfirmedTokenRef.current = null;
+      focusIssuedTokenRef.current = null;
+      focusRetryCountRef.current = 0;
+      focusRequestCountRef.current = 0;
+      nativeFocusEnvironmentReadyRef.current = false;
+      targetFocusConfirmedRef.current = false;
+      detailFocusTokenRef.current = null;
+      immutableCloseTargetRef.current = null;
+      closeCommitTokenRef.current = null;
+      closeTransactionRef.current = null;
+      detailReturnPathRef.current = null;
+
+      setClosingFocusMovieId(null);
+      setRestoringBrowseFocus(false);
+      setFocusSuppressionHeld(false);
+      setPreserveXCloseFocus(false);
+      xCloseActivationLockRef.current = resetMoviesDetailXCloseActivationLock(movieId);
+      setXCloseActivationLocked(false);
+      setViewportRestoreCommand(null);
+      setLockScrollForFocusRestore(false);
+      setDetailSuppressedForPlayback(false);
+      // Keep Detail open on the same movie — exit closing-* permanently.
+      detailOpenRef.current = true;
+      setDetailOpen(true);
+      setDetailFocusPhaseSafe('detail-open');
+
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Overlay', 'detail_close_abort_restored_detail', {
+          token,
+          reason: input.reason,
+          movieId,
+          focusedDetailControl: focusedControl,
+          detailFocusPhase: 'detail-open',
+          visualIsolationActive: false,
+          holdCoverActive: false,
+          focusHandoffActive: false,
+          marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+        });
+      }
+    },
+    [
+      cleanupDetailCloseVisualState,
+      clearCloseAttemptTimers,
+      getImmutableCloseTargetMovieId,
+      selectedMovie?.id,
+      setDetailFocusPhaseSafe,
+    ],
+  );
 
   const releasePostRestoreLatch = useCallback((reason: MoviesPostRestoreReleaseReason) => {
     const latch = postRestoreLatchRef.current;
@@ -819,6 +970,16 @@ export function MoviesScreen() {
         clearTimeout(confirmTimeoutRef.current);
         confirmTimeoutRef.current = null;
       }
+      if (closeWatchdogTimeoutRef.current) {
+        clearTimeout(closeWatchdogTimeoutRef.current);
+        closeWatchdogTimeoutRef.current = null;
+      }
+      if (focusAttemptRef.current?.retryRafId != null) {
+        cancelAnimationFrame(focusAttemptRef.current.retryRafId);
+      }
+      focusAttemptRef.current = null;
+      focusConfirmationRef.current = null;
+      immutableCloseTargetRef.current = null;
       if (pendingIsolationFrameRef.current != null) {
         cancelAnimationFrame(pendingIsolationFrameRef.current);
         pendingIsolationFrameRef.current = null;
@@ -960,7 +1121,9 @@ export function MoviesScreen() {
         return false;
       }
 
-      const targetMovieId = closingFocusMovieId ?? snapshot.movieId;
+      // Stage 4.2K.2: confirm against immutable transaction target only.
+      const targetMovieId =
+        getImmutableCloseTargetMovieId() ?? snapshot.movieId;
       const movieIndex =
         snapshot.movieId === movieId
           ? snapshot.movieIndex
@@ -999,12 +1162,35 @@ export function MoviesScreen() {
             return false;
           }
         } else {
+          const attemptBeforeClear = focusAttemptRef.current;
+          const retryCountBeforeClear = focusRetryCountRef.current;
+          const late = Boolean(
+            attemptBeforeClear &&
+              (attemptBeforeClear.retryRafId != null ||
+                retryCountBeforeClear > 0 ||
+                (attemptBeforeClear.confirmationDeadline != null &&
+                  attemptBeforeClear.requestSettledAt != null &&
+                  Date.now() >=
+                    attemptBeforeClear.requestSettledAt + MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS)),
+          );
           focusConfirmedTokenRef.current = token.token;
           targetFocusConfirmedRef.current = true;
-          // Stage 4.2K.1: cancel confirmation timeout synchronously on matching onFocus.
-          if (confirmTimeoutRef.current) {
-            clearTimeout(confirmTimeoutRef.current);
-            confirmTimeoutRef.current = null;
+          focusConfirmationRef.current = {
+            token: token.token,
+            movieId,
+            acceptedAt: Date.now(),
+            late,
+          };
+          // Stage 4.2K.1/K.2: cancel confirmation timeout + scheduled retry immediately.
+          clearCloseAttemptTimers({ includeWatchdog: false });
+          if (late && isOnnMoviesTraceEnabled()) {
+            traceOnnMoviesEvent('Focus', 'detail_close_late_matching_focus_accepted', {
+              token: token.token,
+              movieId,
+              attemptNumber: attemptBeforeClear?.attemptNumber ?? null,
+              retryScheduled: retryCountBeforeClear > 0 || attemptBeforeClear?.retryRafId != null,
+              marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+            });
           }
           if (isOnnMoviesTraceEnabled()) {
             traceOnnMoviesEvent('Focus', 'detail_close_poster_focus_confirmed', {
@@ -1242,10 +1428,10 @@ export function MoviesScreen() {
           cancelAnimationFrame(rafId);
         }
         closeRafIdsRef.current = [];
-        if (confirmTimeoutRef.current) {
-          clearTimeout(confirmTimeoutRef.current);
-          confirmTimeoutRef.current = null;
-        }
+        // Stage 4.2K.2: clear request timer + watchdog — transaction succeeded.
+        clearCloseAttemptTimers({ includeWatchdog: true });
+        focusAttemptRef.current = null;
+        immutableCloseTargetRef.current = null;
 
         const correctionCount = viewportRestoreCountRef.current;
         const closeSource = detailCloseSourceRef.current;
@@ -1471,7 +1657,8 @@ export function MoviesScreen() {
       activatePostRestoreLatch,
       categories.length,
       cleanupDetailCloseVisualState,
-      closingFocusMovieId,
+      clearCloseAttemptTimers,
+      getImmutableCloseTargetMovieId,
       launchingPlayback,
       playbackActive,
       playbackClosing,
@@ -1488,9 +1675,9 @@ export function MoviesScreen() {
       if (playbackUiActive || Date.now() < playFocusGuardUntilRef.current) {
         return;
       }
+      const immutableTargetId = getImmutableCloseTargetMovieId();
       if (isOnnMoviesTraceEnabled()) {
-        const targetId =
-          closingFocusMovieId ?? detailFocusTokenRef.current?.snapshot.movieId ?? null;
+        const targetId = immutableTargetId;
         traceOnnMoviesEvent('Focus', 'poster_focus', {
           movieId: movie.id,
           offsetAtFocus: viewportStateRef.current.offset,
@@ -1507,25 +1694,33 @@ export function MoviesScreen() {
 
       const phase = detailFocusPhaseRef.current;
       if (isMoviesDetailClosingPhase(phase)) {
-        const targetId = closingFocusMovieId ?? detailFocusTokenRef.current?.snapshot.movieId ?? null;
-        if (targetId && movie.id !== targetId) {
-          logMoviesDetailFocusConflict({
-            token: detailFocusTokenRef.current?.token ?? null,
-            phase,
-            winningComponent: 'MoviePosterCard',
-            targetMovieId: targetId,
-            actuallyFocusedMovieId: movie.id,
-            reason: 'non-target-poster-during-close',
-          });
-          focusIssuedTokenRef.current = null;
-          setRestorationRetry((value) => value + 1);
+        const tx = closeTransactionRef.current;
+        const lateOk = shouldAcceptMoviesDetailCloseLateFocus({
+          token: detailFocusTokenRef.current?.token ?? '',
+          activeToken: detailFocusTokenRef.current?.token ?? null,
+          movieId: movie.id,
+          immutableMovieId: immutableTargetId,
+          gridInstanceId: immutableCloseTargetRef.current?.gridInstanceId ?? null,
+          activeGridInstanceId: getOnnMoviesGridInstanceId(),
+          revealCommitted: Boolean(tx?.revealCommitted),
+          cancelled: Boolean(tx?.cancelled),
+        });
+        if (!lateOk) {
+          if (immutableTargetId && movie.id !== immutableTargetId) {
+            logMoviesDetailFocusConflict({
+              token: detailFocusTokenRef.current?.token ?? null,
+              phase,
+              winningComponent: 'MoviePosterCard',
+              targetMovieId: immutableTargetId,
+              actuallyFocusedMovieId: movie.id,
+              reason: 'non-target-poster-during-close',
+            });
+          }
+          // Stage 4.2K.2: never retarget / never retry for a wrong poster.
           return;
         }
-        // Stage 4.2K.1: matching poster onFocus cancels confirmation timeout immediately.
-        if (confirmTimeoutRef.current) {
-          clearTimeout(confirmTimeoutRef.current);
-          confirmTimeoutRef.current = null;
-        }
+        // Matching immutable target — cancel timeout + retry even at the boundary.
+        clearCloseAttemptTimers({ includeWatchdog: false });
         if (restoreTimingRef.current && restoreTimingRef.current.focusConfirmedAt == null) {
           restoreTimingRef.current.focusConfirmedAt = Date.now();
         }
@@ -1561,9 +1756,10 @@ export function MoviesScreen() {
       focusMovie(movie as Parameters<typeof focusMovie>[0]);
     },
     [
-      closingFocusMovieId,
+      clearCloseAttemptTimers,
       completeDetailFocusRestore,
       focusMovie,
+      getImmutableCloseTargetMovieId,
       playbackUiActive,
       releasePostRestoreLatch,
       selectedCategoryId,
@@ -2062,6 +2258,26 @@ export function MoviesScreen() {
       });
       detailReturnPathRef.current = returnPath;
       closeCommitTokenRef.current = null;
+      const startedAt = Date.now();
+      const targetNativeHandle = targetInstance ? findNodeHandle(targetInstance) : null;
+      const immutableTarget = createMoviesDetailCloseImmutableTarget({
+        token,
+        source: detailCloseSourceRef.current,
+        origin: 'browse',
+        movieId: snapshot.movieId,
+        categoryId: snapshot.categoryId,
+        renderedIndex: snapshot.movieIndex,
+        nativeHandle: targetNativeHandle,
+        gridInstanceId: getOnnMoviesGridInstanceId(),
+        listRevision: openBrowseListRevision,
+        originalOffset: snapshot.verticalOffset,
+        firstVisibleIndex: snapshot.firstVisibleIndex,
+        lastVisibleIndex: snapshot.lastVisibleIndex,
+        targetVisible: snapshotWasVisible,
+      });
+      immutableCloseTargetRef.current = immutableTarget;
+      focusAttemptRef.current = null;
+      focusConfirmationRef.current = null;
       closeTransactionRef.current = createMoviesDetailCloseTransaction({
         token,
         source: detailCloseSourceRef.current,
@@ -2072,8 +2288,8 @@ export function MoviesScreen() {
         gridInstanceId: getOnnMoviesGridInstanceId(),
         listOffset: snapshot.verticalOffset,
         focusedDetailControl: actualFocusedComponentRef.current,
-        targetNativeHandle: targetInstance ? findNodeHandle(targetInstance) : null,
-        startedAt: Date.now(),
+        targetNativeHandle,
+        startedAt,
         listRevision: openBrowseListRevision,
         snapshotTargetWasVisible: snapshotWasVisible,
       });
@@ -2087,6 +2303,39 @@ export function MoviesScreen() {
           offset: snapshot.verticalOffset,
           listRevision: openBrowseListRevision,
           marker: MOVIES_FOCUS_STAGE4J_MARKER,
+        });
+        traceOnnMoviesEvent('Overlay', 'detail_close_immutable_target_locked', {
+          token,
+          source: detailCloseSourceRef.current,
+          origin: 'browse',
+          movieId: immutableTarget.movieId,
+          categoryId: immutableTarget.categoryId,
+          renderedIndex: immutableTarget.renderedIndex,
+          nativeHandle: immutableTarget.nativeHandle,
+          gridInstanceId: immutableTarget.gridInstanceId,
+          listRevision: immutableTarget.listRevision,
+          originalOffset: immutableTarget.originalOffset,
+          firstVisibleIndex: immutableTarget.firstVisibleIndex,
+          lastVisibleIndex: immutableTarget.lastVisibleIndex,
+          targetVisible: immutableTarget.targetVisible,
+          marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+        });
+        traceOnnMoviesEvent('Focus', 'detail_close_fallback_target_registration_state', {
+          token,
+          immutableMovieId: immutableTarget.movieId,
+          nativeHandle: targetNativeHandle,
+          registeredMovieId: stored?.contentId ?? null,
+          gridInstanceId: getOnnMoviesGridInstanceId(),
+          listRevision: openBrowseListRevision,
+          visibleIndexes: {
+            first: viewportStateRef.current.firstIndex,
+            last: viewportStateRef.current.lastIndex,
+          },
+          renderedIndex: stored?.renderedIndex ?? snapshot.movieIndex,
+          targetVisible: snapshotWasVisible,
+          targetRefValid,
+          returnPath,
+          marker: MOVIES_FOCUS_STAGE4K2_MARKER,
         });
         traceOnnMoviesEvent('Overlay', 'detail_close_focus_owner_preserved', {
           token,
@@ -2134,8 +2383,26 @@ export function MoviesScreen() {
       setLockScrollForFocusRestore(false);
       setViewportRestoreCommand(null);
       setFocusSuppressionHeld(true);
-      setClosingFocusMovieId(snapshot.movieId);
+      // Stage 4.2K.2: closingFocusMovieId mirrors immutable target only — never mutates.
+      setClosingFocusMovieId(immutableTarget.movieId);
       setRestoringBrowseFocus(true);
+
+      // Stage 4.2K.2: watchdog guarantees exit from closing-* (not a confirm timer).
+      if (closeWatchdogTimeoutRef.current) {
+        clearTimeout(closeWatchdogTimeoutRef.current);
+      }
+      closeWatchdogTimeoutRef.current = setTimeout(() => {
+        if (closeTransactionRef.current?.token !== token) {
+          return;
+        }
+        if (closeTransactionRef.current.revealCommitted || closeTransactionRef.current.cancelled) {
+          return;
+        }
+        if (focusConfirmedTokenRef.current === token) {
+          return;
+        }
+        abortDetailCloseTransaction({ reason: 'watchdog', token });
+      }, MOVIES_DETAIL_CLOSE_WATCHDOG_MS);
 
       const naturalReturn = shouldUseMoviesNaturalReturnPath(returnPath);
       // Stage 4.2K/K.1: all browse-origin closes share visual isolation lifecycle.
@@ -2212,116 +2479,16 @@ export function MoviesScreen() {
         detailOpened: true,
       });
 
+      // Stage 4.2K.2: confirmation timeout starts after focus request settles — not here.
       if (confirmTimeoutRef.current) {
         clearTimeout(confirmTimeoutRef.current);
+        confirmTimeoutRef.current = null;
       }
-      // Stage 4.2K/K.1: short confirmation window; at most one framed retry.
-      confirmTimeoutRef.current = setTimeout(() => {
-        if (!isMoviesDetailClosingPhase(detailFocusPhaseRef.current)) {
-          return;
-        }
-        if (detailFocusTokenRef.current?.token !== token) {
-          return;
-        }
-        // Stage 4.2K.1: re-check accepted confirmation immediately before emitting timeout.
-        if (focusConfirmedTokenRef.current === token) {
-          return;
-        }
-        if (isOnnMoviesTraceEnabled()) {
-          traceOnnMoviesEvent('Focus', 'detail_close_focus_confirmation_timeout', {
-            token,
-            source: detailCloseSourceRef.current,
-            movieId: snapshot.movieId,
-            focusRequestCount: focusRequestCountRef.current,
-            retryCount: focusRetryCountRef.current,
-            elapsedMs: Date.now() - (closeTransactionRef.current?.startedAt ?? Date.now()),
-            marker: MOVIES_FOCUS_STAGE4K_MARKER,
-          });
-        }
-        // Stage 4.2K.1: confirmation may arrive during this timeout callback turn.
-        if (
-          !shouldScheduleMoviesDetailFocusRetry({
-            focusConfirmedForToken: focusConfirmedTokenRef.current === token,
-          })
-        ) {
-          return;
-        }
-        const retryTarget = getValidatedPosterTarget(
-          snapshot.movieId,
-          snapshot.movieIndex >= 0 ? snapshot.movieIndex : undefined,
-        );
-        const stillValid = Boolean(retryTarget) && wasMoviesSnapshotTargetVisible(snapshot);
-        if (stillValid && focusRetryCountRef.current < MOVIES_DETAIL_FOCUS_MAX_RETRIES) {
-          focusRetryCountRef.current += 1;
-          if (isOnnMoviesTraceEnabled()) {
-            traceOnnMoviesEvent('Focus', 'detail_close_focus_retry_scheduled', {
-              token,
-              movieId: snapshot.movieId,
-              retryCount: focusRetryCountRef.current,
-              marker: MOVIES_FOCUS_STAGE4K_MARKER,
-            });
-          }
-          // Wait one frame so the prior request has ended before retrying.
-          const rafId = requestAnimationFrame(() => {
-            if (detailFocusTokenRef.current?.token !== token) {
-              return;
-            }
-            if (
-              !shouldScheduleMoviesDetailFocusRetry({
-                focusConfirmedForToken: focusConfirmedTokenRef.current === token,
-              })
-            ) {
-              return;
-            }
-            focusIssuedTokenRef.current = null;
-            if (isOnnMoviesTraceEnabled()) {
-              traceOnnMoviesEvent('Focus', 'detail_close_focus_retry_executed', {
-                token,
-                movieId: snapshot.movieId,
-                retryCount: focusRetryCountRef.current,
-                marker: MOVIES_FOCUS_STAGE4K_MARKER,
-              });
-            }
-            setRestorationRetry((value) => value + 1);
-          });
-          closeRafIdsRef.current.push(rafId);
-          logMoviesDetailFocusConflict({
-            token,
-            phase: detailFocusPhaseRef.current,
-            winningComponent: 'MoviesScreen',
-            targetMovieId: snapshot.movieId,
-            actuallyFocusedMovieId: null,
-            reason: 'timeout-revalidate-exact-target',
-          });
-          return;
-        }
-        // Terminal bounded failure only — nearest under visual isolation.
-        const nearest = resolveNearestVisiblePoster({
-          targetIndex: snapshot.movieIndex,
-          visibleFirstIndex: viewportStateRef.current.firstIndex,
-          visibleLastIndex: viewportStateRef.current.lastIndex,
-          movies: visibleMovies,
-        });
-        logMoviesDetailFocusConflict({
-          token,
-          phase: detailFocusPhaseRef.current,
-          winningComponent: 'MoviesScreen',
-          targetMovieId: snapshot.movieId,
-          actuallyFocusedMovieId: nearest?.movieId ?? null,
-          reason: nearest
-            ? 'timeout-nearest-visible-fallback'
-            : 'timeout-no-visible-fallback',
-        });
-        if (nearest) {
-          setClosingFocusMovieId(nearest.movieId);
-          focusIssuedTokenRef.current = null;
-          setRestorationRetry((value) => value + 1);
-        }
-      }, MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS);
 
       return true;
     },
     [
+      abortDetailCloseTransaction,
       activeProviderId,
       getValidatedPosterTarget,
       selectedCategoryId,
@@ -2329,6 +2496,195 @@ export function MoviesScreen() {
       setDetailVisualHoldSafe,
       setVisualIsolationSafe,
       visibleMovies,
+    ],
+  );
+
+  /**
+   * Stage 4.2K.2: request-scoped 350 ms confirmation timer.
+   * Starts only after the native focus request for this attempt has settled.
+   */
+  const startFocusConfirmTimerForAttempt = useCallback(
+    (input: { token: string; attempt: MoviesDetailCloseFocusAttempt }) => {
+      const { token, attempt } = input;
+      const immutableMovieId = getImmutableCloseTargetMovieId();
+      if (!immutableMovieId) {
+        return;
+      }
+      if (
+        !shouldStartMoviesDetailFocusConfirmTimer({
+          token,
+          activeToken: detailFocusTokenRef.current?.token ?? null,
+          attemptId: attempt.attemptId,
+          currentAttemptId: focusAttemptRef.current?.attemptId ?? null,
+          focusConfirmed: focusConfirmedTokenRef.current === token,
+          requestSettled: attempt.requestSettledAt != null,
+        })
+      ) {
+        return;
+      }
+
+      if (confirmTimeoutRef.current) {
+        clearTimeout(confirmTimeoutRef.current);
+        confirmTimeoutRef.current = null;
+      }
+
+      const timeoutMs = MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS;
+      const txStartedAt = closeTransactionRef.current?.startedAt ?? Date.now();
+      const requestStartedElapsedMs =
+        attempt.requestStartedAt != null ? attempt.requestStartedAt - txStartedAt : null;
+      const deadlineElapsedMs =
+        (attempt.requestSettledAt ?? Date.now()) - txStartedAt + timeoutMs;
+      const confirmationDeadline = Date.now() + timeoutMs;
+      focusAttemptRef.current = {
+        ...attempt,
+        confirmationDeadline,
+      };
+
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Focus', 'detail_close_focus_confirmation_timer_started', {
+          token,
+          attemptNumber: attempt.attemptNumber,
+          targetMovieId: immutableMovieId,
+          timeoutMs,
+          requestStartedElapsedMs,
+          deadlineElapsedMs,
+          marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+        });
+      }
+
+      confirmTimeoutRef.current = setTimeout(() => {
+        if (!isMoviesDetailClosingPhase(detailFocusPhaseRef.current)) {
+          return;
+        }
+        if (detailFocusTokenRef.current?.token !== token) {
+          return;
+        }
+        if (focusAttemptRef.current?.attemptId !== attempt.attemptId) {
+          return;
+        }
+        if (focusConfirmedTokenRef.current === token) {
+          return;
+        }
+        const activeImmutable = getImmutableCloseTargetMovieId();
+        if (!activeImmutable || activeImmutable !== attempt.targetMovieId) {
+          return;
+        }
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Focus', 'detail_close_focus_confirmation_timeout', {
+            token,
+            source: detailCloseSourceRef.current,
+            movieId: activeImmutable,
+            attemptNumber: attempt.attemptNumber,
+            focusRequestCount: focusRequestCountRef.current,
+            retryCount: focusRetryCountRef.current,
+            elapsedMs: Date.now() - (closeTransactionRef.current?.startedAt ?? Date.now()),
+            requestScopedElapsedMs:
+              attempt.requestSettledAt != null ? Date.now() - attempt.requestSettledAt : null,
+            marker: MOVIES_FOCUS_STAGE4K_MARKER,
+          });
+        }
+        if (
+          !shouldScheduleMoviesDetailFocusRetry({
+            focusConfirmedForToken: focusConfirmedTokenRef.current === token,
+          })
+        ) {
+          return;
+        }
+
+        // At most one retry — same immutable movieId only.
+        if (focusRetryCountRef.current >= MOVIES_DETAIL_FOCUS_MAX_RETRIES) {
+          if (
+            shouldAbortMoviesDetailCloseAfterFailedAttempts({
+              focusRequestCount: focusRequestCountRef.current,
+              maxFocusRequests: MOVIES_MAX_FOCUS_REQUESTS,
+              focusConfirmed: false,
+            })
+          ) {
+            abortDetailCloseTransaction({ reason: 'focus-attempts-exhausted', token });
+          }
+          return;
+        }
+
+        const stored = posterRefs.current.get(activeImmutable);
+        const resolvedHandle = getValidatedPosterTarget(activeImmutable);
+        const nativeHandle = resolvedHandle ? findNodeHandle(resolvedHandle) : null;
+        const retryResolved = resolveMoviesDetailCloseRetryTarget({
+          immutableMovieId: activeImmutable,
+          resolvedMovieId: stored?.contentId === activeImmutable ? activeImmutable : null,
+          nativeHandle,
+          refMatched: Boolean(stored) && stored!.contentId === activeImmutable,
+          gridInstanceMatched:
+            !immutableCloseTargetRef.current?.gridInstanceId ||
+            immutableCloseTargetRef.current.gridInstanceId === getOnnMoviesGridInstanceId(),
+          listRevisionMatched:
+            !immutableCloseTargetRef.current ||
+            immutableCloseTargetRef.current.listRevision === getMoviesBrowseListRevision(),
+        });
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Focus', 'detail_close_retry_target_resolved', {
+            token,
+            ...retryResolved,
+            marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+          });
+        }
+        if (!retryResolved.ok || retryResolved.resolvedMovieId !== activeImmutable) {
+          abortDetailCloseTransaction({ reason: 'retry-target-unresolved', token });
+          return;
+        }
+
+        focusRetryCountRef.current += 1;
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Focus', 'detail_close_focus_retry_scheduled', {
+            token,
+            movieId: activeImmutable,
+            retryCount: focusRetryCountRef.current,
+            marker: MOVIES_FOCUS_STAGE4K_MARKER,
+          });
+        }
+        // One committed frame — never change closingFocusMovieId / immutable target.
+        const rafId = requestAnimationFrame(() => {
+          if (detailFocusTokenRef.current?.token !== token) {
+            return;
+          }
+          if (
+            !shouldScheduleMoviesDetailFocusRetry({
+              focusConfirmedForToken: focusConfirmedTokenRef.current === token,
+            })
+          ) {
+            return;
+          }
+          if (focusAttemptRef.current) {
+            focusAttemptRef.current = { ...focusAttemptRef.current, retryRafId: null };
+          }
+          focusIssuedTokenRef.current = null;
+          if (isOnnMoviesTraceEnabled()) {
+            traceOnnMoviesEvent('Focus', 'detail_close_focus_retry_executed', {
+              token,
+              movieId: activeImmutable,
+              retryCount: focusRetryCountRef.current,
+              marker: MOVIES_FOCUS_STAGE4K_MARKER,
+            });
+          }
+          setRestorationRetry((value) => value + 1);
+        });
+        if (focusAttemptRef.current) {
+          focusAttemptRef.current = { ...focusAttemptRef.current, retryRafId: rafId };
+        }
+        closeRafIdsRef.current.push(rafId);
+        logMoviesDetailFocusConflict({
+          token,
+          phase: detailFocusPhaseRef.current,
+          winningComponent: 'MoviesScreen',
+          targetMovieId: activeImmutable,
+          actuallyFocusedMovieId: null,
+          reason: 'timeout-revalidate-exact-target',
+        });
+      }, timeoutMs);
+    },
+    [
+      abortDetailCloseTransaction,
+      getImmutableCloseTargetMovieId,
+      getValidatedPosterTarget,
     ],
   );
 
@@ -2521,7 +2877,9 @@ export function MoviesScreen() {
     }
 
     const snapshot = token.snapshot;
-    const targetMovieId = closingFocusMovieId ?? snapshot.movieId;
+    // Stage 4.2K.2: every request/retry uses the immutable transaction target only.
+    const targetMovieId =
+      getImmutableCloseTargetMovieId() ?? snapshot.movieId;
     const targetIndex =
       targetMovieId === snapshot.movieId
         ? snapshot.movieIndex
@@ -2552,9 +2910,19 @@ export function MoviesScreen() {
         return;
       }
 
+      const attempt = createMoviesDetailCloseFocusAttempt({
+        token: token.token,
+        targetMovieId,
+        attemptNumber: focusRequestCountRef.current + 1,
+      });
+      focusAttemptRef.current = attempt;
       focusIssuedTokenRef.current = token.token;
       focusRequestCountRef.current += 1;
       setLockScrollForFocusRestore(true);
+      // Keep preferred/focusable pin on the immutable target only.
+      if (closingFocusMovieId !== targetMovieId) {
+        setClosingFocusMovieId(targetMovieId);
+      }
 
       const issueFocusRequest = () => {
         if (detailFocusTokenRef.current?.token !== token.token) {
@@ -2562,29 +2930,72 @@ export function MoviesScreen() {
           setLockScrollForFocusRestore(false);
           return;
         }
+        const requestMovieId = getImmutableCloseTargetMovieId() ?? targetMovieId;
+        if (
+          isMoviesDetailCloseTargetMutation({
+            immutableMovieId: targetMovieId,
+            requestMovieId,
+          })
+        ) {
+          if (isOnnMoviesTraceEnabled()) {
+            traceOnnMoviesEvent('Focus', 'detail_close_target_mutation_violation', {
+              token: token.token,
+              immutableMovieId: targetMovieId,
+              requestMovieId,
+              attemptNumber: attempt.attemptNumber,
+              marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+            });
+          }
+          abortDetailCloseTransaction({
+            reason: 'target-mutation',
+            token: token.token,
+          });
+          return;
+        }
+        const requestStartedAt = Date.now();
+        if (focusAttemptRef.current?.attemptId === attempt.attemptId) {
+          focusAttemptRef.current = {
+            ...focusAttemptRef.current,
+            requestStartedAt,
+          };
+        }
+        // Resolve by movie ID — do not require rendered-index match (recycle-safe).
+        const targetHandle = getValidatedPosterTarget(requestMovieId);
         if (isOnnMoviesTraceEnabled()) {
-          const targetHandle = getValidatedPosterTarget(
-            targetMovieId,
-            targetIndex >= 0 ? targetIndex : undefined,
-          );
+          const stored = posterRefs.current.get(requestMovieId);
+          traceOnnMoviesEvent('Focus', 'detail_close_fallback_target_registration_state', {
+            token: token.token,
+            immutableMovieId: requestMovieId,
+            nativeHandle: targetHandle ? findNodeHandle(targetHandle) : null,
+            registeredMovieId: stored?.contentId ?? null,
+            gridInstanceId: getOnnMoviesGridInstanceId(),
+            listRevision: getMoviesBrowseListRevision(),
+            visibleIndexes: {
+              first: viewportStateRef.current.firstIndex,
+              last: viewportStateRef.current.lastIndex,
+            },
+            renderedIndex: stored?.renderedIndex ?? targetIndex,
+            targetVisible: snapshotWasVisible,
+            marker: MOVIES_FOCUS_STAGE4K2_MARKER,
+          });
           traceOnnMoviesEvent('Focus', 'detail_close_focus_request_started', {
             token: token.token,
             source: detailCloseSourceRef.current,
             origin: 'browse',
-            movieId: targetMovieId,
+            movieId: requestMovieId,
             nativeHandle: targetHandle ? findNodeHandle(targetHandle) : null,
             gridInstanceId: getOnnMoviesGridInstanceId(),
-            attemptNumber: focusRequestCountRef.current,
+            attemptNumber: attempt.attemptNumber,
             elapsedMs: Date.now() - (closeTransactionRef.current?.startedAt ?? Date.now()),
             marker: MOVIES_FOCUS_STAGE4K_MARKER,
           });
           traceOnnMoviesEvent('Focus', 'focus_request', {
-            targetMovieId,
+            targetMovieId: requestMovieId,
             requestReason:
               token.source === 'detail-close'
                 ? 'restore-exact-poster-after-detail-close'
                 : 'restore-after-playback-exact-poster',
-            attemptNumber: focusRequestCountRef.current,
+            attemptNumber: attempt.attemptNumber,
             detailPhase: detailFocusPhaseRef.current,
             gridOffset: viewportStateRef.current.offset,
             firstVisibleIndex: viewportStateRef.current.firstIndex,
@@ -2596,7 +3007,7 @@ export function MoviesScreen() {
           });
           if (detailCloseSourceRef.current === 'x') {
             traceOnnMoviesEvent('Focus', 'detail_x_poster_focus_requested', {
-              targetMovieId,
+              targetMovieId: requestMovieId,
               targetNativeHandle: targetHandle ? findNodeHandle(targetHandle) : null,
               token: token.token,
               marker: MOVIES_FOCUS_STAGE4H_MARKER,
@@ -2612,7 +3023,7 @@ export function MoviesScreen() {
           screen: 'movies',
           source: 'MoviesScreen',
           region: 'poster-grid',
-          itemId: targetMovieId,
+          itemId: requestMovieId,
           reason:
             token.source === 'detail-close'
               ? 'restore-exact-poster-after-detail-close'
@@ -2623,7 +3034,7 @@ export function MoviesScreen() {
           isActive: () =>
             isMoviesDetailClosingPhase(detailFocusPhaseRef.current) &&
             detailFocusTokenRef.current?.token === token.token,
-          getTarget: () => getValidatedPosterTarget(targetMovieId, targetIndex >= 0 ? targetIndex : undefined),
+          getTarget: () => getValidatedPosterTarget(requestMovieId),
           onSettled: (status) => {
             if (detailFocusTokenRef.current?.token !== token.token) {
               if (isOnnMoviesTraceEnabled()) {
@@ -2635,20 +3046,29 @@ export function MoviesScreen() {
               }
               return;
             }
+            const settledAt = Date.now();
+            const currentAttempt = focusAttemptRef.current;
+            if (currentAttempt?.attemptId === attempt.attemptId) {
+              focusAttemptRef.current = {
+                ...currentAttempt,
+                requestSettledAt: settledAt,
+              };
+            }
             if (isOnnMoviesTraceEnabled()) {
               traceOnnMoviesEvent('Focus', 'detail_close_focus_request_settled', {
                 token: token.token,
                 source: detailCloseSourceRef.current,
                 origin: 'browse',
-                movieId: targetMovieId,
+                movieId: requestMovieId,
                 status,
+                attemptNumber: attempt.attemptNumber,
                 marker: MOVIES_FOCUS_STAGE4K_MARKER,
               });
             }
             logMoviesDetailFocusLifecycle({
               token: token.token,
               phase: requestPhase,
-              targetMovieId,
+              targetMovieId: requestMovieId,
               targetIndex,
               targetVisible: snapshotWasVisible,
               currentOffset: viewportStateRef.current.offset,
@@ -2659,14 +3079,22 @@ export function MoviesScreen() {
               overlayMounted: true,
             });
             if (status === 'timeout') {
-              // Stage 4.2K: clear issued flag; short confirm timeout owns the retry.
               focusIssuedTokenRef.current = null;
               setLockScrollForFocusRestore(false);
+            }
+            // Stage 4.2K.2: confirmation window begins only after this attempt settled.
+            const settledAttempt = focusAttemptRef.current;
+            if (settledAttempt?.attemptId === attempt.attemptId) {
+              startFocusConfirmTimerForAttempt({
+                token: token.token,
+                attempt: settledAttempt,
+              });
             }
           },
         });
       };
 
+      // Mounted+in-page: skip InteractionManager lag and issue immediately.
       if (snapshotWasVisible && targetInPage) {
         issueFocusRequest();
       } else {
@@ -2729,8 +3157,8 @@ export function MoviesScreen() {
       if (restoreTimingRef.current?.token === token.token && restoreTimingRef.current.viewportConfirmedAt == null) {
         restoreTimingRef.current.viewportConfirmedAt = Date.now();
       }
-      if (targetFocusConfirmedRef.current && closingFocusMovieId) {
-        completeDetailFocusRestore(closingFocusMovieId, true);
+      if (targetFocusConfirmedRef.current && targetMovieId) {
+        completeDetailFocusRestore(targetMovieId, true);
         return;
       }
       if (!nativeFocusEnvironmentReadyRef.current) {
@@ -2742,8 +3170,8 @@ export function MoviesScreen() {
     }
 
     if (phase === 'return-focus-confirmed') {
-      if (targetFocusConfirmedRef.current && closingFocusMovieId && viewportStable) {
-        completeDetailFocusRestore(closingFocusMovieId, true);
+      if (targetFocusConfirmedRef.current && targetMovieId && viewportStable) {
+        completeDetailFocusRestore(targetMovieId, true);
       }
       return;
     }
@@ -3008,18 +3436,21 @@ export function MoviesScreen() {
 
     // After a corrective offset restore, focus may already be on the target
     // without a new onFocus event — complete when both gates are true.
-    if (targetFocusConfirmedRef.current && closingFocusMovieId) {
-      completeDetailFocusRestore(closingFocusMovieId, true);
+    if (targetFocusConfirmedRef.current && targetMovieId) {
+      completeDetailFocusRestore(targetMovieId, true);
       return;
     }
 
     issuePosterFocusRequest('closing-focus');
   }, [
+    abortDetailCloseTransaction,
     closingFocusMovieId,
     completeDetailFocusRestore,
+    getImmutableCloseTargetMovieId,
     getValidatedPosterTarget,
     restorationRetry,
     setDetailFocusPhaseSafe,
+    startFocusConfirmTimerForAttempt,
     visibleMovies,
     detailFocusPhase,
     viewportRestoreCommand,

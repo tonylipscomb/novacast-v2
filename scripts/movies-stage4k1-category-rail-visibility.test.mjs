@@ -307,8 +307,10 @@ test('9) Timeout race: onFocus at timeout boundary cancels retry', () => {
     true,
   );
   assert.match(screen, /shouldScheduleMoviesDetailFocusRetry/);
-  assert.match(screen, /re-check accepted confirmation immediately before emitting timeout/);
-  assert.match(screen, /matching poster onFocus cancels confirmation timeout immediately/);
+  // Stage 4.2K.2: request-scoped timer still drops when confirmation already accepted.
+  assert.match(screen, /focusConfirmedTokenRef\.current === token/);
+  assert.match(screen, /clearCloseAttemptTimers/);
+  assert.match(screen, /shouldAcceptMoviesDetailCloseLateFocus|detail_close_late_matching_focus_accepted/);
 });
 
 test('10) Wiring: Stage 4.2K/J isolation + rail invariant present', () => {

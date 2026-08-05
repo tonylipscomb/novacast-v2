@@ -12,7 +12,6 @@ import {
   View,
 } from 'react-native';
 import { BlurView } from 'expo-blur';
-import { isValidExpoBlurTargetRef } from '../moviesStartupRuntimeIsolation';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import Animated, {
   Easing,
@@ -299,7 +298,7 @@ function MovieDetailOverlayComponent({
   preserveCloseButtonFocus = false,
   closeActivationLocked = false,
   closeTargetRef,
-  blurTarget,
+  blurTarget: _ignoredBlurTarget,
   detail,
   detailLoading = false,
   detailError,
@@ -897,44 +896,13 @@ function MovieDetailOverlayComponent({
         focusable={false}
         accessible={false}
         importantForAccessibility="no-hide-descendants">
-        {(() => {
-          const validBlurTarget = isValidExpoBlurTargetRef(blurTarget) ? blurTarget : null;
-          if (blurTarget && !validBlurTarget) {
-            console.info(
-              '[NovaCast Movies Detail] ' +
-                JSON.stringify({
-                  event: 'movie_detail_blur_target_fallback_used',
-                  reason: 'invalid-non-expo-blur-target',
-                  movieId: detail?.id ?? null,
-                }),
-            );
-          } else if (validBlurTarget) {
-            console.info(
-              '[NovaCast Movies Detail] ' +
-                JSON.stringify({
-                  event: 'movie_detail_blur_target_validated',
-                  movieId: detail?.id ?? null,
-                }),
-            );
-          }
-          return validBlurTarget ? (
-            <BlurView
-              blurTarget={validBlurTarget as RefObject<View | null>}
-              blurMethod="dimezisBlurViewSdk31Plus"
-              intensity={28}
-              tint="dark"
-              style={styles.backgroundBlur}
-              pointerEvents="none"
-            />
-          ) : (
-            <BlurView
-              intensity={28}
-              tint="dark"
-              style={styles.backgroundBlur}
-              pointerEvents="none"
-            />
-          );
-        })()}
+        {/* Stage 4.2L.2: intensity + scrim only — never bind blurTargetId (gray/crash on TV). */}
+        <BlurView
+          intensity={28}
+          tint="dark"
+          style={styles.backgroundBlur}
+          pointerEvents="none"
+        />
         <View
           style={[
             styles.backgroundScrim,

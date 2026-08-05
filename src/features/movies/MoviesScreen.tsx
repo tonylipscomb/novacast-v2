@@ -16,7 +16,7 @@ import ReactNative, {
   View,
 } from 'react-native';
 
-import { BlurTargetView, BlurView } from 'expo-blur';
+import { BlurView } from 'expo-blur';
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
 import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
@@ -122,9 +122,14 @@ import {
   MOVIES_FOCUS_STAGE4L1_MARKER,
   releaseMoviesStartupFocusOwnership,
   shouldAllowMoviesToolbarSearchPreferredFocus,
-  shouldCorrectMoviesToolbarSearchFocusSteal,
 } from './moviesStartupRuntimeIsolation';
+import {
+  assertMoviesDetailClosedVisualInvariant,
+  MOVIES_FOCUS_STAGE4L2_MARKER,
+  shouldUseMoviesDetailCloseIsolationCover,
+} from './moviesDetailSimpleBack';
 import { normalizePlaybackFailure } from '@/features/analytics/playbackAnalytics';
+import type { RequestTvFocusResult } from '@/features/navigation/tvFocusDiagnostics';
 
 import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
 import {
@@ -331,9 +336,6 @@ export function MoviesScreen() {
   const confirmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const overlayCloseTargetRef = useRef<ElementRef<typeof Pressable> | null>(null);
   const browseLayerRef = useRef<View | null>(null);
-  // Stage 4.2L.1: only Expo BlurTargetView refs may be passed as blurTarget.
-  (browseLayerRef as { __expoBlurTarget?: boolean }).__expoBlurTarget = true;
-  const searchFocusCorrectionTokenRef = useRef<string | null>(null);
   const startupFocusOwnershipActiveRef = useRef(true);
   const startupFocusFrameRef = useRef<number | null>(null);
   const [detailFocusPhase, setDetailFocusPhase] = useState<MoviesDetailFocusPhase>('browse');
@@ -724,7 +726,6 @@ export function MoviesScreen() {
     const released: MoviesPostRestoreLatch = { ...latch, postRestoreActive: false };
     postRestoreLatchRef.current = released;
     setPostRestoreLatch(released);
-    searchFocusCorrectionTokenRef.current = null;
     console.info(
       '[NovaCast Movies Focus] ' +
         JSON.stringify({
@@ -794,6 +795,79 @@ export function MoviesScreen() {
       }, MOVIES_POST_RESTORE_LATCH_MS);
     },
     [releasePostRestoreLatch],
+  );
+
+  /**
+   * Stage 4.2L.2: close Detail and restore browse ownership when poster focus
+   * cannot be requested safely. Prefer usability over exact poster restore.
+   */
+  const forceCompleteDetailCloseWithoutFocus = useCallback(
+    (input: { token: string; movieId: string; reason: string }) => {
+      const token = input.token;
+      if (
+        !closeTransactionRef.current ||
+        closeTransactionRef.current.token !== token ||
+        closeTransactionRef.current.revealCommitted ||
+        closeTransactionRef.current.cancelled
+      ) {
+        return;
+      }
+      clearCloseAttemptTimers({ includeWatchdog: true });
+      for (const rafId of closeRafIdsRef.current) {
+        cancelAnimationFrame(rafId);
+      }
+      closeRafIdsRef.current = [];
+      closeTransactionRef.current = {
+        ...closeTransactionRef.current,
+        revealCommitted: true,
+      };
+      closeCommitTokenRef.current = token;
+      cleanupDetailCloseVisualState({
+        forced: true,
+        token,
+        reason: `focus-failed:${input.reason}`,
+      });
+      focusAttemptRef.current = null;
+      focusConfirmationRef.current = null;
+      focusConfirmedTokenRef.current = token;
+      focusIssuedTokenRef.current = null;
+      nativeFocusEnvironmentReadyRef.current = false;
+      targetFocusConfirmedRef.current = true;
+      detailFocusTokenRef.current = null;
+      immutableCloseTargetRef.current = null;
+      detailReturnPathRef.current = null;
+      setClosingFocusMovieId(null);
+      setRestoringBrowseFocus(false);
+      setFocusSuppressionHeld(false);
+      setPreserveXCloseFocus(false);
+      setViewportRestoreCommand(null);
+      setLockScrollForFocusRestore(false);
+      setDetailSuppressedForPlayback(false);
+      setDetailVisualHoldSafe(false);
+      setVisualIsolationSafe(false);
+      detailOpenRef.current = false;
+      setDetailOpen(false);
+      setDetailFocusPhaseSafe('browse-restored');
+      activatePostRestoreLatch(token, input.movieId);
+      console.info(
+        '[NovaCast Movies Focus] ' +
+          JSON.stringify({
+            event: 'movies_detail_return_focus_fallback_browse',
+            marker: MOVIES_FOCUS_STAGE4L2_MARKER,
+            token,
+            movieId: input.movieId,
+            reason: input.reason,
+          }),
+      );
+    },
+    [
+      activatePostRestoreLatch,
+      cleanupDetailCloseVisualState,
+      clearCloseAttemptTimers,
+      setDetailFocusPhaseSafe,
+      setDetailVisualHoldSafe,
+      setVisualIsolationSafe,
+    ],
   );
 
   const releaseFocusSuppressionAfterStabilize = useCallback((token: string | null) => {
@@ -2515,9 +2589,14 @@ export function MoviesScreen() {
         ? 'return-focus-arming'
         : 'closing-prepare';
       setDetailVisualHoldSafe(true);
-      setVisualIsolationSafe(true);
-      visualIsolationTokenRef.current = token;
-      visualCoverTokenRef.current = token;
+      // Stage 4.2L.2: skip prolonged gray isolation when the poster is already mounted/visible.
+      const useIsolationCover = shouldUseMoviesDetailCloseIsolationCover({
+        targetVisible: immutableTarget.targetVisible,
+        targetRefMounted: Boolean(getValidatedPosterTarget(immutableTarget.movieId)),
+      });
+      setVisualIsolationSafe(useIsolationCover);
+      visualIsolationTokenRef.current = useIsolationCover ? token : null;
+      visualCoverTokenRef.current = useIsolationCover ? token : null;
       if (naturalReturn) {
         viewportStableRef.current = true;
       }
@@ -2705,7 +2784,12 @@ export function MoviesScreen() {
               focusConfirmed: false,
             })
           ) {
-            abortDetailCloseTransaction({ reason: 'focus-attempts-exhausted', token });
+            // Stage 4.2L.2: prefer usable browse over reopening Detail after focus failure.
+            forceCompleteDetailCloseWithoutFocus({
+              token,
+              movieId: activeImmutable,
+              reason: 'focus-attempts-exhausted',
+            });
           }
           return;
         }
@@ -2733,7 +2817,11 @@ export function MoviesScreen() {
           });
         }
         if (!retryResolved.ok || retryResolved.resolvedMovieId !== activeImmutable) {
-          abortDetailCloseTransaction({ reason: 'retry-target-unresolved', token });
+          forceCompleteDetailCloseWithoutFocus({
+            token,
+            movieId: activeImmutable,
+            reason: 'retry-target-unresolved',
+          });
           return;
         }
 
@@ -2787,7 +2875,7 @@ export function MoviesScreen() {
       }, timeoutMs);
     },
     [
-      abortDetailCloseTransaction,
+      forceCompleteDetailCloseWithoutFocus,
       getImmutableCloseTargetMovieId,
       getValidatedPosterTarget,
     ],
@@ -3124,6 +3212,19 @@ export function MoviesScreen() {
             true,
           );
         }
+        const focusTarget = getValidatedPosterTarget(requestMovieId);
+        if (!focusTarget) {
+          console.info(
+            '[NovaCast Movies Focus] ' +
+              JSON.stringify({
+                event: 'movies_detail_return_focus_target_invalid',
+                marker: MOVIES_FOCUS_STAGE4L2_MARKER,
+                token: token.token,
+                movieId: requestMovieId,
+                reason: 'target-missing',
+              }),
+          );
+        }
         requestTvFocus({
           screen: 'movies',
           source: 'MoviesScreen',
@@ -3140,6 +3241,44 @@ export function MoviesScreen() {
             isMoviesDetailClosingPhase(detailFocusPhaseRef.current) &&
             detailFocusTokenRef.current?.token === token.token,
           getTarget: () => getValidatedPosterTarget(requestMovieId),
+          onResult: (result: RequestTvFocusResult) => {
+            if (detailFocusTokenRef.current?.token !== token.token) {
+              return;
+            }
+            if (result.requested && result.reason === 'ok') {
+              console.info(
+                '[NovaCast Movies Focus] ' +
+                  JSON.stringify({
+                    event: 'movies_detail_return_focus_request_succeeded',
+                    marker: MOVIES_FOCUS_STAGE4L2_MARKER,
+                    token: token.token,
+                    movieId: requestMovieId,
+                  }),
+              );
+              return;
+            }
+            console.info(
+              '[NovaCast Movies Focus] ' +
+                JSON.stringify({
+                  event: 'movies_detail_return_focus_request_failed',
+                  marker: MOVIES_FOCUS_STAGE4L2_MARKER,
+                  token: token.token,
+                  movieId: requestMovieId,
+                  reason: result.reason,
+                }),
+            );
+            // Stage 4.2L.2: failed focus must not trap Detail closing — reveal browse.
+            if (
+              result.reason === 'target-focus-method-unavailable' ||
+              result.reason === 'focus-threw'
+            ) {
+              forceCompleteDetailCloseWithoutFocus({
+                token: token.token,
+                movieId: requestMovieId,
+                reason: result.reason,
+              });
+            }
+          },
           onSettled: (status) => {
             if (detailFocusTokenRef.current?.token !== token.token) {
               if (isOnnMoviesTraceEnabled()) {
@@ -3551,6 +3690,7 @@ export function MoviesScreen() {
     abortDetailCloseTransaction,
     closingFocusMovieId,
     completeDetailFocusRestore,
+    forceCompleteDetailCloseWithoutFocus,
     getImmutableCloseTargetMovieId,
     getValidatedPosterTarget,
     restorationRetry,
@@ -4470,6 +4610,50 @@ export function MoviesScreen() {
 
   const searchBlocksBrowse = searchOverlayReady;
 
+  // Stage 4.2L.2: when Detail is fully closed, no gray cover / isolation may remain.
+  useEffect(() => {
+    if (detailOpen || detailClosing) {
+      return;
+    }
+    const invariant = assertMoviesDetailClosedVisualInvariant({
+      detailOpen,
+      detailClosing,
+      overlayVisible: detailOverlayVisible,
+      visualIsolationActive,
+      holdCoverActive: detailVisualHold || focusHandoffActive,
+      browsePointerEventsEnabled: !playbackUiActive && !searchBlocksBrowse,
+    });
+    if (!invariant.ok) {
+      cleanupDetailCloseVisualState({
+        forced: true,
+        token: visualIsolationTokenRef.current,
+        reason: `closed-invariant:${invariant.violations.join(',')}`,
+      });
+      setVisualIsolationSafe(false);
+      setDetailVisualHoldSafe(false);
+      console.info(
+        '[NovaCast Movies Focus] ' +
+          JSON.stringify({
+            event: 'movies_detail_closed_visual_invariant_enforced',
+            marker: MOVIES_FOCUS_STAGE4L2_MARKER,
+            violations: invariant.violations,
+          }),
+      );
+    }
+  }, [
+    cleanupDetailCloseVisualState,
+    detailClosing,
+    detailOpen,
+    detailOverlayVisible,
+    detailVisualHold,
+    focusHandoffActive,
+    playbackUiActive,
+    searchBlocksBrowse,
+    setDetailVisualHoldSafe,
+    setVisualIsolationSafe,
+    visualIsolationActive,
+  ]);
+
   const handleReload = useCallback(() => {
     const now = Date.now();
     if (now - lastRetryAtRef.current < 400) {
@@ -4905,13 +5089,14 @@ useEffect(() => {
   return (
     <View style={styles.root}>
       <>
-      <BlurTargetView
+      <View
         ref={browseLayerRef}
         collapsable={false}
         style={[styles.browseLayer, playbackUiActive && styles.browseLayerHidden]}
         pointerEvents={
           // During Stage 3D closing, allow the exact target poster to receive focus
           // while the overlay remains mounted above.
+          // Stage 4.2L.2: when Detail is fully closed, browse always owns pointer events.
           detailClosing
             ? 'auto'
             : detailOpen || searchBlocksBrowse || playbackUiActive
@@ -4950,6 +5135,8 @@ useEffect(() => {
               focusable={chromeFocusable && !searchBlocksBrowse}
               hasTVPreferredFocus={false}
               onSearchFocus={() => {
+                // Stage 4.2L.2: Search may log unexpected focus but must NEVER call
+                // requestTvFocus / fight native focus (fatal on Android TV).
                 actualFocusedComponentRef.current = 'MovieToolbar.Search';
                 if (restoreTimingRef.current) {
                   restoreTimingRef.current.searchFocusAttempted = true;
@@ -4963,59 +5150,39 @@ useEffect(() => {
                   detailFocusTokenRef.current?.token ??
                   postRestoreLatchRef.current?.token ??
                   null;
-                const immutablePosterId = getImmutableCloseTargetMovieId();
                 console.info(
                   '[NovaCast Movies Focus] ' +
                     JSON.stringify({
                       event: 'movies_toolbar_search_focus_eligibility_changed',
-                      marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+                      marker: MOVIES_FOCUS_STAGE4L2_MARKER,
                       searchPreferredFocus: false,
                       toolbarPreferredFocus: toolbarSearchPreferredAllowed,
                       detailPhase: detailFocusPhase,
                       closeToken,
-                      immutablePosterMovieId: immutablePosterId,
+                      immutablePosterMovieId: getImmutableCloseTargetMovieId(),
                       startupOwnershipActive: startupFocusOwnershipActiveRef.current,
                       restoringBrowseFocus,
                       postRestoreLatchActive: postRestoreActive,
                     }),
                 );
-
                 if (browseCloseActive || startupFocusOwnershipActiveRef.current) {
-                  const correction = shouldCorrectMoviesToolbarSearchFocusSteal({
-                    browseDetailCloseActive: browseCloseActive,
-                    searchPreferredFocus: true,
-                    correctionAlreadyIssuedForToken:
-                      Boolean(closeToken) &&
-                      searchFocusCorrectionTokenRef.current === closeToken,
-                  });
                   console.info(
                     '[NovaCast Movies Focus] ' +
                       JSON.stringify({
                         event: 'movies_toolbar_search_focus_steal_violation',
-                        marker: MOVIES_FOCUS_STAGE4L1_MARKER,
+                        marker: MOVIES_FOCUS_STAGE4L2_MARKER,
                         detailPhase: detailFocusPhase,
                         closeToken,
-                        immutablePosterMovieId: immutablePosterId,
+                        immutablePosterMovieId: getImmutableCloseTargetMovieId(),
                         currentlyFocusedTarget: 'MovieToolbar.Search',
                         startupOwnershipActive: startupFocusOwnershipActiveRef.current,
                         restoringBrowseFocus,
                         postRestoreLatchActive: postRestoreActive,
                         searchPreferredFocus: false,
                         toolbarPreferredFocus: toolbarSearchPreferredAllowed,
-                        correctionReason: correction.reason,
+                        correctionIssued: false,
                       }),
                   );
-                  if (correction.correct && immutablePosterId && closeToken) {
-                    searchFocusCorrectionTokenRef.current = closeToken;
-                    const stored = posterRefs.current.get(immutablePosterId);
-                    if (stored?.instance) {
-                      requestTvFocus({
-                        target: stored.instance,
-                        context: 'movies-search-steal-correction',
-                        reason: 'toolbar-search-steal-during-detail-close',
-                      });
-                    }
-                  }
                   if (postRestoreLatchRef.current?.postRestoreActive) {
                     logMoviesSearchFocusBlocked({
                       token: postRestoreLatchRef.current.token,
@@ -5023,7 +5190,6 @@ useEffect(() => {
                       source: 'MovieToolbar.onFocus',
                     });
                   }
-                  return;
                 }
               }}
               onSearchPress={() => {
@@ -5200,7 +5366,7 @@ useEffect(() => {
           </View>
         </View>
       </NovaTvShell>
-      </BlurTargetView>
+      </View>
 
       <MovieDetailOverlay
         visible={detailOverlayVisible}
@@ -5213,7 +5379,7 @@ useEffect(() => {
         preserveCloseButtonFocus={preserveCloseButtonFocus}
         closeActivationLocked={xCloseActivationLocked}
         closeTargetRef={overlayCloseTargetRef}
-        blurTarget={browseLayerRef}
+        // Stage 4.2L.2: never pass blurTarget / blurTargetId — intensity + scrim only.
         detail={
           selectedMovie
             ? movieDetail?.id === selectedMovie.id

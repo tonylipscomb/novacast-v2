@@ -7,7 +7,34 @@ import { recordFocusAudit } from './focusRequestAudit.ts';
  * Production builds still run the guarded focus path; recording is DEV-only.
  */
 
-export type TvFocusRequestStatus = 'executed' | 'cancelled' | 'ignored' | 'timeout';
+export type TvFocusRequestStatus =
+  | 'executed'
+  | 'cancelled'
+  | 'ignored'
+  | 'timeout'
+  | 'failed';
+
+export type RequestTvFocusResult = {
+  requested: boolean;
+  reason:
+    | 'ok'
+    | 'target-missing'
+    | 'target-focus-method-unavailable'
+    | 'focus-threw'
+    | 'inactive'
+    | 'timeout'
+    | 'cancelled'
+    | 'superseded';
+};
+
+/** Stage 4.2L.2: true only when target exposes a callable focus(). */
+export function isValidTvFocusableTarget(target: unknown): target is { focus: () => void } {
+  if (target == null || (typeof target !== 'object' && typeof target !== 'function')) {
+    return false;
+  }
+  const focus = (target as { focus?: unknown }).focus;
+  return typeof focus === 'function';
+}
 
 export type TvFocusCancelReason =
   | 'superseded'
@@ -43,6 +70,8 @@ export type RequestTvFocusInput = {
   maxFrames?: number;
   /** Invoked once when the request executes, is ignored, or is cancelled. */
   onSettled?: (status: TvFocusRequestStatus) => void;
+  /** Stage 4.2L.2: structured outcome (never throws to callers). */
+  onResult?: (result: RequestTvFocusResult) => void;
 };
 
 const DEFAULT_MAX_FRAMES = 3;
@@ -166,13 +195,28 @@ export function requestTvFocus(input: RequestTvFocusInput): () => void {
   let frameHandle: ReturnType<typeof requestAnimationFrame> | null = null;
   let attemptsLeft = maxFrames;
 
-  const settle = (status: TvFocusRequestStatus, cancelReason: TvFocusCancelReason = null) => {
+  const settle = (
+    status: TvFocusRequestStatus,
+    cancelReason: TvFocusCancelReason = null,
+    result?: RequestTvFocusResult,
+  ) => {
     if (settled) {
       return;
     }
     settled = true;
     markStatus(id, status, cancelReason);
-    input.onSettled?.(status);
+    if (result) {
+      try {
+        input.onResult?.(result);
+      } catch {
+        // Caller diagnostics must never throw through focus.
+      }
+    }
+    try {
+      input.onSettled?.(status);
+    } catch {
+      // ignore
+    }
   };
 
   const cleanup = () => {
@@ -191,7 +235,10 @@ export function requestTvFocus(input: RequestTvFocusInput): () => void {
     }
     cancelled = true;
     cleanup();
-    settle('cancelled', reason);
+    settle('cancelled', reason, {
+      requested: false,
+      reason: reason === 'superseded' ? 'superseded' : 'cancelled',
+    });
   };
 
   pendingByKey.set(key, { id, cancel });
@@ -203,12 +250,36 @@ export function requestTvFocus(input: RequestTvFocusInput): () => void {
 
     if (input.isActive && !input.isActive()) {
       cleanup();
-      settle('ignored', 'inactive');
+      settle('ignored', 'inactive', { requested: false, reason: 'inactive' });
       return;
     }
 
-    const target = input.getTarget();
+    let target: unknown = null;
+    try {
+      if (typeof input.getTarget !== 'function') {
+        cleanup();
+        settle('failed', null, {
+          requested: false,
+          reason: 'target-focus-method-unavailable',
+        });
+        return;
+      }
+      target = input.getTarget();
+    } catch {
+      cleanup();
+      settle('failed', null, { requested: false, reason: 'focus-threw' });
+      return;
+    }
+
     if (target) {
+      if (!isValidTvFocusableTarget(target)) {
+        cleanup();
+        settle('failed', null, {
+          requested: false,
+          reason: 'target-focus-method-unavailable',
+        });
+        return;
+      }
       recordFocusAudit({
         component: input.source,
         action: 'native-focus',
@@ -216,15 +287,21 @@ export function requestTvFocus(input: RequestTvFocusInput): () => void {
         reason: input.reason,
         detail: { screen: input.screen, region: input.region },
       });
-      target.focus();
+      try {
+        target.focus();
+      } catch {
+        cleanup();
+        settle('failed', null, { requested: false, reason: 'focus-threw' });
+        return;
+      }
       cleanup();
-      settle('executed');
+      settle('executed', null, { requested: true, reason: 'ok' });
       return;
     }
 
     if (attemptsLeft <= 0) {
       cleanup();
-      settle('timeout', 'timeout');
+      settle('timeout', 'timeout', { requested: false, reason: 'timeout' });
       return;
     }
 

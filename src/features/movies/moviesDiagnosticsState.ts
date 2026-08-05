@@ -3,9 +3,16 @@
  *
  * Read by ONN trace and FlatList lifecycle logs. Never read by focus, render,
  * or data logic that affects product behavior.
+ *
+ * Stage 4.2J also exposes a browse UI freeze latch consulted by the screen model
+ * so pagination / catalog commits can defer without widening product focus paths.
  */
 
 let detailOpenForDiagnostics = false;
+/** Stage 4.2J: freeze browse UI commits while Detail is open or closing. */
+let browseUiFrozenForDetail = false;
+/** Stage 4.2J: increments when visibleMovies identity is replaced (not pagination append). */
+let browseListRevision = 0;
 
 export type MoviesOnnTraceSnapshot = {
   providerId: string | null;
@@ -57,6 +64,27 @@ export function setMoviesDetailOpenForDiagnostics(open: boolean) {
 
 export function getMoviesDetailOpenForDiagnostics() {
   return detailOpenForDiagnostics;
+}
+
+export function setMoviesBrowseUiFrozenForDetail(frozen: boolean) {
+  browseUiFrozenForDetail = frozen;
+}
+
+export function isMoviesBrowseUiFrozenForDetail() {
+  return browseUiFrozenForDetail;
+}
+
+export function bumpMoviesBrowseListRevision() {
+  browseListRevision += 1;
+  return browseListRevision;
+}
+
+export function getMoviesBrowseListRevision() {
+  return browseListRevision;
+}
+
+export function setMoviesBrowseListRevisionForTests(revision: number) {
+  browseListRevision = revision;
 }
 
 export function setMoviesOnnTraceSnapshot(next: MoviesOnnTraceSnapshot) {

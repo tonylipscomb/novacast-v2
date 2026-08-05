@@ -151,7 +151,7 @@ test('1) X owns focus: remains native-focusable, activation locked, hidden targe
   assert.match(overlay, /preserveCloseButtonFocus/);
   assert.match(overlay, /closeActivationLocked/);
   assert.match(overlay, /mountHiddenHandoffTarget/);
-  assert.match(overlay, /xOwnedHandoff/);
+  assert.match(overlay, /ownerPreservedHandoff/);
   assert.match(screen, /tryAcquireMoviesDetailXCloseActivation/);
   assert.equal(MOVIES_FOCUS_STAGE4H_MARKER, 'stage4h-movies-x-close-focus-v1');
 });
@@ -242,17 +242,16 @@ test('7) X and Back parity: same final movie/category/offset/grid/phase', () => 
 });
 
 test('8) Search-origin Detail: X returns to Search (no browse restore)', () => {
-  const closeSlice = screen.slice(
-    screen.indexOf('const closeDetail = useCallback'),
-    screen.indexOf('const closeDetail = useCallback') + 4500,
-  );
+  const searchStart = screen.indexOf("// Stage 4.2J: Search-origin Detail close");
+  const browseClose = screen.indexOf("beginFocusAuditCycle('movies-detail-close'");
+  assert.ok(searchStart >= 0);
+  assert.ok(browseClose > searchStart);
+  const closeSlice = screen.slice(searchStart, browseClose);
   assert.match(closeSlice, /detailSourceRef\.current === 'search'/);
   assert.match(closeSlice, /search-restoring/);
-  assert.match(closeSlice, /releaseXCloseOwnership/);
-  assert.doesNotMatch(
-    closeSlice.slice(closeSlice.indexOf("detailSourceRef.current === 'search'"), closeSlice.indexOf("detailSourceRef.current === 'search'") + 900),
-    /beginDetailFocusClose/,
-  );
+  assert.match(closeSlice, /origin: 'search'/);
+  // Stage 4.2J: Search close uses its own transaction — not browse beginDetailFocusClose.
+  assert.doesNotMatch(closeSlice, /beginDetailFocusClose/);
 });
 
 test('9) Playback return-to-Detail behavior unchanged', () => {

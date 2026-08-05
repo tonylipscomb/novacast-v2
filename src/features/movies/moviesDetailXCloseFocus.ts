@@ -7,27 +7,52 @@ export const MOVIES_FOCUS_STAGE4H_MARKER = 'stage4h-movies-x-close-focus-v1';
 
 export type MoviesDetailCloseSource = 'back' | 'x' | 'other';
 
-/** X owns focus at close start — keep the Close Pressable native-focusable. */
+/**
+ * Stage 4.2H/J: keep the Detail focus owner native-focusable during handoff.
+ * X always preserves Close; natural mounted Back/X preserves whichever control owns focus.
+ */
 export function shouldPreserveMoviesDetailCloseButtonFocus(input: {
   closeSource: MoviesDetailCloseSource | null | undefined;
   handoffActive: boolean;
+  /** Stage 4.2J: natural mounted return preserves any focused Detail control. */
+  naturalReturn?: boolean;
 }): boolean {
-  return input.closeSource === 'x' && input.handoffActive;
+  if (!input.handoffActive) {
+    return false;
+  }
+  if (input.naturalReturn) {
+    return true;
+  }
+  return input.closeSource === 'x';
 }
 
-/** Hidden handoff sentinel must not be focused on the X path. */
+/**
+ * Hidden handoff sentinel must not receive focus on X or natural mounted return.
+ * Stage 4.2J: Back and X share the same no-sentinel natural path.
+ */
 export function shouldFocusMoviesDetailHiddenHandoffTarget(input: {
   closeSource: MoviesDetailCloseSource | null | undefined;
+  naturalReturn?: boolean;
 }): boolean {
+  if (input.naturalReturn) {
+    return false;
+  }
   return input.closeSource !== 'x';
 }
 
-/** Mount the hidden Pressable only when Back/other needs a focus park. */
+/** Mount the hidden Pressable only when a non-natural Back/other path needs a focus park. */
 export function shouldMountMoviesDetailHiddenHandoffTarget(input: {
   closeSource: MoviesDetailCloseSource | null | undefined;
   handoffActive: boolean;
+  naturalReturn?: boolean;
 }): boolean {
-  return input.handoffActive && shouldFocusMoviesDetailHiddenHandoffTarget(input);
+  return (
+    input.handoffActive &&
+    shouldFocusMoviesDetailHiddenHandoffTarget({
+      closeSource: input.closeSource,
+      naturalReturn: input.naturalReturn,
+    })
+  );
 }
 
 export type MoviesDetailXCloseActivationLock = {

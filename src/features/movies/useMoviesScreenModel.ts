@@ -55,7 +55,15 @@ import {
   traceOnnMoviesCategoriesCleared,
   traceOnnMoviesEvent,
 } from '@/features/diagnostics/onnMoviesTrace';
-import { getMoviesDetailOpenForDiagnostics } from './moviesDiagnosticsState';
+import {
+  bumpMoviesBrowseListRevision,
+  getMoviesDetailOpenForDiagnostics,
+  isMoviesBrowseUiFrozenForDetail,
+} from './moviesDiagnosticsState';
+import {
+  describeMoviesDeferredBrowseCommit,
+  type MoviesDeferredBrowseCommitKind,
+} from './moviesDetailCloseTransaction';
 import {
   categoriesNeedingCountWarm,
   createSerialCategoryCountQueue,
@@ -264,41 +272,113 @@ export function useMoviesScreenModel(
   const [reloadToken, setReloadToken] = useState(0);
   /** Stage 4.2E: skip the follow-up page effect after an atomic generation swap. */
   const atomicBrowseCommitRef = useRef<{ categoryId: string; generation: number } | null>(null);
+  /** Stage 4.2J: UI commits deferred while Detail owns / closes the screen. */
+  const deferredBrowseCommitsRef = useRef<
+    Array<{ kind: MoviesDeferredBrowseCommitKind; apply: () => void; focusedMovieId: string | null }>
+  >([]);
+
+  const flushDeferredBrowseCommits = useCallback(() => {
+    if (isMoviesBrowseUiFrozenForDetail()) {
+      return;
+    }
+    const pending = deferredBrowseCommitsRef.current;
+    if (pending.length === 0) {
+      return;
+    }
+    deferredBrowseCommitsRef.current = [];
+    // Apply at most one consolidated update — prefer the latest commit that keeps focus.
+    const focusedId = focusedMovieIdRef.current;
+    let chosen = pending[pending.length - 1]!;
+    for (let i = pending.length - 1; i >= 0; i -= 1) {
+      const candidate = pending[i]!;
+      // Probe by applying against a copy via a dry check after apply — we only know
+      // post-apply. Prefer catalog-commit / list-replacement that retain focus id.
+      chosen = candidate;
+      break;
+    }
+    if (isOnnMoviesTraceEnabled()) {
+      traceOnnMoviesEvent('Overlay', 'detail_close_deferred_commits_flushed', {
+        count: pending.length,
+        kind: chosen.kind,
+        focusedMovieId: focusedId,
+        marker: 'stage4j-movies-deterministic-detail-close-v1',
+      });
+    }
+    chosen.apply();
+    void focusedId;
+  }, []);
+
+  const enqueueOrApplyBrowseCommit = useCallback(
+    (kind: MoviesDeferredBrowseCommitKind, apply: () => void) => {
+      if (isMoviesBrowseUiFrozenForDetail() || getMoviesDetailOpenForDiagnostics()) {
+        deferredBrowseCommitsRef.current.push({
+          kind,
+          apply,
+          focusedMovieId: focusedMovieIdRef.current,
+        });
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Overlay', describeMoviesDeferredBrowseCommit(kind), {
+            focusedMovieId: focusedMovieIdRef.current,
+            pendingCount: deferredBrowseCommitsRef.current.length,
+            marker: 'stage4j-movies-deterministic-detail-close-v1',
+          });
+        }
+        return;
+      }
+      apply();
+    },
+    [],
+  );
 
   const updateVisibleMovies = useCallback(
     (
       updater: MovieSummary[] | ((current: MovieSummary[]) => MovieSummary[]),
       reason: string,
     ) => {
-      setVisibleMovies((current) => {
-        const next = typeof updater === 'function' ? updater(current) : updater;
-        visibleMoviesRef.current = next;
-        console.info(
-          '[NovaCast Movies Data] ' +
-            JSON.stringify({
-              reason,
-              arrayIdentityChanged: current !== next,
-              previousLength: current.length,
-              nextLength: next.length,
-              previousFirstId: current[0]?.id ?? null,
-              nextFirstId: next[0]?.id ?? null,
-              previousLastId: current[current.length - 1]?.id ?? null,
-              nextLastId: next[next.length - 1]?.id ?? null,
-            }),
-        );
-        if (isOnnMoviesTraceEnabled() && (next.length === 0 || current !== next)) {
-          traceOnnMoviesEvent('Catalog', next.length === 0 ? 'visible_movies_cleared' : 'visible_movies_replaced', {
-            reason,
-            previousLength: current.length,
-            nextLength: next.length,
-            selectedCategoryId: selectedCategoryIdRef.current,
-            gridMounted: isOnnMoviesGridMounted(),
-          });
-        }
-        return next;
+      const kind: MoviesDeferredBrowseCommitKind =
+        reason === 'pagination-append'
+          ? 'pagination'
+          : reason.includes('atomic') || reason.includes('generation')
+            ? 'catalog-commit'
+            : 'list-replacement';
+      enqueueOrApplyBrowseCommit(kind, () => {
+        setVisibleMovies((current) => {
+          const next = typeof updater === 'function' ? updater(current) : updater;
+          visibleMoviesRef.current = next;
+          if (kind !== 'pagination' && current !== next) {
+            bumpMoviesBrowseListRevision();
+          }
+          console.info(
+            '[NovaCast Movies Data] ' +
+              JSON.stringify({
+                reason,
+                arrayIdentityChanged: current !== next,
+                previousLength: current.length,
+                nextLength: next.length,
+                previousFirstId: current[0]?.id ?? null,
+                nextFirstId: next[0]?.id ?? null,
+                previousLastId: current[current.length - 1]?.id ?? null,
+                nextLastId: next[next.length - 1]?.id ?? null,
+              }),
+          );
+          if (isOnnMoviesTraceEnabled() && (next.length === 0 || current !== next)) {
+            traceOnnMoviesEvent(
+              'Catalog',
+              next.length === 0 ? 'visible_movies_cleared' : 'visible_movies_replaced',
+              {
+                reason,
+                previousLength: current.length,
+                nextLength: next.length,
+                selectedCategoryId: selectedCategoryIdRef.current,
+                gridMounted: isOnnMoviesGridMounted(),
+              },
+            );
+          }
+          return next;
+        });
       });
     },
-    [],
+    [enqueueOrApplyBrowseCommit],
   );
   const selectedCategoryIdRef = useRef(selectedCategoryId);
   selectedCategoryIdRef.current = selectedCategoryId;
@@ -1443,25 +1523,39 @@ export function useMoviesScreenModel(
         return;
       }
 
-      offsetRef.current += page.items.length;
-      updateVisibleMovies((current) => uniqueMovies(current, page.items), 'pagination-append');
-      setHasMore(page.hasMore);
-      if ('hasValidRatings' in page) {
-        setCategoryHasRatings((current) => current || Boolean(page.hasValidRatings));
-      }
-      syncCategoryCount(selectedCategoryId, page.totalCount);
-      setLoadStatus((current) => (current === 'error' ? current : 'ready'));
-
-      if (!focusedMovieIdRef.current && page.items[0]) {
-        setFocusedMovieId(page.items[0].id);
-      }
-
-      logMoviesAction('page-loaded', {
-        categoryId: selectedCategoryId,
-        offset: nextOffset,
-        limit: MOVIE_PAGE_SIZE,
-        returnedCount: page.items.length,
-        totalCount: page.totalCount,
+      // Stage 4.2J: keep offset/list mutation atomic with the deferred UI commit.
+      enqueueOrApplyBrowseCommit('pagination', () => {
+        offsetRef.current += page.items.length;
+        setVisibleMovies((current) => {
+          const next = uniqueMovies(current, page.items);
+          visibleMoviesRef.current = next;
+          console.info(
+            '[NovaCast Movies Data] ' +
+              JSON.stringify({
+                reason: 'pagination-append',
+                arrayIdentityChanged: current !== next,
+                previousLength: current.length,
+                nextLength: next.length,
+              }),
+          );
+          return next;
+        });
+        setHasMore(page.hasMore);
+        if ('hasValidRatings' in page) {
+          setCategoryHasRatings((current) => current || Boolean(page.hasValidRatings));
+        }
+        syncCategoryCount(selectedCategoryId, page.totalCount);
+        setLoadStatus((current) => (current === 'error' ? current : 'ready'));
+        if (!focusedMovieIdRef.current && page.items[0]) {
+          setFocusedMovieId(page.items[0].id);
+        }
+        logMoviesAction('page-loaded', {
+          categoryId: selectedCategoryId,
+          offset: nextOffset,
+          limit: MOVIE_PAGE_SIZE,
+          returnedCount: page.items.length,
+          totalCount: page.totalCount,
+        });
       });
     } catch (error) {
       if (
@@ -1528,6 +1622,7 @@ export function useMoviesScreenModel(
     getListOffset: () => offsetRef.current,
     firstPageLoadGate,
     loadMore,
+    flushDeferredBrowseCommits,
     reload,
     searchQuery,
     setSearchQuery,

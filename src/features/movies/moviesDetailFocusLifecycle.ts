@@ -232,6 +232,8 @@ export type MoviesDetailOpenContext = {
   providerId: string;
   readableGeneration: number | null;
   gridInstanceId: string | null;
+  /** Stage 4.2J: browse list revision frozen at Detail open. */
+  listRevision?: number;
 };
 
 export const MOVIES_FOCUS_STAGE4F_MARKER = 'stage4f-movies-detail-return-v1';
@@ -251,6 +253,12 @@ export function selectMoviesDetailReturnPath(input: {
   targetMovieId: string | null;
   targetInVisibleMovies: boolean;
   targetNativeHandleExists: boolean;
+  /** Stage 4.2J: immutable open-snapshot visibility (live indexes may be null). */
+  snapshotTargetWasVisible?: boolean;
+  /** Stage 4.2J: registered ref identity still matches snapshot. */
+  targetRefIdentityValid?: boolean;
+  /** Stage 4.2J: no list replacement since Detail opened. */
+  listRevisionUnchanged?: boolean;
 }): MoviesDetailReturnPath {
   if (!input.hasSnapshot || !input.targetMovieId) {
     return 'fallback-target-unmounted';
@@ -287,6 +295,16 @@ export function selectMoviesDetailReturnPath(input: {
     return 'fallback-movie-missing';
   }
   if (!input.targetNativeHandleExists) {
+    return 'fallback-target-unmounted';
+  }
+  // Stage 4.2J: a native handle alone is not a reliable mounted target.
+  if (input.snapshotTargetWasVisible === false) {
+    return 'fallback-target-unmounted';
+  }
+  if (input.targetRefIdentityValid === false) {
+    return 'fallback-target-unmounted';
+  }
+  if (input.listRevisionUnchanged === false) {
     return 'fallback-target-unmounted';
   }
   return 'fast-mounted-target';

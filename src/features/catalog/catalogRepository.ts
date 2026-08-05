@@ -44,6 +44,12 @@ import {
   type MoviesGenerationIntegrityAssessment,
   type MoviesGenerationPhysicalSnapshot,
 } from './moviesReadableSnapshotRecovery.ts';
+import {
+  getCachedMoviesReadableGeneration,
+  resolveMoviesReadableGenerationCached,
+  setCachedMoviesReadableGeneration,
+} from './moviesReadableGenerationCache.ts';
+import { getMoviesDetailOpenForDiagnostics } from '../movies/moviesDiagnosticsState.ts';
 
 
 function nowMs() {
@@ -1668,9 +1674,31 @@ export async function repairMoviesProviderCatalogGenerationPointer(
 
 /**
  * Stage 4.2I: integrity-aware Movies readable generation selection.
+ * Stage 4.2J: share one in-flight Promise + cache a validated generation so
+ * syncing/errored newer gens do not rescan 16/15/14/13/8 on every read.
  * Never accepts a marked generation merely because it has one or more rows.
  */
 async function resolveMoviesReadableCatalogGeneration(providerId: string): Promise<number> {
+  return resolveMoviesReadableGenerationCached({
+    providerId,
+    getMeta: async () => {
+      const state = await getCatalogSyncState(providerId, 'movie');
+      const provider = await getCatalogProvider(providerId);
+      const cached = getCachedMoviesReadableGeneration(providerId);
+      return {
+        itemRows: cached?.itemRows ?? 0,
+        categoryRows: cached?.categoryRows ?? 0,
+        distinctItemCategoryIds: cached?.distinctItemCategoryIds ?? 0,
+        activeProviderGeneration: provider?.catalogGeneration ?? 0,
+        syncingGeneration: state?.generation ?? 0,
+        syncStatus: state?.status ?? null,
+      };
+    },
+    resolve: async () => resolveMoviesReadableCatalogGenerationUncached(providerId),
+  });
+}
+
+async function resolveMoviesReadableCatalogGenerationUncached(providerId: string): Promise<number> {
   const state = await getCatalogSyncState(providerId, 'movie');
   const provider = await getCatalogProvider(providerId);
   const currentAttemptGeneration = state?.generation ?? 0;
@@ -1741,6 +1769,14 @@ async function resolveMoviesReadableCatalogGeneration(providerId: string): Promi
     if (decision.pointerRepairNeeded) {
       await repairMoviesProviderCatalogGenerationPointer(providerId, decision.readableGeneration);
     }
+    setCachedMoviesReadableGeneration({
+      providerId,
+      generation: decision.readableGeneration,
+      resolvedAt: Date.now(),
+      itemRows: selected?.itemRows ?? 0,
+      categoryRows: selected?.categoryRows ?? 0,
+      distinctItemCategoryIds: selected?.distinctItemCategoryIds ?? 0,
+    });
   } else {
     console.info(
       '[NovaCast Movies Readable Recovery] ' +
@@ -1778,17 +1814,20 @@ async function resolveMoviesReadableCatalogGeneration(providerId: string): Promi
       }),
   );
 
-  void logCatalogGenerationInventoryOnce(providerId, 'movie', {
-    currentAttemptGeneration,
-    currentStatus: syncStatus,
-    lastCompletedGeneration: activeGeneration,
-    lastFailedGeneration:
-      syncStatus === 'syncing' || syncStatus === 'error' ? currentAttemptGeneration : 0,
-    previousPathEligible: activeGeneration > 0 && activeGeneration !== currentAttemptGeneration,
-    resolvedReadableGeneration: decision.readableGeneration,
-    readableRowCount,
-    reason: decision.reason,
-  });
+  // Stage 4.2J: defer diagnostic inventory while Detail owns the screen.
+  if (!getMoviesDetailOpenForDiagnostics()) {
+    void logCatalogGenerationInventoryOnce(providerId, 'movie', {
+      currentAttemptGeneration,
+      currentStatus: syncStatus,
+      lastCompletedGeneration: activeGeneration,
+      lastFailedGeneration:
+        syncStatus === 'syncing' || syncStatus === 'error' ? currentAttemptGeneration : 0,
+      previousPathEligible: activeGeneration > 0 && activeGeneration !== currentAttemptGeneration,
+      resolvedReadableGeneration: decision.readableGeneration,
+      readableRowCount,
+      reason: decision.reason,
+    });
+  }
 
   return decision.readableGeneration;
 }

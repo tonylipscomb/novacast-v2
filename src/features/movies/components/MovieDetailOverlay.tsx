@@ -79,8 +79,8 @@ export type MovieDetailOverlayProps = {
   /** Stage 4.2G: keep card + blur fully opaque until focus/offset confirm. */
   visualHoldActive?: boolean;
   /**
-   * Stage 4.2H: X currently owns focus — keep Close native-focusable during handoff
-   * and do not mount the hidden handoff sentinel.
+   * Stage 4.2H/J: Detail focus owner stays native-focusable during handoff
+   * (Close on X; Play/Watchlist/Favorite/etc. on Back) — no hidden sentinel.
    */
   preserveCloseButtonFocus?: boolean;
   /** Stage 4.2H: duplicate X activation lock (onPress + onClick). */
@@ -129,6 +129,7 @@ function OverlayAction({
   focused = false,
   disabled = false,
   preferred = false,
+  forceFocusable = false,
   buttonRef,
   nextFocusLeft,
   nextFocusRight,
@@ -147,6 +148,8 @@ function OverlayAction({
   focused?: boolean;
   disabled?: boolean;
   preferred?: boolean;
+  /** Stage 4.2J: remain native-focusable during handoff without activating. */
+  forceFocusable?: boolean;
   buttonRef?: (instance: ElementRef<typeof Pressable> | null) => void;
   nextFocusLeft?: number;
   nextFocusRight?: number;
@@ -155,11 +158,11 @@ function OverlayAction({
   onFocus: (id: ActionId) => void;
   onBlur: () => void;
 }) {
-  const focusable = Boolean(onPress) && !disabled;
+  const focusable = (Boolean(onPress) || Boolean(forceFocusable)) && !disabled;
   const lastActivateAtRef = useRef(0);
 
   const activate = () => {
-    if (!focusable || !onPress) return;
+    if (!onPress || disabled) return;
     const now = Date.now();
     if (now - lastActivateAtRef.current < 400) return;
     lastActivateAtRef.current = now;
@@ -650,10 +653,10 @@ function MovieDetailOverlayComponent({
   // Stage 4.2G: stay mounted + fully painted while visual hold is active.
   if (!visible && !keepFocusTrap && !visualHoldActive) return null;
 
-  const panelVisible = visible || visualHoldActive;
+  const panelVisible = visible || visualHoldActive || keepFocusTrap;
   const holdCoverActive = focusHandoffActive || visualHoldActive;
-  // Stage 4.2H: X-owned handoff keeps Close native-focusable; no hidden sentinel.
-  const xOwnedHandoff = preserveCloseButtonFocus && holdCoverActive;
+  // Stage 4.2H/J: preserved Detail focus owner stays native-focusable; no hidden sentinel.
+  const ownerPreservedHandoff = preserveCloseButtonFocus && holdCoverActive;
   const mountHiddenHandoffTarget = holdCoverActive && !preserveCloseButtonFocus;
 
   const renderAction = (id: ActionId) => {
@@ -702,6 +705,9 @@ function MovieDetailOverlayComponent({
     const isSelected =
       (id === 'favorite' && isFavorite) || (id === 'watchlist' && isWatchlisted);
     const isFocused = focusedTarget === id;
+    // Stage 4.2J: keep the currently focused action native-focusable during handoff.
+    const preserveThisAction =
+      ownerPreservedHandoff && (focusedTarget === id || (focusedTarget == null && id === firstAction));
 
     return (
       <OverlayAction
@@ -710,12 +716,15 @@ function MovieDetailOverlayComponent({
         label={label}
         icon={icon}
         onPress={holdCoverActive ? undefined : onPress}
+        forceFocusable={preserveThisAction}
         primary={id === 'play'}
         compact={id !== 'play'}
         preferred={!holdCoverActive && id === firstAction}
         selected={isSelected}
         focused={isFocused}
-        disabled={holdCoverActive || (id === 'trailer' && !onTrailerPress)}
+        disabled={
+          (holdCoverActive && !preserveThisAction) || (id === 'trailer' && !onTrailerPress && !preserveThisAction)
+        }
         buttonRef={(instance) => {
           if (instance) {
             actionRefs.current.set(id, instance);
@@ -743,10 +752,14 @@ function MovieDetailOverlayComponent({
 
   const playFocusHandle =
     (firstAction ? actionHandles[firstAction] : undefined) ?? actionHandles.play ?? closeHandle;
-  // Stage 4.2H: never strip Close focusability while X owns the handoff.
+  // Stage 4.2H/J: never strip Close focusability while the Detail owner is preserved.
   // Duplicate activation is locked via closeActivationLocked / invokeClose — not via focusable=false.
-  const closeFocusable = panelVisible && (!holdCoverActive || preserveCloseButtonFocus);
-  const focusBoundaryPointerEvents = xOwnedHandoff
+  const closeFocusable =
+    panelVisible &&
+    (!holdCoverActive ||
+      preserveCloseButtonFocus ||
+      (ownerPreservedHandoff && (focusedTarget === 'close' || focusedTarget == null)));
+  const focusBoundaryPointerEvents = ownerPreservedHandoff
     ? 'box-none'
     : holdCoverActive
       ? 'none'

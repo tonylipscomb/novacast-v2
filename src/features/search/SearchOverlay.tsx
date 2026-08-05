@@ -358,13 +358,27 @@ function SearchOverlayContent({
   const handleModalShow = useCallback(() => {
     logSearchEvent('search_overlay_modal_shown', { scope, nativeTvKeyboard: useNativeTvKeyboard });
     onReady?.();
+    // Stage 4.2J: Detail→Search return owns focus — never let modal-show reclaim the input.
+    if (restoreFocusMovieId) {
+      closeOwnsFocusRef.current = false;
+      setPreferSearchFocus(false);
+      preferSearchFocusRef.current = false;
+      initialFocusRequestedRef.current = true;
+      focusConfirmedRef.current = false;
+      logSearchEvent('search_input_focus_suppressed', {
+        scope,
+        source: 'modal-show-restore-result',
+        restoreFocusMovieId,
+      });
+      return;
+    }
     closeOwnsFocusRef.current = false;
     setPreferSearchFocus(true);
     initialFocusRequestedRef.current = false;
     focusConfirmedRef.current = false;
     logSearchEvent('search_input_focus_requested', { scope, source: 'modal-show' });
     focusSearchField();
-  }, [focusSearchField, onReady, scope, useNativeTvKeyboard]);
+  }, [focusSearchField, onReady, restoreFocusMovieId, scope, useNativeTvKeyboard]);
 
   useEffect(() => {
     if (!visible || Platform.OS !== 'android') {

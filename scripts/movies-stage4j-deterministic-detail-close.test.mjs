@@ -363,8 +363,9 @@ test('7) Duplicate RAF/timer callbacks: first commits; later dropped', () => {
 });
 
 test('8) Playback → Detail: Detail instance remains mounted; Play/Resume focused path', () => {
-  assert.match(screen, /keepFocusTrap=\{/);
-  assert.match(screen, /detailSuppressedForPlayback && detailOpen/);
+  // Stage 4.2K: stable shell uses keepFocusTrap for MoviesScreen lifetime.
+  assert.match(screen, /keepFocusTrap/);
+  assert.match(screen, /overlayInstanceId=\{overlayInstanceIdRef\.current\}/);
   assert.match(screen, /playback_detail_revealed/);
   assert.match(overlay, /keepFocusTrap/);
   // Overlay stays mounted when keepFocusTrap even if not visible.

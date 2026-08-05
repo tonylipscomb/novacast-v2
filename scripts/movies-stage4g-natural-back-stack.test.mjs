@@ -243,7 +243,7 @@ test('6) Second Back closes Detail to browse snapshot (contract)', () => {
   assert.match(screen, /closeDetail\('back'\)/);
   assert.match(
     lifecycle,
-    /detail-open → return-focus-requested → return-focus-confirmed → browse-restored → browse/,
+    /detail-open → return-focus-arming → return-focus-requested → return-focus-confirmed → browse-restored → browse/,
   );
 });
 

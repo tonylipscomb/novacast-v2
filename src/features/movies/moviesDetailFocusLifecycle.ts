@@ -2,14 +2,16 @@
  * Stage 3D / 3D.1 / 4.2G — Movies-only detail focus lifecycle.
  * Pure helpers + diagnostics. MoviesScreen is the sole coordinator.
  *
- * Stage 4.2G natural return (mounted poster):
- *   detail-open → return-focus-requested → return-focus-confirmed → browse-restored → browse
+ * Stage 4.2G/K natural return (mounted poster):
+ *   detail-open → return-focus-arming → return-focus-requested → return-focus-confirmed → browse-restored → browse
  * Fallback (unmounted / generation change / etc.) retains closing-prepare → viewport → focus.
  */
 
 export type MoviesDetailFocusPhase =
   | 'browse'
   | 'detail-open'
+  /** Stage 4.2K: handoff armed; wait for native focus environment before request. */
+  | 'return-focus-arming'
   | 'return-focus-requested'
   | 'return-focus-confirmed'
   | 'closing-prepare'
@@ -37,7 +39,11 @@ export type MoviesDetailFocusToken = {
   snapshot: MoviesBrowseFocusSnapshot;
 };
 
-export const MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS = 2200;
+/**
+ * Stage 4.2K: confirmation wait after a native-ready focus request.
+ * (Legacy 2200 ms caused a visible 2.2s stall on ONN.)
+ */
+export const MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS = 350;
 export const MOVIES_VIEWPORT_OFFSET_TOLERANCE_PX = 12;
 /** Stage 3D.3: event-driven browse handoff — one frame, not a long settle timer. */
 export const MOVIES_FOCUS_SUPPRESSION_RELEASE_MS = 32;
@@ -364,7 +370,11 @@ export function resolveMoviesDetailReturnMaxViewportRestores(
 }
 
 export function isMoviesNaturalReturnPhase(phase: MoviesDetailFocusPhase): boolean {
-  return phase === 'return-focus-requested' || phase === 'return-focus-confirmed';
+  return (
+    phase === 'return-focus-arming' ||
+    phase === 'return-focus-requested' ||
+    phase === 'return-focus-confirmed'
+  );
 }
 
 export function isMoviesDetailClosingPhase(phase: MoviesDetailFocusPhase): boolean {

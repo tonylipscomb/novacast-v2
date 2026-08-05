@@ -143,7 +143,8 @@ test('9. Highlight remains visible after overlay removal', () => {
 test('10. No more than two focus requests occur', () => {
   assert.equal(MOVIES_MAX_FOCUS_REQUESTS, 2);
   assert.match(screen, /focusRequestCountRef/);
-  assert.match(screen, /focusRequestCountRef\.current >= MOVIES_MAX_FOCUS_REQUESTS/);
+  // Stage 4.2K: cap enforced via shouldIssueMoviesDetailCloseFocusRequest(maxFocusRequests).
+  assert.match(screen, /maxFocusRequests: MOVIES_MAX_FOCUS_REQUESTS|focusRequestCountRef\.current >= MOVIES_MAX_FOCUS_REQUESTS/);
 });
 
 test('11. No more than two viewport restores occur', () => {

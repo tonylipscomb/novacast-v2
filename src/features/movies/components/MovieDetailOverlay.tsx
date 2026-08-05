@@ -79,6 +79,13 @@ export type MovieDetailOverlayProps = {
   /** Stage 4.2G: keep card + blur fully opaque until focus/offset confirm. */
   visualHoldActive?: boolean;
   /**
+   * Stage 4.2K: non-focusable cover until focus + final offset confirm.
+   * Hides browse highlights/jumps without replacing the overlay shell.
+   */
+  visualIsolationActive?: boolean;
+  /** Stage 4.2K: stable shell identity for mount diagnostics. */
+  overlayInstanceId?: string;
+  /**
    * Stage 4.2H/J: Detail focus owner stays native-focusable during handoff
    * (Close on X; Play/Watchlist/Favorite/etc. on Back) — no hidden sentinel.
    */
@@ -286,6 +293,8 @@ function MovieDetailOverlayComponent({
   keepFocusTrap = false,
   focusHandoffActive = false,
   visualHoldActive = false,
+  visualIsolationActive = false,
+  overlayInstanceId,
   preserveCloseButtonFocus = false,
   closeActivationLocked = false,
   closeTargetRef,
@@ -335,15 +344,24 @@ function MovieDetailOverlayComponent({
     noteOnnMoviesRender('MovieDetailOverlay');
   }
 
+  // Stage 4.2K: mount diagnostics once per overlay shell — not per movie/visibility.
   useEffect(() => {
     if (!isOnnMoviesTraceEnabled()) {
       return;
     }
-    noteOnnMoviesMount('MovieDetailOverlay', { movieId: detail?.id ?? null, visible });
+    noteOnnMoviesMount('MovieDetailOverlay', {
+      overlayInstanceId: overlayInstanceId ?? null,
+      movieId: detail?.id ?? null,
+      visible,
+    });
     return () => {
-      noteOnnMoviesUnmount('MovieDetailOverlay', { movieId: detail?.id ?? null });
+      noteOnnMoviesUnmount('MovieDetailOverlay', {
+        overlayInstanceId: overlayInstanceId ?? null,
+        movieId: detail?.id ?? null,
+      });
     };
-  }, [detail?.id, visible]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable shell identity
+  }, [overlayInstanceId]);
 
   useEffect(() => {
     if (!isOnnMoviesTraceEnabled()) {
@@ -649,11 +667,33 @@ function MovieDetailOverlayComponent({
     trapFocusDown?: boolean;
   }>;
 
-  if (!detail) return null;
-  // Stage 4.2G: stay mounted + fully painted while visual hold is active.
+  // Stage 4.2K: stable shell — stay mounted for MoviesScreen lifetime via keepFocusTrap.
+  // Content may be null while suppressed/closed; do not remount the shell.
+  if (!detail && !keepFocusTrap && !visualHoldActive) return null;
   if (!visible && !keepFocusTrap && !visualHoldActive) return null;
 
-  const panelVisible = visible || visualHoldActive || keepFocusTrap;
+  if (!detail) {
+    return (
+      <View
+        style={[styles.root, styles.rootHidden]}
+        pointerEvents="none"
+        focusable={false}
+        importantForAccessibility="no-hide-descendants">
+        {visualIsolationActive ? (
+          <View
+            style={[StyleSheet.absoluteFill, styles.visualIsolationCover]}
+            pointerEvents="none"
+            focusable={false}
+            accessible={false}
+            importantForAccessibility="no-hide-descendants"
+          />
+        ) : null}
+      </View>
+    );
+  }
+
+  // Stage 4.2K: keepFocusTrap keeps the shell mounted; panelVisible controls paint.
+  const panelVisible = visible || visualHoldActive;
   const holdCoverActive = focusHandoffActive || visualHoldActive;
   // Stage 4.2H/J: preserved Detail focus owner stays native-focusable; no hidden sentinel.
   const ownerPreservedHandoff = preserveCloseButtonFocus && holdCoverActive;
@@ -770,7 +810,9 @@ function MovieDetailOverlayComponent({
       style={[styles.root, !panelVisible && styles.rootHidden]}
       pointerEvents={holdCoverActive ? 'box-none' : panelVisible ? 'auto' : 'none'}
       accessibilityViewIsModal={panelVisible && !holdCoverActive}
-      importantForAccessibility={panelVisible && !holdCoverActive ? 'yes' : 'no-hide-descendants'}>
+      importantForAccessibility={panelVisible && !holdCoverActive ? 'yes' : 'no-hide-descendants'}
+      // Stable shell identity — never key by movie/visibility/token.
+      collapsable={false}>
 
       {mountHiddenHandoffTarget ? (
         <Pressable
@@ -783,11 +825,27 @@ function MovieDetailOverlayComponent({
         />
       ) : null}
 
+      {/* Stage 4.2K: non-focusable cover — hides browse jumps until offset confirms. */}
+      {visualIsolationActive ? (
+        <View
+          style={[StyleSheet.absoluteFill, styles.visualIsolationCover]}
+          pointerEvents="none"
+          focusable={false}
+          accessible={false}
+          importantForAccessibility="no-hide-descendants"
+        />
+      ) : null}
+
       {/* Full-screen blur of the mounted Movies grid — never focusable. */}
       <Animated.View
         entering={visualHoldActive ? undefined : FadeIn.duration(MOVIE_DETAIL_BLUR_MS)}
         exiting={visualHoldActive ? undefined : FadeOut.duration(MOVIE_DETAIL_CLOSE_MS)}
-        style={[StyleSheet.absoluteFill, visualHoldActive ? undefined : blurStyle, visualHoldActive && styles.visualHoldOpaque]}
+        style={[
+          StyleSheet.absoluteFill,
+          styles.detailBackdropLayer,
+          visualHoldActive ? undefined : blurStyle,
+          visualHoldActive && styles.visualHoldOpaque,
+        ]}
         pointerEvents={panelVisible && !holdCoverActive ? 'auto' : 'none'}
         focusable={false}
         accessible={false}
@@ -1036,7 +1094,16 @@ const styles = StyleSheet.create({
   visualHoldOpaque: {
     opacity: 1,
   },
+  /** Stage 4.2K: non-focusable cover — never receives focus; blocks browse visibility. */
+  visualIsolationCover: {
+    backgroundColor: '#05070D',
+    zIndex: 1,
+  },
+  detailBackdropLayer: {
+    zIndex: 2,
+  },
   focusBoundary: {
+    zIndex: 3,
     width: '100%',
     height: '100%',
     alignItems: 'center',

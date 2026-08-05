@@ -275,9 +275,21 @@ test('Stage 4.2C: Close button is TV-focusable inside the focus trap', () => {
   assert.match(overlay, /focusable=\{closeFocusable\}/);
   assert.match(overlay, /hasTVPreferredFocus=\{false\}/);
   assert.match(overlay, /accessibilityLabel=\"Close movie details\"/);
-  // Close is not preferred initial focus — Play remains preferred.
+  // Close is not preferred initial focus — Play remains preferred on Detail open.
   assert.match(overlay, /hasTVPreferredFocus=\{preferred && focusable\}/);
-  assert.match(overlay, /preferred=\{!focusHandoffActive && id === firstAction\}/);
+  // Stage 4.2J: preferred focus still targets firstAction when handoff is inactive
+  // (!holdCoverActive). During natural Back/X handoff, forceFocusable preserves the
+  // current Detail action instead of the obsolete focusHandoffActive preferred expression.
+  assert.match(overlay, /preferred=\{!holdCoverActive && id === firstAction\}/);
+  assert.match(overlay, /forceFocusable=\{preserveThisAction\}/);
+  assert.match(
+    overlay,
+    /const preserveThisAction =\s*ownerPreservedHandoff && \(focusedTarget === id \|\| \(focusedTarget == null && id === firstAction\)\)/,
+  );
+  assert.match(overlay, /const ownerPreservedHandoff = preserveCloseButtonFocus && holdCoverActive/);
+  assert.match(overlay, /const mountHiddenHandoffTarget = holdCoverActive && !preserveCloseButtonFocus/);
+  // Hidden handoff is not required for natural mounted return (owner preserved).
+  assert.doesNotMatch(overlay, /preferred=\{!focusHandoffActive && id === firstAction\}/);
   // Action Up → Close; Close Down → Play.
   assert.match(overlay, /nextFocusUp=\{closeHandle \?\? actionHandles\[id\]\}/);
   assert.match(overlay, /nextFocusDown: playFocusHandle/);

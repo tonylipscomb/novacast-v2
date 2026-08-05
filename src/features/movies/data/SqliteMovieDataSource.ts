@@ -184,7 +184,7 @@ export function createSqliteMovieDataSource(
       const categoriesGeneration = readableGeneration;
       const previous = lastValidSqliteCategoriesByProvider.get(providerId);
 
-      // Stage 4.2D/E: active sparse generation must not stay interactive while repairing.
+      // Stage 4.2D/E/I: may schedule background repair, but never blank a valid snapshot.
       if (itemsGeneration > 0 && readiness.decision !== 'waiting-fresh-sync') {
         const repairStatus = await repairDegradedMoviesCatalogIfNeeded(providerId, ({ providerId: pid }) => {
           const bundle = getActiveRepositoryBundle();
@@ -194,24 +194,50 @@ export function createSqliteMovieDataSource(
           void bundle.syncCatalog();
         });
         if (repairStatus === 'repairing') {
-          lastValidSqliteCategoriesByProvider.delete(providerId);
+          const preserved =
+            previous &&
+            previous.generation === itemsGeneration &&
+            previous.categories.length > 0
+              ? filterInteractiveMovieCategories(previous.categories)
+              : null;
           console.info(
-            '[NovaCast Movies Category Contract] ' +
+            '[NovaCast Movies Readable Recovery] ' +
               JSON.stringify({
+                event: 'movies_snapshot_preserved_during_repair',
                 providerId,
-                readableGeneration,
-                categoriesGeneration,
-                itemsGeneration,
-                repositoryCategoryCount: readiness.categoryCount,
-                sqliteProviderCategoryCount: 0,
-                wrappedCategoryCount: 0,
-                appliedProviderCategoryCount: 0,
-                totalMovieCount: readiness.readableItemCount,
-                firstProviderCategoryIds: [],
-                reason: 'repairing-sparse-generation',
+                generation: itemsGeneration,
+                itemRows: readiness.readableItemCount,
+                categoryRows: preserved?.length ?? previous?.categories.length ?? 0,
+                distinctItemCategoryIds: null,
+                integrityDecision: 'preserve-snapshot',
+                reason: 'background-sparse-repair',
+                marker: 'stage4i-movies-readable-snapshot-recovery-v1',
               }),
           );
-          return [];
+          if (preserved && preserved.length > 0) {
+            console.info(
+              '[NovaCast Movies Category Contract] ' +
+                JSON.stringify({
+                  providerId,
+                  readableGeneration,
+                  categoriesGeneration,
+                  itemsGeneration,
+                  repositoryCategoryCount: preserved.length,
+                  sqliteProviderCategoryCount: preserved.filter((c) => c.kind === 'provider').length,
+                  wrappedCategoryCount: 0,
+                  appliedProviderCategoryCount: preserved.filter((c) => c.kind === 'provider').length,
+                  totalMovieCount: readiness.readableItemCount,
+                  firstProviderCategoryIds: preserved
+                    .filter((c) => c.kind === 'provider')
+                    .slice(0, 5)
+                    .map((c) => c.id),
+                  reason: 'snapshot-preserved-during-repair',
+                }),
+            );
+            return preserved;
+          }
+          // Validated readable generation exists — continue loading categories from N.
+          // Only blank when there is truly no snapshot (handled by waiting-fresh-sync).
         }
         if (repairStatus === 'healthy') {
           clearMoviesSparseRepairSchedule(providerId);

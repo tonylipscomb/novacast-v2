@@ -4,7 +4,6 @@ import {
   getCatalogProvider,
   getCatalogSyncState,
   resolveReadableCatalogGeneration,
-  resolveReadableCategoryGeneration,
 } from '../catalog/catalogRepository.ts';
 
 export type MoviesCatalogReadinessDecision =
@@ -88,13 +87,16 @@ export function decideMoviesCatalogReadiness(input: {
 export async function resolveMoviesCatalogReadiness(
   providerId: string,
 ): Promise<MoviesCatalogReadiness> {
-  const [categoriesGeneration, readableItemGeneration, state, provider] = await Promise.all([
-    resolveReadableCategoryGeneration(providerId, 'movie'),
+  // Stage 4.2I: readable generation is derived from SQLite + integrity, not JS memory.
+  // previousReadableGenerationByProvider is diagnostics/transition only — never source of truth.
+  const [readableItemGeneration, state, provider] = await Promise.all([
     resolveReadableCatalogGeneration(providerId, 'movie'),
     getCatalogSyncState(providerId, 'movie'),
     getCatalogProvider(providerId),
   ]);
 
+  // Stage 4.2I: one generation for the entire Movies screen.
+  const categoriesGeneration = readableItemGeneration;
   const syncingGeneration = state?.generation ?? 0;
   const syncStatus = state?.status ?? null;
   const activeProviderGeneration = provider?.catalogGeneration ?? 0;

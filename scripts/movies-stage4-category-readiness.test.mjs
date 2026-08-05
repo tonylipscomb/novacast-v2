@@ -234,11 +234,12 @@ test('catalog-not-ready pending is distinct from completed-empty loadStatus', ()
   assert.match(model, /resolveMoviesCatalogReadiness\(activeProviderId\)/);
 });
 
-test('Stage 4.2D sparse active generation shows repairing, not empty rail', () => {
-  assert.match(sqlite, /repairing-sparse-generation/);
+test('Stage 4.2D/I sparse repair preserves snapshot; full-screen only without readable gen', () => {
+  // Stage 4.2I: validated snapshots stay mounted during background repair.
   assert.match(sqlite, /repairDegradedMoviesCatalogIfNeeded/);
+  assert.match(sqlite, /snapshot-preserved-during-repair|movies_snapshot_preserved_during_repair/);
   assert.match(model, /isMoviesCatalogRepairing|clearMoviesSparseRepairSchedule/);
-  assert.match(model, /repairing-sparse-generation|atomic_generation_swap/);
+  assert.match(model, /snapshot-preserved-during-repair|repairing-sparse-generation/);
   assert.match(loader, /Repairing movie library…/);
   assert.match(moviesScreen, /catalogRepairing/);
 });

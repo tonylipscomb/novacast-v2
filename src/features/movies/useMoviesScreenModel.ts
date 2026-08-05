@@ -473,7 +473,32 @@ export function useMoviesScreenModel(
             readiness.decision === 'waiting-fresh-sync' ||
             readiness.readableItemGeneration <= 0;
 
-          const clearReason = isMoviesCatalogRepairing(activeProviderId)
+          // Stage 4.2I: never blank a validated readable snapshot for background repair.
+          // Full-screen repairing is only for no-valid-snapshot (catalogPending).
+          const repairingWithoutSnapshot =
+            isMoviesCatalogRepairing(activeProviderId) && catalogPending;
+          if (isMoviesCatalogRepairing(activeProviderId) && !catalogPending) {
+            // Keep existing categories / grid mounted; repair is nonblocking.
+            setCatalogRepairing(false);
+            setLoadStatus((current) => (current === 'error' ? current : current === 'ready' ? current : 'loading'));
+            console.info(
+              '[NovaCast Movies Category Contract] ' +
+                JSON.stringify({
+                  providerId: activeProviderId,
+                  readableGeneration: readiness?.readableItemGeneration ?? null,
+                  repositoryCategoryCount: nextCategories.length,
+                  sqliteProviderCategoryCount: 0,
+                  wrappedCategoryCount: 0,
+                  appliedProviderCategoryCount: 0,
+                  totalMovieCount: readiness?.readableItemCount ?? null,
+                  firstProviderCategoryIds: [],
+                  reason: 'snapshot-preserved-during-repair',
+                }),
+            );
+            return;
+          }
+
+          const clearReason = repairingWithoutSnapshot
             ? 'repairing-sparse-generation'
             : catalogPending
               ? 'catalog-not-ready-categories-pending'
@@ -492,8 +517,8 @@ export function useMoviesScreenModel(
           setCategories([]);
           setSelectedCategoryId('');
           setLoadErrorMessage(null);
-          if (catalogPending || isMoviesCatalogRepairing(activeProviderId)) {
-            setCatalogRepairing(isMoviesCatalogRepairing(activeProviderId));
+          if (catalogPending || repairingWithoutSnapshot) {
+            setCatalogRepairing(repairingWithoutSnapshot);
             setLoadStatus((current) => (current === 'error' ? current : 'loading'));
             console.info(
               '[NovaCast Movies Category Contract] ' +
@@ -506,7 +531,7 @@ export function useMoviesScreenModel(
                   appliedProviderCategoryCount: 0,
                   totalMovieCount: null,
                   firstProviderCategoryIds: [],
-                  reason: isMoviesCatalogRepairing(activeProviderId)
+                  reason: repairingWithoutSnapshot
                     ? 'repairing-sparse-generation'
                     : 'catalog-not-ready-categories-pending',
                 }),

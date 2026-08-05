@@ -1,5 +1,7 @@
 /**
- * Stage 3C.2 / 4.2D — reject collapsed / sparse Movies generations before activation.
+ * Stage 3C.2 / 4.2D / 4.2I — reject collapsed / sparse Movies generations before activation.
+ * Stage 4.2I also rejects partial dumps (tiny item totals with collapsed category coverage)
+ * even when provider.catalogGeneration is zero.
  */
 
 export type MoviesCategoryDistributionStats = {
@@ -73,6 +75,20 @@ export function validateMoviesCategoryDistribution(input: {
   if (stats.totalItems <= 0) {
     validationPassed = false;
     rejectionReason = 'empty-generation';
+  } else if (
+    // Stage 4.2I: partial dumps (e.g. 53 rows / 1 category) must never activate.
+    stats.totalItems < 500 &&
+    stats.distinctCategoryIds <= 2 &&
+    stats.nonzeroCategoryCount <= 2
+  ) {
+    validationPassed = false;
+    rejectionReason = 'sparse-partial-dump';
+  } else if (
+    stats.metadataCategoryCount >= 50 &&
+    stats.totalItems < 200
+  ) {
+    validationPassed = false;
+    rejectionReason = 'sparse-item-total-vs-large-metadata';
   } else if (
     stats.metadataCategoryCount >= 20 &&
     stats.distinctCategoryIds > 0 &&
@@ -157,6 +173,7 @@ export function validateMoviesCategoryDistribution(input: {
         validationPassed: result.validationPassed,
         rejectionReason: result.rejectionReason,
         marker: 'stage4d-vod-ingestion-repair-v1',
+        stage4iMarker: 'stage4i-movies-readable-snapshot-recovery-v1',
       }),
   );
 

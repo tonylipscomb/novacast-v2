@@ -36,6 +36,14 @@ import {
   catalogSeasonsTable,
   usesGenerationSafeCatalog,
 } from './catalogTableRouting.ts';
+import { validateMoviesCategoryDistribution } from './moviesCategoryDistributionValidation.ts';
+import {
+  assessMoviesGenerationSnapshotIntegrity,
+  MOVIES_FOCUS_STAGE4I_MARKER,
+  selectMoviesReadableRecoveryGeneration,
+  type MoviesGenerationIntegrityAssessment,
+  type MoviesGenerationPhysicalSnapshot,
+} from './moviesReadableSnapshotRecovery.ts';
 
 
 function nowMs() {
@@ -941,16 +949,75 @@ export async function completeCatalogSync(
     }
 
     // Ghost-completion guard: never publish an empty or inconsistent generation.
-    // Also reject a tiny replacement that would blank a previously recovered catalog.
-    const replacesRecoveredCatalog =
-      mediaType === 'movie' &&
-      previousItemRows >= 1000 &&
-      physical.itemRows < Math.floor(previousItemRows * 0.5);
-    const validationPassed =
+    // Stage 4.2I: Movies also require full distribution / integrity validation.
+    let rejectionCode = 'complete_validation_failed';
+    let validationPassed =
       physical.itemRows > 0 &&
       physical.itemRows === physical.distinctContentIds &&
-      (mediaType !== 'movie' || physical.categoryRows > 0) &&
-      !replacesRecoveredCatalog;
+      (mediaType !== 'movie' || physical.categoryRows > 0);
+
+    if (validationPassed && mediaType === 'movie') {
+      const largest = await getCatalogGenerationLargestCategory(providerId, mediaType, generation);
+      let previousTotalItems: number | null = null;
+      let previousNonzero: number | null = null;
+      if (previousCompletedGeneration > 0 && previousCompletedGeneration !== generation) {
+        previousTotalItems = previousItemRows;
+        const prevLargest = await getCatalogGenerationLargestCategory(
+          providerId,
+          mediaType,
+          previousCompletedGeneration,
+        );
+        previousNonzero = prevLargest.nonzeroCategoryCount;
+      }
+      const distribution = validateMoviesCategoryDistribution({
+        generation,
+        totalItems: physical.itemRows,
+        distinctCategoryIds: physical.distinctItemCategoryIds,
+        metadataCategoryCount: physical.categoryRows,
+        nonzeroCategoryCount: largest.nonzeroCategoryCount,
+        largestCategoryId: largest.categoryId,
+        largestCategoryCount: largest.itemCount,
+        previousGeneration:
+          previousCompletedGeneration > 0 ? previousCompletedGeneration : null,
+        previousTotalItems,
+        previousNonzeroCategoryCount: previousNonzero,
+      });
+      if (!distribution.validationPassed) {
+        validationPassed = false;
+        rejectionCode = distribution.rejectionReason ?? 'category_distribution_failed';
+        console.info(
+          '[NovaCast Movies Generation Activation] ' +
+            JSON.stringify({
+              event: 'movies_generation_activation_rejected',
+              providerId,
+              generation,
+              itemRows: physical.itemRows,
+              categoryRows: physical.categoryRows,
+              distinctItemCategoryIds: physical.distinctItemCategoryIds,
+              nonzeroCategoryCount: largest.nonzeroCategoryCount,
+              integrityDecision: 'rejected',
+              reason: rejectionCode,
+              marker: MOVIES_FOCUS_STAGE4I_MARKER,
+            }),
+        );
+      } else {
+        console.info(
+          '[NovaCast Movies Generation Activation] ' +
+            JSON.stringify({
+              event: 'movies_generation_activation_passed',
+              providerId,
+              generation,
+              itemRows: physical.itemRows,
+              categoryRows: physical.categoryRows,
+              distinctItemCategoryIds: physical.distinctItemCategoryIds,
+              nonzeroCategoryCount: largest.nonzeroCategoryCount,
+              integrityDecision: 'passed',
+              reason: null,
+              marker: MOVIES_FOCUS_STAGE4I_MARKER,
+            }),
+        );
+      }
+    }
 
     if (!validationPassed) {
       logCatalogV2Generation({
@@ -974,16 +1041,18 @@ export async function completeCatalogSync(
         [
           options?.processedCount ?? null,
           nowMs(),
-          'complete_validation_failed',
+          rejectionCode,
           generation,
           providerId,
           mediaType,
         ],
       );
+      // Keep provider.catalogGeneration unchanged; do not delete older candidates.
       return;
     }
 
     if (usesGenerationSafeCatalog(mediaType)) {
+      // Stage 4.2I: retain newly active + immediately previous validated generation only.
       const keep = [generation];
       if (previousCompletedGeneration > 0 && previousCompletedGeneration !== generation) {
         const previousStats = await getCatalogGenerationPhysicalStats(
@@ -1037,6 +1106,22 @@ export async function completeCatalogSync(
   });
   if (!activated) {
     return false;
+  }
+  if (mediaType === 'movie') {
+    console.info(
+      '[NovaCast Movies Generation Activation] ' +
+        JSON.stringify({
+          event: 'movies_generation_swap_committed',
+          providerId,
+          generation,
+          itemRows: physical.itemRows,
+          categoryRows: physical.categoryRows,
+          distinctItemCategoryIds: physical.distinctItemCategoryIds,
+          integrityDecision: 'activated',
+          reason: null,
+          marker: MOVIES_FOCUS_STAGE4I_MARKER,
+        }),
+    );
   }
   console.info('[Catalog Categories Published]', {
     providerId,
@@ -1290,12 +1375,24 @@ export async function logCatalogGenerationInventoryOnce(
           },
           generations,
           resolverDecision,
-          schemaNotes: {
-            itemPrimaryKey: 'provider_id,media_type,content_id',
-            categoryPrimaryKey: 'provider_id,media_type,category_id',
-            syncGenerationNotInPrimaryKey: true,
-            staleDeleteOnComplete: true,
-          },
+          schemaNotes:
+            mediaType === 'movie'
+              ? {
+                  itemsTable: 'catalog_items_v2',
+                  categoriesTable: 'catalog_categories_v2',
+                  itemPrimaryKey: 'provider_id,media_type,sync_generation,content_id',
+                  categoryPrimaryKey: 'provider_id,media_type,sync_generation,category_id',
+                  syncGenerationInPrimaryKey: true,
+                  staleDeleteOnComplete: true,
+                }
+              : {
+                  itemsTable: 'catalog_items',
+                  categoriesTable: 'catalog_categories',
+                  itemPrimaryKey: 'provider_id,media_type,content_id',
+                  categoryPrimaryKey: 'provider_id,media_type,category_id',
+                  syncGenerationNotInPrimaryKey: true,
+                  staleDeleteOnComplete: true,
+                },
         }),
     );
   } catch (error) {
@@ -1315,6 +1412,10 @@ export async function resolveReadableCatalogGeneration(
   providerId: string,
   mediaType: CatalogMediaType,
 ): Promise<number> {
+  if (mediaType === 'movie') {
+    return resolveMoviesReadableCatalogGeneration(providerId);
+  }
+
   const db = await getCatalogDatabase();
   const itemsTable = catalogItemsTable(mediaType);
   const categoriesTable = catalogCategoriesTable(mediaType);
@@ -1452,6 +1553,245 @@ export async function resolveReadableCatalogGeneration(
   return resolvedReadableGeneration;
 }
 
+
+async function loadMoviesGenerationPhysicalSnapshot(
+  providerId: string,
+  generation: number,
+): Promise<MoviesGenerationPhysicalSnapshot> {
+  const [physical, largest] = await Promise.all([
+    getCatalogGenerationPhysicalStats(providerId, 'movie', generation),
+    getCatalogGenerationLargestCategory(providerId, 'movie', generation),
+  ]);
+  return {
+    generation,
+    itemRows: physical.itemRows,
+    distinctContentIds: physical.distinctContentIds,
+    categoryRows: physical.categoryRows,
+    distinctItemCategoryIds: physical.distinctItemCategoryIds,
+    nonzeroCategoryCount: largest.nonzeroCategoryCount,
+    largestCategoryId: largest.categoryId,
+    largestCategoryCount: largest.itemCount,
+  };
+}
+
+async function listMoviesGenerationCandidateNumbers(
+  providerId: string,
+  excludeIncompleteSyncingGeneration: number,
+): Promise<number[]> {
+  const db = await getCatalogDatabase();
+  const rows = await db.getAll<{ sync_generation: number | string }>(
+    `SELECT sync_generation
+     FROM catalog_items_v2
+     WHERE provider_id = ? AND media_type = 'movie'
+       AND (? = 0 OR sync_generation != ?)
+     GROUP BY sync_generation
+     HAVING COUNT(*) > 0
+     ORDER BY sync_generation DESC`,
+    [providerId, excludeIncompleteSyncingGeneration, excludeIncompleteSyncingGeneration],
+  );
+  return rows.map((row) => asNumber(row.sync_generation)).filter((generation) => generation > 0);
+}
+
+async function assessMoviesGenerationCandidate(
+  providerId: string,
+  generation: number,
+  previousValidated: {
+    generation: number;
+    totalItems: number;
+    nonzeroCategoryCount: number;
+  } | null,
+): Promise<MoviesGenerationIntegrityAssessment> {
+  const snapshot = await loadMoviesGenerationPhysicalSnapshot(providerId, generation);
+  const assessment = assessMoviesGenerationSnapshotIntegrity({
+    snapshot,
+    previousValidated,
+  });
+  console.info(
+    '[NovaCast Movies Readable Recovery] ' +
+      JSON.stringify({
+        event: 'movies_readable_candidate_assessed',
+        providerId,
+        generation,
+        itemRows: assessment.itemRows,
+        categoryRows: assessment.categoryRows,
+        distinctItemCategoryIds: assessment.distinctItemCategoryIds,
+        nonzeroCategoryCount: assessment.nonzeroCategoryCount,
+        integrityDecision: assessment.healthy ? 'passed' : 'rejected',
+        reason: assessment.reason,
+        marker: MOVIES_FOCUS_STAGE4I_MARKER,
+      }),
+  );
+  return assessment;
+}
+
+/** Bounded transactional pointer repair — credentials/activation untouched. */
+export async function repairMoviesProviderCatalogGenerationPointer(
+  providerId: string,
+  recoveredGeneration: number,
+): Promise<boolean> {
+  if (recoveredGeneration <= 0) {
+    return false;
+  }
+  let repaired = false;
+  await withCatalogTransaction(async () => {
+    const db = await getCatalogDatabase();
+    const provider = await getCatalogProvider(providerId);
+    if (!provider || provider.catalogGeneration === recoveredGeneration) {
+      return;
+    }
+    const previous = provider.catalogGeneration;
+    await db.run(
+      `UPDATE catalog_providers
+       SET catalog_generation = ?
+       WHERE provider_id = ?`,
+      [recoveredGeneration, providerId],
+    );
+    repaired = true;
+    console.info(
+      '[NovaCast Movies Readable Recovery] ' +
+        JSON.stringify({
+          event: 'movies_provider_generation_repaired',
+          providerId,
+          generation: recoveredGeneration,
+          previousGeneration: previous,
+          itemRows: null,
+          categoryRows: null,
+          distinctItemCategoryIds: null,
+          integrityDecision: 'pointer-repaired',
+          reason: 'recovered-validated-generation',
+          marker: MOVIES_FOCUS_STAGE4I_MARKER,
+        }),
+    );
+  });
+  return repaired;
+}
+
+/**
+ * Stage 4.2I: integrity-aware Movies readable generation selection.
+ * Never accepts a marked generation merely because it has one or more rows.
+ */
+async function resolveMoviesReadableCatalogGeneration(providerId: string): Promise<number> {
+  const state = await getCatalogSyncState(providerId, 'movie');
+  const provider = await getCatalogProvider(providerId);
+  const currentAttemptGeneration = state?.generation ?? 0;
+  const syncStatus = state?.status ?? null;
+  const activeGeneration = provider?.catalogGeneration ?? 0;
+  const excludeSyncing =
+    syncStatus === 'syncing' && currentAttemptGeneration > 0 ? currentAttemptGeneration : 0;
+
+  const candidateNumbers = await listMoviesGenerationCandidateNumbers(providerId, excludeSyncing);
+  // Always consider the active pointer even if it equals an excluded syncing gen
+  // that somehow completed with rows (ready path). When syncing, exclude incomplete.
+  if (
+    activeGeneration > 0 &&
+    !candidateNumbers.includes(activeGeneration) &&
+    !(excludeSyncing > 0 && activeGeneration === excludeSyncing)
+  ) {
+    candidateNumbers.unshift(activeGeneration);
+  }
+
+  // Assess newest-first on absolute integrity. Collapse-vs-previous is enforced
+  // at activation time; recovery must still reopen a prior validated snapshot.
+  const assessments: MoviesGenerationIntegrityAssessment[] = [];
+  for (const generation of candidateNumbers) {
+    assessments.push(await assessMoviesGenerationCandidate(providerId, generation, null));
+  }
+
+  const decision = selectMoviesReadableRecoveryGeneration({
+    activeGeneration,
+    syncingGeneration: currentAttemptGeneration,
+    syncStatus,
+    candidates: assessments,
+  });
+
+  if (decision.rejectedActiveGeneration != null) {
+    const rejected = assessments.find((a) => a.generation === decision.rejectedActiveGeneration);
+    console.info(
+      '[NovaCast Movies Readable Recovery] ' +
+        JSON.stringify({
+          event: 'movies_degraded_active_rejected',
+          providerId,
+          generation: decision.rejectedActiveGeneration,
+          itemRows: rejected?.itemRows ?? null,
+          categoryRows: rejected?.categoryRows ?? null,
+          distinctItemCategoryIds: rejected?.distinctItemCategoryIds ?? null,
+          integrityDecision: 'rejected',
+          reason: decision.rejectedActiveReason,
+          marker: MOVIES_FOCUS_STAGE4I_MARKER,
+        }),
+    );
+  }
+
+  if (decision.readableGeneration > 0) {
+    const selected = assessments.find((a) => a.generation === decision.readableGeneration);
+    console.info(
+      '[NovaCast Movies Readable Recovery] ' +
+        JSON.stringify({
+          event: 'movies_recovery_generation_selected',
+          providerId,
+          generation: decision.readableGeneration,
+          itemRows: selected?.itemRows ?? null,
+          categoryRows: selected?.categoryRows ?? null,
+          distinctItemCategoryIds: selected?.distinctItemCategoryIds ?? null,
+          integrityDecision: 'selected',
+          reason: decision.reason,
+          marker: MOVIES_FOCUS_STAGE4I_MARKER,
+        }),
+    );
+    if (decision.pointerRepairNeeded) {
+      await repairMoviesProviderCatalogGenerationPointer(providerId, decision.readableGeneration);
+    }
+  } else {
+    console.info(
+      '[NovaCast Movies Readable Recovery] ' +
+        JSON.stringify({
+          event: 'movies_no_valid_snapshot',
+          providerId,
+          generation: 0,
+          itemRows: 0,
+          categoryRows: 0,
+          distinctItemCategoryIds: 0,
+          integrityDecision: 'none',
+          reason: decision.reason,
+          marker: MOVIES_FOCUS_STAGE4I_MARKER,
+        }),
+    );
+  }
+
+  const readableRowCount =
+    decision.readableGeneration > 0
+      ? (assessments.find((a) => a.generation === decision.readableGeneration)?.itemRows ?? 0)
+      : 0;
+
+  console.info(
+    '[Catalog Read Generation] ' +
+      JSON.stringify({
+        providerId,
+        mediaType: 'movie',
+        currentAttemptGeneration,
+        currentStatus: syncStatus,
+        lastCompletedGeneration: activeGeneration,
+        resolvedReadableGeneration: decision.readableGeneration,
+        readableRowCount,
+        reason: decision.reason,
+        marker: MOVIES_FOCUS_STAGE4I_MARKER,
+      }),
+  );
+
+  void logCatalogGenerationInventoryOnce(providerId, 'movie', {
+    currentAttemptGeneration,
+    currentStatus: syncStatus,
+    lastCompletedGeneration: activeGeneration,
+    lastFailedGeneration:
+      syncStatus === 'syncing' || syncStatus === 'error' ? currentAttemptGeneration : 0,
+    previousPathEligible: activeGeneration > 0 && activeGeneration !== currentAttemptGeneration,
+    resolvedReadableGeneration: decision.readableGeneration,
+    readableRowCount,
+    reason: decision.reason,
+  });
+
+  return decision.readableGeneration;
+}
 
 export async function resolveReadableCategoryGeneration(
   providerId: string,

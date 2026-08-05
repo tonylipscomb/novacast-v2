@@ -71,7 +71,13 @@ export function setMoviesCatalogRepairingUi(providerId: string, repairing: boole
 export async function assessActiveMoviesCatalogIntegrity(
   providerId: string,
 ): Promise<MoviesSparseRepairAssessment> {
-  const generation = await resolveReadableCatalogGeneration(providerId, 'movie');
+  // Prefer the integrity-selected readable generation. If none exists, assess the
+  // provider pointer so a degraded-only DB can still schedule one bounded repair.
+  const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie');
+  const provider = await getCatalogProvider(providerId);
+  const generation =
+    readableGeneration > 0 ? readableGeneration : provider?.catalogGeneration ?? 0;
+
   if (generation <= 0) {
     return {
       providerId,
@@ -140,6 +146,7 @@ export async function repairDegradedMoviesCatalogIfNeeded(
   }
   if (repairScheduled.has(providerId)) {
     // Repair already kicked off this session — wait for activation; do not relaunch.
+    // Stage 4.2I: do not clear the screen or reschedule while syncing.
     return 'repairing';
   }
 
@@ -148,6 +155,8 @@ export async function repairDegradedMoviesCatalogIfNeeded(
     clearMoviesSparseRepairSchedule(providerId);
     return 'healthy';
   }
+  // Degraded active generation: schedule at most one bounded repair. UI must not
+  // blank when a validated recovery generation is already readable (resolver).
   if (assessment.alreadyRepaired) {
     // Bound once per degraded generation — never launch gen N+1 for the same reason.
     return 'skipped';

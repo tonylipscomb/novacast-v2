@@ -140,7 +140,11 @@ test('existing sparse active generation is repaired without wiping Live/Series/c
   assert.match(sparseRepair, /invalidateVodCategoryFilterCapability/);
   assert.match(sparseRepair, /Do not touch credentials|never clear credentials/);
   assert.match(sqliteSource, /repairDegradedMoviesCatalogIfNeeded/);
-  assert.match(sqliteSource, /repairing-sparse-generation/);
+  // Stage 4.2I: preserve validated snapshot during repair (no blank rail).
+  assert.match(
+    sqliteSource,
+    /snapshot-preserved-during-repair|movies_snapshot_preserved_during_repair|repairing-sparse-generation/,
+  );
   assert.match(loader, /Repairing movie library…/);
   assert.match(model, /catalogRepairing|setMoviesCatalogRepairingUi/);
   assert.match(sync, /forceMoviesFullDumpForProvider/);

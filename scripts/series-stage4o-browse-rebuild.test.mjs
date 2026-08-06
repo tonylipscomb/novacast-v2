@@ -407,14 +407,13 @@ test('No Movies active-path files were modified by Stage 4.2O', () => {
   );
 });
 
-test('Orphaned Series Detail Popup V2 shell files remain untouched and unwired', () => {
-  assert.doesNotMatch(screen, /SeriesDetailPopupV2/);
+test('Series Detail Popup V2 shell files are now wired in by Stage 4.2O.1 (supersedes Stage 4.2O orphan check)', () => {
+  // Stage 4.2O.1 wires the previously-orphaned V2 shell files into
+  // SeriesScreen.tsx as the active Series Detail popup. The Stage 4.2O
+  // assertion that these stayed untouched/untracked is intentionally
+  // superseded here — see scripts/series-stage4o1-detail-popup-v2.test.mjs
+  // for the full Stage 4.2O.1 contract.
+  assert.match(screen, /import \{ SeriesDetailPopupV2 \} from '\.\/components\/SeriesDetailPopupV2'/);
+  assert.match(screen, /<SeriesDetailPopupV2/);
   assert.doesNotMatch(model, /SeriesDetailPopupV2|seriesDetailPopupV2/);
-  const result = spawnSync('git', ['status', '--porcelain', '--', 'src/features/series/components/SeriesDetailPopupV2.tsx', 'src/features/series/seriesDetailPopupV2.ts'], {
-    encoding: 'utf8',
-  });
-  assert.equal(result.status, 0, `git status failed: ${result.stderr}`);
-  for (const line of result.stdout.trim().split('\n').filter(Boolean)) {
-    assert.match(line, /^\?\?/, `Expected orphaned popup file to remain untracked, got: ${line}`);
-  }
 });

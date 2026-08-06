@@ -11,9 +11,15 @@ const shell = fs.readFileSync('src/features/media-detail/MediaDetailOverlayShell
 const movieOverlay = fs.readFileSync('src/features/movies/components/MovieDetailOverlay.tsx', 'utf8');
 const seriesPlayback = fs.readFileSync('src/features/series/seriesPlayback.ts', 'utf8');
 
-test('1. Shared shell is used by Series', () => {
+test('1. Shared shell is used by Series (legacy overlay component, now disconnected by Stage 4.2O.1)', () => {
+  // Stage 4.2O.1: SeriesDetailPopupV2 (not SeriesDetailOverlay/MediaDetailOverlayShell)
+  // is the active Series Detail popup now. `SeriesDetailOverlay.tsx` itself still uses
+  // the shared shell (untouched, verified below) but SeriesScreen.tsx no longer renders
+  // it — only disconnected legacy state/close-path references remain, guarded by
+  // `logSeriesDetailLegacyOverlayPathViolation`.
   assert.match(seriesOverlay, /MediaDetailOverlayShell/);
-  assert.match(seriesScreen, /SeriesDetailOverlay/);
+  assert.match(seriesScreen, /SeriesDetailPopupV2/);
+  assert.doesNotMatch(seriesScreen, /from '\.\/components\/SeriesDetailOverlay'/);
   assert.doesNotMatch(seriesScreen, /from '@\/components\/media\/MediaDetailOverlay'/);
 });
 
@@ -28,7 +34,9 @@ test('3. Opening does not replace visible items', () => {
   const openBlockStart = seriesScreen.indexOf('const handleSelectSeries = useCallback');
   const openBlockEnd = seriesScreen.indexOf('const handleRegisterPosterRef', openBlockStart);
   const openBlock = seriesScreen.slice(openBlockStart, openBlockEnd);
-  assert.match(openBlock, /openDetailOverlayState\(series\)/);
+  // Stage 4.2O.1: opening now sets SeriesDetailPopupV2's own simple state
+  // instead of the legacy `openDetailOverlayState(series)`.
+  assert.match(openBlock, /setSeriesDetailPopup\(\{ open: true, series, originItemId: series\.id \}\)/);
   assert.doesNotMatch(openBlock, /setVisibleItems|visibleItems\s*=/);
 });
 
@@ -63,7 +71,11 @@ test('Series and Movies share the same shell component', () => {
 });
 
 test('Playback keeps Detail logically open', () => {
-  assert.match(seriesScreen, /Keep overlay logically open but visually suppressed/);
+  // Stage 4.2O.1: the invariant survives, just phrased against
+  // SeriesDetailPopupV2's own state instead of the legacy overlay's.
+  assert.match(seriesScreen, /Keeps SeriesDetailPopupV2's[\s\S]{0,40}state untouched/);
+  assert.match(seriesScreen, /series_detail_popup_v2_revealed_after_playback/);
+  // Legacy reveal-after-playback branch is still present (dead in normal use).
   assert.match(seriesScreen, /series_detail_revealed_after_playback/);
   assert.doesNotMatch(
     seriesScreen.slice(

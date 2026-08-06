@@ -25,6 +25,14 @@ type SeriesPosterGridProps = {
   focusedSeriesId: string | null;
   selectedSeriesId: string | null;
   postersFocusable?: boolean;
+  /**
+   * Stage 4.2O.1: force exactly one poster focusable even while
+   * `postersFocusable` is false, so the Series Detail Popup V2 close path can
+   * make the origin card focusable in the same synchronous render as the
+   * close, instead of waiting on `postersFocusable` to flip (mirrors the
+   * equivalent `closingFocusMovieId` fix on `MoviePosterGrid`).
+   */
+  closingFocusSeriesId?: string | null;
   onFocusSeries: (series: SeriesSummary) => void;
   onSelectSeries: (series: SeriesSummary) => void;
   registerPosterRef?: (seriesId: string, instance: ElementRef<typeof View> | null) => void;
@@ -49,6 +57,7 @@ export function SeriesPosterGrid({
   focusedSeriesId: _focusedSeriesId,
   selectedSeriesId,
   postersFocusable = true,
+  closingFocusSeriesId = null,
   onFocusSeries,
   onSelectSeries,
   registerPosterRef,
@@ -169,7 +178,7 @@ export function SeriesPosterGrid({
       return (
         <SeriesPosterCard
           series={item}
-          focusable={postersFocusable}
+          focusable={postersFocusable || closingFocusSeriesId === item.id}
           trapFocusDown={isLastPosterRow({ index, itemCount: series.length, columns })}
           hasPreferredFocus={shouldClaimPreferredPosterFocus({
             focusClaimed: focusClaimedRef.current,
@@ -182,7 +191,15 @@ export function SeriesPosterGrid({
         />
       );
     },
-    [columns, handleFocusSeries, handleRegisterRef, handleSelectSeries, postersFocusable, series.length],
+    [
+      closingFocusSeriesId,
+      columns,
+      handleFocusSeries,
+      handleRegisterRef,
+      handleSelectSeries,
+      postersFocusable,
+      series.length,
+    ],
   );
 
   const keyExtractor = useCallback((item: SeriesSummary) => item.id, []);

@@ -24,6 +24,7 @@ const suites = [
   'movies-stage4m-simple-overlay.test.mjs',
   'series-stage4m-simple-overlay.test.mjs',
   'movies-stage4n-detail-popup-v2.test.mjs',
+  'series-stage4o-browse-rebuild.test.mjs',
   'movies-catalog-generation-inventory.test.mjs',
   'catalog-stage3c-generation-safe.test.mjs',
   'movies-stage3c1-category-counts.test.mjs',

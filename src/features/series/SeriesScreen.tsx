@@ -58,6 +58,8 @@ import {
 } from './seriesScreenLogic';
 import { getSeriesScreenMemory } from './seriesScreenMemory';
 import { useSeriesScreenModel } from './useSeriesScreenModel';
+import { setOnnSeriesGridMounted } from './seriesDiagnostics';
+import { logSeriesBrowseIsolationViolation } from './seriesStartupRuntimeIsolation';
 
 export function SeriesScreen() {
   const router = useRouter();
@@ -94,6 +96,7 @@ export function SeriesScreen() {
     categoryId: string;
     visibleItemCount: number;
   } | null>(null);
+  const detailOpenGuardRef = useRef({ categories: 0, visibleItems: 0, categoryId: '' });
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchOverlayReady, setSearchOverlayReady] = useState(false);
   const [focusedEpisodeId, setFocusedEpisodeId] = useState<string | null>(null);
@@ -271,6 +274,42 @@ export function SeriesScreen() {
   useEffect(() => {
     tvPerfSetScreen('series');
   }, []);
+
+  // Stage 4.2O: prove the poster grid instance owned by SeriesScreen never
+  // remounts across category switching, Detail open/close, or playback.
+  useEffect(() => {
+    const instanceId = gridInstanceIdRef.current;
+    setOnnSeriesGridMounted(true, instanceId);
+    return () => {
+      setOnnSeriesGridMounted(false, instanceId);
+    };
+  }, []);
+
+  // Stage 4.2O §12: Detail/episode/playback isolation guard-rail diagnostics.
+  // These only observe and log — they never redesign SeriesDetailOverlay itself.
+  useEffect(() => {
+    if (!detailOpen) {
+      detailOpenGuardRef.current = {
+        categories: categories.length,
+        visibleItems: visibleItems.length,
+        categoryId: selectedCategoryId,
+      };
+      return;
+    }
+    const guard = detailOpenGuardRef.current;
+    if (guard.categories > 0 && categories.length === 0) {
+      logSeriesBrowseIsolationViolation('categories-replaced-by-detail', {
+        before: guard.categories,
+        after: categories.length,
+      });
+    }
+    if (guard.visibleItems > 0 && visibleItems.length === 0) {
+      logSeriesBrowseIsolationViolation('visible-series-replaced-by-detail', {
+        before: guard.visibleItems,
+        after: visibleItems.length,
+      });
+    }
+  }, [categories.length, detailOpen, selectedCategoryId, visibleItems.length]);
 
   const handleFocusSeries = useCallback(
     (series: Parameters<typeof focusSeries>[0]) => {
@@ -702,13 +741,13 @@ useEffect(() => {
 
   return (
     <View style={styles.root}>
-      {!playbackUiActive ? (
-        <>
       <View
-        style={styles.browseLayer}
-        pointerEvents={detailOpen || searchBlocksBrowse ? 'none' : 'auto'}
-        importantForAccessibility={detailOpen || searchBlocksBrowse ? 'no-hide-descendants' : 'auto'}
-        accessibilityElementsHidden={detailOpen || searchBlocksBrowse}>
+        style={[styles.browseLayer, playbackUiActive && styles.browseLayerHidden]}
+        pointerEvents={detailOpen || searchBlocksBrowse || playbackUiActive ? 'none' : 'auto'}
+        importantForAccessibility={
+          detailOpen || searchBlocksBrowse || playbackUiActive ? 'no-hide-descendants' : 'auto'
+        }
+        accessibilityElementsHidden={detailOpen || searchBlocksBrowse || playbackUiActive}>
         <NovaTvShell
           activeId="series"
           providerLabel={selectedProviderLabel}
@@ -839,8 +878,6 @@ useEffect(() => {
           void playEpisodeById(episode.id, 'episode');
         }}
       />
-        </>
-      ) : null}
 
       <SearchOverlay
         visible={searchOpen && !playbackUiActive}
@@ -875,6 +912,10 @@ function createSeriesStyles(theme: NovaTheme) {
     },
     browseLayer: {
       flex: 1,
+    },
+    browseLayerHidden: {
+      display: 'none',
+      opacity: 0,
     },
     screen: {
       flex: 1,

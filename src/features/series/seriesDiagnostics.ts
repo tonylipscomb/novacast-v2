@@ -64,3 +64,39 @@ export function resetOnnSeriesGridDiagnosticsForTests(): void {
   activeGridInstanceId = null;
   gridMounted = false;
 }
+
+/**
+ * Stage 4.2O.2 — Series SQLite parity diagnostics.
+ * Mirrors Movies' SQLite console.info event style (`[NovaCast Movies ...]`)
+ * with a single `[NovaCast Series SQLite]` prefix so every event carries the
+ * same providerId/generation/categoryId/rowCount/elapsedMs/requestId shape.
+ */
+export const SERIES_SQLITE_DIAGNOSTICS_MARKER = 'stage4o2-series-sqlite-parity-v1';
+
+export type SeriesSqliteDiagnosticEvent =
+  | 'series_sqlite_generation_pinned'
+  | 'series_sqlite_categories_ready'
+  | 'series_sqlite_first_viewport_ready'
+  | 'series_sqlite_page_appended'
+  | 'series_sqlite_search_completed'
+  | 'series_sqlite_refresh_started'
+  | 'series_sqlite_refresh_validated'
+  | 'series_sqlite_generation_promoted'
+  | 'series_sqlite_refresh_failed'
+  | 'series_sqlite_offline_startup'
+  | 'series_sqlite_stale_result_dropped'
+  | 'series_sqlite_generation_mismatch_blocked';
+
+export function emitSeriesSqliteEvent(
+  event: SeriesSqliteDiagnosticEvent,
+  payload: Record<string, unknown> = {},
+): void {
+  console.info(
+    '[NovaCast Series SQLite] ' +
+      JSON.stringify({
+        event,
+        marker: SERIES_SQLITE_DIAGNOSTICS_MARKER,
+        ...payload,
+      }),
+  );
+}

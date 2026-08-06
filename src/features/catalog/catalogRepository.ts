@@ -2321,6 +2321,42 @@ export async function getCatalogMovieItem(
   return row ? mapItem(row as Record<string, unknown>) : null;
 }
 
+/**
+ * Stage 4.2O.2: canonical single-series catalog row for Detail/browse card
+ * metadata. Reads catalog_items_v2 at the readable sync generation
+ * (content_id === Xtream series_id). Mirrors getCatalogMovieItem.
+ */
+export async function getCatalogSeriesItem(
+  providerId: string,
+  contentId: string,
+  options?: { generation?: number },
+): Promise<CatalogItemRecord | null> {
+  const trimmedId = String(contentId ?? '').trim();
+  if (!providerId || !trimmedId) {
+    return null;
+  }
+
+  const generation =
+    options?.generation ?? (await resolveReadableCatalogGeneration(providerId, 'series'));
+  if (generation <= 0) {
+    return null;
+  }
+
+  const db = await getCatalogDatabase();
+  const itemsTable = catalogItemsTable('series');
+  const row = await db.getFirst(
+    `SELECT * FROM ${itemsTable}
+     WHERE provider_id = ?
+       AND media_type = ?
+       AND sync_generation = ?
+       AND content_id = ?
+     LIMIT 1`,
+    [providerId, 'series', generation, trimmedId],
+  );
+
+  return row ? mapItem(row as Record<string, unknown>) : null;
+}
+
 export async function getCatalogDiagnosticSnapshot(
   providerId: string,
   mediaType: CatalogMediaType,

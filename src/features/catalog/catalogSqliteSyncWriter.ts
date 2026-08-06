@@ -688,16 +688,22 @@ export async function finishCatalogSqliteMediaSync(input: {
         return true;
       }
 
-      await completeCatalogSync(handle.providerId, handle.mediaType, handle.generation, {
+      // Stage 4.2O.2: Series now shares the generation-safe pipeline with Movies —
+      // completeCatalogSync's validated `activated` result must be honored here
+      // (previously this branch unconditionally returned true, masking a failed
+      // promotion). A false result leaves the prior readable generation intact
+      // because completeCatalogSync never advances catalog_providers on rejection.
+      const activated = await completeCatalogSync(handle.providerId, handle.mediaType, handle.generation, {
         processedCount,
       });
-      logSqlite('sqlite-sync-completed', {
+      logSqlite(activated ? 'sqlite-sync-completed' : 'sqlite-sync-promotion-rejected', {
         providerId: handle.providerId,
         mediaType: handle.mediaType,
         generation: handle.generation,
         processedCount,
+        activated,
       });
-      return true;
+      return activated;
     }
 
     await failCatalogSync(handle.providerId, handle.mediaType, errorCode ?? 'sync_failed');

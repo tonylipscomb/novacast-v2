@@ -55,7 +55,10 @@ test('Stage 3C schema marker and v2 tables exist', async () => {
   assert.equal(STAGE3C_GENERATION_SAFE_MARKER, 'stage3c-generation-safe-catalog-v2');
   assert.equal(catalogItemsTable('movie'), 'catalog_items_v2');
   assert.equal(catalogCategoriesTable('movie'), 'catalog_categories_v2');
-  assert.equal(catalogItemsTable('series'), 'catalog_items');
+  // Stage 4.2O.2: Series now shares the generation-safe v2 tables with Movies
+  // (previously routed to the legacy, non-generation-scoped tables).
+  assert.equal(catalogItemsTable('series'), 'catalog_items_v2');
+  assert.equal(catalogCategoriesTable('series'), 'catalog_categories_v2');
 
   const db = await getCatalogDatabase();
   const tables = await db.getAll(

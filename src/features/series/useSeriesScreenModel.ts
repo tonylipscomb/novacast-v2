@@ -65,6 +65,10 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
   const sortOption = settings.seriesSortOption;
   const providerMemory = getSeriesScreenMemory(activeProviderId);
 
+  // Stage 4.2O.2: `bundle.seriesDataSource` is now SQLite-first internally
+  // (see providerBundle.ts) — this hook's data-fetching call sites and
+  // startup fast-path branching are unchanged; only the underlying reads
+  // the "network" fallback step performs have moved to prefer SQLite.
   const resolvedDataSource = useMemo(() => {
     if (options.dataSource) {
       return options.dataSource;
@@ -257,11 +261,41 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
 
     let mounted = true;
     let indexDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+    let deferredCountsRequested = false;
+
+    // Stage 4.2O.2 spec #3: SQLite categories arrive metadata-only
+    // (countKnown: false for provider rows); backfill counts lazily in the
+    // background once, mirroring Movies' getCatalogCategoryCounts deferred
+    // pattern. No-op for data sources without prefetchAllCategoryCounts.
+    const scheduleDeferredCategoryCounts = (loaded: MediaCategory[]) => {
+      if (deferredCountsRequested || !resolvedDataSource.prefetchAllCategoryCounts) {
+        return;
+      }
+      const needsCounts = loaded.some(
+        (category) => category.kind === 'provider' && category.countKnown === false,
+      );
+      if (!needsCounts) {
+        return;
+      }
+      deferredCountsRequested = true;
+      const categoryIds = loaded.map((category) => category.id);
+      queueMicrotask(() => {
+        void resolvedDataSource
+          .prefetchAllCategoryCounts!(categoryIds, (categoryId, count) => {
+            if (!mounted) return;
+            syncCategoryCount(categoryId, count);
+          })
+          .catch(() => {
+            // Best-effort — counts remain "..." until the user selects a category.
+          });
+      });
+    };
 
     const applyCategories = (next: MediaCategory[], startupMode: SeriesStartupQueryMode) => {
       const startup = startupStateRef.current;
       startup.categoryReplacements += 1;
       setCategories((current) => mergeSeriesCategoriesPreservingCounts(current, next));
+      scheduleDeferredCategoryCounts(next);
       if (!startup.durableCategoriesReady) {
         startup.durableCategoriesReady = true;
         startup.level = 'durable-categories';

@@ -3,6 +3,7 @@ import { isProviderConnectionReady } from './providerModel.ts';
 import { createSmartMovieDataSource } from '../movies/smart/SmartMovieDataSource.ts';
 import { createProviderSeriesDataSource } from '../series/data/ProviderSeriesDataSource.ts';
 import { createSmartSeriesDataSource } from '../series/smart/SmartSeriesDataSource.ts';
+import { createSqliteFirstSeriesDataSource } from '../series/data/SqliteSeriesDataSource.ts';
 import type { SeriesDataSource } from '../series/data/SeriesDataSource.ts';
 import {
   createMockProviderRepositories,
@@ -12,6 +13,9 @@ import {
 import { XtreamClient, normalizeXtreamAccountMetadata } from './xtreamClient.ts';
 import { cancelProviderCatalogSync } from './providerCatalogSync.ts';
 import { invalidateCatalogSyncForProvider } from '../catalog/catalogSyncCoordinator.ts';
+
+/** Stage 4.2O.2 — Series SQLite Parity. Mirrors Movies' build-time kill switch. */
+const SERIES_SQLITE_READS_ENABLED = process.env.EXPO_PUBLIC_SERIES_SQLITE_READS === 'true';
 
 export type ProviderRepositoryBundle = ProviderRepositories & {
   providerId: string;
@@ -45,8 +49,17 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
       ? createXtreamProviderRepositories(new XtreamClient(credentials!))
       : createMockProviderRepositories(provider.id);
 
+  // Stage 4.2O.2: insert the SQLite-first composite *below* the smart
+  // wrapper so smart sections (Discover, Continue Watching, Favorites, the
+  // Uncategorized fallback) are unaffected — createSmartSeriesDataSource
+  // calls base.getCategories()/getSeriesPage() for the flat provider rail,
+  // and that "base" now prefers a readable local generation, falling back
+  // to the real provider network call only when none exists.
+  const rawSeriesDataSource = createProviderSeriesDataSource(base.series, base.mediaBaseUrl);
   const seriesDataSource = createSmartSeriesDataSource(
-    createProviderSeriesDataSource(base.series, base.mediaBaseUrl),
+    SERIES_SQLITE_READS_ENABLED
+      ? createSqliteFirstSeriesDataSource(provider.id, rawSeriesDataSource)
+      : rawSeriesDataSource,
     provider.id,
   );
 

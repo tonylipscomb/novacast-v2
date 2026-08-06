@@ -115,6 +115,7 @@ import {
 } from '../catalog/vodCategoryFilterCapability.ts';
 import type { MovieSummary } from '../movies/movieTypes.ts';
 import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
+import { emitSeriesSqliteEvent } from '../series/seriesDiagnostics.ts';
 
 const PERF_LOG_PREFIX = '[NovaCast CatalogSync]';
 const CATALOG_SYNC_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -2199,6 +2200,14 @@ export async function runSeriesCatalogSync(
     });
 
     if (sqliteHandle.enabled) {
+      emitSeriesSqliteEvent('series_sqlite_refresh_started', {
+        providerId,
+        generation: sqliteHandle.generation,
+        categoryCount: seriesCategories.length,
+      });
+    }
+
+    if (sqliteHandle.enabled) {
       await writeCategoriesFromSourceBudgeted(
         sqliteHandle,
         seriesCategories,
@@ -2434,11 +2443,36 @@ export async function runSeriesCatalogSync(
     setup.progressThrottle.flush();
     seriesIndex?.commitSync();
 
-    await finishCatalogSqliteMediaSync({
-      handle: sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'series'),
+    const seriesProcessedCount = Object.values(setup.seriesCountMap).reduce((sum, count) => sum + count, 0);
+    const seriesFinishHandle = sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'series');
+    const seriesFinishOk = await finishCatalogSqliteMediaSync({
+      handle: seriesFinishHandle,
       ok: true,
-      processedCount: Object.values(setup.seriesCountMap).reduce((sum, count) => sum + count, 0),
+      processedCount: seriesProcessedCount,
     });
+    if (seriesFinishHandle.enabled) {
+      if (seriesFinishOk) {
+        emitSeriesSqliteEvent('series_sqlite_refresh_validated', {
+          providerId,
+          generation: seriesFinishHandle.generation,
+          rowCount: seriesProcessedCount,
+        });
+        emitSeriesSqliteEvent('series_sqlite_generation_promoted', {
+          providerId,
+          generation: seriesFinishHandle.generation,
+          rowCount: seriesProcessedCount,
+        });
+      } else {
+        emitSeriesSqliteEvent('series_sqlite_refresh_failed', {
+          providerId,
+          generation: seriesFinishHandle.generation,
+          reason: 'promotion_validation_failed',
+        });
+      }
+    }
+    if (!seriesFinishOk) {
+      throw new Error('series_completion_barrier_failed');
+    }
 
     await writeCatalogSyncCheckpointSafe(
       setup,
@@ -2458,10 +2492,18 @@ export async function runSeriesCatalogSync(
   } catch (error) {
     seriesIndex?.abortSync();
     if (sqliteHandle?.enabled) {
+      const errorCode = error instanceof Error ? error.message : 'series_sync_failed';
+      if (errorCode !== 'series_completion_barrier_failed') {
+        emitSeriesSqliteEvent('series_sqlite_refresh_failed', {
+          providerId,
+          generation: sqliteHandle.generation,
+          reason: errorCode,
+        });
+      }
       await finishCatalogSqliteMediaSync({
         handle: sqliteHandle,
         ok: false,
-        errorCode: error instanceof Error ? error.message : 'series_sync_failed',
+        errorCode,
       });
     }
     throw error;

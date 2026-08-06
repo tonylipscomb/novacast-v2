@@ -14,6 +14,7 @@ permissions:
 env:
   NODE_ENV: production
   EXPO_PUBLIC_MOVIES_SQLITE_READS: 'true'
+  EXPO_PUBLIC_SERIES_SQLITE_READS: 'true'
   SENTRY_DISABLE_AUTO_UPLOAD: 'true'
   EXPO_NO_TELEMETRY: '1'
   CI: 'true'

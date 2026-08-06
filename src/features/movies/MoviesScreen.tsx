@@ -5469,6 +5469,7 @@ useEffect(() => {
                     isDiscover={isDiscoverCategory}
                     sortFocusLeftHandle={categoryFocusLeftHandle}
                     onSortFocusHandleReady={setSortFocusRightHandle}
+                    sortFocusable={chromeFocusable && !searchBlocksBrowse}
                     loadMore={handleLoadMore}
                     restoreMovieId={restoreToken?.snapshot.movieId ?? null}
                     restoreMovieIndex={restoreToken?.snapshot.movieIndex ?? null}

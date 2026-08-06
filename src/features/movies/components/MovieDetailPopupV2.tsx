@@ -283,6 +283,13 @@ export function MovieDetailPopupV2({
     wasVisibleRef.current = true;
     setPosterFailed(false);
     if (opening) {
+      // Reset stale focus-ring state from a prior open/close cycle. Android
+      // doesn't reliably fire onBlur on the close button when its host view
+      // unmounts mid-focus (e.g. closing via X), so without this the X
+      // button can keep rendering its focused style on the next open even
+      // though real TV focus correctly moved to Play/first action.
+      setCloseFocused(false);
+      setFocusedActionId(null);
       logMovieDetailPopupV2Event('movie_detail_popup_v2_active', {
         movieId: movie?.id ?? null,
       });

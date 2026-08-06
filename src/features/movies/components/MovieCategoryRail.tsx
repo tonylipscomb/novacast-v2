@@ -155,6 +155,7 @@ export function MovieCategoryRail({
             <Pressable
               ref={(instance) => registerItemRef?.(item.id, instance)}
               focusable={focusable}
+              disabled={!focusable}
               hasTVPreferredFocus={preferInitialFocus}
               {...(selected && nextFocusRightHandle ? { nextFocusRight: nextFocusRightHandle } : null)}
               onFocus={() => {

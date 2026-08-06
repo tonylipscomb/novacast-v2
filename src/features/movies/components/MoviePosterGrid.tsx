@@ -52,6 +52,8 @@ type MoviePosterGridProps = {
   emptyNotice?: string | null;
   sortFocusLeftHandle?: number;
   onSortFocusHandleReady?: (handle: number | undefined) => void;
+  /** Native focusable for the Sort control's D-pad — e.g. false while a detail popup is open. */
+  sortFocusable?: boolean;
   restoreMovieId?: string | null;
   restoreMovieIndex?: number | null;
   restoreScrollOffset?: number | null;
@@ -122,6 +124,7 @@ export function MoviePosterGrid({
   emptyNotice = null,
   sortFocusLeftHandle,
   onSortFocusHandleReady,
+  sortFocusable = true,
   restoreMovieId = null,
   restoreMovieIndex = null,
   restoreScrollOffset = null,
@@ -641,6 +644,7 @@ export function MoviePosterGrid({
             onChange={onSortChange}
             showRating={showRatingSort}
             nextFocusLeft={sortFocusLeftHandle}
+            focusable={sortFocusable}
           />
           <Text style={styles.subtitle}>{gridHeaderSuffix}</Text>
         </View>

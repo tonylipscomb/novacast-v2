@@ -33,6 +33,7 @@ export function MovieToolbar({
     <View style={styles.toolbar}>
       <Pressable
         focusable={focusable}
+        disabled={!focusable}
         hasTVPreferredFocus={hasTVPreferredFocus}
         onFocus={() => {
           setFocused(true);

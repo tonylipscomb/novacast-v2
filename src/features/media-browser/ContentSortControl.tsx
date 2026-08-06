@@ -24,10 +24,12 @@ type ContentSortControlProps = {
   onChange: (value: ContentSortOption) => void;
   showRating?: boolean;
   nextFocusLeft?: number;
+  /** Native focusable for D-pad — e.g. false while a detail popup/modal is open. */
+  focusable?: boolean;
 };
 
 export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSortControlProps>(function ContentSortControl(
-  { value, onChange, showRating = true, nextFocusLeft },
+  { value, onChange, showRating = true, nextFocusLeft, focusable = true },
   ref,
 ) {
   const { theme } = useAppTheme();
@@ -87,11 +89,20 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
     }
   }, [onChange, showRating, value]);
 
+  // Defensive: if this control becomes non-focusable (e.g. a detail popup opened)
+  // while the menu happens to be open, close it rather than leaving a dangling menu.
+  useEffect(() => {
+    if (!focusable && open) {
+      setOpen(false);
+    }
+  }, [focusable, open]);
+
   return (
     <View style={styles.root}>
       <Pressable
         ref={openerRef}
-        focusable
+        focusable={focusable}
+        disabled={!focusable}
         accessibilityRole="button"
         accessibilityLabel={`Sort: ${contentSortLabel(value)}`}
         {...(nextFocusLeft ? { nextFocusLeft } : null)}

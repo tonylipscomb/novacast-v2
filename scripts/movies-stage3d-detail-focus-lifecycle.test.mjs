@@ -29,9 +29,10 @@ test('1. MoviePosterGrid remains mounted while detail is open', () => {
   assert.match(screen, /pointerEvents=\{/);
   assert.match(screen, /detailClosing/);
   assert.match(screen, /<MoviePosterGrid/);
-  assert.match(screen, /<MovieDetailOverlay/);
-  // Overlay is sibling, not a replacement of the grid branch.
-  assert.doesNotMatch(screen, /detailOpen \? \s*<MovieDetailOverlay[\s\S]*: \s*<MoviePosterGrid/);
+  // Stage 4.2N: MovieDetailPopupV2 replaced MovieDetailOverlay as the active
+  // Movies render; it remains a guest sibling, not a replacement of the grid.
+  assert.match(screen, /<MovieDetailPopupV2/);
+  assert.doesNotMatch(screen, /detailOpen \? \s*<MovieDetailPopupV2[\s\S]*: \s*<MoviePosterGrid/);
 });
 
 test('2. FlatList key does not change on detail open/close', () => {

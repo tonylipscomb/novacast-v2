@@ -44,7 +44,7 @@ import { buildMoviePlaybackUrlResolved } from '@/features/providers/providerPlay
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 import { MovieCategoryRail } from './components/MovieCategoryRail';
-import { MovieDetailOverlay } from './components/MovieDetailOverlay';
+import { MovieDetailPopupV2 } from './components/MovieDetailPopupV2';
 import { MoviePosterGrid } from './components/MoviePosterGrid';
 import { MovieToolbar } from './components/MovieToolbar';
 import {
@@ -132,8 +132,11 @@ import {
   MOVIES_FOCUS_STAGE4M_MARKER,
   MOVIES_SIMPLE_DETAIL_OVERLAY_ENABLED,
   moviesDetailOverlayVisible,
-  shouldConsumeDetailOverlayBack,
 } from './moviesSimpleDetailOverlay';
+import {
+  logMovieDetailLegacyClosePathViolation,
+  logMovieDetailPopupV2Event,
+} from './moviesDetailPopupV2';
 import { normalizePlaybackFailure } from '@/features/analytics/playbackAnalytics';
 import type { RequestTvFocusResult } from '@/features/navigation/tvFocusDiagnostics';
 import { logDetailOverlayEvent } from '@/features/media-detail';
@@ -353,6 +356,17 @@ export function MoviesScreen() {
   const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const detailOpenRef = useRef(false);
+  /**
+   * Stage 4.2N — MovieDetailPopupV2's own simple state. The popup component
+   * reads only this; it never observes legacy detailOpen/detailFocusPhase.
+   */
+  const [detailPopup, setDetailPopup] = useState<{
+    open: boolean;
+    movie: Parameters<typeof selectMovie>[0] | null;
+    originItemId: string | null;
+  }>({ open: false, movie: null, originItemId: null });
+  const detailPopupOpenRef = useRef(false);
+  const detailPopupCloseInFlightRef = useRef(false);
   const previousMoviesDataRef = useRef<unknown>(null);
   const moviesAuditRef = useRef<{ selectedMovieId: string | null; focusedMovieId: string | null }>({
     selectedMovieId: null,
@@ -362,6 +376,20 @@ export function MoviesScreen() {
   const [detailSuppressedForPlayback, setDetailSuppressedForPlayback] = useState(false);
   const [detailVisualHold, setDetailVisualHold] = useState(false);
   const [closingFocusMovieId, setClosingFocusMovieId] = useState<string | null>(null);
+  /**
+   * Stage 4.2N fix: unlike the legacy multi-phase close, `closeMovieDetailPopupV2`
+   * jumps straight from 'detail-open' to 'browse' in one state transition, so the
+   * origin poster's `postersFocusable`-gated `disabled` prop and the header
+   * chrome's `chromeFocusable`-gated `disabled` prop both flip in the exact same
+   * commit. When nothing currently holds native focus (the popup's own controls
+   * just unmounted), Android's own default-focus-search can grab an unrelated
+   * newly-focusable header element (observed on device: Search) before our
+   * explicit `.focus()` call — even when deferred — reaches a poster whose
+   * native `disabled` prop has not yet actually flipped. Marking the origin
+   * poster force-focusable synchronously, in the same close transition, removes
+   * that dependency on `postersFocusable` settling in time for this one poster.
+   */
+  const [v2CloseFocusTargetId, setV2CloseFocusTargetId] = useState<string | null>(null);
   const [viewportRestoreCommand, setViewportRestoreCommand] = useState<{
     token: string;
     offset: number;
@@ -510,10 +538,17 @@ export function MoviesScreen() {
     phase: detailFocusPhase,
     targetMovieId: closingFocusMovieId,
   });
+  // Stage 4.2N fix: the V2 close path jumps straight to 'browse' (never a
+  // legacy "closing" phase), so `activeClosingFocusMovieId` above always
+  // resolves to null for it. `v2CloseFocusTargetId` is the V2-specific
+  // override that forces the origin poster focusable/preferred in the exact
+  // same render as the close transition — see its declaration for why this
+  // is required instead of only deferring the imperative `.focus()` call.
+  const effectiveClosingFocusMovieId = activeClosingFocusMovieId ?? v2CloseFocusTargetId;
   const postRestorePreferredMovieId = postRestoreActive ? postRestoreLatch!.restoredMovieId : null;
   const pinnedHighlightMovieId =
     postRestorePreferredMovieId ??
-    activeClosingFocusMovieId ??
+    effectiveClosingFocusMovieId ??
     (detailClosing ? closingFocusMovieId : null);
   const activeSnapshot = detailFocusTokenRef.current?.snapshot ?? browseFocusSnapshotRef.current;
   const snapshotTargetWasVisible = activeSnapshot
@@ -2022,25 +2057,21 @@ export function MoviesScreen() {
       focusConfirmedTokenRef.current = null;
       nativeFocusEnvironmentReadyRef.current = false;
       focusRetryCountRef.current = 0;
-      cleanupDetailCloseVisualState({
-        forced: true,
-        reason: 'detail-open',
-      });
       setMoviesBrowseUiFrozenForDetail(true);
-      if (
-        shouldResetMoviesDetailXCloseActivationLock({
-          lock: xCloseActivationLockRef.current,
-          openMovieId: movie.id,
-        })
-      ) {
-        releaseXCloseOwnership('movie-changed');
-      } else {
-        xCloseActivationLockRef.current = resetMoviesDetailXCloseActivationLock(movie.id);
-        setXCloseActivationLocked(false);
-        setPreserveXCloseFocus(false);
-      }
       setDetailOpen(true);
       setDetailFocusPhaseSafe('detail-open');
+      // Stage 4.2N — MovieDetailPopupV2's own simple state. No close phases,
+      // no isolation/hold-cover, no X-close activation lock.
+      detailPopupOpenRef.current = true;
+      setDetailPopup({ open: true, movie, originItemId: movie.id });
+      // Stage 4.2N fix: clear any stale force-focusable target from a prior
+      // close so it can never keep the wrong poster focusable once a new
+      // popup opens for a different movie.
+      setV2CloseFocusTargetId(null);
+      logMovieDetailPopupV2Event('movie_detail_popup_v2_active', {
+        movieId: movie.id,
+        origin: 'browse',
+      });
       if (isOnnMoviesTraceEnabled()) {
         const snap = browseFocusSnapshotRef.current;
         traceOnnMoviesEvent('Overlay', 'detail_close_browse_frozen', {
@@ -2090,13 +2121,11 @@ export function MoviesScreen() {
     },
     [
       activeProviderId,
-      cleanupDetailCloseVisualState,
       detailOpen,
       launchingPlayback,
       loadMovieDetail,
       playbackUiActive,
       releasePostRestoreLatch,
-      releaseXCloseOwnership,
       selectMovie,
       selectedCategoryId,
       selectedMovie?.id,
@@ -2372,6 +2401,12 @@ export function MoviesScreen() {
 
   const beginDetailFocusClose = useCallback(
     (source: 'detail-close' | 'playback-close') => {
+      // Stage 4.2N: MovieDetailPopupV2 never calls this legacy multi-phase
+      // close initiator. If it is ever reached while the V2 popup owns the
+      // close path, that is a forbidden violation — log it loudly.
+      if (detailPopupOpenRef.current) {
+        logMovieDetailLegacyClosePathViolation({ source, from: 'beginDetailFocusClose' });
+      }
       const snapshot = browseFocusSnapshotRef.current;
       if (!snapshot || snapshot.categoryId !== selectedCategoryId || !snapshot.movieId) {
         logMoviesDetailFocusConflict({
@@ -2967,23 +3002,37 @@ export function MoviesScreen() {
 
       // At most one safe origin focus request after close. Never keep overlay open waiting.
       if (originItemId && !fromSearch) {
-        requestTvFocus({
-          screen: 'movies',
-          source: 'MoviesScreen',
-          region: 'poster-grid',
-          itemId: originItemId,
-          reason: 'stage4m-restore-origin-poster',
-          maxFrames: 2,
-          isActive: () => !detailOpenRef.current,
-          getTarget: () => getValidatedPosterTarget(originItemId),
-          onResult: (result: RequestTvFocusResult) => {
-            logDetailOverlayEvent('movies_detail_origin_focus_result', {
-              originItemId,
-              requested: result.requested,
-              reason: result.reason,
-              marker: MOVIES_FOCUS_STAGE4M_MARKER,
+        // Stage 4.2N fix: defer by one frame so React has committed the
+        // `detailFocusPhase === 'browse'` re-render (which flips the origin
+        // poster's native `focusable`/`disabled` props back on) BEFORE we
+        // call `.focus()`. Without this, `.focus()` fires synchronously in
+        // the same tick as the state update and silently no-ops on Android
+        // because the poster's native view is still non-focusable from the
+        // pre-close render. A nested double rAF gives the native bridge an
+        // extra frame to flush the committed `focusable` prop (see the
+        // matching comment in `closeMovieDetailPopupV2` for the full
+        // on-device diagnosis).
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            requestTvFocus({
+              screen: 'movies',
+              source: 'MoviesScreen',
+              region: 'poster-grid',
+              itemId: originItemId,
+              reason: 'stage4m-restore-origin-poster',
+              maxFrames: 3,
+              isActive: () => !detailOpenRef.current,
+              getTarget: () => getValidatedPosterTarget(originItemId),
+              onResult: (result: RequestTvFocusResult) => {
+                logDetailOverlayEvent('movies_detail_origin_focus_result', {
+                  originItemId,
+                  requested: result.requested,
+                  reason: result.reason,
+                  marker: MOVIES_FOCUS_STAGE4M_MARKER,
+                });
+              },
             });
-          },
+          });
         });
       } else if (!fromSearch) {
         // No valid origin — leave browse responsive; do not focus Search.
@@ -3012,6 +3061,104 @@ export function MoviesScreen() {
       closeDetailOverlay(closeSource === 'back' ? 'back' : 'x');
     },
     [closeDetailOverlay],
+  );
+
+  /**
+   * Stage 4.2N — MovieDetailPopupV2's own close path.
+   * Back and X call this exact function. One state transition; at most one
+   * safe origin focus request after close. No closing-* phases, no visual
+   * isolation, no hold cover, no transaction watchdog, no Search bridge for
+   * browse-origin closes.
+   */
+  const closeMovieDetailPopupV2 = useCallback(
+    (source: 'back' | 'x') => {
+      if (!detailPopupOpenRef.current || detailPopupCloseInFlightRef.current) {
+        return;
+      }
+      detailPopupCloseInFlightRef.current = true;
+
+      const originItemId = detailPopup.originItemId ?? detailPopup.movie?.id ?? null;
+      const fromSearch = detailSourceRef.current === 'search';
+
+      logMovieDetailPopupV2Event('movie_detail_popup_v2_close', {
+        source,
+        originItemId,
+        fromSearch,
+      });
+
+      // Immediate guest dismiss — browse stays mounted underneath.
+      detailPopupOpenRef.current = false;
+      setDetailPopup({ open: false, movie: null, originItemId: null });
+      detailOpenRef.current = false;
+      setDetailOpen(false);
+      setDetailSuppressedForPlayback(false);
+      setDetailFocusPhaseSafe('browse');
+      setMoviesBrowseUiFrozenForDetail(false);
+      // Stage 4.2N fix: force the origin poster focusable in this SAME
+      // transition (see `v2CloseFocusTargetId` declaration for full
+      // diagnosis). `detailFocusPhase` flipping to 'browse' also flips
+      // `chromeFocusable` (Search/nav) true in this exact same commit;
+      // without this, both the poster and Search become newly-focusable
+      // together and Android's native default-focus-search can grab Search
+      // before the poster's `postersFocusable`-gated native prop actually
+      // lands, no matter how long `.focus()` is deferred.
+      if (originItemId && !fromSearch) {
+        setV2CloseFocusTargetId(originItemId);
+      }
+
+      if (fromSearch && originItemId) {
+        setSearchRestoreMovieId(originItemId);
+        setSearchOverlayReady(true);
+        setSearchPhase('returning');
+        searchPhaseRef.current = 'returning';
+        searchReturnPendingRef.current = true;
+        setSearchReturnPending(true);
+      }
+
+      // At most one safe origin focus request after close. Never keep the
+      // popup open waiting, never reopen, never send focus through Search.
+      if (originItemId && !fromSearch) {
+        // A short double-rAF defer still gives the native bridge time to
+        // attach/mount the poster view before `.focus()` runs; the force-
+        // focusable flag above (not this defer) is what fixes the Search
+        // steal, since it makes the poster focusable from the very first
+        // post-close render instead of waiting on `postersFocusable`.
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            requestTvFocus({
+              screen: 'movies',
+              source: 'MoviesScreen',
+              region: 'poster-grid',
+              itemId: originItemId,
+              reason: 'stage4n-restore-origin-poster',
+              maxFrames: 3,
+              isActive: () => !detailPopupOpenRef.current,
+              getTarget: () => getValidatedPosterTarget(originItemId),
+              onResult: (result: RequestTvFocusResult) => {
+                logMovieDetailPopupV2Event('movie_detail_popup_v2_origin_focus_result', {
+                  originItemId,
+                  requested: result.requested,
+                  reason: result.reason,
+                });
+                setV2CloseFocusTargetId((current) => (current === originItemId ? null : current));
+              },
+            });
+          });
+        });
+      } else if (!fromSearch) {
+        logMovieDetailPopupV2Event('movie_detail_popup_v2_origin_focus_skipped', {
+          reason: 'origin-missing',
+        });
+      }
+
+      detailPopupCloseInFlightRef.current = false;
+    },
+    [
+      detailPopup.movie?.id,
+      detailPopup.originItemId,
+      getValidatedPosterTarget,
+      setDetailFocusPhaseSafe,
+    ],
   );
 
   // Stage 4.2G natural: return-focus-requested → confirmed → closed.
@@ -3663,6 +3810,16 @@ export function MoviesScreen() {
     const onHardwareBackPress = wrapOnnMoviesBackHandler(
       'movies-screen',
       () => {
+        // Stage 4.2N: MovieDetailPopupV2 owns Back while it is visible. This
+        // guard is deliberately at the very top of the legacy handler (rather
+        // than relying on BackHandler listener registration order, which can
+        // flip whenever this effect's many other dependencies change after
+        // the popup opens) so the popup always wins regardless of order.
+        if (detailPopupOpenRef.current) {
+          closeMovieDetailPopupV2('back');
+          return true;
+        }
+
         if (guide.visible) {
           if (isUnifiedRemoteDebugEnabled()) {
             logUnifiedRemoteEvent({
@@ -3710,16 +3867,9 @@ export function MoviesScreen() {
           return true;
         }
 
-        // Stage 4.2M: consume Back only while the guest overlay is visibly open.
-        if (
-          shouldConsumeDetailOverlayBack({
-            overlayOpen: detailOpen,
-            overlayVisible: detailOverlayVisible,
-          })
-        ) {
-          closeDetailOverlay('back');
-          return true;
-        }
+        // Stage 4.2N: MovieDetailPopupV2's own dedicated Back handler (registered
+        // below, after this effect) consumes Back while the popup is open. This
+        // handler no longer runs any Movie Detail close path.
 
         if (searchOpen) {
           closeSearch();
@@ -3777,11 +3927,10 @@ export function MoviesScreen() {
     return () => subscription.remove();
   }, [
     categories.length,
-    closeDetailOverlay,
+    closeMovieDetailPopupV2,
     closePlayback,
     closeSearch,
     detailOpen,
-    detailOverlayVisible,
     guide.visible,
     launchingPlayback,
     loadStatus,
@@ -3792,6 +3941,31 @@ export function MoviesScreen() {
     selectedCategoryId,
     visibleMovies.length,
   ]);
+
+  /**
+   * Stage 4.2N — MovieDetailPopupV2's dedicated Back handler.
+   * Defense-in-depth only: the legacy Movies Back handler above already
+   * guards on `detailPopupOpenRef.current` at its very top and calls the
+   * same close function, so this one is not required to win any
+   * BackHandler listener-registration-order race (that race is exactly
+   * what caused the popup-open Back press to fall through to legacy
+   * screen-level navigation instead of just closing the popup). Back and X
+   * call the exact same close function either way.
+   */
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+    const onPopupBackPress = () => {
+      if (detailPopup.open) {
+        closeMovieDetailPopupV2('back');
+        return true;
+      }
+      return false;
+    };
+    const subscription = BackHandler.addEventListener('hardwareBackPress', onPopupBackPress);
+    return () => subscription.remove();
+  }, [closeMovieDetailPopupV2, detailPopup.open]);
 
   useEffect(() => {
     if (!didJustClose) {
@@ -4392,11 +4566,16 @@ export function MoviesScreen() {
       searchReturnPendingRef.current = false;
       setSearchReturnPending(false);
       setMoviesBrowseUiFrozenForDetail(true);
-      xCloseActivationLockRef.current = resetMoviesDetailXCloseActivationLock(movie.id);
-      setXCloseActivationLocked(false);
-      setPreserveXCloseFocus(false);
       setDetailOpen(true);
       setDetailFocusPhaseSafe('detail-open');
+      // Stage 4.2N — same simple popup state as the browse-origin open path.
+      detailPopupOpenRef.current = true;
+      setDetailPopup({ open: true, movie, originItemId: meta.searchFocusedMovieId });
+      setV2CloseFocusTargetId(null);
+      logMovieDetailPopupV2Event('movie_detail_popup_v2_active', {
+        movieId: movie.id,
+        origin: 'search',
+      });
       // Diagnostics-only shape snapshot at Search Detail open.
       logMoviePlaybackShape({
         origin: 'search-detail',
@@ -5274,7 +5453,7 @@ useEffect(() => {
                       primaryLoaderMode === 'category-blocking'
                     }
                     postersFocusable={postersFocusable && primaryLoaderMode !== 'category-blocking'}
-                    closingFocusMovieId={activeClosingFocusMovieId}
+                    closingFocusMovieId={effectiveClosingFocusMovieId}
                     postRestorePreferredMovieId={postRestorePreferredMovieId}
                     pinnedHighlightMovieId={pinnedHighlightMovieId}
                     lockScrollForFocusRestore={lockScrollForFocusRestore}
@@ -5321,24 +5500,25 @@ useEffect(() => {
       </NovaTvShell>
       </View>
 
-      <MovieDetailOverlay
-        visible={detailOverlayVisible}
-        // Stage 4.2M: guest shell via MediaDetailOverlayShell — no isolation/hold/blurTarget.
+      <MovieDetailPopupV2
+        visible={detailPopup.open && !playbackUiActive}
+        movie={detailPopup.movie}
+        // Stage 4.2N: brand-new popup, own state, own close path — no legacy overlay.
         detail={
-          selectedMovie
-            ? movieDetail?.id === selectedMovie.id
+          detailPopup.movie
+            ? movieDetail?.id === detailPopup.movie.id
               ? movieDetail
-              : buildMoviePreviewDetail(selectedMovie)
+              : buildMoviePreviewDetail(detailPopup.movie)
             : null
         }
-        detailError={detailError}
-        detailLoading={detailLoading}
-        continueWatchingLabel={continueWatchingLabel}
-        isFavorite={selectedMovie ? library.isFavorite(selectedMovie.id) : false}
-        isWatchlisted={selectedMovie ? library.isWatchlisted(selectedMovie.id) : false}
-        onClose={() => closeDetailOverlay('x')}
-        onPlay={selectedMovie ? startPlayback : undefined}
-        onRetry={selectedMovie ? handleDetailRetry : undefined}
+        loading={detailLoading}
+        error={detailError}
+        playLabel={continueWatchingLabel}
+        isFavorite={detailPopup.movie ? library.isFavorite(detailPopup.movie.id) : false}
+        isWatchlisted={detailPopup.movie ? library.isWatchlisted(detailPopup.movie.id) : false}
+        onClose={(source) => closeMovieDetailPopupV2(source)}
+        onPlay={detailPopup.movie ? startPlayback : undefined}
+        onRetry={detailPopup.movie ? handleDetailRetry : undefined}
         onTrailerPress={
           movieDetail?.trailerUrl
             ? () => {
@@ -5346,20 +5526,21 @@ useEffect(() => {
               }
             : undefined
         }
-        onFavoritePress={
-          selectedMovie
+        onToggleFavorite={
+          detailPopup.movie
             ? () => {
-                void toggleFavorite(activeProviderId, selectedMovie.id);
+                void toggleFavorite(activeProviderId, detailPopup.movie!.id);
               }
             : undefined
         }
-        onWatchlistPress={
-          selectedMovie
+        onToggleWatchlist={
+          detailPopup.movie
             ? () => {
-                void toggleWatchlist(activeProviderId, selectedMovie.id);
+                void toggleWatchlist(activeProviderId, detailPopup.movie!.id);
               }
             : undefined
         }
+        originItemId={detailPopup.originItemId}
       />
         </>
 

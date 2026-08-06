@@ -1318,6 +1318,11 @@ export function useMoviesScreenModel(
     focusedMovieIdRef.current = focusedMovieId;
   }, [focusedMovieId]);
 
+  const selectedMovieIdRef = useRef<string | null>(selectedMovieId);
+  useEffect(() => {
+    selectedMovieIdRef.current = selectedMovieId;
+  }, [selectedMovieId]);
+
   useEffect(() => {
     if (!resolvedDataSource || (!isSearchMode && (!selectedCategoryId || selectedCategoryId.startsWith('section:')))) {
       return;
@@ -1499,7 +1504,11 @@ export function useMoviesScreenModel(
         if (!startupStateRef.current.interactive) {
           const startupFocus = resolveMoviesStartupFocusTarget({
             savedMovieId: previousFocusedMovieId,
-            selectedMovieId: selectedMovieId,
+            // Stage 4.2N: read via ref, not the reactive `selectedMovieId` value,
+            // so that MovieDetailPopupV2 selecting a movie (Play target) does not
+            // add `selectedMovieId` to this effect's dependency array and
+            // retrigger a full category-page reload while the popup is open.
+            selectedMovieId: selectedMovieIdRef.current,
             viewportMovieIds: page.items.map((movie) => movie.id),
             hasCategories: categoriesRef.current.length > 0,
           });
@@ -1655,7 +1664,9 @@ export function useMoviesScreenModel(
     reloadToken,
     resolvedDataSource,
     selectedCategoryId,
-    selectedMovieId,
+    // Stage 4.2N: intentionally excluded — see selectedMovieIdRef usage above.
+    // selectedMovieId changes when MovieDetailPopupV2 selects a movie (Play
+    // target) and must not retrigger a category-page reload while browsing.
     sortOption,
     syncCategoryCount,
     updateVisibleMovies,

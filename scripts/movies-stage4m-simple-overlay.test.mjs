@@ -6,6 +6,7 @@ import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 
 const screen = fs.readFileSync('src/features/movies/MoviesScreen.tsx', 'utf8');
 const overlay = fs.readFileSync('src/features/movies/components/MovieDetailOverlay.tsx', 'utf8');
+const popup = fs.readFileSync('src/features/movies/components/MovieDetailPopupV2.tsx', 'utf8');
 const shell = fs.readFileSync('src/features/media-detail/MediaDetailOverlayShell.tsx', 'utf8');
 const simple = fs.readFileSync('src/features/movies/moviesSimpleDetailOverlay.ts', 'utf8');
 const sqlite = fs.readFileSync('src/features/movies/data/SqliteMovieDataSource.ts', 'utf8');
@@ -84,9 +85,11 @@ test('9. Failed focus return leaves browse visible and interactive', () => {
 });
 
 test('13. Detail enrichment errors stay inside the popup', () => {
-  assert.match(screen, /detailError=\{detailError\}/);
-  assert.match(overlay, /Unable to load additional details/);
-  assert.doesNotMatch(overlay, /Something went wrong/);
+  // Stage 4.2N: MovieDetailPopupV2 receives Movies' existing detail error as
+  // its own `error` prop and renders it inline (never a full-route error).
+  assert.match(screen, /error=\{detailError\}/);
+  assert.match(popup, /errorLine/);
+  assert.doesNotMatch(popup, /Something went wrong/);
 });
 
 test('14. Playback errors stay inside the popup', () => {
@@ -96,7 +99,8 @@ test('14. Playback errors stay inside the popup', () => {
 });
 
 test('15. Movies playback wiring remains intact', () => {
-  assert.match(screen, /onPlay=\{selectedMovie \? startPlayback/);
+  // Stage 4.2N: MovieDetailPopupV2 uses the same existing playback callback.
+  assert.match(screen, /onPlay=\{detailPopup\.movie \? startPlayback/);
   assert.match(screen, /const startPlayback/);
   assert.match(screen, /launchPlayback/);
   assert.match(screen, /setDetailSuppressedForPlayback/);

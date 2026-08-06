@@ -39,8 +39,10 @@ test('1. Shared shell is used by both Movies and Series', () => {
 });
 
 test('4. Back and X invoke the same close function', () => {
-  assert.match(moviesScreen, /closeDetailOverlay\('back'\)/);
-  assert.match(moviesScreen, /closeDetailOverlay\('x'\)/);
+  // Stage 4.2N: Movies now uses its own MovieDetailPopupV2 close path, shared
+  // by Back and X. Series is unchanged and still uses closeDetailOverlay.
+  assert.match(moviesScreen, /closeMovieDetailPopupV2\('back'\)/);
+  assert.match(moviesScreen, /onClose=\{\(source\) => closeMovieDetailPopupV2\(source\)\}/);
   assert.match(seriesScreen, /closeDetailOverlay\('back'\)/);
   assert.match(seriesScreen, /closeDetailOverlay\('x'\)/);
 });
@@ -118,7 +120,9 @@ test('19. Physical Back is consumed only while overlay is open', () => {
     shouldConsumeDetailOverlayBack({ overlayOpen: false, overlayVisible: false }),
     false,
   );
-  assert.match(moviesScreen, /shouldConsumeDetailOverlayBack/);
+  // Stage 4.2N: Movies' dedicated Back handler consumes Back only while
+  // detailPopup.open is true — the same "open implies consume" contract.
+  assert.match(moviesScreen, /if \(detailPopup\.open\) \{\s*\n\s*closeMovieDetailPopupV2\('back'\);/);
   assert.match(seriesScreen, /shouldConsumeDetailOverlayBack/);
 });
 

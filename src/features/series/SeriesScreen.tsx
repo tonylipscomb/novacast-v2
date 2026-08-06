@@ -6,7 +6,17 @@ import { useRouter } from 'expo-router';
 
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
-import { MediaDetailOverlay } from '@/components/media/MediaDetailOverlay';
+import { SeriesDetailOverlay } from '@/features/series/components/SeriesDetailOverlay';
+import {
+  MEDIA_DETAIL_OVERLAY_STAGE4M_MARKER,
+  canBeginDetailOverlayClose,
+  logDetailOverlayEvent,
+  shouldConsumeDetailOverlayBack,
+  type DetailOverlayState,
+  createClosedDetailOverlayState,
+  openDetailOverlayState,
+} from '@/features/media-detail';
+import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
 import {
   finishUnifiedPlaybackClose,
@@ -69,7 +79,21 @@ export function SeriesScreen() {
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
   const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
-  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailOverlayState, setDetailOverlayState] = useState<DetailOverlayState<SeriesSummary>>(
+    createClosedDetailOverlayState,
+  );
+  const detailOpen = detailOverlayState.open;
+  const detailCloseInFlightRef = useRef(false);
+  const screenInstanceIdRef = useRef(`series-screen-${Date.now().toString(36)}`);
+  const gridInstanceIdRef = useRef(`series-grid-${Date.now().toString(36)}`);
+  const railInstanceIdRef = useRef(`series-rail-${Date.now().toString(36)}`);
+  const browseSnapshotOnOpenRef = useRef<{
+    screenInstanceId: string;
+    gridInstanceId: string;
+    railInstanceId: string;
+    categoryId: string;
+    visibleItemCount: number;
+  } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchOverlayReady, setSearchOverlayReady] = useState(false);
   const [focusedEpisodeId, setFocusedEpisodeId] = useState<string | null>(null);
@@ -176,10 +200,67 @@ export function SeriesScreen() {
     });
   }, [activeProviderId, selectedItem?.id, visibleItems]);
 
+  const closeDetailOverlay = useCallback(
+    (source: 'back' | 'x') => {
+      if (
+        !canBeginDetailOverlayClose({
+          open: detailOverlayState.open,
+          closeInFlight: detailCloseInFlightRef.current,
+        })
+      ) {
+        return;
+      }
+      detailCloseInFlightRef.current = true;
+      const originItemId = detailOverlayState.originItemId;
+      const before = browseSnapshotOnOpenRef.current;
+      setDetailOverlayState(createClosedDetailOverlayState());
+      logDetailOverlayEvent('series_detail_overlay_close', {
+        source,
+        originItemId,
+        marker: MEDIA_DETAIL_OVERLAY_STAGE4M_MARKER,
+      });
+      if (
+        before &&
+        (before.screenInstanceId !== screenInstanceIdRef.current ||
+          before.gridInstanceId !== gridInstanceIdRef.current ||
+          before.railInstanceId !== railInstanceIdRef.current)
+      ) {
+        logDetailOverlayEvent('series_browse_instance_changed', {
+          before,
+          after: {
+            screenInstanceId: screenInstanceIdRef.current,
+            gridInstanceId: gridInstanceIdRef.current,
+            railInstanceId: railInstanceIdRef.current,
+          },
+        });
+      }
+      if (originItemId) {
+        requestTvFocus({
+          screen: 'series',
+          source: 'SeriesScreen',
+          region: 'poster-grid',
+          itemId: originItemId,
+          reason: 'stage4m-restore-origin-poster',
+          maxFrames: 2,
+          isActive: () => !detailOverlayState.open,
+          getTarget: () => posterRefs.current.get(originItemId) ?? null,
+          onResult: (result) => {
+            logDetailOverlayEvent('series_detail_origin_focus_result', {
+              originItemId,
+              requested: result.requested,
+              reason: result.reason,
+            });
+          },
+        });
+      }
+      detailCloseInFlightRef.current = false;
+    },
+    [detailOverlayState.open, detailOverlayState.originItemId],
+  );
+
   const closeDetail = useCallback(() => {
-    setDetailOpen(false);
-    focusSelectedPoster('restore-after-detail-close');
-  }, [focusSelectedPoster]);
+    closeDetailOverlay('x');
+  }, [closeDetailOverlay]);
 
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
@@ -205,11 +286,22 @@ export function SeriesScreen() {
         return;
       }
 
+      browseSnapshotOnOpenRef.current = {
+        screenInstanceId: screenInstanceIdRef.current,
+        gridInstanceId: gridInstanceIdRef.current,
+        railInstanceId: railInstanceIdRef.current,
+        categoryId: selectedCategoryId,
+        visibleItemCount: visibleItems.length,
+      };
       selectSeries(series);
       void loadSeriesDetail(series);
-      setDetailOpen(true);
+      setDetailOverlayState(openDetailOverlayState(series));
+      logDetailOverlayEvent('series_detail_overlay_open', {
+        seriesId: series.id,
+        marker: MEDIA_DETAIL_OVERLAY_STAGE4M_MARKER,
+      });
     },
-    [detailOpen, loadSeriesDetail, selectSeries, selectedItem?.id],
+    [detailOpen, loadSeriesDetail, selectSeries, selectedCategoryId, selectedItem?.id, visibleItems.length],
   );
 
   const handleRegisterPosterRef = useCallback((seriesId: string, instance: ElementRef<typeof View> | null) => {
@@ -242,7 +334,7 @@ export function SeriesScreen() {
       selectSeries(series);
       focusSeries(series);
       void loadSeriesDetail(series);
-      setDetailOpen(true);
+      setDetailOverlayState(openDetailOverlayState(series));
     },
     [focusSeries, loadSeriesDetail, selectSeries, selectedCategoryId],
   );
@@ -260,7 +352,7 @@ export function SeriesScreen() {
         return;
       }
 
-      setDetailOpen(false);
+      // Keep overlay logically open but visually suppressed via playbackUiActive.
       await launchSeriesEpisodePlayback({
         bundle,
         providerId: activeProviderId,
@@ -310,8 +402,13 @@ export function SeriesScreen() {
             return true;
           }
 
-          if (detailOpen) {
-            closeDetail();
+          if (
+            shouldConsumeDetailOverlayBack({
+              overlayOpen: detailOpen,
+              overlayVisible: detailOverlayVisible,
+            })
+          ) {
+            closeDetailOverlay('back');
             return true;
           }
 
@@ -343,7 +440,18 @@ export function SeriesScreen() {
     );
 
     return () => subscription.remove();
-  }, [closeDetail, closePlayback, closeSearch, detailOpen, guide.visible, playbackActive, playbackClosing, router, searchOpen]);
+  }, [
+    closeDetailOverlay,
+    closePlayback,
+    closeSearch,
+    detailOpen,
+    detailOverlayVisible,
+    guide.visible,
+    playbackActive,
+    playbackClosing,
+    router,
+    searchOpen,
+  ]);
 
   useEffect(() => {
     if (!didJustClose) {
@@ -351,6 +459,15 @@ export function SeriesScreen() {
     }
 
     finishUnifiedPlaybackClose();
+
+    // Stage 4.2M: returning from playback reveals the same Detail popup when still open.
+    if (detailOverlayState.open) {
+      logDetailOverlayEvent('series_detail_revealed_after_playback', {
+        seriesId: detailOverlayState.originItemId,
+        marker: MEDIA_DETAIL_OVERLAY_STAGE4M_MARKER,
+      });
+      return;
+    }
 
     setRestoringBrowseFocus(true);
     const restoreId = resolvePosterRestorationId({
@@ -387,7 +504,14 @@ export function SeriesScreen() {
       task.cancel();
       setRestoringBrowseFocus(false);
     };
-  }, [activeProviderId, didJustClose, selectedItem?.id, visibleItems]);
+  }, [
+    activeProviderId,
+    detailOverlayState.open,
+    detailOverlayState.originItemId,
+    didJustClose,
+    selectedItem?.id,
+    visibleItems,
+  ]);
 
   const executeSeriesSearch = useCallback(
     (request: Parameters<typeof searchSeries>[2]) => searchSeries(activeProviderId, bundle?.seriesDataSource, request),
@@ -671,7 +795,7 @@ useEffect(() => {
         </NovaTvShell>
         </View>
 
-      <MediaDetailOverlay
+      <SeriesDetailOverlay
         visible={detailOverlayVisible}
         detail={
           seriesDetail && seriesDetail.seriesId === selectedItem?.seriesId
@@ -680,12 +804,12 @@ useEffect(() => {
               ? buildSeriesPreviewDetail(selectedItem)
               : null
         }
-        detailError={null}
+        detailError={detailError}
         detailLoading={detailLoading}
         isFavorite={isSelectedFavorite}
         isWatchlisted={isSelectedWatchlisted}
         continueWatchingLabel={continueWatching ? 'Resume' : 'Play'}
-        onClose={closeDetail}
+        onClose={() => closeDetailOverlay('x')}
         onRetry={selectedItem ? handleDetailRetry : undefined}
         onPlay={seriesDetail && seriesDetail.seriesId === selectedItem?.seriesId && seriesDetail.seasons.length ? () => void playFirstEpisode() : undefined}
         onPlayFromBeginning={seriesDetail && seriesDetail.seriesId === selectedItem?.seriesId ? () => void playFirstEpisode(true) : undefined}

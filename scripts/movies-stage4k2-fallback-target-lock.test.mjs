@@ -426,8 +426,9 @@ test('13) Category rail K.1 fix remains intact after successful fallback close',
   assert.ok(result.events.includes('detail_close_visual_state_cleanup'));
   assert.match(screen, /MOVIES_FOCUS_STAGE4K1_MARKER/);
   assert.match(screen, /railInstanceId=\{railInstanceIdRef\.current\}/);
-  assert.match(overlay, /rootClosedInert/);
-  assert.match(overlay, /rootIsolationOnly/);
+  // Stage 4.2M: MovieDetailOverlay is a thin shell adapter (no isolation-only roots).
+  assert.match(overlay, /MediaDetailOverlayShell/);
+  assert.match(overlay, /Stage 4\.2M/);
   assert.equal(
     isMoviesDetailOverlayClosedShellInert({
       panelVisible: false,

@@ -178,21 +178,23 @@ test('7. Pinned startup viewport query does not call full readiness/recovery', (
 });
 
 test('8. Invalid regular View tag is never passed as blurTargetId (Stage 4.2L.2: no blur target)', () => {
-  // Stage 4.2L.2: Movies Detail no longer uses BlurTargetView / blurTarget on Android TV.
+  // Stage 4.2M: blur lives in shared MediaDetailOverlayShell (intensity + scrim).
+  const shell = fs.readFileSync('src/features/media-detail/MediaDetailOverlayShell.tsx', 'utf8');
   assert.equal(isValidExpoBlurTargetRef({ current: {} }), false);
   assert.equal(isValidExpoBlurTargetRef(null), false);
   assert.doesNotMatch(screen, /BlurTargetView/);
   assert.doesNotMatch(screen, /__expoBlurTarget/);
   assert.doesNotMatch(overlay, /blurTarget=\{/);
-  assert.match(overlay, /intensity=\{28\}/);
+  assert.match(shell, /intensity=\{28\}/);
 });
 
 test('9. Blur fallback preserves stable Detail shell and focus', () => {
-  // Stage 4.2L.2: intensity + scrim only; focus trap still stable.
-  assert.match(overlay, /keepFocusTrap|overlayInstanceId/);
-  assert.match(screen, /keepFocusTrap/);
-  assert.match(overlay, /backgroundScrim/);
+  const shell = fs.readFileSync('src/features/media-detail/MediaDetailOverlayShell.tsx', 'utf8');
+  // Stage 4.2M guest shell: intensity + scrim; Movies uses MediaDetailOverlayShell.
+  assert.match(overlay, /MediaDetailOverlayShell/);
+  assert.match(shell, /styles\.scrim/);
   assert.doesNotMatch(overlay, /validBlurTarget \? \(/);
+  assert.doesNotMatch(shell, /blurTarget=\{/);
 });
 
 test('10. HTTP 458 is not labeled user_cancelled', () => {

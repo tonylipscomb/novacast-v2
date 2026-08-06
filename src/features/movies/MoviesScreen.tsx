@@ -128,8 +128,15 @@ import {
   MOVIES_FOCUS_STAGE4L2_MARKER,
   shouldUseMoviesDetailCloseIsolationCover,
 } from './moviesDetailSimpleBack';
+import {
+  MOVIES_FOCUS_STAGE4M_MARKER,
+  MOVIES_SIMPLE_DETAIL_OVERLAY_ENABLED,
+  moviesDetailOverlayVisible,
+  shouldConsumeDetailOverlayBack,
+} from './moviesSimpleDetailOverlay';
 import { normalizePlaybackFailure } from '@/features/analytics/playbackAnalytics';
 import type { RequestTvFocusResult } from '@/features/navigation/tvFocusDiagnostics';
+import { logDetailOverlayEvent } from '@/features/media-detail';
 
 import { buildMoviePreviewDetail } from '@/features/media-browser/mediaDetail';
 import {
@@ -439,14 +446,28 @@ export function MoviesScreen() {
   const [xCloseActivationLocked, setXCloseActivationLocked] = useState(false);
   const gridGateOpenRef = useRef<boolean | null>(null);
   const playbackUiActive = playbackActive || playbackClosing || launchingPlayback;
-  const detailClosing = isMoviesDetailClosingPhase(detailFocusPhase);
-  const detailOverlayMounted = isMoviesDetailOverlayMounted(detailFocusPhase);
-  const detailOverlayVisible =
-    (detailOverlayMounted || detailVisualHold) &&
-    !detailSuppressedForPlayback &&
-    !playbackUiActive &&
-    Boolean(selectedMovie);
-  const focusHandoffActive = detailClosing || detailVisualHold;
+  // Stage 4.2M: guest overlay — no multi-phase closing / isolation handoff.
+  const detailClosing = MOVIES_SIMPLE_DETAIL_OVERLAY_ENABLED
+    ? false
+    : isMoviesDetailClosingPhase(detailFocusPhase);
+  const detailOverlayMounted = MOVIES_SIMPLE_DETAIL_OVERLAY_ENABLED
+    ? detailOpen
+    : isMoviesDetailOverlayMounted(detailFocusPhase);
+  const detailOverlayVisible = MOVIES_SIMPLE_DETAIL_OVERLAY_ENABLED
+    ? moviesDetailOverlayVisible({
+        detailOpen,
+        detailSuppressedForPlayback,
+        playbackUiActive,
+        hasSelectedMovie: Boolean(selectedMovie),
+      })
+    : (detailOverlayMounted || detailVisualHold) &&
+      !detailSuppressedForPlayback &&
+      !playbackUiActive &&
+      Boolean(selectedMovie);
+  const focusHandoffActive = MOVIES_SIMPLE_DETAIL_OVERLAY_ENABLED
+    ? false
+    : detailClosing || detailVisualHold;
+  const detailCloseInFlightRef = useRef(false);
   const naturalReturnActive = isMoviesNaturalReturnPhase(detailFocusPhase);
   const allowOffscreenInitialRestore =
     !naturalReturnActive && !isMoviesDetailReturnFastPath(detailReturnPathRef.current);
@@ -2893,172 +2914,105 @@ export function MoviesScreen() {
     [],
   );
 
-  const closeDetail = useCallback((closeSource: 'back' | 'x' | 'other' = 'other') => {
-    detailCloseSourceRef.current = closeSource;
-
-    if (closeSource === 'x') {
-      const acquire = tryAcquireMoviesDetailXCloseActivation({
-        lock: xCloseActivationLockRef.current,
-        movieId: selectedMovie?.id ?? null,
-      });
-      xCloseActivationLockRef.current = acquire.lock;
-      if (!acquire.acquired) {
+  /**
+   * Stage 4.2M — Back and X share this exact close path.
+   * One state transition; one optional safe origin focus request; no isolation.
+   */
+  const closeDetailOverlay = useCallback(
+    (source: 'back' | 'x') => {
+      if (!detailOpenRef.current || detailCloseInFlightRef.current) {
         return;
       }
-      setXCloseActivationLocked(true);
-      setPreserveXCloseFocus(true);
-      if (isOnnMoviesTraceEnabled()) {
-        traceOnnMoviesEvent('Overlay', 'detail_x_close_pressed', {
-          movieId: selectedMovie?.id ?? null,
-          closeButtonNativeHandle: null,
-          currentFocusedTarget: 'close',
-          token: detailFocusTokenRef.current?.token ?? null,
-          marker: MOVIES_FOCUS_STAGE4H_MARKER,
-        });
-      }
-    }
+      detailCloseInFlightRef.current = true;
+      detailCloseSourceRef.current = source;
 
-    if (!canBeginMoviesDetailClose(detailFocusPhaseRef.current)) {
-      // One close transition only — swallow duplicate Back during closing.
-      if (closeSource === 'x') {
-        // Keep X lock while handoff already in progress.
-        return;
-      }
-      return;
-    }
+      const originItemId =
+        browseFocusSnapshotRef.current?.movieId ??
+        selectedMovie?.id ??
+        searchRestoreMovieId ??
+        null;
+      const fromSearch = detailSourceRef.current === 'search';
 
-    // Stage 4.2J: Search-origin Detail close — keep Detail mounted until result confirms.
-    if (detailSourceRef.current === 'search') {
-      const movieId = selectedMovie?.id ?? searchRestoreMovieId;
-      if (!movieId) {
-        return;
-      }
-      const token = `search-close-${++restorationSequenceRef.current}`;
-      if (closeTransactionRef.current && !closeTransactionRef.current.revealCommitted) {
-        if (isOnnMoviesTraceEnabled()) {
-          traceOnnMoviesEvent('Overlay', 'detail_close_transaction_violation', {
-            reason: 'concurrent-search-close',
-            token,
-            activeToken: closeTransactionRef.current.token,
-            marker: MOVIES_FOCUS_STAGE4J_MARKER,
-          });
-        }
-        return;
-      }
-      closeCommitTokenRef.current = null;
-      closeTransactionRef.current = createMoviesDetailCloseTransaction({
-        token,
-        source: closeSource,
-        origin: 'search',
-        targetMovieId: movieId,
-        targetIndex: 0,
-        categoryId: selectedCategoryId,
-        gridInstanceId: getOnnMoviesGridInstanceId(),
-        listOffset: 0,
-        focusedDetailControl: actualFocusedComponentRef.current,
-        startedAt: Date.now(),
-        listRevision: getMoviesBrowseListRevision(),
+      logDetailOverlayEvent('movies_detail_overlay_close', {
+        source,
+        originItemId,
+        fromSearch,
+        marker: MOVIES_FOCUS_STAGE4M_MARKER,
       });
-      searchReturnPendingRef.current = true;
-      setSearchReturnPending(true);
-      if (closeSource === 'x') {
-        setPreserveXCloseFocus(true);
-      }
-      setDetailVisualHoldSafe(true);
-      detailFocusTokenRef.current = {
-        token,
-        source: 'detail-close',
-        snapshot:
-          browseFocusSnapshotRef.current ??
-          createMoviesBrowseFocusSnapshot({
-            categoryId: selectedCategoryId,
-            movieId,
-            movieIndex: 0,
-            verticalOffset: 0,
-            visibleFirstIndex: 0,
-            visibleLastIndex: 0,
-            columns: getSeriesPosterColumns(width),
-          }),
-      };
-      if (isOnnMoviesTraceEnabled()) {
-        traceOnnMoviesEvent('Overlay', 'detail_close_transaction_started', {
-          token,
-          source: closeSource,
-          origin: 'search',
-          movieId,
-          marker: MOVIES_FOCUS_STAGE4J_MARKER,
-        });
-        traceOnnMoviesEvent('Overlay', 'detail_close_focus_owner_preserved', {
-          token,
-          source: closeSource,
-          origin: 'search',
-          focusedDetailControl: actualFocusedComponentRef.current,
-          marker: MOVIES_FOCUS_STAGE4J_MARKER,
-        });
-      }
-      logMoviesSearchSelection({
-        requestId: getActiveMoviesSearchRequestId(),
-        query: searchQueryForSelectionRef.current,
-        movieId,
-        action: 'detail-closed',
-        searchPhase: 'returning',
-        detailSource: 'search',
-        searchOpen: true,
-        detailOpen: true,
-        selectedMovieStored: Boolean(movieId),
-        overlayVisible: true,
-      });
-      // Keep Detail open/mounted; Search returns underneath with restore focus.
-      setSearchRestoreMovieId(movieId);
-      setSearchOverlayReady(true);
-      setSearchPhase('returning');
-      searchPhaseRef.current = 'returning';
-      logMoviesSearchSelection({
-        requestId: getActiveMoviesSearchRequestId(),
-        query: searchQueryForSelectionRef.current,
-        movieId,
-        action: 'search-restoring',
-        searchPhase: 'returning',
-        detailSource: 'search',
-        searchOpen: true,
-        detailOpen: true,
-        selectedMovieStored: Boolean(movieId),
-        overlayVisible: true,
-      });
-      return;
-    }
 
-    beginFocusAuditCycle('movies-detail-close', {
-      categoryId: selectedCategoryId,
-      movieId: browseFocusSnapshotRef.current?.movieId ?? null,
-    });
-    // Keep overlay mounted (detailOpen stays true) until exact poster confirm.
-    if (!beginDetailFocusClose('detail-close')) {
-      setDetailOpen(false);
+      // Immediate guest dismiss — browse stays mounted underneath.
       detailOpenRef.current = false;
+      setDetailOpen(false);
       setDetailSuppressedForPlayback(false);
       setDetailFocusPhaseSafe('browse');
-      releaseXCloseOwnership('cancelled');
-      focusSelectedPoster('restore-after-detail-close');
-    } else if (closeSource === 'x' && isOnnMoviesTraceEnabled()) {
-      traceOnnMoviesEvent('Overlay', 'detail_x_focus_owner_preserved', {
-        closeButtonStillFocusable: true,
-        visualHoldActive: true,
-        token: detailFocusTokenRef.current?.token ?? null,
-        marker: MOVIES_FOCUS_STAGE4H_MARKER,
-      });
-    }
-  }, [
-    beginDetailFocusClose,
-    focusSelectedPoster,
-    releaseXCloseOwnership,
-    searchRestoreMovieId,
-    selectedCategoryId,
-    selectedMovie?.id,
-    setDetailFocusPhaseSafe,
-    setDetailVisualHoldSafe,
-    width,
-  ]);
+      setDetailVisualHoldSafe(false);
+      setVisualIsolationSafe(false);
+      setPreserveXCloseFocus(false);
+      setXCloseActivationLocked(false);
+      setMoviesBrowseUiFrozenForDetail(false);
+      closeTransactionRef.current = null;
+      detailFocusTokenRef.current = null;
+      immutableCloseTargetRef.current = null;
+      detailReturnPathRef.current = null;
+      releaseXCloseOwnership('detail-closed');
+
+      if (fromSearch && originItemId) {
+        setSearchRestoreMovieId(originItemId);
+        setSearchOverlayReady(true);
+        setSearchPhase('returning');
+        searchPhaseRef.current = 'returning';
+        searchReturnPendingRef.current = true;
+        setSearchReturnPending(true);
+      }
+
+      // At most one safe origin focus request after close. Never keep overlay open waiting.
+      if (originItemId && !fromSearch) {
+        requestTvFocus({
+          screen: 'movies',
+          source: 'MoviesScreen',
+          region: 'poster-grid',
+          itemId: originItemId,
+          reason: 'stage4m-restore-origin-poster',
+          maxFrames: 2,
+          isActive: () => !detailOpenRef.current,
+          getTarget: () => getValidatedPosterTarget(originItemId),
+          onResult: (result: RequestTvFocusResult) => {
+            logDetailOverlayEvent('movies_detail_origin_focus_result', {
+              originItemId,
+              requested: result.requested,
+              reason: result.reason,
+              marker: MOVIES_FOCUS_STAGE4M_MARKER,
+            });
+          },
+        });
+      } else if (!fromSearch) {
+        // No valid origin — leave browse responsive; do not focus Search.
+        logDetailOverlayEvent('movies_detail_origin_focus_skipped', {
+          reason: 'origin-missing',
+          marker: MOVIES_FOCUS_STAGE4M_MARKER,
+        });
+      }
+
+      detailCloseInFlightRef.current = false;
+    },
+    [
+      getValidatedPosterTarget,
+      releaseXCloseOwnership,
+      searchRestoreMovieId,
+      selectedMovie?.id,
+      setDetailFocusPhaseSafe,
+      setDetailVisualHoldSafe,
+      setVisualIsolationSafe,
+    ],
+  );
+
+  const closeDetail = useCallback(
+    (closeSource: 'back' | 'x' | 'other' = 'other') => {
+      // Stage 4.2M: Back and X invoke the same guest close. 'other' maps to 'x'.
+      closeDetailOverlay(closeSource === 'back' ? 'back' : 'x');
+    },
+    [closeDetailOverlay],
+  );
 
   // Stage 4.2G natural: return-focus-requested → confirmed → closed.
   // Stage 3D.1 fallback: prepare → viewport lock → focus → confirm.
@@ -3756,14 +3710,14 @@ export function MoviesScreen() {
           return true;
         }
 
+        // Stage 4.2M: consume Back only while the guest overlay is visibly open.
         if (
-          shouldHandleMoviesDetailBack({
-            playbackUiActive: false,
-            detailOpen: detailOpen || detailOverlayMounted,
-            detailClosing,
+          shouldConsumeDetailOverlayBack({
+            overlayOpen: detailOpen,
+            overlayVisible: detailOverlayVisible,
           })
         ) {
-          closeDetail('back');
+          closeDetailOverlay('back');
           return true;
         }
 
@@ -3823,12 +3777,11 @@ export function MoviesScreen() {
     return () => subscription.remove();
   }, [
     categories.length,
-    closeDetail,
+    closeDetailOverlay,
     closePlayback,
     closeSearch,
-    detailClosing,
     detailOpen,
-    detailOverlayMounted,
+    detailOverlayVisible,
     guide.visible,
     launchingPlayback,
     loadStatus,
@@ -5370,16 +5323,7 @@ useEffect(() => {
 
       <MovieDetailOverlay
         visible={detailOverlayVisible}
-        // Stage 4.2K: one stable shell for the MoviesScreen lifetime.
-        keepFocusTrap
-        overlayInstanceId={overlayInstanceIdRef.current}
-        focusHandoffActive={focusHandoffActive}
-        visualHoldActive={detailVisualHold || shouldHoldMoviesDetailVisual(detailFocusPhase)}
-        visualIsolationActive={visualIsolationActive}
-        preserveCloseButtonFocus={preserveCloseButtonFocus}
-        closeActivationLocked={xCloseActivationLocked}
-        closeTargetRef={overlayCloseTargetRef}
-        // Stage 4.2L.2: never pass blurTarget / blurTargetId — intensity + scrim only.
+        // Stage 4.2M: guest shell via MediaDetailOverlayShell — no isolation/hold/blurTarget.
         detail={
           selectedMovie
             ? movieDetail?.id === selectedMovie.id
@@ -5387,17 +5331,14 @@ useEffect(() => {
               : buildMoviePreviewDetail(selectedMovie)
             : null
         }
-        detailError={null}
-        detailLoading={detailLoading && !focusHandoffActive}
+        detailError={detailError}
+        detailLoading={detailLoading}
         continueWatchingLabel={continueWatchingLabel}
-        continueWatchingProgress={continueWatchingEntry?.progressPercent ?? null}
-        relatedMovies={relatedMovies}
         isFavorite={selectedMovie ? library.isFavorite(selectedMovie.id) : false}
         isWatchlisted={selectedMovie ? library.isWatchlisted(selectedMovie.id) : false}
-        onClose={() => closeDetail('x')}
-        onPlay={focusHandoffActive ? undefined : selectedMovie ? startPlayback : undefined}
-        onRetry={focusHandoffActive ? undefined : selectedMovie ? handleDetailRetry : undefined}
-        onSelectRelated={focusHandoffActive ? undefined : handleSelectRelatedMovie}
+        onClose={() => closeDetailOverlay('x')}
+        onPlay={selectedMovie ? startPlayback : undefined}
+        onRetry={selectedMovie ? handleDetailRetry : undefined}
         onTrailerPress={
           movieDetail?.trailerUrl
             ? () => {
@@ -5406,18 +5347,18 @@ useEffect(() => {
             : undefined
         }
         onFavoritePress={
-          focusHandoffActive || !selectedMovie
-            ? undefined
-            : () => {
+          selectedMovie
+            ? () => {
                 void toggleFavorite(activeProviderId, selectedMovie.id);
               }
+            : undefined
         }
         onWatchlistPress={
-          focusHandoffActive || !selectedMovie
-            ? undefined
-            : () => {
+          selectedMovie
+            ? () => {
                 void toggleWatchlist(activeProviderId, selectedMovie.id);
               }
+            : undefined
         }
       />
         </>

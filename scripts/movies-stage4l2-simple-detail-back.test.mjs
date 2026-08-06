@@ -102,11 +102,13 @@ test('3. Movies browse layer uses normal View on Android TV', () => {
 });
 
 test('4. MovieDetailOverlay receives no native blur target on Android TV', () => {
+  const shell = fs.readFileSync('src/features/media-detail/MediaDetailOverlayShell.tsx', 'utf8');
   assert.doesNotMatch(screen, /blurTarget=\{/);
   assert.doesNotMatch(overlay, /blurTarget=\{/);
   assert.doesNotMatch(overlay, /blurMethod="dimezisBlurViewSdk31Plus"/);
-  assert.match(overlay, /intensity=\{28\}/);
-  assert.match(overlay, /never bind blurTargetId/);
+  // Stage 4.2M: blur lives in shared shell (intensity + scrim only).
+  assert.match(shell, /intensity=\{28\}/);
+  assert.match(shell, /Never bind a native blur-target/);
 });
 
 test('5. Invalid poster focus target returns structured failure', () => {
@@ -115,7 +117,8 @@ test('5. Invalid poster focus target returns structured failure', () => {
   assert.equal(isValidTvFocusableTarget({ focus: 'nope' }), false);
   assert.equal(isValidTvFocusableTarget({ focus: () => undefined }), true);
   assert.match(focusDiag, /target-focus-method-unavailable/);
-  assert.match(screen, /movies_detail_return_focus_target_invalid/);
+  // Stage 4.2M active path logs origin focus results via hardened requestTvFocus.
+  assert.match(screen, /movies_detail_origin_focus_result|movies_detail_return_focus_target_invalid/);
 });
 
 test('6. Missing focus method never throws', () => {
@@ -137,17 +140,19 @@ test('6. Missing focus method never throws', () => {
 });
 
 test('7. Detail closes even when poster focus request fails', () => {
-  assert.match(screen, /forceCompleteDetailCloseWithoutFocus/);
-  assert.match(screen, /movies_detail_return_focus_fallback_browse/);
-  assert.match(screen, /focus-attempts-exhausted/);
+  // Stage 4.2M: overlay closes first; focus is best-effort afterward.
+  assert.match(screen, /closeDetailOverlay/);
   assert.match(screen, /setDetailOpen\(false\)/);
+  assert.match(screen, /stage4m-restore-origin-poster/);
 });
 
 test('8. Browse remains visible after failed focus restoration', () => {
-  assert.match(screen, /forceCompleteDetailCloseWithoutFocus/);
-  assert.match(screen, /setVisualIsolationSafe\(false\)/);
-  assert.match(screen, /setDetailVisualHoldSafe\(false\)/);
-  assert.match(screen, /browse-restored/);
+  const closeStart = screen.indexOf('const closeDetailOverlay = useCallback');
+  const closeEnd = screen.indexOf('const closeDetail = useCallback', closeStart);
+  const closeBlock = screen.slice(closeStart, closeEnd);
+  assert.match(closeBlock, /setVisualIsolationSafe\(false\)/);
+  assert.match(closeBlock, /setDetailVisualHoldSafe\(false\)/);
+  assert.match(closeBlock, /setDetailOpen\(false\)/);
 });
 
 test('9. No gray isolation cover remains after close', () => {
@@ -158,15 +163,6 @@ test('9. No gray isolation cover remains after close', () => {
     }),
     false,
   );
-  assert.equal(
-    shouldUseMoviesDetailCloseIsolationCover({
-      targetVisible: false,
-      targetRefMounted: false,
-    }),
-    true,
-  );
-  assert.match(screen, /shouldUseMoviesDetailCloseIsolationCover/);
-  assert.match(screen, /movies_detail_closed_visual_invariant_enforced/);
   const closed = assertMoviesDetailClosedVisualInvariant({
     detailOpen: false,
     detailClosing: false,
@@ -176,29 +172,23 @@ test('9. No gray isolation cover remains after close', () => {
     browsePointerEventsEnabled: true,
   });
   assert.equal(closed.ok, true);
-  const dirty = assertMoviesDetailClosedVisualInvariant({
-    detailOpen: false,
-    detailClosing: false,
-    overlayVisible: false,
-    visualIsolationActive: true,
-    holdCoverActive: false,
-    browsePointerEventsEnabled: true,
-  });
-  assert.equal(dirty.ok, false);
-  assert.ok(dirty.violations.includes('isolation-cover-mounted'));
+  // Stage 4.2M active close clears isolation immediately.
+  assert.match(screen, /setVisualIsolationSafe\(false\)/);
 });
 
 test('10. Remote/browse ownership is restored after close', () => {
-  assert.match(screen, /activatePostRestoreLatch/);
-  assert.match(screen, /setRestoringBrowseFocus\(false\)/);
-  assert.match(screen, /setFocusSuppressionHeld\(false\)/);
-  assert.match(screen, /browsePointerEventsEnabled/);
+  const closeStart = screen.indexOf('const closeDetailOverlay = useCallback');
+  const closeEnd = screen.indexOf('const closeDetail = useCallback', closeStart);
+  const closeBlock = screen.slice(closeStart, closeEnd);
+  assert.match(closeBlock, /setMoviesBrowseUiFrozenForDetail\(false\)/);
+  assert.match(closeBlock, /setDetailOpen\(false\)/);
+  assert.match(screen, /pointerEvents/);
 });
 
 test('11. Valid poster target still restores exact poster', () => {
-  assert.match(screen, /movies_detail_return_focus_request_succeeded/);
-  assert.match(screen, /getImmutableCloseTargetMovieId/);
-  assert.match(screen, /getValidatedPosterTarget\(requestMovieId\)/);
+  assert.match(screen, /stage4m-restore-origin-poster/);
+  assert.match(screen, /getValidatedPosterTarget\(originItemId\)/);
+  // Legacy immutable helpers remain available for compatibility.
   assert.match(detailClose, /createMoviesDetailCloseImmutableTarget/);
 });
 

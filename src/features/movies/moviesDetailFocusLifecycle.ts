@@ -2,6 +2,11 @@
  * Stage 3D / 3D.1 / 4.2G — Movies-only detail focus lifecycle.
  * Pure helpers + diagnostics. MoviesScreen is the sole coordinator.
  *
+ * @deprecated Stage 4.2M — The active Movies Detail path uses the guest overlay
+ * (`closeDetailOverlay` / MediaDetailOverlayShell) and must not enter these
+ * multi-phase close transitions. This module remains for legacy tests and
+ * unused coordinator branches until a later cleanup pass.
+ *
  * Stage 4.2G/K natural return (mounted poster):
  *   detail-open → return-focus-arming → return-focus-requested → return-focus-confirmed → browse-restored → browse
  * Fallback (unmounted / generation change / etc.) retains closing-prepare → viewport → focus.

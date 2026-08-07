@@ -8,6 +8,7 @@ import { displayProviderCategoryName } from '@/features/providers/categoryDispla
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 import { formatLiveTvCategoryCount } from './liveTvCategoryCount';
+import { dedupeCountryCategoryLabel } from './liveTvCategoryLabel';
 
 type LiveTvCategoryRowProps = {
   category: ProviderLiveCategory;
@@ -46,6 +47,7 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
     countryCode: category.countryCode,
     contentType: 'live',
   });
+  const dedupedName = dedupeCountryCategoryLabel(displayName, category.countryCode);
   const showMarker = Boolean(category.countryCode) || category.regionMarker === 'multi';
 
   return (
@@ -75,7 +77,7 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
         numberOfLines={1}
         ellipsizeMode="tail"
         style={[styles.categoryName, selected && styles.categoryNameSelected, isFocused && styles.categoryNameFocused]}>
-        {displayName}
+        {dedupedName}
       </Text>
       <Text numberOfLines={1} style={[styles.categoryCount, isFocused && styles.categoryCountFocused]}>
         {formatLiveTvCategoryCount(category.count)}
@@ -136,7 +138,7 @@ function createStyles(theme: NovaTheme) {
       width: 3,
       height: 20,
       borderRadius: 2,
-      backgroundColor: theme.colors.success,
+      backgroundColor: theme.colors.textPrimary,
     },
     focusRail: {
       // Glass box carries focus; keep rail width for layout stability only.

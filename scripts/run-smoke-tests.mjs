@@ -59,6 +59,7 @@ const suites = [
   'live-guide-smoke.test.mjs',
   'live-tv-channel-accent.test.mjs',
   'live-tv-focus-pass2.test.mjs',
+  'live-tv-selection-driven-preview.test.mjs',
   'guide-polish.test.mjs',
   'live-tv-scroll-perf.test.mjs',
   'tv-focus-stabilization.test.mjs',

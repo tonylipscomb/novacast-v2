@@ -38,7 +38,6 @@ import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
 import {
-  applyDebouncedPreview,
   chooseLiveChannel,
   clearPreviewConfirmationOnFocus,
   closeLiveFullscreen,
@@ -96,16 +95,8 @@ import {
   PREVIEW_FOCUS_DEBOUNCE_MS,
   shouldClearPreviewStreamUrl,
 } from './liveTvPreviewScheduling';
-import {
-  shouldApplyDebouncedPreviewTune,
-  shouldLoadCategoryOnFocusAlone,
-  shouldSkipPreviewRestart,
-} from './liveTvFocusPreview';
-import {
-  recordLiveTvFocusEvent,
-  recordLiveTvPreviewCancel,
-  recordLiveTvPreviewStart,
-} from './liveTvFocusDiagnostics';
+import { shouldLoadCategoryOnFocusAlone } from './liveTvFocusPreview';
+import { recordLiveTvFocusEvent } from './liveTvFocusDiagnostics';
 import { getLiveTvRowVisualFlags } from './liveTvUiPerfMode';
 import { useLiveTvScreenModel } from './useLiveTvScreenModel';
 import { displayLiveProgramText, isRawLiveStreamValue } from './liveTvProgramText';
@@ -321,9 +312,9 @@ export function LiveTvScreen() {
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [categoryNextFocusRightHandle, setCategoryNextFocusRightHandle] = useState<number | undefined>();
+  const [watchButtonLeftHandle, setWatchButtonLeftHandle] = useState<number | undefined>();
   const pendingPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedChannelIdRef = useRef<string | null>(null);
-  const [categoryFocusEpoch, setCategoryFocusEpoch] = useState(0);
   const watchButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenCloseButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenLaunchSourceRef = useRef<FullscreenLaunchSource>(null);
@@ -373,6 +364,11 @@ export function LiveTvScreen() {
     const channelRef = channelId ? channelRowRefs.current.get(channelId) : null;
     const nextRight = channelRef ? findNodeHandle(channelRef) ?? undefined : undefined;
     setCategoryNextFocusRightHandle((current) => (current === nextRight ? current : nextRight));
+
+    const selectedChannelId = liveStateRef.current?.selectedChannelId ?? null;
+    const selectedChannelRef = selectedChannelId ? channelRowRefs.current.get(selectedChannelId) : null;
+    const nextWatchLeft = selectedChannelRef ? findNodeHandle(selectedChannelRef) ?? undefined : undefined;
+    setWatchButtonLeftHandle((current) => (current === nextWatchLeft ? current : nextWatchLeft));
   }, [channels]);
 
   const registerChannelRowRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
@@ -754,48 +750,11 @@ export function LiveTvScreen() {
         return next === base ? current : next;
       });
 
+      // Focus is browse-only: it moves highlight and enriches EPG/current-program
+      // metadata, but must never resolve a playback URL or start/restart the live
+      // preview. Preview is selection-driven — it begins on OK (see tuneChannel).
+      // Cancel any stray scheduled preview so D-pad browsing never tunes a stream.
       cancelPendingPreview();
-
-      const active = liveStateRef.current;
-      if (
-        active &&
-        shouldSkipPreviewRestart({
-          channelId,
-          previewChannelId: active.previewChannelId,
-          previewStatus: active.previewStatus,
-        })
-      ) {
-        return;
-      }
-
-      pendingPreviewTimerRef.current = setTimeout(() => {
-        pendingPreviewTimerRef.current = null;
-        if (!shouldApplyDebouncedPreviewTune(channelId, focusedChannelIdRef.current)) {
-          recordLiveTvPreviewCancel(channelId);
-          return;
-        }
-
-        setState((current) => {
-          const base = current ?? liveStateRef.current;
-          if (!base) {
-            return current;
-          }
-          if (
-            shouldSkipPreviewRestart({
-              channelId,
-              previewChannelId: base.previewChannelId,
-              previewStatus: base.previewStatus,
-            })
-          ) {
-            return current;
-          }
-          recordLiveTvPreviewStart(channelId);
-          if (shouldClearPreviewStreamUrl(base.previewChannelId, channelId)) {
-            setPreviewStreamUrl(null);
-          }
-          return applyDebouncedPreview(base, channelId);
-        });
-      }, PREVIEW_FOCUS_DEBOUNCE_MS);
     },
     [cancelPendingPreview, enrichFocusedChannelEpg],
   );
@@ -838,7 +797,6 @@ export function LiveTvScreen() {
     liveRetryAttemptedRef.current = false;
     preferredCategoryFocusId.current = categoryId;
     cancelPendingPreview();
-    setCategoryFocusEpoch((value) => value + 1);
     scrollCategoryIntoView(categoryId);
     void loadCategoryChannels(categoryId).then((nextChannels) => {
       const nextChannelId = nextChannels[0]?.id ?? '';
@@ -1148,7 +1106,7 @@ export function LiveTvScreen() {
               ref={categoriesRef}
               data={categories}
               keyExtractor={(item) => item.renderKey}
-              extraData={`${categoryFocusEpoch}:${renderState.selectedCategoryId}:${categoryNextFocusRightHandle ?? ''}`}
+              extraData={`${renderState.selectedCategoryId}:${categoryNextFocusRightHandle ?? ''}`}
               showsVerticalScrollIndicator={false}
               contentContainerStyle={styles.categoryList}
               removeClippedSubviews={false}
@@ -1293,9 +1251,7 @@ export function LiveTvScreen() {
                       hasTVPreferredFocus={false}
                       accessibilityRole="button"
                       accessibilityLabel="Watch Full Screen"
-                      {...(renderState.selectedChannelId
-                        ? { nextFocusLeft: findNodeHandle(channelRowRefs.current.get(renderState.selectedChannelId) ?? null) ?? undefined }
-                        : null)}
+                      {...(watchButtonLeftHandle !== undefined ? { nextFocusLeft: watchButtonLeftHandle } : null)}
                       onFocus={() => setFocusedAction('fullscreen')}
                       onBlur={() => setFocusedAction(null)}
                       onPress={watchFullScreen}

@@ -16,6 +16,7 @@ import { isClosedBetaManagedFlow } from '@/features/device/deviceFeatureFlags';
 import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
 import { markCatalogAuditFocus, markCatalogAuditRender } from '@/features/diagnostics/novaCastCatalogAudit';
 import { noteFocusLatencyFocus } from '@/features/diagnostics/focusLatencyAudit';
+import { beginHomeStabilityGeneration, noteNavFocusChanged, recordHomeStabilityEvent } from '@/features/hub/homeStabilityDiagnostics';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import { themeLogoIncludesWordmark } from '@/theme/brandingAssets';
 import type { NovaTheme } from '@/theme/tokens';
@@ -149,6 +150,16 @@ export function NovaTvShell({
   const resolvedProviderLabel = providerLabel ?? selectedProviderName;
   const nonBetaExpirationLabel = expirationLabel ?? selectedProviderExpiration;
   const navbarPreferredFocus = preferActiveNavigationFocus && !suppressNavbarPreferredFocus;
+  // Stage 4.2R: the Home shell owns the diagnostics generation baseline. Child
+  // effects run before the Home screen's, so mount markers land in order.
+  useEffect(() => {
+    if (activeId !== 'home') {
+      return;
+    }
+    beginHomeStabilityGeneration();
+    recordHomeStabilityEvent('shell_mount_started');
+    recordHomeStabilityEvent('shell_mount_ready');
+  }, [activeId]);
   useEffect(() => {
     if (navbarPreferredFocus) {
       recordFocusAudit({
@@ -290,6 +301,7 @@ export function NovaTvShell({
                       recordFocusAudit({ component: 'NovaTvShell.navbar', action: 'focus-received', itemId: item.id });
                       markCatalogAuditFocus(`nav:${item.id}`);
                       noteFocusLatencyFocus(`nav:${item.id}`);
+                      noteNavFocusChanged(item.id);
                       setFocusedId(item.id);
                     }}
                     onBlur={() => setFocusedId(null)}
@@ -306,6 +318,7 @@ export function NovaTvShell({
                       if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
                         return;
                       }
+                      recordHomeStabilityEvent('nav_route_activated', { navId: item.id, route: item.route });
                       router.replace(item.route as Href);
                     }}
                     style={itemStyle}>

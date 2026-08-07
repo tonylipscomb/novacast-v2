@@ -25,6 +25,19 @@ export const SERIES_STARTUP_INTERACTIVE_MAX_MS = 10000;
 /** First viewport: enough for a few rows + overscan (bounded; never full catalog). */
 export const SERIES_STARTUP_VIEWPORT_LIMIT = 32;
 
+/**
+ * Stage 4.2P #8 — defensive maximum for caller-supplied browse/pagination
+ * limits at the Series data-source boundary (mirrors
+ * `MOVIES_STARTUP_VIEWPORT_LIMIT`'s clamp pattern in `SqliteMovieDataSource.ts`,
+ * but scoped to *all* `getSeriesPage` calls, not just the startup viewport).
+ * Legitimate callers only ever request 32 (startup viewport) or 48 (runtime
+ * pagination) rows per page; 200 leaves generous headroom above both while
+ * still preventing an accidental/malformed multi-thousand-row request from
+ * reaching SQLite. Search has its own limit semantics and is not affected —
+ * this only clamps `getSeriesPageImpl`'s `input.limit`.
+ */
+export const SERIES_BROWSE_PAGE_LIMIT_MAX = 200;
+
 export type SeriesStartupReadinessLevel =
   | 'shell'
   | 'durable-categories'
@@ -129,6 +142,79 @@ export function isSeriesStartupDurableSnapshotValidForProvider(input: {
     return false;
   }
   return true;
+}
+
+/**
+ * Stage 4.2P #1/#3 — cheap warm-reconcile short-circuit validation.
+ * Mirrors Movies' actual short-circuit mechanism (`SqliteMovieDataSource.ts`
+ * `getCategoriesImpl`'s memory/durable-snapshot fast path: provider match +
+ * schema version + a readable-generation check) rather than inventing a new
+ * validation scheme. Pure function — the caller supplies the (already cheap)
+ * current-readable-generation probe so this stays independently testable
+ * without any SQLite/AsyncStorage dependency.
+ *
+ * Safe against: provider changes, generation changes, invalid category ids,
+ * stale/corrupt snapshots, and schema-version mismatches — any of these
+ * yields `valid: false` and the caller must fall back to the existing full
+ * `getCategories()` reconciliation path (never removed, never weakened).
+ */
+export type SeriesWarmSnapshotValidationResult =
+  | { valid: true; generation: number }
+  | {
+      valid: false;
+      reason:
+        | 'invalid-snapshot'
+        | 'provider-mismatch'
+        | 'generation-unreadable'
+        | 'generation-mismatch'
+        | 'category-missing'
+        | 'probe-unavailable'
+        | 'probe-error';
+    };
+
+export async function validateSeriesWarmStartupSnapshot(input: {
+  providerId: string;
+  snapshot: SeriesStartupDurableSnapshot | null;
+  selectedCategoryId: string | null;
+  /** Cheap current-readable-generation probe (SqliteSeriesDataSource#getReadableGeneration). */
+  resolveReadableGeneration: (() => Promise<number>) | null | undefined;
+}): Promise<SeriesWarmSnapshotValidationResult> {
+  if (!isSeriesStartupDurableSnapshotValidForProvider({ snapshot: input.snapshot, providerId: input.providerId })) {
+    return { valid: false, reason: 'invalid-snapshot' };
+  }
+  const snapshot = input.snapshot as SeriesStartupDurableSnapshot;
+  if (snapshot.providerId !== input.providerId) {
+    return { valid: false, reason: 'provider-mismatch' };
+  }
+  if (typeof input.resolveReadableGeneration !== 'function') {
+    // Non-SQLite data sources (demo/mock/pure-network) have no cheap
+    // generation probe — fail closed to the existing reconciliation path.
+    return { valid: false, reason: 'probe-unavailable' };
+  }
+
+  let currentGeneration: number;
+  try {
+    currentGeneration = await input.resolveReadableGeneration();
+  } catch {
+    return { valid: false, reason: 'probe-error' };
+  }
+
+  if (!(currentGeneration > 0)) {
+    return { valid: false, reason: 'generation-unreadable' };
+  }
+  if (currentGeneration !== snapshot.generation) {
+    return { valid: false, reason: 'generation-mismatch' };
+  }
+  if (
+    input.selectedCategoryId &&
+    !input.selectedCategoryId.startsWith('section:') &&
+    !input.selectedCategoryId.startsWith('smart:') &&
+    !snapshot.categories.some((category) => category.id === input.selectedCategoryId)
+  ) {
+    return { valid: false, reason: 'category-missing' };
+  }
+
+  return { valid: true, generation: currentGeneration };
 }
 
 export function resolveSeriesStartupFocusTarget(input: {

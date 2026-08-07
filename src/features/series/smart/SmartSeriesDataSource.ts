@@ -303,15 +303,26 @@ export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: 
       return buildSmartCategories(providerCategories);
     },
 
-    async getSeriesPage({ categoryId, offset, limit, sort = DEFAULT_CONTENT_SORT }) {
+    async getSeriesPage({ categoryId, offset, limit, sort = DEFAULT_CONTENT_SORT, queryPurpose }) {
       if (isSectionCategoryId(categoryId)) {
         return { items: [], totalCount: 0, hasMore: false, hasValidRatings: false };
       }
 
       if (!isSmartCategoryId(categoryId)) {
-        return base.getSeriesPage({ categoryId, offset, limit, sort });
+        // Stage 4.2P #7: this wrapper sits between useSeriesScreenModel.ts and
+        // the SQLite-first composite for every non-smart category too — it
+        // must forward the caller's explicit queryPurpose through unchanged
+        // rather than reconstructing the input and silently dropping it
+        // (which would make the SQLite layer's own offset-based fallback
+        // mislabel every post-interactive category switch as
+        // 'startup-viewport' again).
+        return base.getSeriesPage({ categoryId, offset, limit, sort, queryPurpose });
       }
 
+      // Smart categories (favorites/watchlist/recently-added/etc.) are
+      // computed entirely in-memory from the catalog index, never touching
+      // SQLite's own generation-pinning/queryPurpose diagnostics — no
+      // forwarding target exists here.
       return querySmartSeriesPage(categoryId, offset, limit, sort);
     },
 

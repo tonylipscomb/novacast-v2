@@ -14,7 +14,7 @@ import { subscribeCategoryCountIndex } from '@/features/providers/categoryCountI
 import { subscribeCatalogSyncPhase } from '@/features/providers/providerCatalogSync';
 import { subscribeSmartCategoryCache } from '@/features/providers/smartCategoryCacheStore';
 import { findDefaultBrowseCategoryId, isSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
-import type { SeriesDataSource } from './data/SeriesDataSource';
+import type { SeriesDataSource, SeriesQueryPurpose } from './data/SeriesDataSource';
 import { getSeriesScreenMemory, rememberSeriesScreenMemory } from './seriesScreenMemory';
 import { matchSeriesMetadata } from './metadata/seriesMetadataMatcher';
 import { emitSeriesStartup, logSeriesPerf } from './seriesDiagnostics';
@@ -24,6 +24,8 @@ import {
   resolveSeriesStartupFocusTarget,
   SERIES_FOCUS_STAGE4O_MARKER,
   SERIES_STARTUP_VIEWPORT_LIMIT,
+  validateSeriesWarmStartupSnapshot,
+  type SeriesStartupDurableSnapshot,
   type SeriesStartupQueryMode,
   type SeriesStartupReadinessLevel,
 } from './seriesStartupFastPath';
@@ -131,6 +133,12 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
     categoryReplacements: 0,
     seriesReplacements: 0,
     budgetEmitted: false,
+    // Stage 4.2P #2: warm-reconcile short-circuit timing, tracked separately
+    // from the pre-existing metrics above (never blended into one number).
+    warmValidationElapsedMs: null as number | null,
+    warmValidationResult: null as string | null,
+    warmShortCircuited: false,
+    reconciliationElapsedMs: null as number | null,
   });
 
   const emitStartup = useCallback(
@@ -176,7 +184,16 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
         providerRefreshStillRunning: !state.backgroundRefreshFinished,
       });
       emitStartup('series_startup_budget_result', {
+        // Stage 4.2P #2: each stage reported separately — snapshot paint
+        // (categoriesElapsedMs), the cheap warm-validation check, the full
+        // reconciliation pass (only non-null when it actually ran), first
+        // viewport, and interactive.
+        snapshotPaintElapsedMs: state.categoriesElapsedMs,
         categoriesElapsedMs: state.categoriesElapsedMs,
+        warmValidationElapsedMs: state.warmValidationElapsedMs,
+        warmValidationResult: state.warmValidationResult,
+        warmShortCircuited: state.warmShortCircuited,
+        reconciliationElapsedMs: state.reconciliationElapsedMs,
         firstViewportElapsedMs: state.firstViewportElapsedMs,
         interactiveElapsedMs: state.interactiveElapsedMs,
         ...budgets,
@@ -204,6 +221,10 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       categoryReplacements: 0,
       seriesReplacements: 0,
       budgetEmitted: false,
+      warmValidationElapsedMs: null,
+      warmValidationResult: null,
+      warmShortCircuited: false,
+      reconciliationElapsedMs: null,
     };
     setStartupInteractive(false);
     emitStartup('series_startup_shell_mounted', {
@@ -319,9 +340,17 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
         }
         applyCategories(nextCategories, 'network-fallback');
         setBrowseLoadErrorMessage(null);
+        // Stage 4.2P #1: persist the *real* SQLite readable generation when
+        // available so a later warm boot's short-circuit validation can
+        // compare against the current readable generation meaningfully.
+        // Falls back to the local freshness counter for non-SQLite data
+        // sources (demo/mock), which have no real generation concept.
+        const realGeneration = resolvedDataSource.getReadableGeneration
+          ? await resolvedDataSource.getReadableGeneration().catch(() => 0)
+          : 0;
         void saveSeriesStartupDurableSnapshot({
           providerId: activeProviderId,
-          generation: ++seriesCategoriesGenerationSeq,
+          generation: realGeneration > 0 ? realGeneration : ++seriesCategoriesGenerationSeq,
           categories: nextCategories,
           selectedCategoryId: selectedCategoryIdRef.current || null,
           savedSeriesId: focusedItemIdRef.current,
@@ -353,6 +382,52 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       }
     };
 
+    // Stage 4.2P #1/#2/#3: cheap validation that, when it passes, allows the
+    // route to skip straight to first-viewport resolution without paying for
+    // the expensive full getCategories() SQL pass. Mirrors Movies' actual
+    // short-circuit mechanism (memory/durable-snapshot + readable-generation
+    // check) rather than inventing a new validation scheme. Returns true when
+    // the caller may skip the reconciliation call entirely.
+    const validateWarmSnapshotAndMaybeSkip = async (
+      snapshot: SeriesStartupDurableSnapshot,
+      reconcileReason: string,
+    ): Promise<boolean> => {
+      const validationStartedAt = Date.now();
+      const validation = await validateSeriesWarmStartupSnapshot({
+        providerId: activeProviderId,
+        snapshot,
+        selectedCategoryId: selectedCategoryIdRef.current || null,
+        resolveReadableGeneration: resolvedDataSource.getReadableGeneration
+          ? () => resolvedDataSource.getReadableGeneration!()
+          : null,
+      });
+      const warmValidationElapsedMs = Date.now() - validationStartedAt;
+      startupStateRef.current.warmValidationElapsedMs = warmValidationElapsedMs;
+      startupStateRef.current.warmValidationResult = validation.valid ? 'valid' : validation.reason;
+      emitStartup('series_startup_warm_validation_result', {
+        reconcileReason,
+        valid: validation.valid,
+        validationOutcome: validation.valid ? 'valid' : validation.reason,
+        warmValidationElapsedMs,
+        snapshotPaintElapsedMs: startupStateRef.current.categoriesElapsedMs,
+        generation: validation.valid ? validation.generation : null,
+      });
+
+      if (!validation.valid) {
+        return false;
+      }
+
+      startupStateRef.current.warmShortCircuited = true;
+      startupStateRef.current.reconciliationElapsedMs = null;
+      startupStateRef.current.backgroundRefreshFinished = true;
+      emitStartup('series_startup_warm_reconcile_skipped', {
+        reconcileReason,
+        generation: validation.generation,
+        warmValidationElapsedMs,
+      });
+      return true;
+    };
+
     const startupFastPath = async () => {
       // Fast path only applies to the first (non-reentrant) startup session.
       if (shouldBlockSeriesStartupReentry(activeProviderId)) {
@@ -363,11 +438,19 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       const memory = getMemorySeriesStartupSnapshot(activeProviderId);
       if (memory && memory.categories.length > 0) {
         applyCategories(memory.categories, 'memory-cache');
-        emitStartup('series_startup_background_refresh_started', { reason: 'memory-cache-reconcile' });
-        void loadCategoriesFromNetwork('memory-cache-reconcile').finally(() => {
-          startupStateRef.current.backgroundRefreshFinished = true;
-          emitStartup('series_startup_background_refresh_finished', { reason: 'memory-cache-reconcile' });
-        });
+        const shortCircuited = await validateWarmSnapshotAndMaybeSkip(memory, 'memory-cache-reconcile');
+        if (!shortCircuited) {
+          emitStartup('series_startup_background_refresh_started', { reason: 'memory-cache-reconcile' });
+          const reconcileStartedAt = Date.now();
+          void loadCategoriesFromNetwork('memory-cache-reconcile').finally(() => {
+            startupStateRef.current.backgroundRefreshFinished = true;
+            startupStateRef.current.reconciliationElapsedMs = Date.now() - reconcileStartedAt;
+            emitStartup('series_startup_background_refresh_finished', {
+              reason: 'memory-cache-reconcile',
+              reconciliationElapsedMs: startupStateRef.current.reconciliationElapsedMs,
+            });
+          });
+        }
         return;
       }
 
@@ -377,11 +460,19 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       }
       if (durable && durable.providerId === activeProviderId && durable.categories.length > 0) {
         applyCategories(durable.categories, 'durable-snapshot');
-        emitStartup('series_startup_background_refresh_started', { reason: 'durable-snapshot-reconcile' });
-        void loadCategoriesFromNetwork('durable-snapshot-reconcile').finally(() => {
-          startupStateRef.current.backgroundRefreshFinished = true;
-          emitStartup('series_startup_background_refresh_finished', { reason: 'durable-snapshot-reconcile' });
-        });
+        const shortCircuited = await validateWarmSnapshotAndMaybeSkip(durable, 'durable-snapshot-reconcile');
+        if (!shortCircuited) {
+          emitStartup('series_startup_background_refresh_started', { reason: 'durable-snapshot-reconcile' });
+          const reconcileStartedAt = Date.now();
+          void loadCategoriesFromNetwork('durable-snapshot-reconcile').finally(() => {
+            startupStateRef.current.backgroundRefreshFinished = true;
+            startupStateRef.current.reconciliationElapsedMs = Date.now() - reconcileStartedAt;
+            emitStartup('series_startup_background_refresh_finished', {
+              reason: 'durable-snapshot-reconcile',
+              reconciliationElapsedMs: startupStateRef.current.reconciliationElapsedMs,
+            });
+          });
+        }
         return;
       }
 
@@ -515,6 +606,15 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
 
     const isStartupViewport = !isSearchMode && !startupStateRef.current.interactive;
     const pageLimit = isStartupViewport ? SERIES_STARTUP_VIEWPORT_LIMIT : 48;
+    // Stage 4.2P #7: explicit purpose, never inferred by the data source from
+    // `offset`. This same effect handles both the very first startup
+    // viewport paint AND later category switches (offset is always 0 for
+    // both) — `isStartupViewport` is what actually distinguishes them.
+    const queryPurpose: SeriesQueryPurpose = isStartupViewport
+      ? 'startup-viewport'
+      : isSearchMode
+        ? 'search'
+        : 'category-switch';
 
     const loadInitialPage = async () => {
       const pageStartedAt = Date.now();
@@ -532,7 +632,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
         categoryId: selectedCategoryId,
         search: isSearchMode,
         pageLimit,
-        queryPurpose: isStartupViewport ? 'startup-viewport' : 'runtime',
+        queryPurpose,
       });
 
       try {
@@ -544,6 +644,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
                 offset: 0,
                 limit: pageLimit,
                 sort: sortOption,
+                queryPurpose,
               });
 
         if (
@@ -736,6 +837,9 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
               offset: nextOffset,
               limit: 48,
               sort: sortOption,
+              // Stage 4.2P #7: loadMore is always a pagination continuation
+              // (offset > 0), never the startup viewport or a category switch.
+              queryPurpose: isSearchMode ? 'search' : 'pagination',
             });
 
       if (

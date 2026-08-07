@@ -25,7 +25,8 @@ import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 import type { MediaCategory, SeriesDetail, SeriesSummary } from '../../media-browser/mediaTypes.ts';
 import { getOfflineSnapshot } from '../../resilience/offlineStatus.ts';
 import { emitSeriesSqliteEvent } from '../seriesDiagnostics.ts';
-import type { SeriesDataSource } from './SeriesDataSource.ts';
+import { SERIES_BROWSE_PAGE_LIMIT_MAX } from '../seriesStartupFastPath.ts';
+import type { SeriesDataSource, SeriesQueryPurpose } from './SeriesDataSource.ts';
 
 const SQLITE_SERIES_DISCOVER_ID = 'all';
 
@@ -177,14 +178,26 @@ export function createSqliteSeriesDataSource(
     offset: number;
     limit: number;
     sort?: ContentSortOption;
+    queryPurpose?: SeriesQueryPurpose;
   }) {
     const startedAt = Date.now();
     const requestId = `series-sqlite-${providerId}-${startedAt}-${Math.round(Math.random() * 1e6)}`;
     const isFirstPage = input.offset === 0;
-    const queryPurpose = isFirstPage ? 'startup-viewport' : 'runtime';
+    // Stage 4.2P #7: the caller (useSeriesScreenModel.ts) states the real
+    // query purpose explicitly — never re-derived from `offset`, which
+    // previously mislabeled post-interactive category switches (offset 0,
+    // after startup) as 'startup-viewport'. A missing purpose falls back to
+    // the offset-based guess only for callers that predate this stage.
+    const queryPurpose: SeriesQueryPurpose =
+      input.queryPurpose ?? (isFirstPage ? 'startup-viewport' : 'pagination');
     const generation = await requireReadableGeneration(queryPurpose);
     const categoryId =
       input.categoryId && input.categoryId !== SQLITE_SERIES_DISCOVER_ID ? input.categoryId : undefined;
+    // Stage 4.2P #8: defensive clamp against an accidentally huge caller
+    // limit. Never affects Search (searchSeriesImpl has its own limit path)
+    // and never affects generation refresh ingestion (a separate writer
+    // pipeline that never calls getSeriesPageImpl).
+    const clampedLimit = Math.min(Math.max(input.limit, 1), SERIES_BROWSE_PAGE_LIMIT_MAX);
 
     const runQuery = (queryGeneration: number) =>
       getCatalogItemsPage({
@@ -192,7 +205,7 @@ export function createSqliteSeriesDataSource(
         mediaType: 'series',
         categoryId,
         offset: input.offset,
-        limit: input.limit,
+        limit: clampedLimit,
         sort: mapSort(input.sort),
         generation: queryGeneration,
         skipTotalCount: true,
@@ -223,7 +236,7 @@ export function createSqliteSeriesDataSource(
     }
 
     const items = page.items.map(mapCatalogItemToSeries);
-    const hasMore = page.items.length >= input.limit;
+    const hasMore = page.items.length >= clampedLimit;
     const eventName = isFirstPage ? 'series_sqlite_first_viewport_ready' : 'series_sqlite_page_appended';
     emitSeriesSqliteEvent(eventName, {
       providerId,
@@ -343,6 +356,13 @@ export function createSqliteSeriesDataSource(
         );
       }
     },
+
+    async getReadableGeneration() {
+      // Stage 4.2P #1/#3: cheap probe (no category/row work) — used only to
+      // validate a warm durable snapshot before deciding whether the full
+      // getCategories() reconciliation pass can be skipped.
+      return resolveReadableCatalogGeneration(providerId, 'series');
+    },
   };
 }
 
@@ -426,6 +446,13 @@ export function createSqliteFirstSeriesDataSource(
             ? network.prefetchAllCategoryCounts(categoryIds, onCategoryCount)
             : Promise.resolve(),
       );
+    },
+
+    // Stage 4.2P #1/#3: always local-only (no network fallback) — a missing
+    // readable generation (0) is itself a meaningful "cannot short-circuit"
+    // signal, not an error condition that should fall through to network.
+    getReadableGeneration() {
+      return sqlite.getReadableGeneration!();
     },
 
     listCategorySeries: network.listCategorySeries?.bind(network),

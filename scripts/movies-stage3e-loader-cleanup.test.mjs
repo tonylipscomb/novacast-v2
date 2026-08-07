@@ -35,8 +35,10 @@ test('1. Initial empty Movies load shows one spaceship loader', () => {
     }),
     'initial',
   );
-  assert.match(screen, /variant="hero"/);
-  assert.equal((screen.match(/variant="hero"/g) ?? []).length, 1);
+  // Stage 4.2Q-ui: primary loader uses NovaSpaceLoader's default cohesive
+  // presentation (no explicit variant) to match Series, exactly once.
+  assert.match(screen, /<NovaSpaceLoader label=\{primaryLoaderLabel\} \/>/);
+  assert.equal((screen.match(/<NovaSpaceLoader label=\{primaryLoaderLabel\} \/>/g) ?? []).length, 1);
 });
 
 test('2. Uncached category first-page load shows one spaceship loader', () => {
@@ -93,7 +95,7 @@ test('6. No top-right badge loader remains', () => {
 
 test('7. Loader wrapper is transparent', () => {
   assert.match(screen, /primaryLoaderOverlay:[\s\S]*backgroundColor: 'transparent'/);
-  assert.match(loader, /hero:[\s\S]*backgroundColor: 'transparent'/);
+  assert.match(loader, /panel:[\s\S]*backgroundColor: 'transparent'/);
 });
 
 test('8. No opaque card surrounds the spaceship', () => {

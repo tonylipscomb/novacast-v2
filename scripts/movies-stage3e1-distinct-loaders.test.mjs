@@ -35,8 +35,10 @@ test('1. Initial Movies load shows large spaceship and Loading Movies', () => {
     }),
     'Loading Movies',
   );
-  assert.match(screen, /variant="hero"/);
-  assert.match(screen, /primaryLoaderLabel/);
+  // Stage 4.2Q-ui: primary loader now uses NovaSpaceLoader's default cohesive
+  // (rocket + label + energy bar) presentation to match Series, not the bare
+  // "hero" variant with a separately-styled label Text.
+  assert.match(screen, /<NovaSpaceLoader label=\{primaryLoaderLabel\} \/>/);
 });
 
 test('2. All Movies first load shows Loading All Movies', () => {
@@ -93,7 +95,7 @@ test('5. Primary loader is centered within poster-grid area', () => {
 test('6. Primary wrapper is transparent', () => {
   assert.match(screen, /primaryLoaderOverlay:[\s\S]*backgroundColor: 'transparent'/);
   assert.match(screen, /primaryLoaderContent:[\s\S]*backgroundColor: 'transparent'/);
-  assert.match(loader, /hero:[\s\S]*backgroundColor: 'transparent'/);
+  assert.match(loader, /panel:[\s\S]*backgroundColor: 'transparent'/);
 });
 
 test('7. Pagination shows one compact bottom loader', () => {

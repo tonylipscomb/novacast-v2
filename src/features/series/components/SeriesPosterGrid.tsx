@@ -2,6 +2,7 @@ import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { FlatList, StyleSheet, Text, View, useWindowDimensions, type ListRenderItemInfo } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { useAppTheme, type NovaTheme } from '@/theme';
@@ -204,19 +205,10 @@ export function SeriesPosterGrid({
 
   const keyExtractor = useCallback((item: SeriesSummary) => item.id, []);
 
-  const loadingLabel = `Loading ${selectedCategoryLabel}â€¦`;
+  const loadingLabel = `Loading ${selectedCategoryLabel}…`;
   const showInitialLoader = categoryLoading && series.length === 0 && !emptyNotice;
   const showLoadingOverlay = categoryLoading && series.length > 0;
-  const showFooterLoader = loading && !categoryLoading && series.length > 0;
-  const listFooter = useMemo(
-    () =>
-      showFooterLoader ? (
-        <View style={styles.footerLoader}>
-          <NovaSpaceLoader label="Loading moreâ€¦" variant="inline" />
-        </View>
-      ) : null,
-    [showFooterLoader, styles.footerLoader],
-  );
+  const showPaginationLoader = loading && !categoryLoading && series.length > 0;
 
   return (
     <View style={styles.panel}>
@@ -268,12 +260,18 @@ export function SeriesPosterGrid({
             getItemLayout={getItemLayout}
             onEndReachedThreshold={TV_POSTER_LIST_TUNING.onEndReachedThreshold}
             onEndReached={requestMore}
-            ListFooterComponent={listFooter}
             renderItem={renderItem}
           />
           {showLoadingOverlay ? (
             <View style={styles.loadingOverlay} pointerEvents="none">
               <NovaSpaceLoader label={loadingLabel} />
+            </View>
+          ) : null}
+          {showPaginationLoader ? (
+            <View style={styles.paginationLoaderBar} pointerEvents="none" accessible={false} focusable={false}>
+              <BlurView intensity={10} tint="dark" style={styles.paginationLoaderPill}>
+                <NovaSpaceLoader label="Loading more…" variant="inline" />
+              </BlurView>
             </View>
           ) : null}
         </View>
@@ -358,10 +356,28 @@ function createStyles(theme: NovaTheme) {
       backgroundColor:
         String(theme.colors.background) === '#F3EEE4' ? 'rgba(26,21,16,0.45)' : 'rgba(0,0,0,0.35)',
     },
-    footerLoader: {
+    paginationLoaderBar: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 14,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingVertical: 16,
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      zIndex: 3,
+    },
+    paginationLoaderPill: {
+      overflow: 'hidden',
+      flexDirection: 'row',
+      alignItems: 'center',
+      minHeight: 44,
+      paddingHorizontal: 18,
+      paddingVertical: 9,
+      borderRadius: 22,
+      backgroundColor: 'rgba(4, 10, 24, 0.7)',
+      borderWidth: 1,
+      borderColor: 'rgba(95, 149, 216, 0.35)',
     },
   });
 }

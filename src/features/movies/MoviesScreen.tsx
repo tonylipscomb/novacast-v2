@@ -5198,10 +5198,7 @@ useEffect(() => {
       focusable={false}>
       {primaryLoaderMode === 'category-blocking' ? <View style={styles.primaryLoaderDim} /> : null}
       <View style={styles.primaryLoaderContent}>
-        <Text style={styles.primaryLoaderLabel} numberOfLines={1}>
-          {primaryLoaderLabel}
-        </Text>
-        <NovaSpaceLoader label={primaryLoaderLabel} variant="hero" />
+        <NovaSpaceLoader label={primaryLoaderLabel} />
       </View>
     </View>
   ) : null;
@@ -5780,18 +5777,6 @@ function createMoviesStyles(theme: NovaTheme) {
       backgroundColor: 'transparent',
       borderWidth: 0,
       transform: [{ translateY: -52 }],
-    },
-    primaryLoaderLabel: {
-      color: theme.colors.textPrimary,
-      fontSize: 22,
-      fontWeight: '800',
-      letterSpacing: 0.2,
-      textAlign: 'center',
-      backgroundColor: 'transparent',
-      zIndex: 1,
-      textShadowColor: 'rgba(0, 0, 0, 0.65)',
-      textShadowOffset: { width: 0, height: 1 },
-      textShadowRadius: 5,
     },
     paginationLoaderBar: {
       position: 'absolute',

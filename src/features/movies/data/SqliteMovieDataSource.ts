@@ -25,7 +25,7 @@ import {
 import {
   isOnnMoviesTraceEnabled,
   traceOnnMoviesEvent,
-} from '@/features/diagnostics/onnMoviesTrace';
+} from '../../diagnostics/onnMoviesTrace.ts';
 import { getMoviesDetailOpenForDiagnostics } from '../moviesDiagnosticsState.ts';
 
 import type { MovieDataSource } from './MovieDataSource.ts';
@@ -1272,7 +1272,7 @@ export function createSqliteMovieDataSource(
 
       try {
         const { getActiveMoviesSearchRequestId, markMoviesSearchPath } = await import(
-          '@/features/search/moviesSearchPerfDiagnostics'
+          '../../search/moviesSearchPerfDiagnostics.ts'
         );
         markMoviesSearchPath(getActiveMoviesSearchRequestId(), 'sqlite', { sqliteMs, mappingMs });
       } catch {

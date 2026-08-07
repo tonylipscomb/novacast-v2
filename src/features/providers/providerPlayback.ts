@@ -1,4 +1,4 @@
-import { logPlaybackSourceDiagnostics, normalizePlaybackExtension, resolveMovieContainerExtension } from './playbackSourceDiagnostics';
+import { logPlaybackSourceDiagnostics, normalizePlaybackExtension, resolveMovieContainerExtension } from './playbackSourceDiagnostics.ts';
 import type { ProviderRepositoryBundle } from './providerBundle';
 import type { ProviderLiveChannel } from './providerRepositories';
 

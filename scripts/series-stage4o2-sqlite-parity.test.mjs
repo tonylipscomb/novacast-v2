@@ -106,7 +106,7 @@ test('9. Pagination appends without duplicates', () => {
 });
 
 test('10. Search reads from SQLite', () => {
-  const block = sliceBlock(sqliteDs, 'async function searchSeriesImpl', 'return {\n    async getCategories');
+  const block = sliceBlock(sqliteDs, 'async function searchSeriesImpl', "sourceKind: 'sqlite'");
   assert.match(block, /getCatalogItemsPage\(/);
   assert.match(block, /query: input\.query/);
 });

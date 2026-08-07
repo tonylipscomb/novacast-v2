@@ -4,6 +4,14 @@ import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 export type SeriesQueryPurpose = 'startup-viewport' | 'category-switch' | 'pagination' | 'search';
 
 export interface SeriesDataSource {
+  /**
+   * Stage 4.2Q: identifies the active read backend, mirroring
+   * `MovieDataSource.sourceKind` — used by `SmartSeriesDataSource` and
+   * `seriesSearchRepository.ts` to apply the same "SQLite is authoritative"
+   * routing policy Movies already has.
+   */
+  sourceKind?: 'legacy' | 'sqlite';
+
   getCategories(): Promise<MediaCategory[]>;
 
   getSeriesPage(input: {

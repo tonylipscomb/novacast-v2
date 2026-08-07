@@ -2,7 +2,18 @@
  * Stage 3C.2 / 4.2D / 4.2I — reject collapsed / sparse Movies generations before activation.
  * Stage 4.2I also rejects partial dumps (tiny item totals with collapsed category coverage)
  * even when provider.catalogGeneration is zero.
+ *
+ * Stage 4.2Q: the actual threshold logic below was never Movies-specific data
+ * (it's pure arithmetic over item/category counts) — generalized to
+ * `validateCatalogCategoryDistribution(mediaType, input)` / `assessCatalogIntegrity(mediaType, input)`
+ * so Series can share the exact same validation (same thresholds, same
+ * rejection reasons) instead of having no promotion-time sparse check of its
+ * own. `validateMoviesCategoryDistribution` / `assessMoviesCatalogIntegrity`
+ * remain as-is (same signature, same behavior, same log text) — thin
+ * `mediaType: 'movie'` wrappers over the shared implementation.
  */
+
+import type { CatalogMediaType } from './catalogTypes.ts';
 
 export type MoviesCategoryDistributionStats = {
   totalItems: number;
@@ -24,7 +35,13 @@ export type MoviesCategoryDistributionValidation = MoviesCategoryDistributionSta
   rejectionReason: string | null;
 };
 
-export function validateMoviesCategoryDistribution(input: {
+/** Same stats shape, reused for any catalog media type (Movies today, Series as of Stage 4.2Q). */
+export type CatalogCategoryDistributionStats = MoviesCategoryDistributionStats;
+export type CatalogCategoryDistributionValidation = MoviesCategoryDistributionValidation & {
+  mediaType: CatalogMediaType;
+};
+
+function computeCategoryDistributionStatsAndVerdict(input: {
   generation: number;
   totalItems: number;
   distinctCategoryIds: number;
@@ -157,9 +174,47 @@ export function validateMoviesCategoryDistribution(input: {
     rejectionReason,
   };
 
+  return result;
+}
+
+const CATALOG_MEDIA_TYPE_LOG_LABEL: Record<CatalogMediaType, string> = {
+  movie: 'Movies',
+  series: 'Series',
+};
+
+const CATALOG_MEDIA_TYPE_MARKER: Record<CatalogMediaType, string> = {
+  movie: 'stage4d-vod-ingestion-repair-v1',
+  series: 'stage4q-series-sparse-catalog-validation-v1',
+};
+
+/**
+ * Stage 4.2Q — generalized entry point: identical thresholds/logic as
+ * `validateMoviesCategoryDistribution` (below), parameterized by
+ * `mediaType` purely for the diagnostic log line/marker. Movies callers
+ * should keep using `validateMoviesCategoryDistribution` unchanged; this is
+ * for Series' new promotion-time sparse check.
+ */
+export function validateCatalogCategoryDistribution(
+  mediaType: CatalogMediaType,
+  input: {
+    generation: number;
+    totalItems: number;
+    distinctCategoryIds: number;
+    metadataCategoryCount: number;
+    nonzeroCategoryCount: number;
+    largestCategoryId: string | null;
+    largestCategoryCount: number;
+    previousGeneration?: number | null;
+    previousTotalItems?: number | null;
+    previousNonzeroCategoryCount?: number | null;
+  },
+): CatalogCategoryDistributionValidation {
+  const result = computeCategoryDistributionStatsAndVerdict(input);
+
   console.info(
-    '[NovaCast Movies Category Distribution Validation] ' +
+    `[NovaCast ${CATALOG_MEDIA_TYPE_LOG_LABEL[mediaType]} Category Distribution Validation] ` +
       JSON.stringify({
+        mediaType,
         generation: result.generation,
         totalItems: result.totalItems,
         metadataCategoryCount: result.metadataCategoryCount,
@@ -172,25 +227,49 @@ export function validateMoviesCategoryDistribution(input: {
         previousNonzeroCategoryCount: result.previousNonzeroCategoryCount,
         validationPassed: result.validationPassed,
         rejectionReason: result.rejectionReason,
-        marker: 'stage4d-vod-ingestion-repair-v1',
+        marker: CATALOG_MEDIA_TYPE_MARKER[mediaType],
         stage4iMarker: 'stage4i-movies-readable-snapshot-recovery-v1',
       }),
   );
 
+  return { ...result, mediaType };
+}
+
+/**
+ * Stage 3C.2/4.2D/4.2I Movies entry point — unchanged signature, unchanged
+ * behavior, unchanged log text/marker. Thin `mediaType: 'movie'` wrapper over
+ * the shared `validateCatalogCategoryDistribution` (Stage 4.2Q).
+ */
+export function validateMoviesCategoryDistribution(input: {
+  generation: number;
+  totalItems: number;
+  distinctCategoryIds: number;
+  metadataCategoryCount: number;
+  nonzeroCategoryCount: number;
+  largestCategoryId: string | null;
+  largestCategoryCount: number;
+  previousGeneration?: number | null;
+  previousTotalItems?: number | null;
+  previousNonzeroCategoryCount?: number | null;
+}): MoviesCategoryDistributionValidation {
+  const { mediaType: _mediaType, ...result } = validateCatalogCategoryDistribution('movie', input);
   return result;
 }
 
-/** Integrity check for an already-active readable generation (startup repair). */
-export function assessMoviesCatalogIntegrity(input: {
-  /** Actual readable generation under assessment — never invent 0 when known. */
-  generation?: number;
-  metadataCategoryCount: number;
-  nonzeroCategoryCount: number;
-  distinctItemCategoryIds: number;
-  totalItems: number;
-  largestCategoryShare?: number;
-}): { healthy: boolean; degraded: boolean; reason: string | null } {
-  const check = validateMoviesCategoryDistribution({
+/** Integrity check for an already-active readable generation (startup repair). Generic over media type. */
+export function assessCatalogIntegrity(
+  mediaType: CatalogMediaType,
+  input: {
+    /** Actual readable generation under assessment — never invent 0 when known. */
+    generation?: number;
+    metadataCategoryCount: number;
+    nonzeroCategoryCount: number;
+    distinctItemCategoryIds: number;
+    totalItems: number;
+    largestCategoryShare?: number;
+  },
+): { healthy: boolean; degraded: boolean; reason: string | null } {
+  const check = validateCatalogCategoryDistribution(mediaType, {
     generation:
       typeof input.generation === 'number' && input.generation > 0 ? input.generation : 0,
     totalItems: input.totalItems,
@@ -210,4 +289,17 @@ export function assessMoviesCatalogIntegrity(input: {
     degraded: true,
     reason: check.rejectionReason ?? 'sparse-active-generation',
   };
+}
+
+/** Movies entry point — unchanged signature/behavior. Thin wrapper over `assessCatalogIntegrity`. */
+export function assessMoviesCatalogIntegrity(input: {
+  /** Actual readable generation under assessment — never invent 0 when known. */
+  generation?: number;
+  metadataCategoryCount: number;
+  nonzeroCategoryCount: number;
+  distinctItemCategoryIds: number;
+  totalItems: number;
+  largestCategoryShare?: number;
+}): { healthy: boolean; degraded: boolean; reason: string | null } {
+  return assessCatalogIntegrity('movie', input);
 }

@@ -174,19 +174,27 @@ test('8b. Bonus: SmartSeriesDataSource forwards queryPurpose through for non-sma
 test('9. Series browse limit is clamped', () => {
   assert.match(fastPath, /export const SERIES_BROWSE_PAGE_LIMIT_MAX = 200;/);
   const block = sliceBlock(sqliteDs, 'async function getSeriesPageImpl', 'async function searchSeriesImpl');
-  assert.match(block, /const clampedLimit = Math\.min\(Math\.max\(input\.limit, 1\), SERIES_BROWSE_PAGE_LIMIT_MAX\);/);
+  // Stage 4.2Q: runtime pagination still clamps to SERIES_BROWSE_PAGE_LIMIT_MAX (200);
+  // the startup-viewport purpose now uses a tighter, purpose-specific ceiling instead
+  // (see test 10) — both flow into the same `clampedLimit`/`hasMore` computation.
+  assert.match(block, /purposeLimitCeiling =\s*\n\s*queryPurpose === 'startup-viewport' \? SERIES_STARTUP_VIEWPORT_LIMIT : SERIES_BROWSE_PAGE_LIMIT_MAX;/);
+  assert.match(block, /const clampedLimit = Math\.min\(Math\.max\(input\.limit, 1\), purposeLimitCeiling\);/);
   assert.match(block, /const hasMore = page\.items\.length >= clampedLimit;/);
 });
 
-test('10. Normal Series page size remains unchanged', () => {
-  // Startup viewport (32) and runtime pagination (48) callers are unaffected
-  // by the 200-row defensive clamp.
-  assert.match(fastPath, /export const SERIES_STARTUP_VIEWPORT_LIMIT = 32;/);
+test('10. Normal Series page size remains unchanged; startup viewport unified with Movies (36)', () => {
+  // Stage 4.2Q: unified to Movies' MOVIES_STARTUP_VIEWPORT_LIMIT (36) — was 32.
+  // Runtime pagination (48) is untouched by this change.
+  assert.match(fastPath, /export const SERIES_STARTUP_VIEWPORT_LIMIT = 36;/);
   assert.match(model, /const pageLimit = isStartupViewport \? SERIES_STARTUP_VIEWPORT_LIMIT : 48;/);
   const block = sliceBlock(model, 'const loadMore = useCallback', "logSeriesPerf('series_pagination_appended'");
   assert.match(block, /limit: 48,/);
-  // Search has its own limit semantics — the clamp constant is not reused there.
-  const searchBlock = sliceBlock(sqliteDs, 'async function searchSeriesImpl', 'return {\n    async getCategories');
+  // Stage 4.2Q: the DS now also clamps the startup-viewport purpose to
+  // SERIES_STARTUP_VIEWPORT_LIMIT at the getSeriesPageImpl boundary (defense-in-depth).
+  const pageBlock = sliceBlock(sqliteDs, 'async function getSeriesPageImpl', 'async function searchSeriesImpl');
+  assert.match(pageBlock, /SERIES_STARTUP_VIEWPORT_LIMIT/);
+  // Search has its own limit semantics — the browse clamp constant is not reused there.
+  const searchBlock = sliceBlock(sqliteDs, 'async function searchSeriesImpl', "sourceKind: 'sqlite'");
   assert.doesNotMatch(searchBlock, /SERIES_BROWSE_PAGE_LIMIT_MAX/);
 });
 
@@ -388,14 +396,15 @@ test('26. Existing Stage 4.2N Movies tests remain 24/24', () => {
   assert.equal(countTapPass(result.stdout), 24, result.stdout);
 });
 
-test('27. No out-of-scope Movies/Series UI styling files were changed', () => {
+test('27. Movies UI styling files remain out-of-scope (Movies is the reference, never edited)', () => {
+  // Stage 4.2Q intentionally re-syncs SeriesDetailPopupV2.tsx's typography/padding to
+  // Movies' values (see scripts/series-stage4q-visual-consistency.test.mjs) — it is no
+  // longer forbidden here. MovieDetailPopupV2.tsx must still never change: Movies is the
+  // original accepted reference that Series is re-synced to, not the other way around.
   const result = spawnSync('git', ['diff', '--name-only', 'HEAD'], { encoding: 'utf8' });
   const changed = result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
-  const forbidden = [
-    'src/features/movies/components/MovieDetailPopupV2.tsx',
-    'src/features/series/components/SeriesDetailPopupV2.tsx',
-  ];
+  const forbidden = ['src/features/movies/components/MovieDetailPopupV2.tsx'];
   for (const path of forbidden) {
-    assert.ok(!changed.includes(path), `${path} must not change in Stage 4.2P`);
+    assert.ok(!changed.includes(path), `${path} must never change — Movies is the visual reference`);
   }
 });

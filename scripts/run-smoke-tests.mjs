@@ -28,6 +28,7 @@ const suites = [
   'series-stage4o1-detail-popup-v2.test.mjs',
   'series-stage4o2-sqlite-parity.test.mjs',
   'stage4p-parity-polish.test.mjs',
+  'series-stage4q-visual-consistency.test.mjs',
   'movies-catalog-generation-inventory.test.mjs',
   'catalog-stage3c-generation-safe.test.mjs',
   'movies-stage3c1-category-counts.test.mjs',

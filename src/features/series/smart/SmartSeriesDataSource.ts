@@ -185,6 +185,10 @@ export async function refreshSmartSeriesCategoryCounts(providerId: string, categ
 }
 
 export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: string): SeriesDataSource {
+  // Stage 4.2Q: mirrors `SmartMovieDataSource`'s `usesSqliteReads` — used by
+  // `searchSeries` below to apply the same "SQLite is authoritative" policy
+  // Movies already has, instead of always preferring the in-memory index.
+  const usesSqliteReads = base.sourceKind === 'sqlite';
   async function buildSmartCategories(providerCategories: MediaCategory[]) {
     const sortedProviderCategories = sortProviderCategoriesUsFirst(providerCategories, 'series');
     const settings = await getMediaSettings();
@@ -338,6 +342,13 @@ export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: 
     },
 
     async searchSeries(input) {
+      // Stage 4.2Q: once `base` is SQLite-backed, it is authoritative — go
+      // straight to it (zero hits included) rather than consulting the
+      // in-memory index first, mirroring `SmartMovieDataSource.searchMovies`.
+      if (usesSqliteReads) {
+        return base.searchSeries!(input);
+      }
+
       const indexed = getSeriesCatalogIndex(providerId);
       if (indexed.size > 0) {
         const page = await searchSeriesRepository(providerId, null, {

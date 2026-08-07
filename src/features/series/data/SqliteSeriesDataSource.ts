@@ -25,7 +25,8 @@ import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 import type { MediaCategory, SeriesDetail, SeriesSummary } from '../../media-browser/mediaTypes.ts';
 import { getOfflineSnapshot } from '../../resilience/offlineStatus.ts';
 import { emitSeriesSqliteEvent } from '../seriesDiagnostics.ts';
-import { SERIES_BROWSE_PAGE_LIMIT_MAX } from '../seriesStartupFastPath.ts';
+import { SERIES_BROWSE_PAGE_LIMIT_MAX, SERIES_STARTUP_VIEWPORT_LIMIT } from '../seriesStartupFastPath.ts';
+import { repairDegradedSeriesCatalogIfNeeded } from '../seriesSparseCatalogRepair.ts';
 import type { SeriesDataSource, SeriesQueryPurpose } from './SeriesDataSource.ts';
 
 const SQLITE_SERIES_DISCOVER_ID = 'all';
@@ -141,6 +142,28 @@ export function createSqliteSeriesDataSource(
     const startedAt = Date.now();
     const generation = await requireReadableGeneration('categories');
 
+    // Stage 4.2Q: runtime degraded-catalog repair, mirroring Movies'
+    // `repairDegradedMoviesCatalogIfNeeded` (`SqliteMovieDataSource.ts`).
+    // Best-effort/non-blocking for the actual category read below — Series'
+    // simpler getCategoriesImpl has no readiness/pinning state to preserve
+    // the way Movies does, so this only detects an already-active sparse
+    // generation and schedules (at most once per generation) a background
+    // full resync; it never blanks or delays the metadata already being
+    // served, and never awaits the result.
+    void repairDegradedSeriesCatalogIfNeeded(providerId, ({ providerId: pid }) => {
+      // Dynamic import: providerBundle.ts imports this module (for
+      // createSqliteFirstSeriesDataSource), so a static import here would
+      // create a cycle. Movies avoids this only because SqliteMovieDataSource.ts
+      // isn't itself imported by providerBundle.ts.
+      void import('../../providers/providerBundle.ts').then(({ getActiveRepositoryBundle }) => {
+        const bundle = getActiveRepositoryBundle();
+        if (!bundle || bundle.providerId !== pid) {
+          return;
+        }
+        void bundle.syncCatalog();
+      });
+    });
+
     // Metadata-only fast path (Stage 4.2O.2 spec #3): no per-category counts,
     // no provider calls. Counts are backfilled lazily via getCategoryCount /
     // prefetchAllCategoryCounts (mirrors Movies' getCatalogCategoryCounts
@@ -197,7 +220,17 @@ export function createSqliteSeriesDataSource(
     // limit. Never affects Search (searchSeriesImpl has its own limit path)
     // and never affects generation refresh ingestion (a separate writer
     // pipeline that never calls getSeriesPageImpl).
-    const clampedLimit = Math.min(Math.max(input.limit, 1), SERIES_BROWSE_PAGE_LIMIT_MAX);
+    // Stage 4.2Q: the startup-viewport purpose additionally uses
+    // `SERIES_STARTUP_VIEWPORT_LIMIT` as its ceiling instead of the wider
+    // `SERIES_BROWSE_PAGE_LIMIT_MAX`, mirroring Movies' DS-level clamp
+    // (`Math.min(input.limit, MOVIES_STARTUP_VIEWPORT_LIMIT)` in
+    // `SqliteMovieDataSource.ts`). The caller (useSeriesScreenModel.ts)
+    // already requests <= SERIES_STARTUP_VIEWPORT_LIMIT rows for the startup
+    // viewport, so this only ever engages as defense-in-depth. Runtime
+    // pagination is unaffected — it keeps the wider ceiling.
+    const purposeLimitCeiling =
+      queryPurpose === 'startup-viewport' ? SERIES_STARTUP_VIEWPORT_LIMIT : SERIES_BROWSE_PAGE_LIMIT_MAX;
+    const clampedLimit = Math.min(Math.max(input.limit, 1), purposeLimitCeiling);
 
     const runQuery = (queryGeneration: number) =>
       getCatalogItemsPage({
@@ -290,6 +323,8 @@ export function createSqliteSeriesDataSource(
   }
 
   return {
+    sourceKind: 'sqlite',
+
     async getCategories() {
       return getCategoriesImpl();
     },
@@ -397,6 +432,14 @@ export function createSqliteFirstSeriesDataSource(
   }
 
   return {
+    // Stage 4.2Q: this composite is SQLite-first — it only falls back to
+    // `network` when the SQLite side has no readable generation at all
+    // (`SeriesCatalogNotReadyError`), never on a legitimate zero-hit SQLite
+    // result. Marking it 'sqlite' lets `SmartSeriesDataSource`/
+    // `seriesSearchRepository.ts` apply the same "SQLite is authoritative"
+    // policy Movies already has.
+    sourceKind: 'sqlite',
+
     getCategories() {
       return withSqliteOrNetwork(
         () => sqlite.getCategories(),

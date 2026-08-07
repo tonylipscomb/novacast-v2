@@ -2,9 +2,10 @@
  * Stage 4.2O — Series startup fast path.
  * Pure helpers + durable snapshot contracts, mirroring the shape of
  * `moviesStartupFastPath.ts` (Movies) but scoped to Series-specific types.
- * Series has no local SQLite catalog, so "generation" here is a simple
- * monotonically increasing session/durable-snapshot freshness counter,
- * not a SQLite catalog generation.
+ * As of Stage 4.2O.2/4.2P, Series has a real local SQLite catalog (see
+ * `SqliteSeriesDataSource.ts`, `catalogRepository.ts`) — "generation" here is
+ * the actual SQLite catalog generation for the provider, exactly like
+ * Movies', not a standalone session counter.
  */
 
 import type { MediaCategory } from '../media-browser/mediaTypes.ts';
@@ -22,16 +23,22 @@ export const SERIES_STARTUP_VIEWPORT_MAX_MS = 10000;
 export const SERIES_STARTUP_INTERACTIVE_TARGET_MS = 5000;
 export const SERIES_STARTUP_INTERACTIVE_MAX_MS = 10000;
 
-/** First viewport: enough for a few rows + overscan (bounded; never full catalog). */
-export const SERIES_STARTUP_VIEWPORT_LIMIT = 32;
+/**
+ * First viewport: enough for a few rows + overscan (bounded; never full catalog).
+ * Stage 4.2Q: unified to Movies' exact value (`MOVIES_STARTUP_VIEWPORT_LIMIT` in
+ * `moviesStartupFastPath.ts`, also 36) — was 32. No Stage 4.2O/4.2O.1/4.2O.2
+ * report or test documented a Series-specific reason for the lower value;
+ * this was simply drift from the initial SQLite-parity adaptation.
+ */
+export const SERIES_STARTUP_VIEWPORT_LIMIT = 36;
 
 /**
  * Stage 4.2P #8 — defensive maximum for caller-supplied browse/pagination
  * limits at the Series data-source boundary (mirrors
  * `MOVIES_STARTUP_VIEWPORT_LIMIT`'s clamp pattern in `SqliteMovieDataSource.ts`,
  * but scoped to *all* `getSeriesPage` calls, not just the startup viewport).
- * Legitimate callers only ever request 32 (startup viewport) or 48 (runtime
- * pagination) rows per page; 200 leaves generous headroom above both while
+ * Legitimate callers only ever request 36 (startup viewport, Stage 4.2Q) or
+ * 48 (runtime pagination) rows per page; 200 leaves generous headroom above both while
  * still preventing an accidental/malformed multi-thousand-row request from
  * reaching SQLite. Search has its own limit semantics and is not affected —
  * this only clamps `getSeriesPageImpl`'s `input.limit`.

@@ -63,6 +63,61 @@ function searchSeriesCatalogIndex(
   return page;
 }
 
+function dedupeSeriesPage(
+  providerId: string,
+  page: {
+    items: Array<{
+      id: string;
+      title: string;
+      year?: string;
+      posterUrl?: string;
+      genres?: string[];
+      rating?: string;
+      seriesId?: string;
+      categoryId?: string;
+    }>;
+    totalCount: number;
+    hasMore: boolean;
+  },
+): SearchPageResult<SeriesSearchResult> {
+  const seenSeriesIds = new Set<string>();
+  const deduped = page.items.filter((item) => {
+    const key = item.seriesId || item.id;
+    if (seenSeriesIds.has(key)) {
+      return false;
+    }
+
+    seenSeriesIds.add(key);
+    return true;
+  });
+
+  return {
+    items: deduped.map((series) => ({
+      type: 'series' as const,
+      id: series.id,
+      providerId,
+      title: series.title,
+      year: series.year,
+      posterUrl: series.posterUrl,
+      genres: series.genres,
+      rating: series.rating,
+      seriesId: series.seriesId,
+      categoryId: series.categoryId,
+    })),
+    totalCount: page.totalCount,
+    hasMore: page.hasMore,
+  };
+}
+
+/**
+ * Stage 4.2Q: SQLite is authoritative when the datasource is sqlite-backed
+ * (i.e. a readable local catalog generation exists), mirroring Movies'
+ * policy in `movieSearchRepository.ts`. Zero SQLite hits are valid and must
+ * not fall through to provider/network. The in-memory catalog index is
+ * still consulted first as a fast-path in this branch — but only because it
+ * is populated from that same authoritative SQLite-backed catalog, not
+ * because it is an independently-fallback-able source.
+ */
 export async function searchSeries(
   providerId: string,
   dataSource: SeriesDataSource | null | undefined,
@@ -70,6 +125,44 @@ export async function searchSeries(
 ): Promise<SearchPageResult<SeriesSearchResult>> {
   if (request.signal?.aborted) {
     throw new DOMException('Aborted', 'AbortError');
+  }
+
+  const sqliteAuthoritative = dataSource?.sourceKind === 'sqlite';
+
+  if (sqliteAuthoritative) {
+    const indexed = searchSeriesCatalogIndex(providerId, request.query, request.offset, request.limit);
+    if (indexed) {
+      return indexed;
+    }
+
+    if (!dataSource?.searchSeries) {
+      return { items: [], totalCount: 0, hasMore: false };
+    }
+
+    const timer = createSearchTimer();
+    const page = await dataSource.searchSeries({
+      query: request.query,
+      offset: request.offset,
+      limit: request.limit,
+    });
+
+    if (request.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+
+    const mapped = dedupeSeriesPage(providerId, page);
+    logSearchTiming({
+      stage: 'sqlite',
+      scope: 'series',
+      queryLength: request.query.trim().length,
+      repository: 'sqlite',
+      returnedCount: mapped.items.length,
+      queryDurationMs: timer.elapsed(),
+      totalDurationMs: timer.elapsed(),
+    });
+
+    // Zero results are authoritative — never fall through to provider/network.
+    return mapped;
   }
 
   const indexed = searchSeriesCatalogIndex(providerId, request.query, request.offset, request.limit);
@@ -97,44 +190,19 @@ export async function searchSeries(
       throw new DOMException('Aborted', 'AbortError');
     }
 
-    const seenSeriesIds = new Set<string>();
-    const deduped = page.items.filter((item) => {
-      const key = item.seriesId || item.id;
-      if (seenSeriesIds.has(key)) {
-        return false;
-      }
-
-      seenSeriesIds.add(key);
-      return true;
-    });
-
-    if (deduped.length > 0) {
+    const mapped = dedupeSeriesPage(providerId, page);
+    if (mapped.items.length > 0) {
       logSearchTiming({
         stage: 'provider-fallback',
         scope: 'series',
         queryLength: request.query.trim().length,
         repository: 'provider',
-        returnedCount: deduped.length,
+        returnedCount: mapped.items.length,
         queryDurationMs: timer.elapsed(),
         totalDurationMs: timer.elapsed(),
       });
 
-      return {
-        items: deduped.map((series) => ({
-          type: 'series' as const,
-          id: series.id,
-          providerId,
-          title: series.title,
-          year: series.year,
-          posterUrl: series.posterUrl,
-          genres: series.genres,
-          rating: series.rating,
-          seriesId: series.seriesId,
-          categoryId: series.categoryId,
-        })),
-        totalCount: page.totalCount,
-        hasMore: page.hasMore,
-      };
+      return mapped;
     }
   } catch (error) {
     logSearchTiming({

@@ -36,7 +36,10 @@ import {
   catalogSeasonsTable,
   usesGenerationSafeCatalog,
 } from './catalogTableRouting.ts';
-import { validateMoviesCategoryDistribution } from './moviesCategoryDistributionValidation.ts';
+import {
+  validateCatalogCategoryDistribution,
+  validateMoviesCategoryDistribution,
+} from './moviesCategoryDistributionValidation.ts';
 import {
   assessMoviesGenerationSnapshotIntegrity,
   MOVIES_FOCUS_STAGE4I_MARKER,
@@ -1025,6 +1028,77 @@ export async function completeCatalogSync(
       }
     }
 
+    // Stage 4.2Q: Series previously had no equivalent sparse-distribution
+    // check here at all (only the baseline item-row/distinct-content check
+    // above) — a Series generation could promote even when its category
+    // coverage was collapsed/sparse in the same way an unvalidated Movies
+    // generation could before Stage 4.2I. Reuses the exact same thresholds
+    // as Movies via `validateCatalogCategoryDistribution` (Stage 4.2Q
+    // generalization of `validateMoviesCategoryDistribution`) — no new
+    // validation logic, no change to Movies' branch above.
+    if (validationPassed && mediaType === 'series') {
+      const largest = await getCatalogGenerationLargestCategory(providerId, mediaType, generation);
+      let previousTotalItems: number | null = null;
+      let previousNonzero: number | null = null;
+      if (previousCompletedGeneration > 0 && previousCompletedGeneration !== generation) {
+        previousTotalItems = previousItemRows;
+        const prevLargest = await getCatalogGenerationLargestCategory(
+          providerId,
+          mediaType,
+          previousCompletedGeneration,
+        );
+        previousNonzero = prevLargest.nonzeroCategoryCount;
+      }
+      const distribution = validateCatalogCategoryDistribution('series', {
+        generation,
+        totalItems: physical.itemRows,
+        distinctCategoryIds: physical.distinctItemCategoryIds,
+        metadataCategoryCount: physical.categoryRows,
+        nonzeroCategoryCount: largest.nonzeroCategoryCount,
+        largestCategoryId: largest.categoryId,
+        largestCategoryCount: largest.itemCount,
+        previousGeneration:
+          previousCompletedGeneration > 0 ? previousCompletedGeneration : null,
+        previousTotalItems,
+        previousNonzeroCategoryCount: previousNonzero,
+      });
+      if (!distribution.validationPassed) {
+        validationPassed = false;
+        rejectionCode = distribution.rejectionReason ?? 'category_distribution_failed';
+        console.info(
+          '[NovaCast Series Generation Activation] ' +
+            JSON.stringify({
+              event: 'series_generation_activation_rejected',
+              providerId,
+              generation,
+              itemRows: physical.itemRows,
+              categoryRows: physical.categoryRows,
+              distinctItemCategoryIds: physical.distinctItemCategoryIds,
+              nonzeroCategoryCount: largest.nonzeroCategoryCount,
+              integrityDecision: 'rejected',
+              reason: rejectionCode,
+              marker: 'stage4q-series-sparse-catalog-validation-v1',
+            }),
+        );
+      } else {
+        console.info(
+          '[NovaCast Series Generation Activation] ' +
+            JSON.stringify({
+              event: 'series_generation_activation_passed',
+              providerId,
+              generation,
+              itemRows: physical.itemRows,
+              categoryRows: physical.categoryRows,
+              distinctItemCategoryIds: physical.distinctItemCategoryIds,
+              nonzeroCategoryCount: largest.nonzeroCategoryCount,
+              integrityDecision: 'passed',
+              reason: null,
+              marker: 'stage4q-series-sparse-catalog-validation-v1',
+            }),
+        );
+      }
+    }
+
     if (!validationPassed) {
       logCatalogV2Generation({
         providerId,
@@ -1126,6 +1200,22 @@ export async function completeCatalogSync(
           integrityDecision: 'activated',
           reason: null,
           marker: MOVIES_FOCUS_STAGE4I_MARKER,
+        }),
+    );
+  }
+  if (mediaType === 'series') {
+    console.info(
+      '[NovaCast Series Generation Activation] ' +
+        JSON.stringify({
+          event: 'series_generation_swap_committed',
+          providerId,
+          generation,
+          itemRows: physical.itemRows,
+          categoryRows: physical.categoryRows,
+          distinctItemCategoryIds: physical.distinctItemCategoryIds,
+          integrityDecision: 'activated',
+          reason: null,
+          marker: 'stage4q-series-sparse-catalog-validation-v1',
         }),
     );
   }

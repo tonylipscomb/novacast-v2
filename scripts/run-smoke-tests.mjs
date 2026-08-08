@@ -61,6 +61,7 @@ const suites = [
   'live-tv-focus-pass2.test.mjs',
   'live-tv-selection-driven-preview.test.mjs',
   'live-tv-switch-feedback.test.mjs',
+  'live-tv-category-count-consistency.test.mjs',
   'guide-polish.test.mjs',
   'live-tv-scroll-perf.test.mjs',
   'tv-focus-stabilization.test.mjs',

@@ -90,30 +90,6 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     }
   }, [bundle]);
 
-  const updateCategoryCount = useCallback((categoryId: string, count: number) => {
-    if (categoryId === 'favorites') {
-      return;
-    }
-
-    setBaseCategories((current) => {
-      let changed = false;
-      const next = current.map((category) => {
-        if (category.id !== categoryId || category.count === count) {
-          return category;
-        }
-
-        changed = true;
-        return { ...category, count };
-      });
-
-      return changed ? next : current;
-    });
-
-    if (bundle?.providerId) {
-      void mergeCategoryCountIndex(bundle.providerId, 'live', { [categoryId]: count }).catch(() => undefined);
-    }
-  }, [bundle]);
-
   const applyCategoryCounts = useCallback(
     (requestId: number, counts: Record<string, number>) => {
       if (requestId !== requestRef.current) {
@@ -288,7 +264,6 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
       }
 
       markSwitchEvent(traceId, 'channel_query_finished', { rowCount: nextChannels.length });
-      updateCategoryCount(resolvedCategoryId, nextChannels.length);
 
       if (!nextChannels.length) {
         channelsBaselineRef.current = [];
@@ -334,7 +309,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
       setIsSwitchingProvider(false);
       endSwitchTrace(traceId);
     }
-  }, [applyCategoryCounts, bundle, initialCategoryId, commitChannels, loadChannelsForCategory, personalizationState.liveFavorites.length, prefetchChannelEpg, updateCategoryCount]);
+  }, [applyCategoryCounts, bundle, initialCategoryId, commitChannels, loadChannelsForCategory, personalizationState.liveFavorites.length, prefetchChannelEpg]);
 
   const loadCategoriesRef = useRef(loadCategories);
   loadCategoriesRef.current = loadCategories;
@@ -382,7 +357,6 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         }
 
         markSwitchEvent(traceId, 'channel_query_finished', { rowCount: nextChannels.length });
-        updateCategoryCount(categoryId, nextChannels.length);
         const immediate = mapChannelsWithoutEpg(nextChannels);
         clearLiveTvChannelRowDataPool();
         commitChannels(immediate);
@@ -412,7 +386,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         return channelsBaselineRef.current;
       }
     },
-    [bundle, commitChannels, loadChannelsForCategory, prefetchChannelEpg, updateCategoryCount],
+    [bundle, commitChannels, loadChannelsForCategory, prefetchChannelEpg],
   );
 
   useEffect(() => {

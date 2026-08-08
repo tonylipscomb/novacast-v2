@@ -8,6 +8,10 @@ import {
   sortContentItems,
   type ContentSortOption,
 } from '../media-browser/contentSorting.ts';
+import {
+  computeLiveCategoryCounts,
+  filterStreamsForLiveCategory,
+} from '../live/liveCategoryMembership.ts';
 import { MockMovieDataSource } from '../movies/data/MockMovieDataSource.ts';
 import type { MovieDataSource } from '../movies/data/MovieDataSource.ts';
 import { MOCK_ALL_MOVIES, matchesMovie, normalizeQuery } from '../movies/movieMockData.ts';
@@ -1265,6 +1269,11 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     inFlightLiveCategoryResolves.clear();
   }
 
+  // The one category-membership predicate shared by the browse filter AND the
+  // badge-count tally, so both always agree on which streams belong to a category.
+  const resolveLiveCategoryId = (value: unknown) =>
+    resolveProviderStreamCategoryId(value, 'live', liveCategoryIds);
+
   async function resolveLiveCategoryStreamsRaw(categoryId: string | undefined, signal?: AbortSignal) {
     if (!categoryId || categoryId === 'all') {
       return client.getLiveStreams(undefined, signal);
@@ -1272,8 +1281,10 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
 
     const serverSideCategoryId = categoryId === fallbackProviderCategoryId('live') ? undefined : categoryId;
     const allStreams = await client.getLiveStreams(serverSideCategoryId, signal);
-    return allStreams.filter(
-      (stream) => resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds) === categoryId,
+    // Dedupe here so the browse list and the badge count agree on membership even
+    // when a provider repeats the same stream_id inside a category.
+    return dedupeXtreamLiveStreamsByStreamId(
+      filterStreamsForLiveCategory(allStreams, categoryId, resolveLiveCategoryId),
     );
   }
 
@@ -1290,7 +1301,10 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
 
     loadingAllLiveStreamsUsFirst = (async () => {
       const streams = await resolveLiveCategoryStreamsRaw(undefined, signal);
-      const partitioned = partitionXtreamLiveStreamsUsFirst(streams);
+      // Dedupe once at the "all" source so every derived view (browse-from-all,
+      // per-category counts, total counts) shares one deduplicated membership set.
+      const deduped = dedupeXtreamLiveStreamsByStreamId(streams);
+      const partitioned = partitionXtreamLiveStreamsUsFirst(deduped);
       cachedAllLiveStreamsUsFirst = partitioned;
       return partitioned;
     })().finally(() => {
@@ -1308,9 +1322,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     // download the full live catalog, there is no reason to re-hit Xtream for a subset.
     // "all" is already US-first partitioned, so a filtered slice keeps that order (no re-partition).
     if (cachedAllLiveStreamsUsFirst) {
-      return cachedAllLiveStreamsUsFirst.filter(
-        (stream) => resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds) === categoryId,
-      );
+      return filterStreamsForLiveCategory(cachedAllLiveStreamsUsFirst, categoryId, resolveLiveCategoryId);
     }
 
     // Otherwise hit Xtream for just this category, then partition once.
@@ -1670,7 +1682,9 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     }
 
     await ensureLiveCategoryIds(signal);
-    const dump = dedupeXtreamLiveStreamsByStreamId(await client.getLiveStreams(undefined, signal));
+    // Reuse the shared US-first "all" list (populated once, also used by browse and
+    // getCategoryCounts) so the total-count path never re-downloads the full catalog.
+    const dump = dedupeXtreamLiveStreamsByStreamId(await resolveAllLiveStreamsUsFirst(signal));
     const dumpLikelyTruncated = dump.length >= XTREAM_MAX_ITEMS_PER_RESPONSE && liveCategoryIds.size > 0;
     applyLiveStreamCounts(dump, dumpLikelyTruncated);
 
@@ -1700,7 +1714,10 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       mappedCategories.forEach((category) => liveCategoryIds.add(category.id));
       return mappedCategories.map((category) => ({
         ...category,
-        count: category.count ?? liveCategoryCountCache.get(category.id) ?? null,
+        // Never surface the provider's self-reported category_count here — it routinely
+        // disagrees with actual browseable membership (e.g. 18 declared vs 11 resolved).
+        // The authoritative, membership-derived counts arrive via getCategoryCounts.
+        count: liveCategoryCountCache.get(category.id) ?? null,
       }));
     },
     async getCategoryAccentHints(signal) {
@@ -1713,8 +1730,23 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       }));
     },
     async getCategoryCounts(signal) {
-      await loadLiveStreamIndex(signal, { accurate: true });
-      return Object.fromEntries(liveCategoryCountCache);
+      // Counts MUST match what the user browses. Derive them from the same shared,
+      // deduplicated US-first "all" list and the same membership predicate the browse
+      // path uses. No extra network: resolveAllLiveStreamsUsFirst reuses cached "all".
+      await ensureLiveCategoryIds(signal);
+      const all = await resolveAllLiveStreamsUsFirst(signal);
+
+      // When the uncategorized dump hits the Xtream 10k ceiling it is truncated and
+      // cannot be trusted for membership; fall back to accurate per-category recounts
+      // (the same path getTotalChannelCount uses) so large providers stay correct.
+      if (all.length >= XTREAM_MAX_ITEMS_PER_RESPONSE && liveCategoryIds.size > 0) {
+        await recountLiveStreamsByCategory(signal);
+        return Object.fromEntries(liveCategoryCountCache);
+      }
+
+      // A category already resolved for browse overrides the derived tally with its
+      // exact browsed length, guaranteeing badgeCount === resolvedBrowseableChannels.length.
+      return computeLiveCategoryCounts(all, liveCategoryIds, resolveLiveCategoryId, resolvedLiveCategoryCache);
     },
     async getTotalChannelCount(signal) {
       await loadLiveStreamIndex(signal, { accurate: true });

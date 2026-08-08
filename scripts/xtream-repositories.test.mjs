@@ -180,11 +180,14 @@ test('live channel total dedupes duplicate stream ids and ignores inflated dupli
   });
 
   const categories = await repositories.live.getCategories();
-  const inflatedProviderMetadataTotal = categories.reduce((total, category) => total + (category.count ?? 0), 0);
+  // getCategories no longer surfaces the provider's inflated channel_count metadata
+  // (Stage 4.2S.3): the badge count is populated from real membership via
+  // getCategoryCounts so it can never disagree with the browseable channel list.
+  const surfacesInflatedProviderMetadata = categories.some((category) => category.count != null);
   const categoryCounts = await repositories.live.getCategoryCounts?.();
   const totalChannels = await repositories.live.getTotalChannelCount?.();
 
-  assert.equal(inflatedProviderMetadataTotal, 5120);
+  assert.equal(surfacesInflatedProviderMetadata, false);
   assert.deepEqual(categoryCounts, { '5': 2, '6': 1 });
   assert.equal(totalChannels, 3);
 });

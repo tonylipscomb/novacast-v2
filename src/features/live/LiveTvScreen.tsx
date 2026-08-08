@@ -97,6 +97,13 @@ import {
 } from './liveTvPreviewScheduling';
 import { shouldLoadCategoryOnFocusAlone } from './liveTvFocusPreview';
 import { recordLiveTvFocusEvent } from './liveTvFocusDiagnostics';
+import { recordLeftBoundaryResolution } from './liveTvSwitchDiagnostics';
+import {
+  resolveLeftBoundaryTarget,
+  resolveSwitchFocusTarget,
+  shouldShowSwitchLoader,
+  LIVE_TV_SWITCH_LOADER_THRESHOLD_MS,
+} from './liveTvSwitchFeedback';
 import { getLiveTvRowVisualFlags } from './liveTvUiPerfMode';
 import { useLiveTvScreenModel } from './useLiveTvScreenModel';
 import { displayLiveProgramText, isRawLiveStreamValue } from './liveTvProgramText';
@@ -105,6 +112,20 @@ import { searchLiveChannels } from '@/features/search/repositories/liveSearchRep
 import type { SearchResult } from '@/features/search/searchTypes';
 
 const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false } as const) : {};
+
+// Category rows are a fixed height (LiveTvCategoryRow height:38) separated by the
+// category list's `gap: 3`. Providing getItemLayout lets the list honour
+// initialScrollIndex, so after the browse subtree remounts (e.g. returning from
+// fullscreen) it mounts already scrolled to the selected category — keeping that
+// row rendered so the LEFT boundary handle stays valid instead of falling back.
+const CATEGORY_ROW_HEIGHT = 38;
+const CATEGORY_ROW_GAP = 3;
+const CATEGORY_ROW_STRIDE = CATEGORY_ROW_HEIGHT + CATEGORY_ROW_GAP;
+const getCategoryItemLayout = (_data: ArrayLike<ProviderLiveCategory> | null | undefined, index: number) => ({
+  length: CATEGORY_ROW_HEIGHT,
+  offset: CATEGORY_ROW_STRIDE * index,
+  index,
+});
 
 function formatPreviewWindow(channel: ProviderLiveChannel | null) {
   if (!channel) {
@@ -174,6 +195,8 @@ export function LiveTvScreen() {
     categoryTotalCount,
     channels,
     selectedCategoryId,
+    isLoadingChannels,
+    isSwitchingProvider,
     selectCategory: loadCategoryChannels,
     enrichFocusedChannelEpg,
     resolvePlaybackUrl,
@@ -313,12 +336,19 @@ export function LiveTvScreen() {
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [categoryNextFocusRightHandle, setCategoryNextFocusRightHandle] = useState<number | undefined>();
   const [watchButtonLeftHandle, setWatchButtonLeftHandle] = useState<number | undefined>();
+  // Handle of the Favorite (star) button so the Play button's LEFT lands on the star
+  // instead of skipping it straight to the channel row.
+  const [favoriteButtonHandle, setFavoriteButtonHandle] = useState<number | undefined>();
+  // Stage 4.2S.1 — local content-pane loader shown only when a switch is genuinely slow.
+  const [showSwitchLoader, setShowSwitchLoader] = useState(false);
+  const switchLoaderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedChannelIdRef = useRef<string | null>(null);
   const watchButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenCloseButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenLaunchSourceRef = useRef<FullscreenLaunchSource>(null);
   const previousFullscreenChannelIdRef = useRef<string | null>(null);
+  const previousFullscreenForCategoryScrollRef = useRef<string | null>(null);
   const isRestoringFullscreenFocusRef = useRef(false);
   const fullscreenRetryButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenRetryFocusKeyRef = useRef<string | null>(null);
@@ -334,6 +364,11 @@ export function LiveTvScreen() {
     fullscreenRetryButtonRef.current = instance;
     const nextTag = instance ? findNodeHandle(instance) : null;
     setFullscreenRetryNodeTag((current) => (current === nextTag ? current : nextTag));
+  }, []);
+
+  const registerFavoriteButtonRef = useCallback((instance: ElementRef<typeof View> | null) => {
+    const nextTag = instance ? findNodeHandle(instance) ?? undefined : undefined;
+    setFavoriteButtonHandle((current) => (current === nextTag ? current : nextTag));
   }, []);
 
   const syncLiveTvMemory = useCallback(() => {
@@ -355,10 +390,43 @@ export function LiveTvScreen() {
       return;
     }
 
-    const selectedCategoryId = liveStateRef.current?.selectedCategoryId;
-    const categoryRef = selectedCategoryId ? categoryRowRefs.current.get(selectedCategoryId) : null;
-    const nextLeft = categoryRef ? findNodeHandle(categoryRef) ?? undefined : undefined;
+    // LEFT from the channel/action area → the selected category row. Mid-switch that row
+    // can be transiently unmounted (null handle), which drops Android into spatial
+    // navigation and skips Favorites/category. Fall back to Favorites → first category so
+    // LEFT always resolves to a concrete, intended target.
+    const selectedCategoryId = liveStateRef.current?.selectedCategoryId ?? null;
+    const selectedCategoryRef = selectedCategoryId ? categoryRowRefs.current.get(selectedCategoryId) : null;
+    const selectedCategoryHandle = selectedCategoryRef ? findNodeHandle(selectedCategoryRef) : null;
+
+    const favoritesId = categories.some((category) => category.id === 'favorites') ? 'favorites' : null;
+    const favoritesRef = favoritesId ? categoryRowRefs.current.get(favoritesId) : null;
+    const favoritesHandle = favoritesRef ? findNodeHandle(favoritesRef) : null;
+
+    const firstCategoryId = categories[0]?.id ?? null;
+    const firstCategoryRef = firstCategoryId ? categoryRowRefs.current.get(firstCategoryId) : null;
+    const firstCategoryHandle = firstCategoryRef ? findNodeHandle(firstCategoryRef) : null;
+
+    const boundary = resolveLeftBoundaryTarget({
+      selectedCategoryId,
+      selectedCategoryHandle,
+      favoritesId,
+      favoritesHandle,
+      firstCategoryId,
+      firstCategoryHandle,
+    });
+    const nextLeft = boundary.handle;
     setCategoryFocusLeftHandle((current) => (current === nextLeft ? current : nextLeft));
+
+    recordLeftBoundaryResolution({
+      currentFocusId: liveStateRef.current?.selectedChannelId ?? null,
+      intendedTargetId: selectedCategoryId,
+      resolvedHandle: boundary.handle != null,
+      targetMounted: selectedCategoryHandle != null,
+      fallbackUsed: boundary.fallbackUsed,
+      fallbackTargetId: boundary.fallbackUsed ? boundary.targetId : null,
+      providerId: activeProviderId ?? null,
+      selectedCategoryId,
+    });
 
     const channelId = preferredChannelFocusId.current ?? channels[0]?.id ?? null;
     const channelRef = channelId ? channelRowRefs.current.get(channelId) : null;
@@ -369,7 +437,7 @@ export function LiveTvScreen() {
     const selectedChannelRef = selectedChannelId ? channelRowRefs.current.get(selectedChannelId) : null;
     const nextWatchLeft = selectedChannelRef ? findNodeHandle(selectedChannelRef) ?? undefined : undefined;
     setWatchButtonLeftHandle((current) => (current === nextWatchLeft ? current : nextWatchLeft));
-  }, [channels]);
+  }, [activeProviderId, categories, channels]);
 
   const registerChannelRowRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
     if (instance) {
@@ -713,9 +781,67 @@ export function LiveTvScreen() {
     [categories],
   );
 
+  // The browse subtree (including the category FlatList) unmounts while
+  // fullscreen playback is open and remounts fresh on close, which snaps the
+  // category rail back to offset 0 and scrolls the selected category off-screen
+  // (unmounting its row). That both hides the "last category" and detaches the
+  // node the LEFT boundary handle points at, so LEFT then resolves via a
+  // fallback/spatial target. Restore the category scroll position and refresh
+  // the boundary handles once the browse UI has remounted after close.
+  useEffect(() => {
+    const currentFullscreenChannelId = liveState?.fullscreenChannelId ?? null;
+    const previousFullscreenChannelId = previousFullscreenForCategoryScrollRef.current;
+    previousFullscreenForCategoryScrollRef.current = currentFullscreenChannelId;
+
+    if (!didFullscreenJustClose(previousFullscreenChannelId, currentFullscreenChannelId)) {
+      return;
+    }
+
+    const categoryId = liveStateRef.current?.selectedCategoryId ?? null;
+    if (!categoryId) {
+      return;
+    }
+
+    // Defer to the next frame so the remounted category FlatList is attached
+    // and laid out before we scroll it back to the selected category.
+    const frame = requestAnimationFrame(() => {
+      scrollCategoryIntoView(categoryId);
+      refreshBoundaryFocusHandles();
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [liveState?.fullscreenChannelId, scrollCategoryIntoView, refreshBoundaryFocusHandles]);
+
   useEffect(() => {
     refreshBoundaryFocusHandles();
   }, [refreshBoundaryFocusHandles, renderState?.selectedCategoryId, renderState?.selectedChannelId, channels.length]);
+
+  // Stage 4.2S.1 — arm the local content-pane loader only when a switch is genuinely
+  // slow, so fast category/provider switches never flash a spinner. The loader hides the
+  // instant channel loading ends (dependency flips false) and never steals focus.
+  useEffect(() => {
+    if (!isLoadingChannels) {
+      if (switchLoaderTimerRef.current) {
+        clearTimeout(switchLoaderTimerRef.current);
+        switchLoaderTimerRef.current = null;
+      }
+      setShowSwitchLoader(false);
+      return;
+    }
+
+    switchLoaderTimerRef.current = setTimeout(() => {
+      setShowSwitchLoader(
+        shouldShowSwitchLoader({ isLoadingChannels: true, elapsedMs: LIVE_TV_SWITCH_LOADER_THRESHOLD_MS }),
+      );
+    }, LIVE_TV_SWITCH_LOADER_THRESHOLD_MS);
+
+    return () => {
+      if (switchLoaderTimerRef.current) {
+        clearTimeout(switchLoaderTimerRef.current);
+        switchLoaderTimerRef.current = null;
+      }
+    };
+  }, [isLoadingChannels]);
 
   const cancelPendingPreview = useCallback(() => {
     if (pendingPreviewTimerRef.current) {
@@ -799,11 +925,17 @@ export function LiveTvScreen() {
     cancelPendingPreview();
     scrollCategoryIntoView(categoryId);
     void loadCategoryChannels(categoryId).then((nextChannels) => {
-      const nextChannelId = nextChannels[0]?.id ?? '';
+      // Stage 4.2S.1 — deterministic focus restoration: keep the previously focused
+      // channel when it survives the switch, otherwise land on the first valid channel,
+      // otherwise fall back to the category rail (never a stale/undefined handle).
+      const previousChannelId = liveStateRef.current?.selectedChannelId ?? null;
+      const focusTarget = resolveSwitchFocusTarget(previousChannelId, nextChannels);
+      const nextChannelId = focusTarget.kind === 'channel' ? focusTarget.channelId : '';
       preferredCategoryFocusId.current = categoryId;
       preferredChannelFocusId.current = nextChannelId;
-      // Category OK must leave the category rail and land in the channel list.
-      preferCategoryFocusRef.current = false;
+      // Category OK must leave the category rail and land in the channel list; an empty
+      // switch keeps focus on the category rail rather than a dangling channel handle.
+      preferCategoryFocusRef.current = focusTarget.kind === 'category-rail';
       preferChannelFocusRef.current = Boolean(nextChannelId);
       setState((current) =>
         current ? selectLiveCategory(current, categoryId, nextChannelId) : createInitialLiveTvState(categoryId, nextChannelId),
@@ -1057,6 +1189,15 @@ export function LiveTvScreen() {
     );
   }
 
+  // The browse subtree remounts every time fullscreen closes; mounting the category
+  // FlatList already scrolled to the selected category keeps that row rendered (so the
+  // LEFT boundary handle stays valid) instead of snapping to the top of the list.
+  const selectedCategoryScrollIndex = categories.findIndex(
+    (category) => category.id === renderState.selectedCategoryId,
+  );
+  const selectedCategoryInitialScrollIndex =
+    selectedCategoryScrollIndex > 0 ? selectedCategoryScrollIndex : undefined;
+
   return (
     <View style={styles.root}>
       {!renderState.fullscreenChannelId ? (
@@ -1113,6 +1254,8 @@ export function LiveTvScreen() {
               windowSize={5}
               maxToRenderPerBatch={8}
               initialNumToRender={Math.min(categories.length, 12)}
+              getItemLayout={getCategoryItemLayout}
+              initialScrollIndex={selectedCategoryInitialScrollIndex}
               onScrollToIndexFailed={(info) => {
                 recordLiveTvManualScroll();
                 categoriesRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
@@ -1169,6 +1312,11 @@ export function LiveTvScreen() {
                 registerRowRef={registerChannelRowRef}
               />
             )}
+            {showSwitchLoader ? (
+              <View pointerEvents="none" focusable={false} style={styles.switchLoaderOverlay}>
+                <NovaSpaceLoader label="Updating channels…" />
+              </View>
+            ) : null}
           </View>
 
           {shouldKeepPreviewAlive(renderState.fullscreenChannelId ?? null, fullscreenFrameStatus) ? (
@@ -1228,9 +1376,11 @@ export function LiveTvScreen() {
                 <View style={styles.actionRow}>
                   <View style={styles.actionButtons}>
                     <Pressable
+                      ref={registerFavoriteButtonRef}
                       focusable
                       accessibilityRole="button"
                       accessibilityLabel={detailChannelIsFavorite ? 'Favorited' : 'Favorite'}
+                      {...(watchButtonLeftHandle !== undefined ? { nextFocusLeft: watchButtonLeftHandle } : null)}
                       onFocus={() => setFocusedAction('favorite')}
                       onBlur={() => setFocusedAction(null)}
                       onPress={() => {
@@ -1251,7 +1401,11 @@ export function LiveTvScreen() {
                       hasTVPreferredFocus={false}
                       accessibilityRole="button"
                       accessibilityLabel="Watch Full Screen"
-                      {...(watchButtonLeftHandle !== undefined ? { nextFocusLeft: watchButtonLeftHandle } : null)}
+                      {...(favoriteButtonHandle !== undefined
+                        ? { nextFocusLeft: favoriteButtonHandle }
+                        : watchButtonLeftHandle !== undefined
+                          ? { nextFocusLeft: watchButtonLeftHandle }
+                          : null)}
                       onFocus={() => setFocusedAction('fullscreen')}
                       onBlur={() => setFocusedAction(null)}
                       onPress={watchFullScreen}
@@ -1426,6 +1580,15 @@ function createStyles(theme: NovaTheme) {
     justifyContent: 'center',
     gap: 8,
     paddingHorizontal: 24,
+  },
+  switchLoaderOverlay: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   inlineStateText: {
     color: theme.colors.textMuted,

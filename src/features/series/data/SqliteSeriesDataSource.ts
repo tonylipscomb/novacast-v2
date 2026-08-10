@@ -1,5 +1,5 @@
 /**
- * Stage 4.2O.2 — Series SQLite Parity.
+ * Stage 4.2O.2 ΓÇö Series SQLite Parity.
  *
  * Local-catalog read path for Series, mirroring the Movies SQLite data
  * source (`../../movies/data/SqliteMovieDataSource.ts`) but scoped to the
@@ -7,14 +7,13 @@
  * only (no seasons/episodes), generation-safe reads via the shared
  * `catalogRepository`/`catalogTableRouting` pipeline, and a network-fallback
  * composite so `useSeriesScreenModel.ts`'s existing UI contract and startup
- * fast-path branching need no changes — only the resolved `SeriesDataSource`
+ * fast-path branching need no changes ΓÇö only the resolved `SeriesDataSource`
  * value changes.
  */
 
 import {
   getCatalogCategoryCounts,
   getCatalogCategoryMetadataOnly,
-  getCatalogGenerationRowCount,
   getCatalogItemsPage,
   getCatalogSeriesItem,
   getCatalogTotalCount,
@@ -25,13 +24,12 @@ import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 import type { MediaCategory, SeriesDetail, SeriesSummary } from '../../media-browser/mediaTypes.ts';
 import { getOfflineSnapshot } from '../../resilience/offlineStatus.ts';
 import { emitSeriesSqliteEvent } from '../seriesDiagnostics.ts';
-import { SERIES_BROWSE_PAGE_LIMIT_MAX, SERIES_STARTUP_VIEWPORT_LIMIT } from '../seriesStartupFastPath.ts';
 import { repairDegradedSeriesCatalogIfNeeded } from '../seriesSparseCatalogRepair.ts';
-import type { SeriesDataSource, SeriesQueryPurpose } from './SeriesDataSource.ts';
+import type { SeriesDataSource } from './SeriesDataSource.ts';
 
 const SQLITE_SERIES_DISCOVER_ID = 'all';
 
-/** Thrown internally to signal "no readable local generation" — callers fall back to network. */
+/** Thrown internally to signal "no readable local generation" ΓÇö callers fall back to network. */
 export class SeriesCatalogNotReadyError extends Error {
   constructor(providerId: string, generation: number) {
     super(`Series SQLite catalog not ready for provider ${providerId} (generation ${generation})`);
@@ -78,10 +76,11 @@ function mapCatalogItemToSeries(item: CatalogItemRecord): SeriesSummary {
 
 function buildSeriesCategoriesFromMetadata(
   metadata: Array<{ categoryId: string; categoryName: string }>,
-  totalCount: number,
 ): MediaCategory[] {
+  // series-no-all-category-v1
+  // Provider categories only. No synthetic All Series row.
   const seenIds = new Map<string, number>();
-  const providerCategories: MediaCategory[] = metadata.map((category) => {
+  return metadata.map((category) => {
     const id = category.categoryId;
     const occurrence = (seenIds.get(id) ?? 0) + 1;
     seenIds.set(id, occurrence);
@@ -97,36 +96,31 @@ function buildSeriesCategoriesFromMetadata(
       section: 'provider' as const,
     };
   });
-
-  return [
-    {
-      id: SQLITE_SERIES_DISCOVER_ID,
-      renderKey: SQLITE_SERIES_DISCOVER_ID,
-      name: 'All Series',
-      count: totalCount,
-      countKnown: totalCount > 0,
-      kind: 'provider' as const,
-      section: 'provider' as const,
-    },
-    ...providerCategories,
-  ];
 }
 
 export type SqliteSeriesDataSourceOptions = {
   getDetailOrigin?: () => 'browse' | 'search';
+  /** search-s7-pinned-readable-generation - Navbar Search already resolved this generation. */
+  searchReadableGeneration?: number;
 };
 
 /**
  * Pure-SQLite Series reads. Throws `SeriesCatalogNotReadyError` when no
- * readable local generation exists for the provider — callers (the
+ * readable local generation exists for the provider ΓÇö callers (the
  * network-fallback composite below) treat that as "use provider network".
  */
 export function createSqliteSeriesDataSource(
   providerId: string,
-  _options?: SqliteSeriesDataSourceOptions,
+  options?: SqliteSeriesDataSourceOptions,
 ): SeriesDataSource {
   async function requireReadableGeneration(requestPurpose: string): Promise<number> {
-    const generation = await resolveReadableCatalogGeneration(providerId, 'series');
+    // search-s7-pinned-readable-generation
+    const pinnedSearchGeneration =
+      requestPurpose === 'search' ? (options?.searchReadableGeneration ?? 0) : 0;
+    const generation =
+      pinnedSearchGeneration > 0
+        ? pinnedSearchGeneration
+        : await resolveReadableCatalogGeneration(providerId, 'series');
     if (generation <= 0) {
       throw new SeriesCatalogNotReadyError(providerId, generation);
     }
@@ -142,19 +136,11 @@ export function createSqliteSeriesDataSource(
     const startedAt = Date.now();
     const generation = await requireReadableGeneration('categories');
 
-    // Stage 4.2Q: runtime degraded-catalog repair, mirroring Movies'
-    // `repairDegradedMoviesCatalogIfNeeded` (`SqliteMovieDataSource.ts`).
-    // Best-effort/non-blocking for the actual category read below — Series'
-    // simpler getCategoriesImpl has no readiness/pinning state to preserve
-    // the way Movies does, so this only detects an already-active sparse
-    // generation and schedules (at most once per generation) a background
-    // full resync; it never blanks or delays the metadata already being
-    // served, and never awaits the result.
+    // Backport of Stage 4.2Q's bounded sparse-Series repair.
+    // Non-blocking: current metadata keeps rendering while a degraded active
+    // generation schedules one fresh provider sync in the background.
     void repairDegradedSeriesCatalogIfNeeded(providerId, ({ providerId: pid }) => {
-      // Dynamic import: providerBundle.ts imports this module (for
-      // createSqliteFirstSeriesDataSource), so a static import here would
-      // create a cycle. Movies avoids this only because SqliteMovieDataSource.ts
-      // isn't itself imported by providerBundle.ts.
+      // Dynamic import avoids a providerBundle <-> SqliteSeriesDataSource cycle.
       void import('../../providers/providerBundle.ts').then(({ getActiveRepositoryBundle }) => {
         const bundle = getActiveRepositoryBundle();
         if (!bundle || bundle.providerId !== pid) {
@@ -167,19 +153,16 @@ export function createSqliteSeriesDataSource(
     // Metadata-only fast path (Stage 4.2O.2 spec #3): no per-category counts,
     // no provider calls. Counts are backfilled lazily via getCategoryCount /
     // prefetchAllCategoryCounts (mirrors Movies' getCatalogCategoryCounts
-    // deferred pattern) — called on demand by useSeriesScreenModel.
-    const [metadata, totalCount] = await Promise.all([
-      getCatalogCategoryMetadataOnly(providerId, 'series', { generation }),
-      getCatalogGenerationRowCount(providerId, 'series', generation),
-    ]);
+    // deferred pattern) ΓÇö called on demand by useSeriesScreenModel.
+    const metadata = await getCatalogCategoryMetadataOnly(providerId, 'series', { generation });
 
     if (metadata.length === 0) {
-      // No readable category rows yet at this generation — let the caller
+      // No readable category rows yet at this generation ΓÇö let the caller
       // fall back to network rather than showing an empty rail.
       throw new SeriesCatalogNotReadyError(providerId, generation);
     }
 
-    const categories = buildSeriesCategoriesFromMetadata(metadata, totalCount);
+    const categories = buildSeriesCategoriesFromMetadata(metadata);
     emitSeriesSqliteEvent('series_sqlite_categories_ready', {
       providerId,
       generation,
@@ -201,36 +184,14 @@ export function createSqliteSeriesDataSource(
     offset: number;
     limit: number;
     sort?: ContentSortOption;
-    queryPurpose?: SeriesQueryPurpose;
   }) {
     const startedAt = Date.now();
     const requestId = `series-sqlite-${providerId}-${startedAt}-${Math.round(Math.random() * 1e6)}`;
     const isFirstPage = input.offset === 0;
-    // Stage 4.2P #7: the caller (useSeriesScreenModel.ts) states the real
-    // query purpose explicitly — never re-derived from `offset`, which
-    // previously mislabeled post-interactive category switches (offset 0,
-    // after startup) as 'startup-viewport'. A missing purpose falls back to
-    // the offset-based guess only for callers that predate this stage.
-    const queryPurpose: SeriesQueryPurpose =
-      input.queryPurpose ?? (isFirstPage ? 'startup-viewport' : 'pagination');
+    const queryPurpose = isFirstPage ? 'startup-viewport' : 'runtime';
     const generation = await requireReadableGeneration(queryPurpose);
     const categoryId =
       input.categoryId && input.categoryId !== SQLITE_SERIES_DISCOVER_ID ? input.categoryId : undefined;
-    // Stage 4.2P #8: defensive clamp against an accidentally huge caller
-    // limit. Never affects Search (searchSeriesImpl has its own limit path)
-    // and never affects generation refresh ingestion (a separate writer
-    // pipeline that never calls getSeriesPageImpl).
-    // Stage 4.2Q: the startup-viewport purpose additionally uses
-    // `SERIES_STARTUP_VIEWPORT_LIMIT` as its ceiling instead of the wider
-    // `SERIES_BROWSE_PAGE_LIMIT_MAX`, mirroring Movies' DS-level clamp
-    // (`Math.min(input.limit, MOVIES_STARTUP_VIEWPORT_LIMIT)` in
-    // `SqliteMovieDataSource.ts`). The caller (useSeriesScreenModel.ts)
-    // already requests <= SERIES_STARTUP_VIEWPORT_LIMIT rows for the startup
-    // viewport, so this only ever engages as defense-in-depth. Runtime
-    // pagination is unaffected — it keeps the wider ceiling.
-    const purposeLimitCeiling =
-      queryPurpose === 'startup-viewport' ? SERIES_STARTUP_VIEWPORT_LIMIT : SERIES_BROWSE_PAGE_LIMIT_MAX;
-    const clampedLimit = Math.min(Math.max(input.limit, 1), purposeLimitCeiling);
 
     const runQuery = (queryGeneration: number) =>
       getCatalogItemsPage({
@@ -238,7 +199,7 @@ export function createSqliteSeriesDataSource(
         mediaType: 'series',
         categoryId,
         offset: input.offset,
-        limit: clampedLimit,
+        limit: input.limit,
         sort: mapSort(input.sort),
         generation: queryGeneration,
         skipTotalCount: true,
@@ -248,7 +209,7 @@ export function createSqliteSeriesDataSource(
     let page = await runQuery(generation);
 
     // Stage 4.2O.2 spec #14/#15: detect a mid-flight generation promotion
-    // and drop the stale-generation page rather than mixing generations —
+    // and drop the stale-generation page rather than mixing generations ΓÇö
     // a single bounded retry re-reads at the newly-promoted generation.
     const postGeneration = await resolveReadableCatalogGeneration(providerId, 'series');
     if (postGeneration > 0 && postGeneration !== generation) {
@@ -269,7 +230,7 @@ export function createSqliteSeriesDataSource(
     }
 
     const items = page.items.map(mapCatalogItemToSeries);
-    const hasMore = page.items.length >= clampedLimit;
+    const hasMore = page.items.length >= input.limit;
     const eventName = isFirstPage ? 'series_sqlite_first_viewport_ready' : 'series_sqlite_page_appended';
     emitSeriesSqliteEvent(eventName, {
       providerId,
@@ -284,14 +245,21 @@ export function createSqliteSeriesDataSource(
     return {
       items,
       totalCount: page.offset + items.length + (hasMore ? 1 : 0),
+      // series-total-count-exactness-v1:
+      // skipTotalCount:true makes this a lower-bound pagination estimate.
+      // Keep it for the page contract, but never let it replace category counts.
+      totalCountIsExact: false,
       hasMore,
     };
   }
 
-  async function searchSeriesImpl(input: { query: string; offset: number; limit: number }) {
+  async function searchSeriesImpl(input: { query: string; offset: number; limit: number; signal?: AbortSignal }) {
+  // search-s3-cancellable-series
+  if (input.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const startedAt = Date.now();
     const requestId = `series-sqlite-search-${providerId}-${startedAt}-${Math.round(Math.random() * 1e6)}`;
     const generation = await requireReadableGeneration('search');
+  if (input.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
     const page = await getCatalogItemsPage({
       providerId,
@@ -323,8 +291,6 @@ export function createSqliteSeriesDataSource(
   }
 
   return {
-    sourceKind: 'sqlite',
-
     async getCategories() {
       return getCategoriesImpl();
     },
@@ -341,7 +307,7 @@ export function createSqliteSeriesDataSource(
       // Stage 4.2O.2 spec #2/#11: browse SQLite is card-level only. Basic
       // metadata (title/poster/backdrop) already renders instantly from the
       // grid card; seasons/episodes remain an on-demand provider concern.
-      // The network-fallback composite is responsible for real enrichment —
+      // The network-fallback composite is responsible for real enrichment ΓÇö
       // this SQLite-only implementation returns a metadata-only shell so
       // Detail never renders fully blank while the network call is pending.
       const generation = await resolveReadableCatalogGeneration(providerId, 'series');
@@ -391,13 +357,6 @@ export function createSqliteSeriesDataSource(
         );
       }
     },
-
-    async getReadableGeneration() {
-      // Stage 4.2P #1/#3: cheap probe (no category/row work) — used only to
-      // validate a warm durable snapshot before deciding whether the full
-      // getCategories() reconciliation pass can be skipped.
-      return resolveReadableCatalogGeneration(providerId, 'series');
-    },
   };
 }
 
@@ -406,7 +365,7 @@ export function createSqliteSeriesDataSource(
  * when no readable local Series generation exists. Wrapping at the
  * `SeriesDataSource` boundary means `useSeriesScreenModel.ts`'s existing
  * memory-pin -> durable-snapshot -> "network" fast-path branching is
- * unchanged — the "network" step now transparently prefers SQLite whenever
+ * unchanged ΓÇö the "network" step now transparently prefers SQLite whenever
  * a readable generation is available, and only reaches the real network
  * data source when it is not.
  */
@@ -432,14 +391,6 @@ export function createSqliteFirstSeriesDataSource(
   }
 
   return {
-    // Stage 4.2Q: this composite is SQLite-first — it only falls back to
-    // `network` when the SQLite side has no readable generation at all
-    // (`SeriesCatalogNotReadyError`), never on a legitimate zero-hit SQLite
-    // result. Marking it 'sqlite' lets `SmartSeriesDataSource`/
-    // `seriesSearchRepository.ts` apply the same "SQLite is authoritative"
-    // policy Movies already has.
-    sourceKind: 'sqlite',
-
     getCategories() {
       return withSqliteOrNetwork(
         () => sqlite.getCategories(),
@@ -466,7 +417,7 @@ export function createSqliteFirstSeriesDataSource(
       // the browse-level catalog, so full Detail enrichment always goes
       // through the existing provider path unchanged. Basic card metadata
       // (title/poster/backdrop) is already SQLite-sourced via getSeriesPage
-      // and renders instantly in the popup before this resolves — so
+      // and renders instantly in the popup before this resolves ΓÇö so
       // Detail already "opens from local card metadata" without this call
       // needing a local fallback. Preserving the exact existing
       // success/null/throw contract here keeps SeriesDetailPopupV2's
@@ -489,13 +440,6 @@ export function createSqliteFirstSeriesDataSource(
             ? network.prefetchAllCategoryCounts(categoryIds, onCategoryCount)
             : Promise.resolve(),
       );
-    },
-
-    // Stage 4.2P #1/#3: always local-only (no network fallback) — a missing
-    // readable generation (0) is itself a meaningful "cannot short-circuit"
-    // signal, not an error condition that should fall through to network.
-    getReadableGeneration() {
-      return sqlite.getReadableGeneration!();
     },
 
     listCategorySeries: network.listCategorySeries?.bind(network),

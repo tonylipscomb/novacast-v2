@@ -1,17 +1,7 @@
 import type { MediaCategory, SeriesDetail, SeriesSummary } from '../../media-browser/mediaTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 
-export type SeriesQueryPurpose = 'startup-viewport' | 'category-switch' | 'pagination' | 'search';
-
 export interface SeriesDataSource {
-  /**
-   * Stage 4.2Q: identifies the active read backend, mirroring
-   * `MovieDataSource.sourceKind` — used by `SmartSeriesDataSource` and
-   * `seriesSearchRepository.ts` to apply the same "SQLite is authoritative"
-   * routing policy Movies already has.
-   */
-  sourceKind?: 'legacy' | 'sqlite';
-
   getCategories(): Promise<MediaCategory[]>;
 
   getSeriesPage(input: {
@@ -19,27 +9,25 @@ export interface SeriesDataSource {
     offset: number;
     limit: number;
     sort?: ContentSortOption;
-    /** Stage 4.2P #7: caller states the query's purpose explicitly — the data source never infers it from `offset`. */
-    queryPurpose?: SeriesQueryPurpose;
   }): Promise<{
     items: SeriesSummary[];
     totalCount: number;
+    /**
+     * series-total-count-exactness-v1
+     * false means totalCount is only a lower-bound/pagination estimate and
+     * must not overwrite an authoritative category count.
+     * Omitted means exact/backward-compatible for existing provider sources.
+     */
+    totalCountIsExact?: boolean;
     hasMore: boolean;
   }>;
-
-  /**
-   * Stage 4.2P #1/#3 — cheap current-readable-generation probe used only for
-   * the warm-reconcile short-circuit validation in `useSeriesScreenModel.ts`.
-   * SQLite-backed sources return the real readable generation (0 when none
-   * is readable); sources without a local SQLite catalog omit this method
-   * entirely so callers fail closed to the existing reconciliation path.
-   */
-  getReadableGeneration?(): Promise<number>;
 
   searchSeries?(input: {
     query: string;
     offset: number;
     limit: number;
+    // search-s3-cancellable-series
+    signal?: AbortSignal;
   }): Promise<{
     items: SeriesSummary[];
     totalCount: number;

@@ -101,6 +101,7 @@ import {
 import {
   getCatalogCategoryCounts,
   getCatalogTotalCount,
+  getCatalogSyncState,
   resolveReadableCatalogGeneration,
 } from '../catalog/catalogRepository.ts';
 import {
@@ -1190,6 +1191,18 @@ async function shouldSkipSeriesSync(setup: CatalogSyncSetup, runToken: number) {
   const { smartCategoriesEnabled, movieCategoryIds, seriesCategoryIds } = setup;
   const providerId = setup.input.providerId;
   const now = Date.now();
+  // A failed generation must get a real rebuild even if the provider-wide
+  // checkpoint/count cache still looks fresh.
+  const seriesSyncState = await getCatalogSyncState(providerId, 'series').catch(() => null);
+  if (seriesSyncState?.status === 'error') {
+    console.info('[NovaCast Series Generation Resume Guard]', {
+      providerId,
+      action: 'force-series-rebuild',
+      reason: 'previous-series-sync-error',
+      failedGeneration: seriesSyncState.generation,
+    });
+    return false;
+  }
 
   if (
     !setup.checkpointMatches ||
@@ -2231,8 +2244,27 @@ export async function runSeriesCatalogSync(
       setup.resumeSeriesIndex,
     );
 
+    // Generation-safe tables cannot resume item progress from an older
+    // generation. Every fresh SQLite Series generation must own a complete
+    // category/item walk of its own.
+    const seriesStartIndex = sqliteHandle?.enabled ? 0 : setup.resumeSeriesIndex;
+    if (sqliteHandle?.enabled) {
+      for (const categoryId of Object.keys(setup.seriesCountMap)) {
+        delete setup.seriesCountMap[categoryId];
+      }
+      if (smartCategoriesEnabled && canResumeCheckpoint) {
+        seriesIndex?.beginSync();
+      }
+      console.info('[NovaCast Series Generation Resume Guard]', {
+        providerId,
+        generation: sqliteHandle.generation,
+        checkpointResumeSeriesIndex: setup.resumeSeriesIndex,
+        seriesStartIndex,
+        action: 'fresh-generation-full-rewalk',
+      });
+    }
     for (
-      let seriesCategoryIndex = setup.resumeSeriesIndex;
+      let seriesCategoryIndex = seriesStartIndex;
       seriesCategoryIndex < seriesCategories.length;
       seriesCategoryIndex += 1
     ) {
@@ -2400,7 +2432,7 @@ export async function runSeriesCatalogSync(
         setup.movieCategories.length,
         seriesCategoryIndex + 1,
       );
-      if (seriesCategoryIndex === setup.resumeSeriesIndex || (seriesCategoryIndex + 1) % 5 === 0) {
+      if (seriesCategoryIndex === seriesStartIndex || (seriesCategoryIndex + 1) % 5 === 0) {
         publishCatalogProgress(setup);
       }
       await waitForCatalogSyncIdleSlot();

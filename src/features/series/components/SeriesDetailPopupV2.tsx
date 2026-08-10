@@ -725,9 +725,7 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     paddingHorizontal: 30,
-    // Stage 4.2Q: re-synced to Movies' exact value (was 26) — physically
-    // verified the season/episode chip rows still fit without clipping.
-    paddingVertical: 30,
+    paddingVertical: 26,
     gap: 26,
     zIndex: 2,
   },
@@ -749,27 +747,23 @@ const styles = StyleSheet.create({
     minWidth: 0,
     paddingRight: 24,
     justifyContent: 'center',
-    // Stage 4.2Q: re-synced to Movies' exact value (was 10).
-    gap: 12,
+    gap: 10,
   },
   title: {
     color: novaTheme.colors.textPrimary,
-    // Stage 4.2Q: re-synced to Movies' exact value (was 28).
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: '700',
     letterSpacing: 0.2,
   },
   meta: {
     color: novaTheme.colors.textSecondary,
-    // Stage 4.2Q: re-synced to Movies' exact value (was 14).
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '600',
   },
   description: {
     color: 'rgba(255,255,255,0.86)',
-    // Stage 4.2Q: re-synced to Movies' exact values (was 14/20).
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 14,
+    lineHeight: 20,
   },
   statusLine: {
     color: novaTheme.colors.textMuted,
@@ -835,8 +829,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 12,
-    // Stage 4.2Q: re-synced to Movies' exact value (was 4).
-    marginTop: 8,
+    marginTop: 4,
   },
   action: {
     flexDirection: 'row',

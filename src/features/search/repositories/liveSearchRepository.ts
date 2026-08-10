@@ -1,19 +1,23 @@
 import type { ProviderRepositories } from '../../providers/providerRepositories.ts';
 
-import { ingestLiveChannels, liveChannelIndexSize, searchLiveChannelIndex } from '../liveChannelIndex.ts';
+import { ingestLiveChannels, liveChannelIndexSize, searchLiveChannelIndex, type LiveSearchMatchMode } from '../liveChannelIndex.ts';
+import { matchesSearchQuery } from '../searchRanking.ts';
 import type { LiveSearchResult, SearchPageRequest, SearchPageResult } from '../searchTypes.ts';
 
 export async function searchLiveChannels(
   providerId: string,
   repositories: ProviderRepositories | null | undefined,
   request: SearchPageRequest,
+  options: { matchMode?: LiveSearchMatchMode } = {},
 ): Promise<SearchPageResult<LiveSearchResult>> {
+  // search-live-s1-global-mode
+  const matchMode = options.matchMode ?? 'live';
   if (request.signal?.aborted) {
     throw new DOMException('Aborted', 'AbortError');
   }
 
   if (liveChannelIndexSize(providerId) > 0) {
-    return searchLiveChannelIndex(providerId, request.query, request.offset, request.limit);
+    return searchLiveChannelIndex(providerId, request.query, request.offset, request.limit, matchMode);
   }
 
   if (!repositories?.live || !repositories.search) {
@@ -61,11 +65,16 @@ export async function searchLiveChannels(
     );
   }
 
-  const items = liveHits.slice(request.offset, request.offset + request.limit);
+  const visibleLiveHits =
+    matchMode === 'global'
+      ? liveHits.filter((hit) => matchesSearchQuery(request.query, { title: hit.title }))
+      : liveHits;
+
+  const items = visibleLiveHits.slice(request.offset, request.offset + request.limit);
   return {
     items,
-    totalCount: liveHits.length,
-    hasMore: request.offset + request.limit < liveHits.length,
+    totalCount: visibleLiveHits.length,
+    hasMore: request.offset + request.limit < visibleLiveHits.length,
   };
 }
 

@@ -5,6 +5,7 @@ import {
 } from './catalogSchema.ts';
 import {
   getCatalogDatabaseOpener,
+  openCatalogReadDatabase,
   type CatalogDatabaseHandle,
 } from './catalogDatabaseDriver.ts';
 import { CATALOG_DATABASE_NAME } from './catalogTypes.ts';
@@ -13,12 +14,41 @@ import { nowMs } from './jsChunkBudget.ts';
 
 let initPromise: Promise<CatalogDatabaseHandle> | null = null;
 let activeHandle: CatalogDatabaseHandle | null = null;
+/** search-s6-dedicated-read-connection */
+let readInitPromise: Promise<CatalogDatabaseHandle> | null = null;
+let activeReadHandle: CatalogDatabaseHandle | null = null;
 /** Serialize write transactions — movie + series sync can race on one expo-sqlite connection. */
 let catalogTransactionChain: Promise<unknown> = Promise.resolve();
 let mutexWaitTotalMs = 0;
 let mutexWaitSamples = 0;
 let mutexMaxWaitMs = 0;
 let activeCatalogTransactions = 0;
+
+/** search-s5-foreground-read-priority */
+let activeForegroundCatalogReads = 0;
+const foregroundCatalogReadDrainWaiters = new Set<() => void>();
+
+export function beginCatalogForegroundRead(): () => void {
+  activeForegroundCatalogReads += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeForegroundCatalogReads = Math.max(0, activeForegroundCatalogReads - 1);
+    if (activeForegroundCatalogReads === 0) {
+      const waiters = [...foregroundCatalogReadDrainWaiters];
+      foregroundCatalogReadDrainWaiters.clear();
+      for (const resolve of waiters) resolve();
+    }
+  };
+}
+
+async function waitForForegroundCatalogReadsToDrain(): Promise<void> {
+  if (activeForegroundCatalogReads === 0) return;
+  await new Promise<void>((resolve) => {
+    foregroundCatalogReadDrainWaiters.add(resolve);
+  });
+}
 
 function reportCatalogDatabaseError(action: string, error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
@@ -68,6 +98,35 @@ export async function getCatalogDatabase(): Promise<CatalogDatabaseHandle> {
   }
   return initializeCatalogDatabase();
 }
+/** search-s6-dedicated-read-connection
+ * Foreground Search reads use a separate query-only Expo SQLite connection.
+ * The primary connection remains the only writer/migration connection.
+ */
+export async function getCatalogReadDatabase(): Promise<CatalogDatabaseHandle> {
+  if (activeReadHandle) {
+    return activeReadHandle;
+  }
+  if (readInitPromise) {
+    return readInitPromise;
+  }
+
+  readInitPromise = (async () => {
+    // Ensure the primary handle has completed WAL setup and migrations first.
+    await getCatalogDatabase();
+
+    const readDb = await openCatalogReadDatabase(CATALOG_DATABASE_NAME);
+    await readDb.exec('PRAGMA query_only = ON;');
+    activeReadHandle = readDb;
+    return readDb;
+  })().catch((error) => {
+    readInitPromise = null;
+    activeReadHandle = null;
+    reportCatalogDatabaseError('initializeCatalogReadDatabase', error);
+    throw error;
+  });
+
+  return readInitPromise;
+}
 
 /**
  * Catalog write mutex. Held only for the SQLite transaction body — never across
@@ -77,6 +136,7 @@ export async function withCatalogTransaction<T>(fn: () => Promise<T>): Promise<T
   const waitStart = nowMs();
 
   const run = catalogTransactionChain.then(async () => {
+    await waitForForegroundCatalogReadsToDrain();
     const waitMs = nowMs() - waitStart;
     mutexWaitTotalMs += waitMs;
     mutexWaitSamples += 1;

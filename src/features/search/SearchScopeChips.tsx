@@ -14,7 +14,8 @@ type SearchScopeChipsProps = {
   firstTabRef?: React.RefObject<ViewType | null>;
 };
 
-const SCOPES: SearchScope[] = ['all', 'live', 'movie', 'series', 'guide'];
+// search-s2-scoped-only
+const SCOPES: SearchScope[] = ['movie', 'series', 'live', 'guide'];
 
 export function SearchScopeChips({
   activeScope,

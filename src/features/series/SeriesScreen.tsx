@@ -87,6 +87,8 @@ export function SeriesScreen() {
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
   const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
+  // series-pagination-focus-v6_1-confirmed-handoff
+  const [paginationFocusHandoffActive, setPaginationFocusHandoffActive] = useState(false);
   const [detailOverlayState, setDetailOverlayState] = useState<DetailOverlayState<SeriesSummary>>(
     createClosedDetailOverlayState,
   );
@@ -129,6 +131,10 @@ export function SeriesScreen() {
    * discover the hard way — see `closeSeriesDetailPopup` below).
    */
   const [seriesV2CloseFocusTargetId, setSeriesV2CloseFocusTargetId] = useState<string | null>(null);
+  // series-pagination-focus-v6_2-stable-native-owner
+  // requestTvFocus "executed" is not proof of native focus ownership.
+  const seriesV2CloseFocusTargetIdRef = useRef<string | null>(null);
+  const seriesV2CloseFocusWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** True while native focus sits inside the popup's season/episode chip area. */
   const episodesAreaFocusedRef = useRef(false);
   const [episodesFocusReturnToken, setEpisodesFocusReturnToken] = useState(0);
@@ -320,6 +326,27 @@ export function SeriesScreen() {
    * closing-* phases, no visual isolation, no hold cover, no transaction
    * watchdog, no Search bridge.
    */
+  const releaseSeriesV2CloseFocusHandoff = useCallback(
+    (originItemId: string, reason: string) => {
+      if (seriesV2CloseFocusTargetIdRef.current !== originItemId) {
+        return;
+      }
+
+      if (seriesV2CloseFocusWatchdogRef.current) {
+        clearTimeout(seriesV2CloseFocusWatchdogRef.current);
+        seriesV2CloseFocusWatchdogRef.current = null;
+      }
+
+      seriesV2CloseFocusTargetIdRef.current = null;
+      setSeriesV2CloseFocusTargetId((current) => (current === originItemId ? null : current));
+      setRestoringBrowseFocus(false);
+      logSeriesDetailPopupV2Event('series_detail_popup_v2_origin_focus_handoff_released', {
+        originItemId,
+        reason,
+      });
+    },
+    [],
+  );
   const closeSeriesDetailPopup = useCallback(
     (source: 'back' | 'x') => {
       if (!seriesDetailPopupOpenRef.current || seriesDetailPopupCloseInFlightRef.current) {
@@ -342,7 +369,20 @@ export function SeriesScreen() {
       // does not depend on `postersFocusable` settling before the deferred
       // focus request below runs.
       if (originItemId) {
+        seriesV2CloseFocusTargetIdRef.current = originItemId;
+        setRestoringBrowseFocus(true);
         setSeriesV2CloseFocusTargetId(originItemId);
+
+        if (seriesV2CloseFocusWatchdogRef.current) {
+          clearTimeout(seriesV2CloseFocusWatchdogRef.current);
+        }
+        seriesV2CloseFocusWatchdogRef.current = setTimeout(() => {
+          releaseSeriesV2CloseFocusHandoff(originItemId, 'actual-focus-watchdog');
+        }, 1200);
+
+        logSeriesDetailPopupV2Event('series_detail_popup_v2_origin_focus_handoff_armed', {
+          originItemId,
+        });
       }
 
       if (originItemId) {
@@ -354,7 +394,7 @@ export function SeriesScreen() {
               region: 'poster-grid',
               itemId: originItemId,
               reason: 'stage4o1-restore-origin-poster',
-              maxFrames: 3,
+              maxFrames: 12,
               isActive: () => !seriesDetailPopupOpenRef.current,
               getTarget: () => posterRefs.current.get(originItemId) ?? null,
               onResult: (result) => {
@@ -363,12 +403,26 @@ export function SeriesScreen() {
                   requested: result.requested,
                   reason: result.reason,
                 });
-                setSeriesV2CloseFocusTargetId((current) => (current === originItemId ? null : current));
+              },
+              onSettled: (status) => {
+                logSeriesDetailPopupV2Event('series_detail_popup_v2_origin_focus_handoff_settled', {
+                  originItemId,
+                  status,
+                });
+                // V6.2: "executed" only means .focus() was issued.
+                // Actual SeriesPosterCard.onFocus (or watchdog) releases ownership.
               },
             });
           });
         });
       } else {
+        if (seriesV2CloseFocusWatchdogRef.current) {
+          clearTimeout(seriesV2CloseFocusWatchdogRef.current);
+          seriesV2CloseFocusWatchdogRef.current = null;
+        }
+        seriesV2CloseFocusTargetIdRef.current = null;
+        setSeriesV2CloseFocusTargetId(null);
+        setRestoringBrowseFocus(false);
         logSeriesDetailPopupV2Event('series_detail_popup_v2_origin_focus_skipped', {
           reason: 'origin-missing',
         });
@@ -376,7 +430,7 @@ export function SeriesScreen() {
 
       seriesDetailPopupCloseInFlightRef.current = false;
     },
-    [seriesDetailPopup.originItemId, seriesDetailPopup.series?.id],
+    [releaseSeriesV2CloseFocusHandoff, seriesDetailPopup.originItemId, seriesDetailPopup.series?.id],
   );
 
   const closeSearch = useCallback(() => {
@@ -430,8 +484,16 @@ export function SeriesScreen() {
     (series: Parameters<typeof focusSeries>[0]) => {
       tvPerfSetFocus('SeriesPosterCard', series.id);
       focusSeries(series);
+
+      if (seriesV2CloseFocusTargetIdRef.current === series.id) {
+        logSeriesDetailPopupV2Event('series_detail_popup_v2_origin_focus_confirmed', {
+          originItemId: series.id,
+          source: 'SeriesPosterCard.onFocus',
+        });
+        releaseSeriesV2CloseFocusHandoff(series.id, 'actual-poster-onFocus');
+      }
     },
-    [focusSeries],
+    [focusSeries, releaseSeriesV2CloseFocusHandoff],
   );
 
   const handleSelectSeries = useCallback(
@@ -453,6 +515,11 @@ export function SeriesScreen() {
       // legacy `SeriesDetailOverlay` is never opened on this path.
       episodesAreaFocusedRef.current = false;
       setEpisodePlaybackError(null);
+      if (seriesV2CloseFocusWatchdogRef.current) {
+        clearTimeout(seriesV2CloseFocusWatchdogRef.current);
+        seriesV2CloseFocusWatchdogRef.current = null;
+      }
+      seriesV2CloseFocusTargetIdRef.current = null;
       setSeriesV2CloseFocusTargetId(null);
       seriesDetailPopupOpenRef.current = true;
       setSeriesDetailPopup({ open: true, series, originItemId: series.id });
@@ -496,6 +563,11 @@ export function SeriesScreen() {
       void loadSeriesDetail(series);
       episodesAreaFocusedRef.current = false;
       setEpisodePlaybackError(null);
+      if (seriesV2CloseFocusWatchdogRef.current) {
+        clearTimeout(seriesV2CloseFocusWatchdogRef.current);
+        seriesV2CloseFocusWatchdogRef.current = null;
+      }
+      seriesV2CloseFocusTargetIdRef.current = null;
       setSeriesV2CloseFocusTargetId(null);
       seriesDetailPopupOpenRef.current = true;
       setSeriesDetailPopup({ open: true, series, originItemId: series.id });
@@ -965,12 +1037,13 @@ useEffect(() => {
         <NovaTvShell
           activeId="series"
           providerLabel={selectedProviderLabel}
+          navigationFocusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesDetailPopupVisible && !playbackUiActive && !searchBlocksBrowse}
           preferActiveNavigationFocus={shouldPreferNavigationFocus({
             playbackUiActive,
             detailOverlayVisible: seriesDetailPopupVisible,
             searchBlocksBrowse,
             restoringBrowseFocus,
-            gridEmpty: visibleItems.length === 0,
+            gridEmpty: categories.length === 0,
           })}
           compactNavigationRail>
           <View style={styles.screen}>
@@ -980,6 +1053,7 @@ useEffect(() => {
                 <Text style={styles.copy}>Browse seasons and episodes from your provider.</Text>
               </View>
               <MovieToolbar
+                focusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesDetailPopupVisible && !playbackUiActive && !searchBlocksBrowse}
                 onSearchPress={() => {
                   if (searchOpen) {
                     closeSearch();
@@ -992,6 +1066,7 @@ useEffect(() => {
             </View>
             <View style={styles.contentRow}>
             <MediaCategoryRail
+              focusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesDetailPopupVisible && !playbackUiActive && !searchBlocksBrowse}
               categories={categories}
               selectedCategoryId={selectedCategoryId}
               preferredCategoryId={selectedCategoryId}
@@ -1015,7 +1090,12 @@ useEffect(() => {
             <View style={styles.middleColumn}>
             {categories.length === 0 && loadStatus !== 'error' ? (
               <View style={styles.initialLoadingPanel}>
-                <NovaSpaceLoader label="Loading series categories…" />
+                <View style={styles.initialCategoryLoaderContent}>
+                  <Text style={styles.initialCategoryLoaderLabel} numberOfLines={2}>
+                    Loading series categories...
+                  </Text>
+                  <NovaSpaceLoader label="Loading series categories..." variant="hero" />
+                </View>
               </View>
             ) : (
             <SeriesPosterGrid
@@ -1027,9 +1107,9 @@ useEffect(() => {
               loading={loading}
               categoryLoading={categoryLoading}
               emptyNotice={gridEmptyNotice}
-              focusedSeriesId={null}
+              focusedSeriesId={focusedItem?.id ?? null}
               selectedSeriesId={selectedItem?.id ?? null}
-              postersFocusable={!seriesDetailPopup.open && !playbackUiActive && !searchBlocksBrowse}
+              postersFocusable={!seriesDetailPopup.open && !playbackUiActive && !searchBlocksBrowse && seriesV2CloseFocusTargetId == null}
               closingFocusSeriesId={seriesV2CloseFocusTargetId}
               onFocusSeries={handleFocusSeries}
               onSelectSeries={handleSelectSeries}
@@ -1040,6 +1120,7 @@ useEffect(() => {
               sortFocusLeftHandle={categoryFocusLeftHandle}
               onSortFocusHandleReady={setSortFocusRightHandle}
               loadMore={loadMore}
+              onPaginationFocusHandoffChange={setPaginationFocusHandoffActive}
             />
             )}
             </View>
@@ -1193,8 +1274,34 @@ function createSeriesStyles(theme: NovaTheme) {
     initialLoadingPanel: {
       flex: 1,
       minHeight: 280,
+      position: 'relative',
+    },
+    initialCategoryLoaderContent: {
+      position: 'absolute',
+      top: '42%',
+      left: 12,
+      right: 12,
       alignItems: 'center',
       justifyContent: 'center',
+      gap: 24,
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      transform: [{ translateY: -52 }],
+    },
+    // media-category-hero-compact-v2
+    initialCategoryLoaderLabel: {
+      color: theme.colors.textPrimary,
+      fontSize: 18,
+      lineHeight: 22,
+      fontWeight: '700',
+      letterSpacing: 0.1,
+      textAlign: 'center',
+      paddingHorizontal: 24,
+      backgroundColor: 'transparent',
+      zIndex: 1,
+      textShadowColor: 'rgba(0, 0, 0, 0.65)',
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 5,
     },
     emptyState: {
       flex: 1,

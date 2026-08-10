@@ -16,8 +16,6 @@ type ChannelHeroCardProps = {
   categoryType: ProviderCategoryType;
   isLive?: boolean;
   preferredFocus?: boolean;
-  focusId?: string;
-  onFocused?: (id: string) => void;
   onPress: () => void;
 };
 
@@ -37,8 +35,6 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
   categoryType,
   isLive = false,
   preferredFocus = false,
-  focusId,
-  onFocused,
   onPress,
 }: ChannelHeroCardProps) {
   const { theme } = useAppTheme();
@@ -52,12 +48,7 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
       <Pressable
         focusable
         hasTVPreferredFocus={preferredFocus}
-        onFocus={() => {
-          setFocused(true);
-          if (focusId) {
-            onFocused?.(focusId);
-          }
-        }}
+        onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onPress={onPress}
         style={[styles.card, novaTvFocus.base, focused && styles.cardFocused]}>

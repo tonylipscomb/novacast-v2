@@ -72,10 +72,8 @@ test('5. Loader label remains visible with the spaceship', () => {
     }),
     'Loading Boxing',
   );
-  // Stage 4.2Q-ui: label is rendered by NovaSpaceLoader's own default cohesive
-  // presentation (rocket + label + energy bar), matching Series, instead of a
-  // separately-styled Text alongside a bare "hero" spaceship.
-  assert.match(screen, /<NovaSpaceLoader label=\{primaryLoaderLabel\} \/>/);
+  assert.match(screen, /primaryLoaderLabel/);
+  assert.match(screen, /variant="hero"/);
 });
 
 test('6. Primary loader is centered in the grid wrapper, not a FlatList footer', () => {

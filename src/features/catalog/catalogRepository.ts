@@ -1,5 +1,7 @@
 import {
+  beginCatalogForegroundRead,
   getCatalogDatabase,
+  getCatalogReadDatabase,
   withCatalogTransaction,
 } from './catalogDatabase.ts';
 import type { CatalogSqlParams } from './catalogDatabaseDriver.ts';
@@ -270,7 +272,7 @@ function logCatalogV2Generation(payload: {
 
 /**
  * Starts a sync generation for provider+mediaType.
- * Does not delete prior successful data ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â that happens on completeCatalogSync.
+ * Does not delete prior successful data ├â╞Æ├é┬ó├â┬ó├óΓé¼┼í├é┬¼├â┬ó├óΓÇÜ┬¼├é┬¥ that happens on completeCatalogSync.
  */
 export async function beginCatalogSync(
   providerId: string,
@@ -1030,11 +1032,11 @@ export async function completeCatalogSync(
 
     // Stage 4.2Q: Series previously had no equivalent sparse-distribution
     // check here at all (only the baseline item-row/distinct-content check
-    // above) — a Series generation could promote even when its category
+    // above) ΓÇö a Series generation could promote even when its category
     // coverage was collapsed/sparse in the same way an unvalidated Movies
     // generation could before Stage 4.2I. Reuses the exact same thresholds
     // as Movies via `validateCatalogCategoryDistribution` (Stage 4.2Q
-    // generalization of `validateMoviesCategoryDistribution`) — no new
+    // generalization of `validateMoviesCategoryDistribution`) ΓÇö no new
     // validation logic, no change to Movies' branch above.
     if (validationPassed && mediaType === 'series') {
       const largest = await getCatalogGenerationLargestCategory(providerId, mediaType, generation);
@@ -1238,8 +1240,8 @@ export async function getCatalogGenerationItemCount(
 }
 
 /**
- * Stage 4.2L: lightweight generation presence check — COUNT(*) only.
- * Avoids COUNT(DISTINCT …) used by physical stats during startup.
+ * Stage 4.2L: lightweight generation presence check ΓÇö COUNT(*) only.
+ * Avoids COUNT(DISTINCT ΓÇª) used by physical stats during startup.
  */
 export async function getCatalogGenerationRowCount(
   providerId: string,
@@ -1690,7 +1692,7 @@ export async function resolveReadableCatalogGeneration(
       }),
   );
 
-  // Diagnostics only — never changes the resolved generation above.
+  // Diagnostics only ΓÇö never changes the resolved generation above.
   void logCatalogGenerationInventoryOnce(providerId, mediaType, {
     currentAttemptGeneration,
     currentStatus: state?.status ?? null,
@@ -1778,7 +1780,7 @@ async function assessMoviesGenerationCandidate(
   return assessment;
 }
 
-/** Bounded transactional pointer repair — credentials/activation untouched. */
+/** Bounded transactional pointer repair ΓÇö credentials/activation untouched. */
 export async function repairMoviesProviderCatalogGenerationPointer(
   providerId: string,
   recoveredGeneration: number,
@@ -2248,7 +2250,13 @@ export async function getCatalogTotalCount(
 }
 
 export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise<CatalogItemsPage> {
-  const db = await getCatalogDatabase();
+  // search-s5-foreground-read-priority
+  const releaseForegroundRead = query.query?.trim() ? beginCatalogForegroundRead() : null;
+  try {
+  // search-s6-dedicated-read-connection
+  const db = query.query?.trim()
+    ? await getCatalogReadDatabase()
+    : await getCatalogDatabase();
   const generation = query.generation ?? (await resolveActiveGeneration(query.providerId, query.mediaType));
   const limit = Math.min(Math.max(query.limit ?? CATALOG_DEFAULT_PAGE_SIZE, 1), 100);
   const offset = Math.max(query.offset ?? 0, 0);
@@ -2276,8 +2284,22 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
   }
 
   if (query.query?.trim()) {
-    where += ' AND normalized_title LIKE ?';
-    params.push(`%${normalizeCatalogTitle(query.query)}%`);
+    const normalizedSearch = normalizeCatalogTitle(query.query);
+    // search-s5-exact-title-fast-path
+    const exactTitleRow = await db.getFirst<{ content_id: string }>(
+      `SELECT content_id FROM ${itemsTable}
+       WHERE ${where} AND normalized_title = ?
+       LIMIT 1`,
+      [...params, normalizedSearch],
+    );
+
+    if (exactTitleRow) {
+      where += ' AND normalized_title = ?';
+      params.push(normalizedSearch);
+    } else {
+      where += ' AND normalized_title LIKE ?';
+      params.push(`%${normalizedSearch}%`);
+    }
   }
 
   const pageSql = `SELECT * FROM ${itemsTable}
@@ -2374,6 +2396,9 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
       ? rows.length >= limit
       : offset + items.length < totalCount,
   };
+  } finally {
+    releaseForegroundRead?.();
+  }
 }
 
 /**

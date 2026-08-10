@@ -27,11 +27,8 @@ test('Stage 3B.2 Movies focus handoff keeps a non-activating loading target', ()
 
 test('Stage 3B.2 uses one larger centered transparent loader', () => {
   // Stage 3E: primary spaceship lives on MoviesScreen; grid has no loaders.
-  // Stage 4.2Q-ui: primary loader now uses NovaSpaceLoader's default cohesive
-  // (rocket + label + energy bar) presentation to match Series, not the bare
-  // "hero" variant with a separately-styled label Text.
   assert.match(screen, /primaryLoaderOverlay/);
-  assert.match(screen, /<NovaSpaceLoader label=\{primaryLoaderLabel\} \/>/);
+  assert.match(screen, /variant="hero"/);
   assert.doesNotMatch(grid, /NovaSpaceLoader/);
   assert.doesNotMatch(grid, /paginationLoader/);
   assert.doesNotMatch(grid, /variant="badge"/);

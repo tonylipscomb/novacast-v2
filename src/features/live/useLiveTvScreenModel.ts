@@ -18,7 +18,6 @@ import { ingestLiveChannels } from '@/features/search/repositories/liveSearchRep
 import { resetLiveTvFocusIdle } from './liveTvFocusIdle';
 import { clearLiveTvChannelRowDataPool, mergeLiveTvChannelEpg } from './liveTvChannelRowData';
 import type { LiveTvLoadStatus } from './liveTvLogic';
-import { beginSwitchTrace, endSwitchTrace, markSwitchEvent } from './liveTvSwitchDiagnostics';
 
 export type { LiveTvLoadStatus } from './liveTvLogic';
 
@@ -29,18 +28,11 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
   const [channels, setChannels] = useState<ProviderLiveChannel[]>([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState(initialCategoryId ?? '');
   const [baseCategories, setBaseCategories] = useState<ProviderLiveCategory[]>([]);
-  // Stage 4.2S.1 — distinct loading signals so only channel/content loading drives the
-  // local content-pane loader (never a screen-wide blocker).
-  const [isLoadingChannels, setIsLoadingChannels] = useState(false);
-  const [isSwitchingCategory, setIsSwitchingCategory] = useState(false);
-  const [isSwitchingProvider, setIsSwitchingProvider] = useState(false);
-  const [isLoadingEpg, setIsLoadingEpg] = useState(false);
   const { state: personalizationState } = usePersonalizationStore(bundle?.providerId ?? 'no-provider');
   const requestRef = useRef(0);
   const loadAbortRef = useRef<AbortController | null>(null);
   const epgFetchedIdsRef = useRef(new Set<string>());
   const channelsBaselineRef = useRef<ProviderLiveChannel[]>([]);
-  const previousBundleGenerationRef = useRef<number | null>(null);
 
   const categoriesWithFavorites = useMemo(() => {
     const withoutStaticFavorites = baseCategories.filter((category) => category.id !== 'favorites');
@@ -87,6 +79,30 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     setChannels(next);
     if (bundle?.providerId) {
       ingestLiveChannels(bundle.providerId, next);
+    }
+  }, [bundle]);
+
+  const updateCategoryCount = useCallback((categoryId: string, count: number) => {
+    if (categoryId === 'favorites') {
+      return;
+    }
+
+    setBaseCategories((current) => {
+      let changed = false;
+      const next = current.map((category) => {
+        if (category.id !== categoryId || category.count === count) {
+          return category;
+        }
+
+        changed = true;
+        return { ...category, count };
+      });
+
+      return changed ? next : current;
+    });
+
+    if (bundle?.providerId) {
+      void mergeCategoryCountIndex(bundle.providerId, 'live', { [categoryId]: count }).catch(() => undefined);
     }
   }, [bundle]);
 
@@ -154,33 +170,25 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         return;
       }
 
-      setIsLoadingEpg(true);
       void enrichChannelsWithPrefetchedEpg(bundle, nextChannels, {
         onChannelEnriched: (enriched) => {
           applyIncrementalEpg(enriched, requestId);
         },
-      })
-        .then((fullyEnriched) => {
-          if (requestId !== requestRef.current) {
-            return;
-          }
+      }).then((fullyEnriched) => {
+        if (requestId !== requestRef.current) {
+          return;
+        }
 
-          commitChannels(fullyEnriched);
-        })
-        .finally(() => {
-          if (requestId === requestRef.current) {
-            setIsLoadingEpg(false);
-          }
-        });
+        commitChannels(fullyEnriched);
+      });
     },
     [applyIncrementalEpg, bundle, commitChannels],
   );
 
-  const loadCategories = useCallback(async (isProviderSwitch = false) => {
+  const loadCategories = useCallback(async () => {
     if (!bundle) {
       setStatus('error');
       setErrorMessage('Provider is not connected.');
-      setIsSwitchingProvider(false);
       return;
     }
 
@@ -192,15 +200,9 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     const requestId = ++requestRef.current;
     setStatus('loading');
     setErrorMessage(null);
-    setIsLoadingChannels(true);
-    const traceId = isProviderSwitch
-      ? beginSwitchTrace('provider', { providerId: bundle.providerId })
-      : -1;
-    markSwitchEvent(traceId, 'current_rows_retained', { retainedRows: channelsBaselineRef.current.length });
     try {
       const nextCategories = await bundle.live.getCategories(signal);
       if (requestId !== requestRef.current) {
-        endSwitchTrace(traceId);
         return;
       }
 
@@ -229,9 +231,6 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         channelsBaselineRef.current = [];
         setChannels([]);
         setStatus('empty');
-        setIsLoadingChannels(false);
-        setIsSwitchingProvider(false);
-        endSwitchTrace(traceId);
         return;
       }
 
@@ -256,35 +255,24 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         })
         .catch(() => undefined);
 
-      markSwitchEvent(traceId, 'channel_query_started');
       const nextChannels = await loadChannelsForCategory(resolvedCategoryId, signal);
       if (requestId !== requestRef.current) {
-        endSwitchTrace(traceId);
         return;
       }
 
-      markSwitchEvent(traceId, 'channel_query_finished', { rowCount: nextChannels.length });
+      updateCategoryCount(resolvedCategoryId, nextChannels.length);
 
       if (!nextChannels.length) {
         channelsBaselineRef.current = [];
         setChannels([]);
         setStatus('empty');
-        setIsLoadingChannels(false);
-        setIsSwitchingProvider(false);
-        endSwitchTrace(traceId);
         return;
       }
 
       commitChannels(mapChannelsWithoutEpg(nextChannels));
-      markSwitchEvent(traceId, 'row_pool_rebuilt', { rowCount: nextChannels.length });
       setStatus('ready');
-      setIsLoadingChannels(false);
-      setIsSwitchingProvider(false);
-      markSwitchEvent(traceId, 'content_ready', { rowCount: nextChannels.length });
 
-      markSwitchEvent(traceId, 'epg_refresh_started');
       prefetchChannelEpg(requestId, nextChannels);
-      endSwitchTrace(traceId);
 
       if (bundle.live.getCategoryCounts) {
         void bundle.live
@@ -298,31 +286,20 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
       }
     } catch (error) {
       if (requestId !== requestRef.current || signal.aborted) {
-        endSwitchTrace(traceId);
         return;
       }
 
       // Keep last-good channels on refresh failure — do not wipe a usable browse list.
       setStatus(channelsBaselineRef.current.length ? 'ready' : 'error');
       setErrorMessage('Unable to load live channels from your provider.');
-      setIsLoadingChannels(false);
-      setIsSwitchingProvider(false);
-      endSwitchTrace(traceId);
     }
-  }, [applyCategoryCounts, bundle, initialCategoryId, commitChannels, loadChannelsForCategory, personalizationState.liveFavorites.length, prefetchChannelEpg]);
+  }, [applyCategoryCounts, bundle, initialCategoryId, commitChannels, loadChannelsForCategory, personalizationState.liveFavorites.length, prefetchChannelEpg, updateCategoryCount]);
 
   const loadCategoriesRef = useRef(loadCategories);
   loadCategoriesRef.current = loadCategories;
 
   useEffect(() => {
-    const generation = bundle?.generation ?? null;
-    const previous = previousBundleGenerationRef.current;
-    const isProviderSwitch = previous != null && previous !== generation;
-    previousBundleGenerationRef.current = generation;
-    if (isProviderSwitch) {
-      setIsSwitchingProvider(true);
-    }
-    void loadCategoriesRef.current(isProviderSwitch);
+    void loadCategoriesRef.current();
   }, [bundle?.generation, initialCategoryId]);
 
   useEffect(() => {
@@ -342,51 +319,34 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
       epgFetchedIdsRef.current.clear();
       clearLiveTvEpgCache();
       setSelectedCategoryId(categoryId);
-      setIsSwitchingCategory(true);
-      setIsLoadingChannels(true);
-
-      const traceId = beginSwitchTrace('category', { categoryId, providerId: bundle.providerId });
-      markSwitchEvent(traceId, 'current_rows_retained', { retainedRows: channelsBaselineRef.current.length });
-      markSwitchEvent(traceId, 'channel_query_started');
 
       try {
         const nextChannels = await loadChannelsForCategory(categoryId);
         if (requestId !== requestRef.current) {
-          endSwitchTrace(traceId);
           return [];
         }
 
-        markSwitchEvent(traceId, 'channel_query_finished', { rowCount: nextChannels.length });
+        updateCategoryCount(categoryId, nextChannels.length);
         const immediate = mapChannelsWithoutEpg(nextChannels);
         clearLiveTvChannelRowDataPool();
         commitChannels(immediate);
-        markSwitchEvent(traceId, 'row_pool_rebuilt', { rowCount: immediate.length });
         setStatus(immediate.length ? 'ready' : 'empty');
-        setIsLoadingChannels(false);
-        setIsSwitchingCategory(false);
-        markSwitchEvent(traceId, 'content_ready', { rowCount: immediate.length });
 
-        markSwitchEvent(traceId, 'epg_refresh_started');
         prefetchChannelEpg(requestId, nextChannels);
-        endSwitchTrace(traceId);
 
         return immediate;
       } catch {
         if (requestId !== requestRef.current) {
-          endSwitchTrace(traceId);
           return [];
         }
 
         // Retain previous category list on failure so the user is not left with an empty rail.
         setStatus(channelsBaselineRef.current.length ? 'ready' : 'error');
         setErrorMessage('Unable to load channels for this category.');
-        setIsLoadingChannels(false);
-        setIsSwitchingCategory(false);
-        endSwitchTrace(traceId);
         return channelsBaselineRef.current;
       }
     },
-    [bundle, commitChannels, loadChannelsForCategory, prefetchChannelEpg],
+    [bundle, commitChannels, loadChannelsForCategory, prefetchChannelEpg, updateCategoryCount],
   );
 
   useEffect(() => {
@@ -468,10 +428,6 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     categoryTotalCount,
     channels,
     selectedCategoryId,
-    isLoadingChannels,
-    isSwitchingCategory,
-    isSwitchingProvider,
-    isLoadingEpg,
     selectCategory,
     enrichFocusedChannelEpg,
     resolvePlaybackUrl,

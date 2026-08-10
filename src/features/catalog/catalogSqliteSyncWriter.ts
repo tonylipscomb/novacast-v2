@@ -502,10 +502,19 @@ export async function writeCatalogItemsFromSourceBudgeted<T>(
       {
         kind: options?.mapKind ?? (handle.mediaType === 'movie' ? 'movieMapping' : 'itemWrites'),
         writeKind: handle.mediaType === 'movie' ? 'movieItemWrites' : 'itemWrites',
-        minItems: handle.mediaType === 'movie' ? 8 : 4,
-        maxItems: handle.mediaType === 'movie' ? 12 : 24,
-        hardMs: handle.mediaType === 'movie' ? 100 : undefined,
-        pressureMode: handle.mediaType === 'movie',
+        // catalog-writer-pressure-v6_4-onn-interactive
+        // Movie catalog sync is background work. On ONN/Fire TV, 8-12 item
+        // SQLite transactions can monopolize the native thread for 500-750ms
+        // and drop D-pad events. Let pressure adaptation shrink to a single
+        // item and cap bursts at 4 so foreground TV focus remains responsive.
+        // catalog-writer-pressure-v6_5-all-media-interactive
+        // Series sync can hit the same long SQLite/mutex spans as Movies while
+        // the TV grid is actively handling D-pad input. Bound every catalog
+        // item write burst to 1-4 items and enable the same pressure behavior.
+        minItems: 1,
+        maxItems: 4,
+        hardMs: 100,
+        pressureMode: true,
         isCancelled: options?.isCancelled,
         onChunk: (info) => {
           if (

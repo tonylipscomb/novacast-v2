@@ -5005,7 +5005,10 @@ useEffect(() => {
   const [primaryHoldVisible, setPrimaryHoldVisible] = useState(false);
   const primaryShownAtRef = useRef(0);
   const primaryHideReasonRef = useRef<MoviesPrimaryLoaderHideReason>(null);
-  const primaryLoaderVisible = gateVisible || primaryHoldVisible;
+  // media-category-hero-standard-v1
+  // Every category first-page load uses the hero spaceship loader.
+  // The inline Loading more movies pill remains pagination-only.
+  const primaryLoaderVisible = gateVisible || primaryHoldVisible || categoryLoading;
   const primaryLoaderMode: MoviesPrimaryLoaderMode = primaryLoaderVisible
     ? gatePrimaryMode === 'hidden'
       ? hasUsableItems
@@ -5198,7 +5201,10 @@ useEffect(() => {
       focusable={false}>
       {primaryLoaderMode === 'category-blocking' ? <View style={styles.primaryLoaderDim} /> : null}
       <View style={styles.primaryLoaderContent}>
-        <NovaSpaceLoader label={primaryLoaderLabel} />
+        <Text style={styles.primaryLoaderLabel} numberOfLines={2}>
+          {primaryLoaderLabel}
+        </Text>
+        <NovaSpaceLoader label={primaryLoaderLabel} variant="hero" />
       </View>
     </View>
   ) : null;
@@ -5428,10 +5434,7 @@ useEffect(() => {
 
               {categories.length > 0 ? (
                 <View
-                  style={[
-                    styles.gridStage,
-                    primaryLoaderMode === 'category-blocking' && styles.gridStageDimmed,
-                  ]}
+                  style={styles.gridStage}
                   pointerEvents={primaryLoaderMode === 'category-blocking' ? 'none' : 'auto'}>
                   <MoviePosterGrid
                     movies={visibleMovies}
@@ -5480,13 +5483,10 @@ useEffect(() => {
                       detailFocusPhase === 'browse'
                     }
                     onViewportChange={handleViewportChange}
-                    listOverlays={
-                      <>
-                        {primaryLoaderNode}
-                        {paginationLoaderNode}
-                      </>
-                    }
+                    listOverlays={paginationLoaderNode}
                   />
+                  {/* media-category-hero-layout-v2: category hero stays outside the clipped poster-list viewport. */}
+                  {primaryLoaderNode}
                 </View>
               ) : (
                 <View style={styles.gridStage}>{primaryLoaderNode}</View>
@@ -5754,7 +5754,11 @@ function createMoviesStyles(theme: NovaTheme) {
     },
     // Stage 3E.3: fill MoviePosterGrid listStage viewport only (not full TV shell).
     primaryLoaderOverlay: {
-      ...StyleSheet.absoluteFillObject,
+      position: 'absolute',
+      top: 50,
+      left: 0,
+      right: 0,
+      bottom: 0,
       alignItems: 'center',
       justifyContent: 'flex-start',
       backgroundColor: 'transparent',
@@ -5765,18 +5769,33 @@ function createMoviesStyles(theme: NovaTheme) {
       ...StyleSheet.absoluteFillObject,
       backgroundColor: 'rgba(0, 0, 0, 0.28)',
     },
+    // media-category-hero-series-parity-v4
+    // Match Series category-loader vertical geometry while staying outside MoviePosterGrid clipping.
     primaryLoaderContent: {
       position: 'absolute',
-      // ~42% down the poster list viewport; nudge up by half stack height.
       top: '42%',
       left: 12,
       right: 12,
       alignItems: 'center',
       justifyContent: 'center',
-      gap: 24,
+      gap: 10,
       backgroundColor: 'transparent',
       borderWidth: 0,
       transform: [{ translateY: -52 }],
+    },
+    primaryLoaderLabel: {
+      color: theme.colors.textPrimary,
+      fontSize: 18,
+      lineHeight: 22,
+      fontWeight: '700',
+      letterSpacing: 0.1,
+      textAlign: 'center',
+      paddingHorizontal: 24,
+      backgroundColor: 'transparent',
+      zIndex: 1,
+      textShadowColor: 'rgba(0, 0, 0, 0.65)',
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 5,
     },
     paginationLoaderBar: {
       position: 'absolute',

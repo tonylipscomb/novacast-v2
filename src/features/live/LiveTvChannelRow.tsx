@@ -4,7 +4,6 @@ import { findNodeHandle, Platform, Pressable, StyleSheet, Text, View } from 'rea
 
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
-import { TvRemoteImage } from '@/components/media/TvRemoteImage';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -72,7 +71,6 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   const hasProgram = displayCurrent !== LIVE_TV_NO_PROGRAM_LABEL;
   const showSelected = rowVisualFlags.showSelectedHighlight && selected;
   const showPreviewing = rowVisualFlags.showPreviewingHighlight && previewing;
-  const logoInitial = (displayName.trim().charAt(0) || '#').toUpperCase();
 
   const assignRef = useCallback(
     (instance: ElementRef<typeof View> | null) => {
@@ -110,16 +108,6 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
         isFocused && styles.channelRowFocused,
       ]}>
       <View style={[styles.channelRail, selected && styles.selectedRail, isFocused && styles.focusRail]} />
-      {rowVisualFlags.showLogos ? (
-        <View style={styles.logoSlot}>
-          <Text numberOfLines={1} style={styles.logoFallback}>
-            {logoInitial}
-          </Text>
-          {data.logoUrl ? (
-            <TvRemoteImage uri={data.logoUrl} resizeMode="contain" style={styles.logoImage} />
-          ) : null}
-        </View>
-      ) : null}
       <Text style={[styles.channelNumber, selected && styles.selectedText, isFocused && styles.focusedText]}>{data.number}</Text>
       <View style={styles.channelCopy}>
         <View style={styles.channelTitleRow}>
@@ -144,44 +132,19 @@ function createStyles(theme: NovaTheme) {
 
   return StyleSheet.create({
     channelRow: {
-      minHeight: 58,
+      minHeight: 52,
       borderBottomWidth: 1,
       borderBottomColor: theme.colors.borderSubtle,
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 9,
-      paddingHorizontal: 9,
-      paddingVertical: 5,
+      gap: 7,
+      paddingHorizontal: 7,
+      paddingVertical: 4,
       ...focusChrome.base,
     },
     channelRowFocused: focusChrome.active,
     previewingRow: {
       backgroundColor: 'transparent',
-    },
-    logoSlot: {
-      width: 36,
-      height: 36,
-      borderRadius: 6,
-      overflow: 'hidden',
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: theme.colors.surfaceMuted,
-      borderWidth: 1,
-      borderColor: theme.colors.borderSubtle,
-    },
-    logoFallback: {
-      color: theme.colors.textSecondary,
-      fontSize: 15,
-      fontWeight: '800',
-    },
-    logoImage: {
-      position: 'absolute',
-      top: 3,
-      left: 3,
-      right: 3,
-      bottom: 3,
-      width: undefined,
-      height: undefined,
     },
     channelNumber: {
       width: 24,
@@ -191,11 +154,11 @@ function createStyles(theme: NovaTheme) {
     },
     channelRail: {
       width: 3,
-      height: 28,
+      height: 25,
       backgroundColor: 'transparent',
     },
     selectedRail: {
-      backgroundColor: theme.colors.textPrimary,
+      backgroundColor: theme.colors.success,
     },
     focusRail: {
       // Glass box carries focus; keep rail slot for layout only.

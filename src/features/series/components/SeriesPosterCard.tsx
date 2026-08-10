@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ElementRef } from 'react';
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
@@ -56,7 +56,7 @@ function seriesPosterCardPropsAreEqual(previous: SeriesPosterCardProps, next: Se
     previous.trapFocusDown === next.trapFocusDown &&
     previous.onFocus === next.onFocus &&
     previous.onPress === next.onPress
-    // registerRef intentionally ignored — ref wiring must not invalidate memo.
+    // registerRef intentionally ignored ΓÇö ref wiring must not invalidate memo.
   );
 }
 
@@ -74,6 +74,12 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
   const [isFocused, setIsFocused] = useState(false);
   const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
   const [selfFocusHandle, setSelfFocusHandle] = useState<number | undefined>();
+  // series-pagination-focus-v6_3-lookahead-native-stable
+  const nativePressableRef = useRef<ElementRef<typeof Pressable> | null>(null);
+  const registerRefRef = useRef(registerRef);
+  const trapFocusDownRef = useRef(trapFocusDown);
+  registerRefRef.current = registerRef;
+  trapFocusDownRef.current = trapFocusDown;
   const posterColors = getPosterColors(series.posterStyleKey);
   const initials = makeInitials(series.title);
   const posterKey = `${series.id}:${series.posterUrl ?? ''}`;
@@ -89,18 +95,27 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
     setIsFocused(false);
   }, [series.id]);
 
-  const bindRef = useCallback(
-    (instance: ElementRef<typeof Pressable> | null) => {
-      registerRef?.(instance);
-      if (!trapFocusDown) {
-        setSelfFocusHandle((prev) => (prev === undefined ? prev : undefined));
-        return;
-      }
-      const handle = instance ? findNodeHandle(instance) ?? undefined : undefined;
+  const bindRef = useCallback((instance: ElementRef<typeof Pressable> | null) => {
+    nativePressableRef.current = instance;
+    registerRefRef.current?.(instance);
+
+    // If this card mounts as the safety-fence row, capture its native handle
+    // immediately. The callback itself never changes when pagination appends.
+    if (instance && trapFocusDownRef.current) {
+      const handle = findNodeHandle(instance) ?? undefined;
       setSelfFocusHandle((prev) => (prev === handle ? prev : handle));
-    },
-    [registerRef, trapFocusDown],
-  );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!trapFocusDown) {
+      return;
+    }
+    const handle = nativePressableRef.current
+      ? findNodeHandle(nativePressableRef.current) ?? undefined
+      : undefined;
+    setSelfFocusHandle((prev) => (prev === handle ? prev : handle));
+  }, [trapFocusDown]);
 
   return (
     <Pressable

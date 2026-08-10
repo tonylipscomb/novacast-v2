@@ -58,8 +58,10 @@ const DEFAULT_BATCH: Record<ChunkWorkKind, number> = {
   categories: 8,
   movieMapping: 32,
   seriesMapping: 32,
-  movieItemWrites: 10,
-  itemWrites: 16,
+  // catalog-writer-pressure-v6_4-onn-interactive
+  movieItemWrites: 2,
+  // catalog-writer-pressure-v6_5-all-media-interactive
+  itemWrites: 2,
   regionRanking: 64,
   generic: 24,
 };

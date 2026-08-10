@@ -185,10 +185,6 @@ export async function refreshSmartSeriesCategoryCounts(providerId: string, categ
 }
 
 export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: string): SeriesDataSource {
-  // Stage 4.2Q: mirrors `SmartMovieDataSource`'s `usesSqliteReads` — used by
-  // `searchSeries` below to apply the same "SQLite is authoritative" policy
-  // Movies already has, instead of always preferring the in-memory index.
-  const usesSqliteReads = base.sourceKind === 'sqlite';
   async function buildSmartCategories(providerCategories: MediaCategory[]) {
     const sortedProviderCategories = sortProviderCategoriesUsFirst(providerCategories, 'series');
     const settings = await getMediaSettings();
@@ -307,26 +303,15 @@ export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: 
       return buildSmartCategories(providerCategories);
     },
 
-    async getSeriesPage({ categoryId, offset, limit, sort = DEFAULT_CONTENT_SORT, queryPurpose }) {
+    async getSeriesPage({ categoryId, offset, limit, sort = DEFAULT_CONTENT_SORT }) {
       if (isSectionCategoryId(categoryId)) {
         return { items: [], totalCount: 0, hasMore: false, hasValidRatings: false };
       }
 
       if (!isSmartCategoryId(categoryId)) {
-        // Stage 4.2P #7: this wrapper sits between useSeriesScreenModel.ts and
-        // the SQLite-first composite for every non-smart category too — it
-        // must forward the caller's explicit queryPurpose through unchanged
-        // rather than reconstructing the input and silently dropping it
-        // (which would make the SQLite layer's own offset-based fallback
-        // mislabel every post-interactive category switch as
-        // 'startup-viewport' again).
-        return base.getSeriesPage({ categoryId, offset, limit, sort, queryPurpose });
+        return base.getSeriesPage({ categoryId, offset, limit, sort });
       }
 
-      // Smart categories (favorites/watchlist/recently-added/etc.) are
-      // computed entirely in-memory from the catalog index, never touching
-      // SQLite's own generation-pinning/queryPurpose diagnostics — no
-      // forwarding target exists here.
       return querySmartSeriesPage(categoryId, offset, limit, sort);
     },
 
@@ -342,13 +327,6 @@ export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: 
     },
 
     async searchSeries(input) {
-      // Stage 4.2Q: once `base` is SQLite-backed, it is authoritative — go
-      // straight to it (zero hits included) rather than consulting the
-      // in-memory index first, mirroring `SmartMovieDataSource.searchMovies`.
-      if (usesSqliteReads) {
-        return base.searchSeries!(input);
-      }
-
       const indexed = getSeriesCatalogIndex(providerId);
       if (indexed.size > 0) {
         const page = await searchSeriesRepository(providerId, null, {
@@ -356,6 +334,7 @@ export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: 
           query: input.query,
           offset: input.offset,
           limit: input.limit,
+          signal: input.signal,
         });
         return {
           items: page.items

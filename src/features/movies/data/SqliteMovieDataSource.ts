@@ -25,7 +25,7 @@ import {
 import {
   isOnnMoviesTraceEnabled,
   traceOnnMoviesEvent,
-} from '../../diagnostics/onnMoviesTrace.ts';
+} from '@/features/diagnostics/onnMoviesTrace';
 import { getMoviesDetailOpenForDiagnostics } from '../moviesDiagnosticsState.ts';
 
 import type { MovieDataSource } from './MovieDataSource.ts';
@@ -348,6 +348,8 @@ export type SqliteMovieDataSourceOptions = {
   fetchProviderMovieInfo?: (movieId: string) => Promise<MediaDetail | null>;
   /** Browse vs Search origin for enrichment diagnostics. */
   getDetailOrigin?: () => MovieDetailEnrichmentOrigin;
+  /** search-s7-pinned-readable-generation - Navbar Search already resolved this generation. */
+  searchReadableGeneration?: number;
 };
 
 export function createSqliteMovieDataSource(
@@ -1248,6 +1250,11 @@ export function createSqliteMovieDataSource(
         offset: input.offset,
         limit: input.limit,
         sort: 'title',
+        // search-s7-pinned-readable-generation
+        generation:
+          options?.searchReadableGeneration && options.searchReadableGeneration > 0
+            ? options.searchReadableGeneration
+            : undefined,
         // Stage 3G: first page must not wait on a full-generation COUNT.
         skipTotalCount: true,
       });
@@ -1272,7 +1279,7 @@ export function createSqliteMovieDataSource(
 
       try {
         const { getActiveMoviesSearchRequestId, markMoviesSearchPath } = await import(
-          '../../search/moviesSearchPerfDiagnostics.ts'
+          '@/features/search/moviesSearchPerfDiagnostics'
         );
         markMoviesSearchPath(getActiveMoviesSearchRequestId(), 'sqlite', { sqliteMs, mappingMs });
       } catch {

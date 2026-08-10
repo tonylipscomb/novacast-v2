@@ -47,9 +47,27 @@ export function getCatalogDatabaseOpener(): CatalogDatabaseOpener {
   return openExpoCatalogDatabase;
 }
 
-async function openExpoCatalogDatabase(databaseName: string): Promise<CatalogDatabaseHandle> {
+/** search-s6-dedicated-read-connection
+ * Open a separate connection to the same catalog file for foreground reads.
+ * Tests keep using the injected opener; production requests a new Expo connection.
+ */
+export async function openCatalogReadDatabase(
+  databaseName: string,
+): Promise<CatalogDatabaseHandle> {
+  if (openerOverride) {
+    return openerOverride(databaseName);
+  }
+  return openExpoCatalogDatabase(databaseName, true);
+}
+async function openExpoCatalogDatabase(
+  databaseName: string,
+  useNewConnection = false,
+): Promise<CatalogDatabaseHandle> {
   const SQLite = await import('expo-sqlite');
-  const db = await SQLite.openDatabaseAsync(databaseName);
+  const db = await SQLite.openDatabaseAsync(
+    databaseName,
+    useNewConnection ? { useNewConnection: true } : undefined,
+  );
 
   return {
     async exec(sql) {

@@ -619,8 +619,8 @@ export function clearOnnMoviesTraceForTests() {
   autoTraceOwned = false;
   autoBackgroundInstalled = false;
   autoDurationMsApplied = ONN_MOVIES_TRACE_DEFAULT_AUTO_DURATION_MS;
-  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO;
-  delete process.env.EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS;
+  Reflect.deleteProperty(process.env, 'EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_SCENARIO');
+  Reflect.deleteProperty(process.env, 'EXPO_PUBLIC_NOVACAST_MOVIES_TRACE_AUTO_DURATION_MS');
 }
 
 export function getOnnMoviesTraceTestState() {

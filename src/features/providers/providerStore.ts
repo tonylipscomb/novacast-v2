@@ -50,12 +50,6 @@ import {
   setProviderCredentials,
 } from './providerCredentialStore.ts';
 import { cancelProviderCatalogSync } from './providerCatalogSync.ts';
-import {
-  clearAllProviderAuthTrustMarkers,
-  computeProviderCredentialIdentity,
-  saveProviderAuthTrustMarker,
-} from './providerAuthTrustStore.ts';
-import { resolveLocalLibraryBootstrapEligibility } from './providerLocalBootstrap.ts';
 
 const STORAGE_KEY = '@novacast/provider-state';
 
@@ -104,34 +98,6 @@ function emitRuntimeChange() {
 function setRuntime(next: ProviderRuntimeState) {
   runtime = next;
   emitRuntimeChange();
-}
-
-/** Stage 4.2P #5: providers with a deferred (not-yet-real) account validation in flight. */
-const deferredValidationPendingProviders = new Set<string>();
-
-function setDeferredValidationPending(providerId: string, pending: boolean) {
-  const wasPending = deferredValidationPendingProviders.has(providerId);
-  if (pending === wasPending) {
-    return;
-  }
-  if (pending) {
-    deferredValidationPendingProviders.add(providerId);
-  } else {
-    deferredValidationPendingProviders.delete(providerId);
-  }
-  // Force a new `runtime` object reference so `useProviderStore()`'s
-  // subscribeProviderRuntime listener (which re-sets state to `runtime`)
-  // actually re-renders — the Set mutation above alone would not change
-  // `runtime`'s own identity.
-  setRuntime({ ...runtime });
-}
-
-export function isDeferredAccountValidationPending(providerId: string): boolean {
-  return deferredValidationPendingProviders.has(providerId);
-}
-
-function emitProviderBootstrapDiagnostic(event: string, payload: Record<string, unknown> = {}) {
-  console.info('[NovaCast Provider Bootstrap] ' + JSON.stringify({ event, ...payload }));
 }
 
 function describeSwitchFailure(error: unknown, providerId: string) {
@@ -227,40 +193,8 @@ async function resolveProviderCredentials(provider: ProviderRecord) {
   return credentials;
 }
 
-/**
- * Stage 4.2P #4/#5 — records the auth trust marker after a REAL successful
- * account validation only (never on a skipped/bypassed handshake). No-op for
- * non-xtream connections (mock/demo has no real account concept to trust).
- */
-async function recordSuccessfulAccountValidation(
-  provider: ProviderRecord,
-  credentials: ProviderCredentialRecord | undefined,
-): Promise<void> {
-  if (provider.connection?.type !== 'xtream' || !credentials) {
-    return;
-  }
-  await saveProviderAuthTrustMarker({
-    providerId: provider.id,
-    providerEndpointIdentity: getProviderServerId(credentials.baseUrl) ?? '',
-    credentialIdentity: computeProviderCredentialIdentity(credentials),
-  });
-}
-
-/**
- * Stage 4.2P #5 — this is the existing deferred-validation plumbing the spec
- * asks to be reused verbatim, extended with: (a) a trust-marker refresh on
- * real success, and (b) a `deferredValidationPendingProviders` flag so
- * StartupGate-adjacent code/tests/logcat can observe "deferred validation is
- * in flight" without inventing a second validation system.
- */
-function scheduleProviderAccountValidation(
-  provider: ProviderRecord,
-  bundle: ProviderRepositoryBundle,
-  credentials: ProviderCredentialRecord | undefined,
-) {
+function scheduleProviderAccountValidation(provider: ProviderRecord, bundle: ProviderRepositoryBundle) {
   pairingTransactionStart('scheduleProviderAccountValidation', { providerId: provider.id });
-  setDeferredValidationPending(provider.id, true);
-  emitProviderBootstrapDiagnostic('provider_deferred_validation_scheduled', { providerId: provider.id });
   void bundle.ready
     .then(async () => {
       if (bundle.accountMetadata == null) {
@@ -271,7 +205,6 @@ function scheduleProviderAccountValidation(
         return;
       }
 
-      await recordSuccessfulAccountValidation(provider, credentials);
       const nextProvider = validatedProviderMetadata(provider, bundle.accountMetadata);
       await runPairingTransactionStep('scheduleProviderAccountValidation.writeState', async () => {
         const current = await readState();
@@ -285,14 +218,9 @@ function scheduleProviderAccountValidation(
         });
       }, { providerId: provider.id });
       pairingTransactionSuccess('scheduleProviderAccountValidation', { providerId: provider.id });
-      emitProviderBootstrapDiagnostic('provider_deferred_validation_succeeded', { providerId: provider.id });
     })
     .catch((error) => {
       pairingTransactionFailure('scheduleProviderAccountValidation', error, { providerId: provider.id });
-      emitProviderBootstrapDiagnostic('provider_deferred_validation_failed', {
-        providerId: provider.id,
-        message: error instanceof Error ? error.message : String(error),
-      });
       if (getActiveRepositoryBundle()?.providerId !== provider.id) {
         return;
       }
@@ -304,9 +232,6 @@ function scheduleProviderAccountValidation(
         ...runtime,
         lastError: describeSwitchFailure(error, provider.id),
       });
-    })
-    .finally(() => {
-      setDeferredValidationPending(provider.id, false);
     });
 }
 
@@ -320,7 +245,7 @@ async function prepareProviderBundle(
   const bundle = createRepositoryBundle(provider, credentials);
 
   if (!validateAccount) {
-    scheduleProviderAccountValidation(provider, bundle, credentials);
+    scheduleProviderAccountValidation(provider, bundle);
     return { bundle, provider };
   }
 
@@ -330,7 +255,6 @@ async function prepareProviderBundle(
     bundle.invalidate();
     throw error;
   }
-  await recordSuccessfulAccountValidation(provider, credentials);
   const nextProvider = validatedProviderMetadata(provider, bundle.accountMetadata);
   return { bundle, provider: nextProvider };
 }
@@ -341,60 +265,7 @@ function closeActivePlayback() {
   }
 }
 
-/**
- * Stage 4.2P #3/#6 — tries the bounded local-library bootstrap exactly once
- * (cheap, local-only checks; no network, no retries). Returns `null` for any
- * ineligible/failed outcome so the caller falls through to the existing
- * online bootstrap path completely unchanged — that fallback is the safety
- * net for every fail-closed condition in the spec.
- */
-async function attemptLocalLibraryBootstrap(
-  provider: ProviderRecord,
-): Promise<ProviderRepositoryBundle | null> {
-  if (provider.connection?.type !== 'xtream') {
-    return null;
-  }
-
-  const credentials = await getProviderCredentials(provider.connection.credentialKey ?? provider.id).catch(
-    () => null,
-  );
-  const eligibility = await resolveLocalLibraryBootstrapEligibility(provider, credentials);
-  if (!eligibility.eligible) {
-    emitProviderBootstrapDiagnostic('provider_local_library_bootstrap_skipped', {
-      providerId: provider.id,
-      reason: eligibility.reason,
-    });
-    return null;
-  }
-
-  try {
-    const prepared = await prepareProviderBundle(provider, credentials ?? undefined, { validateAccount: false });
-    activateRepositoryBundle(prepared.bundle);
-    setRuntime({ ...runtime, generation: getRepositoryBundleGeneration() });
-    emitProviderBootstrapDiagnostic('provider_local_library_bootstrap_used', {
-      providerId: provider.id,
-      movieGeneration: eligibility.readableGeneration.movie,
-      seriesGeneration: eligibility.readableGeneration.series,
-    });
-    return prepared.bundle;
-  } catch (error) {
-    // Local bypass failed unexpectedly (e.g. corrupt local catalog) — fall
-    // through to the existing online bootstrap below rather than surfacing
-    // a bypass-specific error to the user.
-    emitProviderBootstrapDiagnostic('provider_local_library_bootstrap_failed', {
-      providerId: provider.id,
-      message: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
-}
-
 async function initializeSavedProviderOnStartup(provider: NonNullable<ReturnType<typeof getSelectedProvider>>) {
-  const bypassBundle = await attemptLocalLibraryBootstrap(provider);
-  if (bypassBundle) {
-    return bypassBundle;
-  }
-
   return withStartupInitRetries(async () => {
     const prepared = await prepareProviderBundle(provider);
     activateRepositoryBundle(prepared.bundle);
@@ -917,9 +788,6 @@ export async function clearProvidersForPairing() {
   });
   const result = await writeState(createEmptyProviderState());
   await Promise.all(current.providers.map((provider) => removeProviderCredentials(provider.id).catch(() => undefined)));
-  // Stage 4.2P #6: explicit logout/removal must never leave a trust marker
-  // behind that a later re-pair with different credentials could reuse.
-  await clearAllProviderAuthTrustMarkers(current.providers.map((provider) => provider.id));
   return result;
 }
 
@@ -936,7 +804,6 @@ export async function resetProviderState() {
   });
   const result = await writeState(createDefaultProviderState());
   await Promise.all(current.providers.map((provider) => removeProviderCredentials(provider.id).catch(() => undefined)));
-  await clearAllProviderAuthTrustMarkers(current.providers.map((provider) => provider.id));
   return result;
 }
 
@@ -1078,9 +945,6 @@ export function useProviderStore() {
         switchingProviderId: runtimeState.switchingProviderId,
         providerSwitchError: runtimeState.lastError,
         providerInitialized: Boolean(activeBundle) && !runtimeState.lastError,
-        deferredAccountValidationPending: selectedProvider
-          ? isDeferredAccountValidationPending(selectedProvider.id)
-          : false,
       };
     },
     [bundleGeneration, expirationLabel, ready, runtimeState, selectedProvider, state],

@@ -34,7 +34,10 @@ export async function resolveMoviesSearchDatasource(input: {
 
   const sqliteAvailable = MOVIES_SQLITE_READS_ENABLED && readableGeneration > 0;
   if (sqliteAvailable) {
-    const sqlite = createSqliteMovieDataSource(providerId);
+    // search-s7-pinned-readable-generation
+    const sqlite = createSqliteMovieDataSource(providerId, {
+      searchReadableGeneration: readableGeneration,
+    });
     const selection: MoviesSearchDatasourceSelection = {
       providerId,
       dataSource: sqlite,

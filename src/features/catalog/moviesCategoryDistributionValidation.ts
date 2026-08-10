@@ -1,15 +1,15 @@
 /**
- * Stage 3C.2 / 4.2D / 4.2I — reject collapsed / sparse Movies generations before activation.
+ * Stage 3C.2 / 4.2D / 4.2I ΓÇö reject collapsed / sparse Movies generations before activation.
  * Stage 4.2I also rejects partial dumps (tiny item totals with collapsed category coverage)
  * even when provider.catalogGeneration is zero.
  *
  * Stage 4.2Q: the actual threshold logic below was never Movies-specific data
- * (it's pure arithmetic over item/category counts) — generalized to
+ * (it's pure arithmetic over item/category counts) ΓÇö generalized to
  * `validateCatalogCategoryDistribution(mediaType, input)` / `assessCatalogIntegrity(mediaType, input)`
  * so Series can share the exact same validation (same thresholds, same
  * rejection reasons) instead of having no promotion-time sparse check of its
  * own. `validateMoviesCategoryDistribution` / `assessMoviesCatalogIntegrity`
- * remain as-is (same signature, same behavior, same log text) — thin
+ * remain as-is (same signature, same behavior, same log text) ΓÇö thin
  * `mediaType: 'movie'` wrappers over the shared implementation.
  */
 
@@ -188,7 +188,7 @@ const CATALOG_MEDIA_TYPE_MARKER: Record<CatalogMediaType, string> = {
 };
 
 /**
- * Stage 4.2Q — generalized entry point: identical thresholds/logic as
+ * Stage 4.2Q ΓÇö generalized entry point: identical thresholds/logic as
  * `validateMoviesCategoryDistribution` (below), parameterized by
  * `mediaType` purely for the diagnostic log line/marker. Movies callers
  * should keep using `validateMoviesCategoryDistribution` unchanged; this is
@@ -236,7 +236,7 @@ export function validateCatalogCategoryDistribution(
 }
 
 /**
- * Stage 3C.2/4.2D/4.2I Movies entry point — unchanged signature, unchanged
+ * Stage 3C.2/4.2D/4.2I Movies entry point ΓÇö unchanged signature, unchanged
  * behavior, unchanged log text/marker. Thin `mediaType: 'movie'` wrapper over
  * the shared `validateCatalogCategoryDistribution` (Stage 4.2Q).
  */
@@ -260,7 +260,7 @@ export function validateMoviesCategoryDistribution(input: {
 export function assessCatalogIntegrity(
   mediaType: CatalogMediaType,
   input: {
-    /** Actual readable generation under assessment — never invent 0 when known. */
+    /** Actual readable generation under assessment ΓÇö never invent 0 when known. */
     generation?: number;
     metadataCategoryCount: number;
     nonzeroCategoryCount: number;
@@ -291,9 +291,9 @@ export function assessCatalogIntegrity(
   };
 }
 
-/** Movies entry point — unchanged signature/behavior. Thin wrapper over `assessCatalogIntegrity`. */
+/** Movies entry point ΓÇö unchanged signature/behavior. Thin wrapper over `assessCatalogIntegrity`. */
 export function assessMoviesCatalogIntegrity(input: {
-  /** Actual readable generation under assessment — never invent 0 when known. */
+  /** Actual readable generation under assessment ΓÇö never invent 0 when known. */
   generation?: number;
   metadataCategoryCount: number;
   nonzeroCategoryCount: number;

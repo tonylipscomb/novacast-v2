@@ -92,12 +92,8 @@ test('7. Startup query does not hydrate seasons/episodes', () => {
   assert.match(sqliteDs, /browse SQLite is card-level only/);
 });
 
-test('8. Pagination reads from SQLite (explicit queryPurpose, not offset-inferred)', () => {
-  // Stage 4.2P #7 fix: queryPurpose is now passed explicitly by the caller
-  // (useSeriesScreenModel.ts) rather than inferred from `offset` — see
-  // scripts/stage4p-parity-polish.test.mjs tests 6-8 for full coverage of
-  // the corrected startup-viewport / category-switch / pagination labeling.
-  assert.match(sqliteDs, /input\.queryPurpose \?\? \(isFirstPage \? 'startup-viewport' : 'pagination'\)/);
+test('8. Pagination reads from SQLite (runtime queryPurpose branch)', () => {
+  assert.match(sqliteDs, /const queryPurpose = isFirstPage \? 'startup-viewport' : 'runtime'/);
 });
 
 test('9. Pagination appends without duplicates', () => {
@@ -106,7 +102,7 @@ test('9. Pagination appends without duplicates', () => {
 });
 
 test('10. Search reads from SQLite', () => {
-  const block = sliceBlock(sqliteDs, 'async function searchSeriesImpl', "sourceKind: 'sqlite'");
+  const block = sliceBlock(sqliteDs, 'async function searchSeriesImpl', 'return {\n    async getCategories');
   assert.match(block, /getCatalogItemsPage\(/);
   assert.match(block, /query: input\.query/);
 });

@@ -1,8 +1,10 @@
 import type { ProviderLiveChannel } from '@/features/providers/providerRepositories';
 
-import { buildSearchHaystack, compareSearchCandidates, matchesSearchQuery } from './searchRanking.ts';
+import { compareSearchCandidates } from './searchRanking.ts';
 import { normalizeSearchQuery } from './searchQuery.ts';
 import type { LiveSearchResult } from './searchTypes.ts';
+
+export type LiveSearchMatchMode = 'global' | 'live';
 
 export type LiveChannelIndexEntry = {
   id: string;
@@ -13,6 +15,13 @@ export type LiveChannelIndexEntry = {
   current?: string;
   tone?: string;
   logoUrl?: string;
+  // search-live-s1-cached-index
+  // Cache normalized fields once during ingestion instead of rebuilding a haystack per keystroke.
+  normalizedName: string;
+  normalizedCurrent: string;
+  numberText: string;
+  nameTokens: string[];
+  currentTokens: string[];
 };
 
 const indexes = new Map<string, Map<string, LiveChannelIndexEntry>>();
@@ -28,9 +37,37 @@ function providerMap(providerId: string) {
   return next;
 }
 
+function tokenizeNormalized(value: string) {
+  return value.split(' ').filter(Boolean);
+}
+
+function matchesCachedText(
+  normalizedQuery: string,
+  queryTokens: string[],
+  normalizedText: string,
+  textTokens: string[],
+) {
+  if (!normalizedQuery || !normalizedText) {
+    return false;
+  }
+
+  if (normalizedText.includes(normalizedQuery)) {
+    return true;
+  }
+
+  return (
+    queryTokens.length > 0 &&
+    queryTokens.every((queryToken) => textTokens.some((textToken) => textToken.startsWith(queryToken)))
+  );
+}
+
 export function ingestLiveChannels(providerId: string, channels: ProviderLiveChannel[]) {
   const map = providerMap(providerId);
   for (const channel of channels) {
+    const normalizedName = normalizeSearchQuery(channel.name);
+    const normalizedCurrent = normalizeSearchQuery(channel.current ?? '');
+    const numberText = String(channel.number);
+
     map.set(channel.id, {
       id: channel.id,
       providerId,
@@ -40,6 +77,11 @@ export function ingestLiveChannels(providerId: string, channels: ProviderLiveCha
       current: channel.current,
       tone: channel.tone,
       logoUrl: channel.logoUrl,
+      normalizedName,
+      normalizedCurrent,
+      numberText,
+      nameTokens: tokenizeNormalized(normalizedName),
+      currentTokens: tokenizeNormalized(normalizedCurrent),
     });
   }
 }
@@ -62,6 +104,7 @@ export function searchLiveChannelIndex(
   query: string,
   offset: number,
   limit: number,
+  matchMode: LiveSearchMatchMode = 'live',
 ): { items: LiveSearchResult[]; totalCount: number; hasMore: boolean } {
   const map = indexes.get(providerId);
   if (!map?.size) {
@@ -69,15 +112,29 @@ export function searchLiveChannelIndex(
   }
 
   const normalizedQuery = normalizeSearchQuery(query);
+  const queryTokens = tokenizeNormalized(normalizedQuery);
   const matches: LiveSearchResult[] = [];
 
   for (const entry of map.values()) {
-    const haystack = buildSearchHaystack([entry.name, entry.number, entry.current, entry.categoryId]);
-    const nameMatch = matchesSearchQuery(query, { title: entry.name, metadata: haystack });
-    const haystackMatch = haystack.includes(normalizedQuery);
-    const numberMatch = String(entry.number) === normalizedQuery;
+    const nameMatch = matchesCachedText(
+      normalizedQuery,
+      queryTokens,
+      entry.normalizedName,
+      entry.nameTokens,
+    );
+    const numberMatch = entry.numberText === normalizedQuery;
+    const currentProgramMatch =
+      matchMode === 'live' &&
+      matchesCachedText(
+        normalizedQuery,
+        queryTokens,
+        entry.normalizedCurrent,
+        entry.currentTokens,
+      );
 
-    if (!nameMatch && !haystackMatch && !numberMatch) {
+    // Global search intentionally ignores current-program/category metadata.
+    // Dedicated Live scope keeps current-program matching for richer channel discovery.
+    if (!nameMatch && !numberMatch && !currentProgramMatch) {
       continue;
     }
 
@@ -95,9 +152,19 @@ export function searchLiveChannelIndex(
     });
   }
 
-  matches.sort((left, right) =>
-    compareSearchCandidates(query, { title: left.title, metadata: left.subtitle }, { title: right.title, metadata: right.subtitle }),
-  );
+  matches.sort((left, right) => {
+    const leftNumberExact = String(left.channelNumber ?? '') === normalizedQuery;
+    const rightNumberExact = String(right.channelNumber ?? '') === normalizedQuery;
+    if (leftNumberExact !== rightNumberExact) {
+      return leftNumberExact ? -1 : 1;
+    }
+
+    return compareSearchCandidates(
+      query,
+      { title: left.title, metadata: matchMode === 'live' ? left.subtitle : undefined },
+      { title: right.title, metadata: matchMode === 'live' ? right.subtitle : undefined },
+    );
+  });
 
   const items = matches.slice(offset, offset + limit);
   return {

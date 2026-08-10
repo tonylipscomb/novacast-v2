@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ImageBackground as ReactNativeImageBackground, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ImageBackground as ReactNativeImageBackground, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
@@ -39,16 +39,6 @@ import { markCatalogAuditFocus, markCatalogAuditRender } from '@/features/diagno
 import { noteFocusLatencyFocus } from '@/features/diagnostics/focusLatencyAudit';
 import { waitOutCatalogWriteQuietPeriod } from '@/features/catalog/catalogWriteQuietPeriod';
 import { processTimeBudgeted } from '@/features/catalog/jsChunkBudget';
-import {
-  getHomeScreenMemory,
-  rememberHomeScreenMemory,
-  resolveHomeInitialFocusId,
-  type HomeFocusSnapshot,
-} from '@/features/hub/homeScreenMemory';
-import {
-  noteHomeRowUpdated,
-  recordHomeStabilityOnce,
-} from '@/features/hub/homeStabilityDiagnostics';
 
 /**
  * Resolves a channel's category type for accent-color purposes. Prefers an
@@ -73,9 +63,6 @@ export function MainMenuScreen() {
   const { width } = useWindowDimensions();
   const router = useRouter();
   const navigationGateRef = useRef(createTvNavigationGate());
-  const scrollRef = useRef<ScrollView | null>(null);
-  const homeInteractiveFiredRef = useRef(false);
-  const focusDiagnosticFiredRef = useRef(false);
   const { selectedProvider } = useProviderStore();
   const { bundle } = useActiveProviderBundle();
   const { isActive: playbackActive, isClosing: playbackClosing, launchPlayback } = useUnifiedPlayer();
@@ -94,87 +81,20 @@ export function MainMenuScreen() {
   }));
   const recentlyWatchedItems =
     personalization.providerId === activeProviderId ? personalization.recentlyWatched.slice(0, 6) : [];
-
-  const focusSnapshot: HomeFocusSnapshot = {
-    providerId: personalization.providerId,
-    recentlyWatched: recentlyWatchedItems,
-    continueWatching:
-      personalization.providerId === activeProviderId ? personalization.continueWatching : [],
-    favoriteChannels:
-      personalization.providerId === activeProviderId ? personalization.favoriteChannels : [],
-    favoriteMovies:
-      personalization.providerId === activeProviderId ? personalization.favoriteMovies : [],
-    favoriteSeries:
-      personalization.providerId === activeProviderId ? personalization.favoriteSeries : [],
-  };
-
-  // Stage 4.2R: resolve the initial focus target ONCE per Home mount and freeze
-  // it. Later debounced/background personalization refreshes must not re-point
-  // preferred focus, which would steal focus after data settles. The remembered
-  // target (from a prior Home visit) is restored when it still exists. While the
-  // guided walkthrough is visible, Home content owns no focus.
-  const resolvedFocusIdRef = useRef<string | null | undefined>(undefined);
-  let firstHomeFocusId: string | null;
-  if (guide.visible) {
-    firstHomeFocusId = null;
-  } else if (resolvedFocusIdRef.current !== undefined) {
-    firstHomeFocusId = resolvedFocusIdRef.current;
-  } else {
-    const candidate = resolveHomeInitialFocusId(focusSnapshot, activeProviderId, {
-      guideVisible: false,
-      rememberedFocusId: getHomeScreenMemory(activeProviderId).focusedCardId,
-    });
-    if (candidate) {
-      resolvedFocusIdRef.current = candidate;
-    }
-    firstHomeFocusId = candidate;
-  }
-
-  // Stage 4.2R: the Home shell (NovaTvShell) starts the diagnostics generation;
-  // this parent effect runs afterwards and records the Home mount marker.
-  useEffect(() => {
-    recordHomeStabilityOnce('home_mount_started', { providerId: activeProviderId });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Stage 4.2R: once the initial focus target is resolved, emit a one-shot
-  // diagnostic and restore the prior vertical scroll offset when we are
-  // restoring a remembered target (Home-return path).
-  useEffect(() => {
-    if (focusDiagnosticFiredRef.current || !firstHomeFocusId) {
-      return;
-    }
-    focusDiagnosticFiredRef.current = true;
-    const memory = getHomeScreenMemory(activeProviderId);
-    const restored = memory.focusedCardId === firstHomeFocusId;
-    recordHomeStabilityOnce(restored ? 'home_focus_restored' : 'home_initial_focus_assigned', {
-      focusId: firstHomeFocusId,
-    });
-    if (restored && memory.scrollOffsetY > 0) {
-      const targetY = memory.scrollOffsetY;
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ y: targetY, animated: false });
-      });
-    }
-  }, [activeProviderId, firstHomeFocusId]);
-
-  const handleCardFocused = useCallback(
-    (focusId: string) => {
-      rememberHomeScreenMemory(activeProviderId, { focusedCardId: focusId });
-      if (!homeInteractiveFiredRef.current) {
-        homeInteractiveFiredRef.current = true;
-        recordHomeStabilityOnce('home_interactive', { focusId });
-      }
-    },
-    [activeProviderId],
-  );
-
-  const handleHomeScroll = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      rememberHomeScreenMemory(activeProviderId, { scrollOffsetY: event.nativeEvent.contentOffset.y });
-    },
-    [activeProviderId],
-  );
+  const firstHomeFocusId =
+    guide.visible
+      ? null
+      : recentlyWatchedItems.length
+        ? `recent-${recentlyWatchedItems[0].mediaType}-${recentlyWatchedItems[0].contentId}`
+        : personalization.providerId === activeProviderId && personalization.continueWatching.length
+          ? `continue-${personalization.continueWatching[0].contentId}`
+          : personalization.providerId === activeProviderId && personalization.favoriteChannels.length
+            ? `favorite-channel-${personalization.favoriteChannels[0].id}`
+            : personalization.providerId === activeProviderId && personalization.favoriteMovies.length
+              ? `favorite-movie-${personalization.favoriteMovies[0].id}`
+              : personalization.providerId === activeProviderId && personalization.favoriteSeries.length
+                ? `favorite-series-${personalization.favoriteSeries[0].id}`
+                : null;
 
   useEffect(() => {
     if (!bundle || !selectedProvider) {
@@ -238,25 +158,11 @@ export function MainMenuScreen() {
   useEffect(() => {
     let cancelled = false;
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-    let loadedOnce = false;
 
     const refresh = () => {
       void loadHomePersonalization(activeProviderId, bundle).then((next) => {
-        if (cancelled) {
-          return;
-        }
-        setPersonalization(next);
-        if (loadedOnce) {
-          noteHomeRowUpdated('personalization-refresh');
-        } else {
-          loadedOnce = true;
-          recordHomeStabilityOnce('home_data_snapshot_ready', {
-            recentlyWatched: next.recentlyWatched.length,
-            continueWatching: next.continueWatching.length,
-            favoriteChannels: next.favoriteChannels.length,
-            favoriteMovies: next.favoriteMovies.length,
-            favoriteSeries: next.favoriteSeries.length,
-          });
+        if (!cancelled) {
+          setPersonalization(next);
         }
       });
     };
@@ -444,12 +350,9 @@ export function MainMenuScreen() {
           preferActiveNavigationFocus={!firstHomeFocusId}
         >
           <ScrollView
-            ref={scrollRef}
             style={styles.screenScroll}
             contentContainerStyle={styles.screen}
             showsVerticalScrollIndicator={false}
-            onScroll={handleHomeScroll}
-            scrollEventThrottle={64}
             nestedScrollEnabled>
         <View style={styles.heroBlock}>
           <ReactNativeImageBackground
@@ -479,8 +382,6 @@ export function MainMenuScreen() {
                   subtitle={item.mediaType === 'live' ? 'Live channel' : 'Recently watched'}
                   artworkUrl={item.artworkUrl}
                   icon={item.mediaType === 'live' ? 'television' : 'history'}
-                  focusId={`recent-${item.mediaType}-${item.contentId}`}
-                  onFocused={handleCardFocused}
                   preferredFocus={firstHomeFocusId === `recent-${item.mediaType}-${item.contentId}`}
                   onPress={() => void openRecentItem(item)}
                 />
@@ -497,8 +398,6 @@ export function MainMenuScreen() {
                   subtitle={item.subtitle ?? `${Math.round(item.progressPercent)}% watched`}
                   artworkUrl={item.artworkUrl}
                   progress={item.progressPercent}
-                  focusId={`continue-${item.contentId}`}
-                  onFocused={handleCardFocused}
                   preferredFocus={firstHomeFocusId === `continue-${item.contentId}`}
                   onPress={() => void openContinueItem(item)}
                   onRemove={() => void removeContinueWatchingItem(activeProviderId, item.mediaType, item.contentId)}
@@ -517,8 +416,6 @@ export function MainMenuScreen() {
                   logoUrl={item.artworkUrl}
                   categoryType={resolveChannelCategoryType({ categoryId: item.categoryId, name: item.title }, categoryTypeById)}
                   isLive
-                  focusId={`favorite-channel-${item.id}`}
-                  onFocused={handleCardFocused}
                   preferredFocus={firstHomeFocusId === `favorite-channel-${item.id}`}
                   onPress={() => void openRecentItem({ providerId: activeProviderId, mediaType: 'live', contentId: item.id, title: item.title, artworkUrl: item.artworkUrl, lastOpenedAt: Date.now() })}
                 />
@@ -534,8 +431,6 @@ export function MainMenuScreen() {
                   title={item.title}
                   subtitle="Favorite movie"
                   artworkUrl={item.posterUrl}
-                  focusId={`favorite-movie-${item.id}`}
-                  onFocused={handleCardFocused}
                   preferredFocus={firstHomeFocusId === `favorite-movie-${item.id}`}
                   onPress={() => {
                     rememberMoviesScreenMemory(activeProviderId, {
@@ -558,8 +453,6 @@ export function MainMenuScreen() {
                   title={item.title}
                   subtitle="Favorite series"
                   artworkUrl={item.posterUrl}
-                  focusId={`favorite-series-${item.id}`}
-                  onFocused={handleCardFocused}
                   preferredFocus={firstHomeFocusId === `favorite-series-${item.id}`}
                   onPress={() => {
                     rememberSeriesScreenMemory(activeProviderId, {
@@ -625,8 +518,6 @@ type HomeMediaCardProps = {
   progress?: number;
   icon?: 'television' | 'history' | 'movie-open-outline';
   preferredFocus?: boolean;
-  focusId?: string;
-  onFocused?: (id: string) => void;
   onPress: () => void;
   onRemove?: () => void;
 };
@@ -638,8 +529,6 @@ const HomeMediaCard = memo(function HomeMediaCard({
   progress,
   icon,
   preferredFocus = false,
-  focusId,
-  onFocused,
   onPress,
   onRemove,
 }: HomeMediaCardProps) {
@@ -660,9 +549,6 @@ const HomeMediaCard = memo(function HomeMediaCard({
           markCatalogAuditFocus('home-card');
           noteFocusLatencyFocus('home-card');
           setFocused(true);
-          if (focusId) {
-            onFocused?.(focusId);
-          }
         }}
         onBlur={() => setFocused(false)}
         onPress={onPress}

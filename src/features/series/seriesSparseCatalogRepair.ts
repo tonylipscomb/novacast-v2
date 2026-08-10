@@ -1,14 +1,14 @@
 /**
- * Stage 4.2Q — Series counterpart to `../movies/moviesSparseCatalogRepair.ts`:
+ * Stage 4.2Q ΓÇö Series counterpart to `../movies/moviesSparseCatalogRepair.ts`:
  * detect and repair an already-active sparse Series generation. Bounded once
  * per provider/generation, same as the Movies original.
  *
  * Series has no dedicated "force full dump" mode the way Movies does (see
- * `forceMoviesFullDumpForProvider` in `providerCatalogSync.ts` — a Movies-only
+ * `forceMoviesFullDumpForProvider` in `providerCatalogSync.ts` ΓÇö a Movies-only
  * optimization for a specific provider-API quirk). A degraded Series
  * generation is instead repaired by invalidating the shared, provider-wide
  * catalog sync checkpoint (the same checkpoint Movies' repair also
- * invalidates — it tracks both Movies and Series stage progress together)
+ * invalidates ΓÇö it tracks both Movies and Series stage progress together)
  * and requesting a fresh `bundle.syncCatalog()` pass, which re-walks every
  * Series category from scratch. Does not touch credentials, activation,
  * Live TV, or Movies data.
@@ -150,7 +150,7 @@ export async function repairDegradedSeriesCatalogIfNeeded(
     return 'skipped';
   }
   if (repairScheduled.has(providerId)) {
-    // Repair already kicked off this session — wait for activation; do not relaunch.
+    // Repair already kicked off this session ΓÇö wait for activation; do not relaunch.
     return 'repairing';
   }
 
@@ -161,7 +161,7 @@ export async function repairDegradedSeriesCatalogIfNeeded(
   }
   // Degraded active generation: schedule at most one bounded repair.
   if (assessment.alreadyRepaired) {
-    // Bound once per degraded generation — never launch gen N+1 for the same reason.
+    // Bound once per degraded generation ΓÇö never launch gen N+1 for the same reason.
     return 'skipped';
   }
 
@@ -192,7 +192,7 @@ export async function repairDegradedSeriesCatalogIfNeeded(
       return 'skipped';
     }
 
-    // Series has no dedicated full-dump flag (unlike Movies' forceMoviesFullDumpForProvider) —
+    // Series has no dedicated full-dump flag (unlike Movies' forceMoviesFullDumpForProvider) ΓÇö
     // invalidating the shared provider-wide sync checkpoint is enough to make the
     // next syncCatalog() pass re-walk every category from scratch.
     const { invalidateMoviesCatalogSyncCheckpoint } = await import(

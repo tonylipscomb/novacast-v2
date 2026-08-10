@@ -8,10 +8,6 @@ import {
   sortContentItems,
   type ContentSortOption,
 } from '../media-browser/contentSorting.ts';
-import {
-  computeLiveCategoryCounts,
-  filterStreamsForLiveCategory,
-} from '../live/liveCategoryMembership.ts';
 import { MockMovieDataSource } from '../movies/data/MockMovieDataSource.ts';
 import type { MovieDataSource } from '../movies/data/MovieDataSource.ts';
 import { MOCK_ALL_MOVIES, matchesMovie, normalizeQuery } from '../movies/movieMockData.ts';
@@ -59,12 +55,6 @@ const POSTER_STYLE_KEYS = ['ember', 'signal', 'glacier', 'orbit', 'midnight', 'o
 
 /** Xtream has no portable pagination contract; keep fallback indexing bounded. */
 export const XTREAM_MAX_ITEMS_PER_CATEGORY = XTREAM_MAX_ITEMS_PER_RESPONSE;
-/**
- * Bounded LRU cap for the resolved (partitioned) per-category live-stream cache.
- * Keeps repeat category switches instant without letting a big provider's many
- * categories accumulate unbounded memory.
- */
-const RESOLVED_LIVE_CATEGORY_CACHE_LIMIT = 12;
 /** In-memory cache cap for a single VOD/series category catalog used for global sorting. */
 const MAX_VOD_CATEGORY_CACHE_ITEMS = 100_000;
 const XTREAM_MAX_SEARCH_CATEGORIES = 100;
@@ -1222,34 +1212,6 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
   let cachedLiveStreamCount = 0;
   let cachedAllLiveStreamsUsFirst: XtreamLiveStreamResponse[] | null = null;
   let loadingAllLiveStreamsUsFirst: Promise<XtreamLiveStreamResponse[]> | null = null;
-  // Resolved (partitioned) streams per normalized category id — the fully processed
-  // result shared by live.getChannels + guide.getRows/getChannelCount. Insertion order
-  // is used as an LRU: touched entries are re-inserted, oldest are evicted past the cap.
-  const resolvedLiveCategoryCache = new Map<string, XtreamLiveStreamResponse[]>();
-  // In-flight resolves per category so simultaneous screen + guide callers attach to a
-  // single request/partition instead of both missing the cache and doing duplicate work.
-  const inFlightLiveCategoryResolves = new Map<string, Promise<XtreamLiveStreamResponse[]>>();
-
-  function touchResolvedLiveCategory(categoryId: string): XtreamLiveStreamResponse[] | undefined {
-    const existing = resolvedLiveCategoryCache.get(categoryId);
-    if (existing) {
-      resolvedLiveCategoryCache.delete(categoryId);
-      resolvedLiveCategoryCache.set(categoryId, existing);
-    }
-    return existing;
-  }
-
-  function storeResolvedLiveCategory(categoryId: string, streams: XtreamLiveStreamResponse[]) {
-    resolvedLiveCategoryCache.delete(categoryId);
-    resolvedLiveCategoryCache.set(categoryId, streams);
-    while (resolvedLiveCategoryCache.size > RESOLVED_LIVE_CATEGORY_CACHE_LIMIT) {
-      const oldest = resolvedLiveCategoryCache.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      resolvedLiveCategoryCache.delete(oldest);
-    }
-  }
 
   function invalidateLiveStreamOrderCache() {
     cachedAllLiveStreamsUsFirst = null;
@@ -1260,20 +1222,6 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     cachedLiveStreamCount = 0;
   }
 
-  // Kept separate from the order/count invalidation: getCategories runs on every
-  // Live TV *and* Guide mount and must keep refreshing counts, but the resolved
-  // per-category channel cache should only be dropped when the category set truly
-  // changes (provider switch / sync add-remove) so both screens keep sharing it.
-  function invalidateResolvedLiveCategoryCache() {
-    resolvedLiveCategoryCache.clear();
-    inFlightLiveCategoryResolves.clear();
-  }
-
-  // The one category-membership predicate shared by the browse filter AND the
-  // badge-count tally, so both always agree on which streams belong to a category.
-  const resolveLiveCategoryId = (value: unknown) =>
-    resolveProviderStreamCategoryId(value, 'live', liveCategoryIds);
-
   async function resolveLiveCategoryStreamsRaw(categoryId: string | undefined, signal?: AbortSignal) {
     if (!categoryId || categoryId === 'all') {
       return client.getLiveStreams(undefined, signal);
@@ -1281,53 +1229,33 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
 
     const serverSideCategoryId = categoryId === fallbackProviderCategoryId('live') ? undefined : categoryId;
     const allStreams = await client.getLiveStreams(serverSideCategoryId, signal);
-    // Dedupe here so the browse list and the badge count agree on membership even
-    // when a provider repeats the same stream_id inside a category.
-    return dedupeXtreamLiveStreamsByStreamId(
-      filterStreamsForLiveCategory(allStreams, categoryId, resolveLiveCategoryId),
+    return allStreams.filter(
+      (stream) => resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds) === categoryId,
     );
   }
 
-  async function resolveAllLiveStreamsUsFirst(
-    signal: AbortSignal | undefined,
-  ): Promise<XtreamLiveStreamResponse[]> {
-    if (cachedAllLiveStreamsUsFirst) {
-      return cachedAllLiveStreamsUsFirst;
-    }
+  async function resolveLiveCategoryStreamsUsFirst(categoryId: string | undefined, signal?: AbortSignal) {
+    if (!categoryId || categoryId === 'all') {
+      if (cachedAllLiveStreamsUsFirst) {
+        return cachedAllLiveStreamsUsFirst;
+      }
 
-    if (loadingAllLiveStreamsUsFirst) {
+      if (!loadingAllLiveStreamsUsFirst) {
+        loadingAllLiveStreamsUsFirst = resolveLiveCategoryStreamsRaw(categoryId, signal)
+          .then((streams) => {
+            cachedAllLiveStreamsUsFirst = partitionXtreamLiveStreamsUsFirst(streams);
+            return cachedAllLiveStreamsUsFirst;
+          })
+          .finally(() => {
+            loadingAllLiveStreamsUsFirst = null;
+          });
+      }
+
       return loadingAllLiveStreamsUsFirst;
     }
 
-    loadingAllLiveStreamsUsFirst = (async () => {
-      const streams = await resolveLiveCategoryStreamsRaw(undefined, signal);
-      // Dedupe once at the "all" source so every derived view (browse-from-all,
-      // per-category counts, total counts) shares one deduplicated membership set.
-      const deduped = dedupeXtreamLiveStreamsByStreamId(streams);
-      const partitioned = partitionXtreamLiveStreamsUsFirst(deduped);
-      cachedAllLiveStreamsUsFirst = partitioned;
-      return partitioned;
-    })().finally(() => {
-      loadingAllLiveStreamsUsFirst = null;
-    });
-
-    return loadingAllLiveStreamsUsFirst;
-  }
-
-  async function resolveCategoryFromAllOrNetwork(
-    categoryId: string,
-    signal: AbortSignal | undefined,
-  ): Promise<XtreamLiveStreamResponse[]> {
-    // Prefer deriving from the already-cached "all" list — if NovaCast already paid to
-    // download the full live catalog, there is no reason to re-hit Xtream for a subset.
-    // "all" is already US-first partitioned, so a filtered slice keeps that order (no re-partition).
-    if (cachedAllLiveStreamsUsFirst) {
-      return filterStreamsForLiveCategory(cachedAllLiveStreamsUsFirst, categoryId, resolveLiveCategoryId);
-    }
-
-    // Otherwise hit Xtream for just this category, then partition once.
-    const rawStreams = await resolveLiveCategoryStreamsRaw(categoryId, signal);
-    return partitionXtreamLiveStreamsUsFirst(rawStreams);
+    const streams = await resolveLiveCategoryStreamsRaw(categoryId, signal);
+    return partitionXtreamLiveStreamsUsFirst(streams);
   }
 
   /**
@@ -1335,36 +1263,9 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
    * shared by `live.getChannels`, `guide.getRows`, and `guide.getChannelCount`
    * so category-scoped Guide paging uses the exact same channel-filtering
    * logic as the Live TV screen (no parallel category parser).
-   *
-   * Resolution order (Stage 4.2S.2): resolved cache → in-flight request →
-   * derive from cached "all" → network category fetch. The in-flight map means
-   * simultaneous screen + guide callers for the same category share one request
-   * and one partition instead of both missing the cache and duplicating work.
    */
   async function resolveLiveCategoryStreams(categoryId: string | undefined, signal?: AbortSignal) {
-    if (!categoryId || categoryId === 'all') {
-      return resolveAllLiveStreamsUsFirst(signal);
-    }
-
-    const cached = touchResolvedLiveCategory(categoryId);
-    if (cached) {
-      return cached;
-    }
-
-    const inFlight = inFlightLiveCategoryResolves.get(categoryId);
-    if (inFlight) {
-      return inFlight;
-    }
-
-    const work = resolveCategoryFromAllOrNetwork(categoryId, signal);
-    inFlightLiveCategoryResolves.set(categoryId, work);
-    try {
-      const resolved = await work;
-      storeResolvedLiveCategory(categoryId, resolved);
-      return resolved;
-    } finally {
-      inFlightLiveCategoryResolves.delete(categoryId);
-    }
+    return resolveLiveCategoryStreamsUsFirst(categoryId, signal);
   }
 
   function categoryCount(categoryId: string) {
@@ -1682,9 +1583,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     }
 
     await ensureLiveCategoryIds(signal);
-    // Reuse the shared US-first "all" list (populated once, also used by browse and
-    // getCategoryCounts) so the total-count path never re-downloads the full catalog.
-    const dump = dedupeXtreamLiveStreamsByStreamId(await resolveAllLiveStreamsUsFirst(signal));
+    const dump = dedupeXtreamLiveStreamsByStreamId(await client.getLiveStreams(undefined, signal));
     const dumpLikelyTruncated = dump.length >= XTREAM_MAX_ITEMS_PER_RESPONSE && liveCategoryIds.size > 0;
     applyLiveStreamCounts(dump, dumpLikelyTruncated);
 
@@ -1696,28 +1595,15 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
   const liveRepository: ProviderLiveRepository = {
     async getCategories(signal) {
       const categories = await client.getLiveCategories(signal);
+      invalidateLiveStreamOrderCache();
       const mappedCategories = sortLiveCategoriesUsFirst(
         removeExactProviderCategoryDuplicates(categories.map(mapXtreamCategory)),
       );
-      // Always refresh the live-stream order + per-category counts (the original
-      // behavior — counts are recomputed lazily by getCategoryCounts). Only drop the
-      // resolved per-category channel cache when the category set actually changed,
-      // so the Live TV screen and Guide keep sharing it across mounts.
-      const categorySetChanged =
-        mappedCategories.length !== liveCategoryIds.size ||
-        mappedCategories.some((category) => !liveCategoryIds.has(category.id));
-      invalidateLiveStreamOrderCache();
-      if (categorySetChanged) {
-        invalidateResolvedLiveCategoryCache();
-      }
       liveCategoryIds.clear();
       mappedCategories.forEach((category) => liveCategoryIds.add(category.id));
       return mappedCategories.map((category) => ({
         ...category,
-        // Never surface the provider's self-reported category_count here — it routinely
-        // disagrees with actual browseable membership (e.g. 18 declared vs 11 resolved).
-        // The authoritative, membership-derived counts arrive via getCategoryCounts.
-        count: liveCategoryCountCache.get(category.id) ?? null,
+        count: category.count ?? liveCategoryCountCache.get(category.id) ?? null,
       }));
     },
     async getCategoryAccentHints(signal) {
@@ -1730,23 +1616,8 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       }));
     },
     async getCategoryCounts(signal) {
-      // Counts MUST match what the user browses. Derive them from the same shared,
-      // deduplicated US-first "all" list and the same membership predicate the browse
-      // path uses. No extra network: resolveAllLiveStreamsUsFirst reuses cached "all".
-      await ensureLiveCategoryIds(signal);
-      const all = await resolveAllLiveStreamsUsFirst(signal);
-
-      // When the uncategorized dump hits the Xtream 10k ceiling it is truncated and
-      // cannot be trusted for membership; fall back to accurate per-category recounts
-      // (the same path getTotalChannelCount uses) so large providers stay correct.
-      if (all.length >= XTREAM_MAX_ITEMS_PER_RESPONSE && liveCategoryIds.size > 0) {
-        await recountLiveStreamsByCategory(signal);
-        return Object.fromEntries(liveCategoryCountCache);
-      }
-
-      // A category already resolved for browse overrides the derived tally with its
-      // exact browsed length, guaranteeing badgeCount === resolvedBrowseableChannels.length.
-      return computeLiveCategoryCounts(all, liveCategoryIds, resolveLiveCategoryId, resolvedLiveCategoryCache);
+      await loadLiveStreamIndex(signal, { accurate: true });
+      return Object.fromEntries(liveCategoryCountCache);
     },
     async getTotalChannelCount(signal) {
       await loadLiveStreamIndex(signal, { accurate: true });

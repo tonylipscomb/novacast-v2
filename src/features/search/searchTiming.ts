@@ -33,21 +33,39 @@ export async function withSearchTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   message: string,
+  signal?: AbortSignal,
 ): Promise<T> {
+  // search-s3-cancellable-series
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abortHandler: (() => void) | undefined;
+
   try {
-    return await Promise.race([
+    const racers: Promise<T>[] = [
       promise,
       new Promise<T>((_, reject) => {
         timer = setTimeout(() => {
           reject(new Error(message));
         }, timeoutMs);
       }),
-    ]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
+    ];
+
+    if (signal) {
+      racers.push(
+        new Promise<T>((_, reject) => {
+          abortHandler = () => reject(new DOMException('Aborted', 'AbortError'));
+          signal.addEventListener('abort', abortHandler, { once: true });
+        }),
+      );
     }
+
+    return await Promise.race(racers);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
   }
 }
 

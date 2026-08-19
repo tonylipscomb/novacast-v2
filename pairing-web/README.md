@@ -55,9 +55,9 @@ Environment variables: `VITE_PAIRING_API_URL`, `VITE_SUPABASE_ANON_KEY`,
 `public/_redirects` (and root `netlify.toml`) map:
 
 ```text
-/downloads/novacast.apk → GitHub releases/latest/download/novacast.apk
+/downloads/novacast.apk → GitHub releases/download/beta-latest/novacast.apk
 ```
 
 Do not commit APK binaries into this folder. Downloader code `6275368` stays
-stable because the asset is always named `novacast.apk` on the latest
-non-prerelease GitHub Release.
+stable because the asset is always named `novacast.apk` on the rolling
+`beta-latest` GitHub Release.

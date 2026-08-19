@@ -1,4 +1,4 @@
-# NovaCast Android releasing
+﻿# NovaCast Android releasing
 
 This repository builds installable Android release APKs in GitHub Actions
 (`.github/workflows/android-beta.yml`).
@@ -7,7 +7,7 @@ Permanent public download (via NovaCast Connect redirects):
 
 ```text
 https://novacast-connect.netlify.app/downloads/novacast.apk
-→ https://github.com/tonylipscomb/novacast-v2/releases/latest/download/novacast.apk
+â†’ https://github.com/tonylipscomb/novacast-v2/releases/download/beta-latest/novacast.apk
 ```
 
 Downloader code: `6275368` (points at that permanent URL).
@@ -16,7 +16,7 @@ Downloader code: `6275368` (points at that permanent URL).
 
 | Item | Value |
 | --- | --- |
-| Package manager | `package-lock.json` → `npm ci` |
+| Package manager | `package-lock.json` â†’ `npm ci` |
 | Native project | `android/` is generated (gitignored); CI runs `npx expo prebuild --platform android` |
 | Gradle wrapper | `android/gradlew` (after prebuild) |
 | Release APK path | `android/app/build/outputs/apk/release/app-release.apk` |
@@ -49,20 +49,32 @@ Required repository secrets:
 - `EXPO_PUBLIC_SUPABASE_ANON_KEY`
 - `EXPO_PUBLIC_NOVACAST_PAIRING_WEBSITE_URL`
 
-## Main test build (artifact only)
+## Main rolling beta (updates `beta-latest`)
 
-Every push to `main` (and manual `workflow_dispatch`) builds a release APK and
-uploads it as a workflow artifact. It does **not** create a public GitHub Release.
+Every push to `main` (and manual `workflow_dispatch` from `main`) builds a
+release APK, uploads the workflow artifact, and publishes/replaces the
+prerelease GitHub Release `beta-latest`.
 
-Artifact contents:
+That moves:
+
+```text
+https://github.com/tonylipscomb/novacast-v2/releases/download/beta-latest/novacast.apk
+```
+
+and therefore the Netlify permanent URL used by Downloader.
+
+Artifact / rolling-release contents:
 
 ```text
 novacast.apk
 novacast.apk.sha256
-NovaCast-beta-main-<run_number>.apk
 ```
 
-## Public stable release (updates /latest)
+The versioned copy `NovaCast-beta-main-<run_number>.apk` stays on the workflow
+artifact only. It is not attached to `beta-latest`, so the public download
+name stays `novacast.apk`.
+
+## Public versioned release (tags `v*`)
 
 Push an annotated version tag that does **not** contain `beta`, `alpha`, or `rc`:
 
@@ -79,36 +91,31 @@ The workflow will:
 4. Generate `novacast.apk.sha256`
 5. Create/update the GitHub Release for that tag
 6. Attach `novacast.apk`, `novacast.apk.sha256`, and a versioned copy
-7. Leave the release as a **full release** so GitHub `/releases/latest` updates
+7. Leave a non-prerelease tag as a **full release** so GitHub `/releases/latest` still points at the newest stable version tag
 
-That moves:
-
-```text
-https://github.com/tonylipscomb/novacast-v2/releases/latest/download/novacast.apk
-```
-
-and therefore the Netlify permanent URL used by Downloader.
+Versioned tags do **not** change the Connect/Downloader URL. That URL always
+follows `beta-latest`.
 
 ## Public prerelease / beta tag
 
 Tags containing `beta`, `alpha`, or `rc` are published as GitHub **prereleases**.
 They attach the same asset names for that tag, but they do **not** move
-`/releases/latest` (Downloader stays on the previous stable).
+`/releases/latest`, and they do **not** replace `beta-latest`.
 
 ```bash
 git tag -a v1.1.0-beta.1 -m "NovaCast beta"
 git push origin v1.1.0-beta.1
 ```
 
-## First stable publish checklist
+## First rolling-beta publish checklist
 
 1. Confirm GitHub secrets: `EXPO_TOKEN`, pairing env secrets, optional keystore secrets.
 2. Confirm Netlify site still uses base `pairing-web`, build `npm run build`, publish `dist`.
-3. Merge Connect website changes so `/downloads/novacast.apk` redirects exist.
-4. With explicit approval, create and push a stable tag (`vX.Y.Z` without beta/alpha/rc).
-5. Wait for **Android Beta APK** workflow success.
-6. Verify Release assets include `novacast.apk` and `novacast.apk.sha256`.
-7. Verify `https://novacast-connect.netlify.app/downloads/novacast.apk` downloads the APK.
-8. On a TV, open Downloader → enter `6275368` → install.
+3. Merge Connect website changes so `/downloads/novacast.apk` redirects to `beta-latest`.
+4. Merge this workflow change to `main` and wait for **Android Beta APK** success.
+5. Verify GitHub Release `beta-latest` includes `novacast.apk` and `novacast.apk.sha256`.
+6. Verify `https://novacast-connect.netlify.app/downloads/novacast.apk` downloads the APK.
+7. On a TV, open Downloader â†’ enter `6275368` â†’ install.
 
 Do not commit APK binaries, keystores, Expo tokens, or signing passwords.
+

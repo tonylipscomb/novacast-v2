@@ -1,6 +1,6 @@
 import { deviceAuthHeaders, deviceMetadata } from './deviceRegistration';
 import type { DeviceHeartbeatResponse, DevicePendingCommand } from './deviceTypes';
-import { applyHeartbeatAccess, checkDeviceStatus } from './deviceActivation';
+import { applyHeartbeatAccess, checkDeviceStatus, getDeviceState } from './deviceActivation';
 import { isLocalActivationBypassEnabled } from './deviceFeatureFlags';
 import { setContentPolicyOverride } from '@/features/content-policy/ContentPolicyService';
 import { downloadManagedProviderAssignment } from './managedProviderDownload';
@@ -109,23 +109,77 @@ export async function sendDeviceHeartbeat(options?: {
   if (!payload) return null;
 
   reportNetworkOutcome(true);
-  applyHeartbeatAccess(payload);
 
-  if (
+  const localBypass = isLocalActivationBypassEnabled({ log: false });
+
+  const explicitRevocation =
     payload.activationStatus === 'revoked' ||
-    payload.activationStatus === 'suspended' ||
-    (payload.deviceActive === false && !isLocalActivationBypassEnabled({ log: false }))
-  ) {
+    payload.activationStatus === 'suspended';
+
+  const ambiguousInactive =
+    payload.deviceActive === false &&
+    !localBypass &&
+    !explicitRevocation;
+
+  const wasAuthorized =
+    getDeviceState().authorization.effectiveAuthorized;
+
+  let confirmedRevocation = false;
+
+  // A heartbeat can transiently report deviceActive=false even while the
+  // authoritative device-status endpoint still considers this device active.
+  // Preserve an already-authorized playback session until revocation is confirmed.
+  if (ambiguousInactive && wasAuthorized) {
+    console.info(
+      '[NovaCast Device Activation]',
+      JSON.stringify({
+        event: 'heartbeat-inactive-confirmation-start',
+        activationStatus: payload.activationStatus ?? null,
+        deviceActive: false,
+        preservedAuthorizedSession: true,
+      }),
+    );
+
+    const confirmed = await checkDeviceStatus().catch(() => null);
+
+    confirmedRevocation = confirmed?.state === 'revoked';
+
+    console.info(
+      '[NovaCast Device Activation]',
+      JSON.stringify({
+        event: 'heartbeat-inactive-confirmation-complete',
+        confirmedRevocation,
+        resultingDeviceState:
+          confirmed?.state ?? 'status-check-failed',
+        preservedAuthorizedSession: !confirmedRevocation,
+      }),
+    );
+
+    if (confirmedRevocation) {
+      applyHeartbeatAccess(payload);
+    }
+  } else {
+    applyHeartbeatAccess(payload);
+  }
+
+  const shouldRevokeSession =
+    explicitRevocation ||
+    (ambiguousInactive &&
+      (wasAuthorized ? confirmedRevocation : true));
+
+  if (shouldRevokeSession) {
     const player = getUnifiedPlayerState();
+
     if (isUnifiedPlaybackActive(player.machineState, player.item)) {
       closeUnifiedPlayback();
     }
+
     try {
       router.replace('/');
     } catch {
       // Navigation may be unavailable during teardown.
     }
-  } else if (payload.activationStatus === 'expired' && !isLocalActivationBypassEnabled({ log: false })) {
+  } else if (payload.activationStatus === 'expired' && !localBypass) {
     try {
       router.replace('/');
     } catch {

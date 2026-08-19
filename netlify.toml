@@ -6,13 +6,13 @@ publish = "dist"
 # Permanent APK redirects must appear before the SPA fallback.
 [[redirects]]
 from = "/downloads/novacast.apk"
-to = "https://github.com/tonylipscomb/novacast-v2/releases/latest/download/novacast.apk"
+to = "https://github.com/tonylipscomb/novacast-v2/releases/download/beta-latest/novacast.apk"
 status = 302
 force = true
 
 [[redirects]]
 from = "/downloads/novacast.apk.sha256"
-to = "https://github.com/tonylipscomb/novacast-v2/releases/latest/download/novacast.apk.sha256"
+to = "https://github.com/tonylipscomb/novacast-v2/releases/download/beta-latest/novacast.apk.sha256"
 status = 302
 force = true
 

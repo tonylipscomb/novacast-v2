@@ -1,4 +1,4 @@
-﻿name: Android Beta APK
+name: Android Beta APK
 
 on:
   push:
@@ -197,7 +197,40 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: Create or update GitHub Release
+      - name: Publish rolling beta download
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: beta-latest
+          STABLE_APK: ${{ steps.apk.outputs.stable_path }}
+          CHECKSUM_PATH: ${{ steps.apk.outputs.checksum_path }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "$STABLE_APK" \
+              "$CHECKSUM_PATH" \
+              --clobber
+            gh release edit "$TAG" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "NovaCast Beta - Latest"
+          else
+            gh release create "$TAG" \
+              "$STABLE_APK" \
+              "$CHECKSUM_PATH" \
+              --target "$GITHUB_SHA" \
+              --title "NovaCast Beta - Latest" \
+              --notes "Rolling NovaCast beta build. This release is automatically replaced whenever main builds successfully." \
+              --prerelease
+          fi
+
+          echo "Rolling beta URL:"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/novacast.apk"
+
+      - name: Create or update versioned GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
@@ -215,8 +248,6 @@ jobs:
             PRERELEASE_ARGS+=(--prerelease)
           fi
 
-          # Stable (non-prerelease) releases update GitHub /releases/latest,
-          # which powers novacast-connect.netlify.app/downloads/novacast.apk.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               "$STABLE_APK" \

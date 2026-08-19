@@ -33,3 +33,17 @@ Deno.test('http provider URLs can be disabled explicitly', async () => {
     else Deno.env.set('ALLOW_HTTP_PROVIDER', original);
   }
 });
+
+Deno.test('normalizeProviderUrl strips player_api.php and blocks SSRF targets', async () => {
+  const original = Deno.env.get('ALLOW_HTTP_PROVIDER');
+  try {
+    Deno.env.delete('ALLOW_HTTP_PROVIDER');
+    assertEquals(await normalizeProviderUrl('http://max8k.top/player_api.php'), 'http://max8k.top');
+    await assertRejects(() => normalizeProviderUrl('http://127.0.0.1'), Error, 'unsafe_provider_target');
+    await assertRejects(() => normalizeProviderUrl('http://169.254.169.254'), Error, 'unsafe_provider_target');
+    await assertRejects(() => normalizeProviderUrl('http://localhost'), Error, 'unsafe_provider_target');
+  } finally {
+    if (original === undefined) Deno.env.delete('ALLOW_HTTP_PROVIDER');
+    else Deno.env.set('ALLOW_HTTP_PROVIDER', original);
+  }
+});

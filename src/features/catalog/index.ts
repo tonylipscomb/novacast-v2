@@ -25,6 +25,7 @@ export {
   getCatalogCategoryCounts,
   getCatalogItemsPage,
   getCatalogMovieItem,
+  getCatalogSeriesItem,
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
   resolveReadableCategoryGeneration,
@@ -44,15 +45,22 @@ export {
 
 export {
   MOVIES_UNCATEGORIZED_CATEGORY_ID,
+  VOD_CATEGORY_FILTER_CAPABILITY_STORAGE_VERSION,
   normalizeStreamCategoryId,
   resolveCatalogItemCategoryId,
   createVodCategoryProbeAccumulator,
   evaluateVodCategoryFilterCapability,
+  evaluateSparsePerCategoryCoverage,
+  selectVodCategoryProbeIds,
   computeContentIdOverlapRatio,
+  invalidateVodCategoryFilterCapability,
   clearVodCategoryFilterCapabilityForTests,
 } from './vodCategoryFilterCapability.ts';
 
-export { validateMoviesCategoryDistribution } from './moviesCategoryDistributionValidation.ts';
+export {
+  validateMoviesCategoryDistribution,
+  assessMoviesCatalogIntegrity,
+} from './moviesCategoryDistributionValidation.ts';
 
 export {
   CATALOG_SCHEMA_VERSION,
@@ -92,6 +100,17 @@ export {
   recoverFragmentedMovieCatalogOnce,
   resetMovieFragmentRecoveryForTests,
 } from './catalogFragmentRecovery.ts';
+
+export {
+  CATALOG_READABLE_RESTORE_LOG,
+  incompleteGenerationToExclude,
+  resolveMoviePointerCandidate,
+  shouldExcludeSyncingGenerationFromRecovery,
+  shouldResumeInterruptedCatalogSync,
+  shouldSkipBootstrapBecauseSyncing,
+} from './catalogReadableGenerationRestore.ts';
+
+export { clearMoviesReadableGenerationCacheForTests } from './moviesReadableGenerationCache.ts';
 
 export type { MovieFragmentRecoveryResult } from './catalogFragmentRecovery.ts';
 

@@ -15,6 +15,7 @@ import { useRouter } from 'expo-router';
 
 import { NovaLogo } from '@/components/nova/NovaLogo';
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import { markOnboardingGuideSeen } from '@/features/onboarding/onboardingStore';
@@ -106,17 +107,26 @@ export function ContentHubOverlayScreen() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
-        return true;
-      }
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'content-hub',
+        () => {
+          if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
+            return true;
+          }
 
-      void (async () => {
-        await markOnboardingGuideSeen('hubGuideSeen');
-        router.replace('/main-menu');
-      })();
-      return true;
-    });
+          void (async () => {
+            await markOnboardingGuideSeen('hubGuideSeen');
+            router.replace('/main-menu');
+          })();
+          return true;
+        },
+        () => ({
+          screen: 'ContentHubOverlayScreen',
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [router]);

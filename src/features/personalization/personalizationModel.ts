@@ -40,32 +40,17 @@ export type HomeContinueWatchingItem = {
   durationMs: number;
   progressPercent: number;
   updatedAt: number;
+  /** Optional. Old rows omit this and self-heal from canonical catalog lookup. */
+  containerExtension?: string;
 };
 
-export const MIN_CONTINUE_WATCHING_POSITION_MS = 30_000;
-export const COMPLETED_PROGRESS_PERCENT = 95;
-export const LONG_CONTENT_MIN_DURATION_MS = 10 * 60 * 1000;
-export const LONG_CONTENT_REMAINING_MS = 5 * 60 * 1000;
-
-export function isContinueWatchingEligible(positionMs: number, durationMs: number) {
-  if (!Number.isFinite(positionMs) || !Number.isFinite(durationMs) || positionMs < MIN_CONTINUE_WATCHING_POSITION_MS || durationMs <= 0) {
-    return false;
-  }
-
-  const safePosition = Math.max(0, Math.min(positionMs, durationMs));
-  const progressPercent = (safePosition / durationMs) * 100;
-  const remainingMs = Math.max(0, durationMs - safePosition);
-
-  if (progressPercent >= COMPLETED_PROGRESS_PERCENT) {
-    return false;
-  }
-
-  if (durationMs >= LONG_CONTENT_MIN_DURATION_MS && remainingMs <= LONG_CONTENT_REMAINING_MS) {
-    return false;
-  }
-
-  return true;
-}
+export {
+  COMPLETED_PROGRESS_PERCENT,
+  LONG_CONTENT_MIN_DURATION_MS,
+  LONG_CONTENT_REMAINING_MS,
+  MIN_CONTINUE_WATCHING_POSITION_MS,
+  isContinueWatchingEligible,
+} from '../playback/continuity/playbackContinuity.ts';
 
 export function clampProgress(positionMs: number, durationMs: number) {
   if (!Number.isFinite(durationMs) || durationMs <= 0) {
@@ -101,17 +86,15 @@ export function dedupeRecentItems(items: RecentItemRecord[], limit = 20) {
 
 export function getVisibleHomeRows(snapshot: {
   continueWatching: unknown[];
+  watchlist: unknown[];
   favoriteChannels: unknown[];
-  favoriteMovies: unknown[];
-  favoriteSeries: unknown[];
-  recentlyWatched: unknown[];
+  favorites: unknown[];
 }) {
   return [
     ['continueWatching', snapshot.continueWatching],
+    ['watchlist', snapshot.watchlist],
     ['favoriteChannels', snapshot.favoriteChannels],
-    ['favoriteMovies', snapshot.favoriteMovies],
-    ['favoriteSeries', snapshot.favoriteSeries],
-    ['recentlyWatched', snapshot.recentlyWatched],
+    ['favorites', snapshot.favorites],
   ]
     .filter(([, items]) => items.length > 0)
     .map(([key]) => key);

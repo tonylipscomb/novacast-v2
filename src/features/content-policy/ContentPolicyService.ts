@@ -20,15 +20,7 @@ const ADULT_MARKERS =
  * Unmarked Latin catalogs often resolve as `international` in the regional
  * pipeline — those stay visible. Explicit "English"/UK/CA/EU/foreign stay hidden.
  */
-const BLOCKED_REGION_GROUPS = new Set<CategoryRegionGroup>([
-  'uk',
-  'canada',
-  'australia',
-  'europe',
-  'intlEnglish',
-  'mixed',
-  'foreign',
-]);
+const BLOCKED_REGION_GROUPS = new Set<CategoryRegionGroup>();
 
 let activePolicyOverride: ContentPolicyId | null = null;
 

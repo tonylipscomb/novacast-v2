@@ -1,3 +1,5 @@
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
+
 /**
  * Stage 3G.3 — Search result selection / detail lifecycle helpers.
  */
@@ -51,7 +53,7 @@ export function logMoviesSearchSelection(payload: {
   selectedMovieStored: boolean;
   overlayVisible: boolean;
 }) {
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Selection] ' +
       JSON.stringify({
         ...payload,
@@ -67,7 +69,7 @@ export function logMoviesSearchReopen(payload: {
   toolbarPressAccepted: boolean;
   blockedReason: string | null;
 }) {
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Reopen] ' +
       JSON.stringify({
         ...payload,

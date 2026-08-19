@@ -1,22 +1,36 @@
-/* eslint-disable react-hooks/set-state-in-effect -- Provider-backed screens load async repository data in effects. */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { buildLiveChannelPlaybackUrl } from '@/features/providers/providerPlayback';
 import { mergeCategoryCountIndex, readCategoryCountIndex } from '@/features/providers/categoryCountIndexStore';
-import { fallbackProviderCategoryId } from '@/features/providers/categoryNormalization';
+import {
+  isRealProviderLiveCategoryId,
+  isSyntheticLiveFavoritesCategoryId,
+  providerLiveCategoriesOnly,
+  resolveInitialLiveBrowseCategoryId,
+} from '@/features/providers/liveCategoryIdSafety';
 import type { ProviderLiveCategory, ProviderLiveChannel } from '@/features/providers/providerRepositories';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
-import { getLiveFavoriteEntries, usePersonalizationStore } from '@/features/personalization/personalizationStore';
 
 import {
-  clearLiveTvEpgCache,
+  LIVE_EPG_FOCUS_DEBOUNCE_MS,
+  cancelLiveTvEpgWork,
   enrichChannelsWithPrefetchedEpg,
   enrichSingleChannelEpg,
   mapChannelsWithoutEpg,
+  selectVisibleEpgWindow,
+  shouldIssueFocusedEpgRequest,
 } from './liveTvChannelEpg';
-import { ingestLiveChannels } from '@/features/search/repositories/liveSearchRepository';
+import { getLiveTvWorkload, shouldSuspendLiveListEpg } from './liveTvWorkload';
+import { ingestLiveChannels, ingestLiveSearchCategories } from '@/features/search/repositories/liveSearchRepository';
 import { resetLiveTvFocusIdle } from './liveTvFocusIdle';
 import { clearLiveTvChannelRowDataPool, mergeLiveTvChannelEpg } from './liveTvChannelRowData';
+import {
+  logLiveCategory,
+  logLiveEpgTrigger,
+  logLivePerformance,
+  logLiveStallAudit,
+  logLiveStartup,
+} from './liveTvDiagnostics';
 import type { LiveTvLoadStatus } from './liveTvLogic';
 
 export type { LiveTvLoadStatus } from './liveTvLogic';
@@ -24,33 +38,24 @@ export type { LiveTvLoadStatus } from './liveTvLogic';
 export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelId?: string | null) {
   const { bundle, isXtream } = useActiveProviderBundle();
   const [status, setStatus] = useState<LiveTvLoadStatus>('loading');
+  const [channelListPending, setChannelListPending] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [channels, setChannels] = useState<ProviderLiveChannel[]>([]);
-  const [selectedCategoryId, setSelectedCategoryId] = useState(initialCategoryId ?? '');
+  const [selectedCategoryId, setSelectedCategoryId] = useState(() =>
+    isRealProviderLiveCategoryId(initialCategoryId) ? initialCategoryId ?? '' : '',
+  );
   const [baseCategories, setBaseCategories] = useState<ProviderLiveCategory[]>([]);
-  const { state: personalizationState } = usePersonalizationStore(bundle?.providerId ?? 'no-provider');
   const requestRef = useRef(0);
   const loadAbortRef = useRef<AbortController | null>(null);
   const epgFetchedIdsRef = useRef(new Set<string>());
+  const epgInFlightIdsRef = useRef(new Set<string>());
+  const focusedEpgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastFocusedEpgRef = useRef<{ channelId: string; atMs: number } | null>(null);
   const channelsBaselineRef = useRef<ProviderLiveChannel[]>([]);
+  const mountStartedAtRef = useRef(0);
+  const interactiveLoggedRef = useRef(false);
 
-  const categoriesWithFavorites = useMemo(() => {
-    const withoutStaticFavorites = baseCategories.filter((category) => category.id !== 'favorites');
-    if (!personalizationState.liveFavorites.length) {
-      return withoutStaticFavorites;
-    }
-
-    return [
-      {
-        id: 'favorites',
-        renderKey: 'favorites',
-        name: 'Favorites',
-        count: personalizationState.liveFavorites.length,
-        icon: 'star-outline' as const,
-      },
-      ...withoutStaticFavorites,
-    ];
-  }, [baseCategories, personalizationState.liveFavorites.length]);
+  const categories = useMemo(() => providerLiveCategoriesOnly(baseCategories), [baseCategories]);
 
   const loadChannelsForCategory = useCallback(
     async (categoryId: string, signal?: AbortSignal) => {
@@ -58,18 +63,26 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         return [];
       }
 
-      if (categoryId !== 'favorites') {
-        return bundle.live.getChannels(categoryId, signal);
+      if (!isRealProviderLiveCategoryId(categoryId)) {
+        logLiveCategory('selection-rejected', {
+          categoryId,
+          reason: isSyntheticLiveFavoritesCategoryId(categoryId)
+            ? 'synthetic-favorites'
+            : 'invalid-provider-category',
+        });
+        return [];
       }
 
-      const favoriteEntries = await getLiveFavoriteEntries(bundle.providerId);
-      const channelsForFavorites = await Promise.all(
-        favoriteEntries.map(async (entry) => {
-          const channel = await bundle.live.getChannel(entry.contentId, signal).catch(() => null);
-          return channel;
-        }),
-      );
-      return channelsForFavorites.filter((channel): channel is ProviderLiveChannel => Boolean(channel));
+      const startedAt = Date.now();
+      logLiveCategory('load-started', { categoryId });
+      const next = await bundle.live.getChannels(categoryId, signal);
+      logLiveStallAudit('live.getChannels', next.length, startedAt);
+      logLiveCategory('load-completed', {
+        categoryId,
+        channelCount: next.length,
+        elapsedMs: Date.now() - startedAt,
+      });
+      return next;
     },
     [bundle],
   );
@@ -83,7 +96,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
   }, [bundle]);
 
   const updateCategoryCount = useCallback((categoryId: string, count: number) => {
-    if (categoryId === 'favorites') {
+    if (!isRealProviderLiveCategoryId(categoryId)) {
       return;
     }
 
@@ -106,51 +119,6 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     }
   }, [bundle]);
 
-  const applyCategoryCounts = useCallback(
-    (requestId: number, counts: Record<string, number>) => {
-      if (requestId !== requestRef.current) {
-        return;
-      }
-
-      setBaseCategories((current) => {
-        let changed = false;
-        const next = current.map((category) => {
-          if (category.id === 'favorites') {
-            return category;
-          }
-
-          const count = counts[category.id] ?? 0;
-          if (category.count === count) {
-            return category;
-          }
-
-          changed = true;
-          return { ...category, count: Math.floor(count) };
-        });
-
-        const fallbackId = fallbackProviderCategoryId('live');
-        const fallbackCount = counts[fallbackId] ?? 0;
-        if (fallbackCount > 0 && !next.some((category) => category.id === fallbackId)) {
-          next.push({
-            id: fallbackId,
-            renderKey: `${fallbackId}::fallback`,
-            name: 'Uncategorized',
-            count: Math.floor(fallbackCount),
-            icon: 'flag-outline',
-          });
-          changed = true;
-        }
-
-        return changed ? next : current;
-      });
-
-      if (bundle?.providerId && Object.keys(counts).length) {
-        void mergeCategoryCountIndex(bundle.providerId, 'live', counts).catch(() => undefined);
-      }
-    },
-    [bundle],
-  );
-
   const applyIncrementalEpg = useCallback((enriched: ProviderLiveChannel, requestId: number) => {
     if (requestId !== requestRef.current) {
       return;
@@ -165,12 +133,28 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
   }, []);
 
   const prefetchChannelEpg = useCallback(
-    (requestId: number, nextChannels: ProviderLiveChannel[]) => {
+    (requestId: number, nextChannels: ProviderLiveChannel[], categoryId: string, focusedChannelId?: string | null) => {
       if (!bundle) {
         return;
       }
 
+      if (shouldSuspendLiveListEpg()) {
+        cancelLiveTvEpgWork('list-prefetch-suspended');
+        return;
+      }
+
+      const generation = cancelLiveTvEpgWork('category-prefetch-supersede');
+      const focusedId = focusedChannelId || initialChannelId || nextChannels[0]?.id || null;
+      logLiveEpgTrigger({
+        caller: 'useLiveTvScreenModel.prefetchChannelEpg',
+        reason: 'visible-window-current-program',
+        categoryId,
+        channelCount: selectVisibleEpgWindow(nextChannels, focusedId).length,
+      });
+
       void enrichChannelsWithPrefetchedEpg(bundle, nextChannels, {
+        focusedChannelId: focusedId,
+        generation,
         onChannelEnriched: (enriched) => {
           applyIncrementalEpg(enriched, requestId);
         },
@@ -182,11 +166,12 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         commitChannels(fullyEnriched);
       });
     },
-    [applyIncrementalEpg, bundle, commitChannels],
+    [applyIncrementalEpg, bundle, commitChannels, initialChannelId],
   );
 
   const loadCategories = useCallback(async () => {
     if (!bundle) {
+      setChannelListPending(false);
       setStatus('error');
       setErrorMessage('Provider is not connected.');
       return;
@@ -198,47 +183,63 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     const signal = controller.signal;
 
     const requestId = ++requestRef.current;
-    setStatus('loading');
+    const keepExistingList = channelsBaselineRef.current.length > 0;
+    if (!keepExistingList) {
+      setStatus('loading');
+      setChannelListPending(true);
+    }
     setErrorMessage(null);
     try {
+      const categoriesStartedAt = Date.now();
       const nextCategories = await bundle.live.getCategories(signal);
+      logLiveStallAudit('live.getCategories', nextCategories.length, categoriesStartedAt);
       if (requestId !== requestRef.current) {
         return;
       }
 
-      // Don't block first paint on count-index disk I/O — hydrate counts in the background.
-      const categoriesWithoutCounts = nextCategories.map((category) => ({
+      const providerCategories = providerLiveCategoriesOnly(nextCategories).map((category) => ({
         ...category,
         count: category.count ?? null,
       }));
-      setBaseCategories(categoriesWithoutCounts);
-      const visibleCategories = [
-        ...categoriesWithoutCounts.filter((category) => category.id !== 'favorites'),
-        ...(personalizationState.liveFavorites.length
-          ? [
-              {
-                id: 'favorites',
-                renderKey: 'favorites',
-                name: 'Favorites',
-                count: personalizationState.liveFavorites.length,
-                icon: 'star-outline' as const,
-              },
-            ]
-          : []),
-      ].sort((left, right) => (left.id === 'favorites' ? -1 : right.id === 'favorites' ? 1 : 0));
+      setBaseCategories(providerCategories);
+      ingestLiveSearchCategories(bundle.providerId, providerCategories);
+      logLiveStartup('categories-ready', {
+        elapsedMs: Date.now() - mountStartedAtRef.current,
+        categoryCount: providerCategories.length,
+        providerIdPresent: Boolean(bundle.providerId),
+      });
+      logLivePerformance({
+        event: 'categories-ready',
+        elapsedMs: Date.now() - mountStartedAtRef.current,
+        providerIdPresent: Boolean(bundle.providerId),
+        categoryCount: providerCategories.length,
+        selectedCategoryIdPresent: false,
+        source: 'repository',
+        epgPending: false,
+        discoverPending: false,
+      });
 
-      if (!visibleCategories.length) {
+      if (!providerCategories.length) {
         channelsBaselineRef.current = [];
         setChannels([]);
+        setSelectedCategoryId('');
+        setChannelListPending(false);
         setStatus('empty');
         return;
       }
 
-      const resolvedCategoryId = visibleCategories.some((item) => item.id === initialCategoryId)
-        ? initialCategoryId ?? nextCategories[0]?.id ?? ''
-        : visibleCategories[0]?.id ?? '';
-
+      const resolvedCategoryId = resolveInitialLiveBrowseCategoryId(initialCategoryId, providerCategories);
       setSelectedCategoryId(resolvedCategoryId);
+      logLiveStartup('initial-category-selected', {
+        elapsedMs: Date.now() - mountStartedAtRef.current,
+        categoryCount: providerCategories.length,
+        selectedCategoryId: resolvedCategoryId,
+        providerIdPresent: Boolean(bundle.providerId),
+      });
+      logLiveCategory('selection-accepted', {
+        categoryId: resolvedCategoryId,
+        reason: 'initial-browse',
+      });
 
       void readCategoryCountIndex(bundle.providerId, 'live')
         .then((persistedCountIndex) => {
@@ -263,48 +264,104 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
       updateCategoryCount(resolvedCategoryId, nextChannels.length);
 
       if (!nextChannels.length) {
-        channelsBaselineRef.current = [];
-        setChannels([]);
-        setStatus('empty');
+        if (!keepExistingList) {
+          channelsBaselineRef.current = [];
+          setChannels([]);
+        }
+        setChannelListPending(false);
+        setStatus(keepExistingList ? 'ready' : 'empty');
         return;
       }
 
       commitChannels(mapChannelsWithoutEpg(nextChannels));
+      setChannelListPending(false);
       setStatus('ready');
-
-      prefetchChannelEpg(requestId, nextChannels);
-
-      if (bundle.live.getCategoryCounts) {
-        void bundle.live
-          .getCategoryCounts()
-          .then((counts) => {
-            if (counts) {
-              applyCategoryCounts(requestId, counts);
-            }
-          })
-          .catch(() => undefined);
+      logLiveStartup('first-channel-list-ready', {
+        elapsedMs: Date.now() - mountStartedAtRef.current,
+        categoryCount: providerCategories.length,
+        channelCount: nextChannels.length,
+        selectedCategoryId: resolvedCategoryId,
+        providerIdPresent: Boolean(bundle.providerId),
+      });
+      logLivePerformance({
+        event: 'first-channel-list-ready',
+        elapsedMs: Date.now() - mountStartedAtRef.current,
+        providerIdPresent: Boolean(bundle.providerId),
+        categoryCount: providerCategories.length,
+        channelCount: nextChannels.length,
+        selectedCategoryIdPresent: Boolean(resolvedCategoryId),
+        source: 'repository',
+        epgPending: true,
+        discoverPending: false,
+      });
+      if (!interactiveLoggedRef.current) {
+        interactiveLoggedRef.current = true;
+        logLiveStartup('interactive', {
+          elapsedMs: Date.now() - mountStartedAtRef.current,
+          categoryCount: providerCategories.length,
+          channelCount: nextChannels.length,
+          selectedCategoryId: resolvedCategoryId,
+          providerIdPresent: Boolean(bundle.providerId),
+        });
+        logLivePerformance({
+          event: 'interactive',
+          elapsedMs: Date.now() - mountStartedAtRef.current,
+          providerIdPresent: Boolean(bundle.providerId),
+          categoryCount: providerCategories.length,
+          channelCount: nextChannels.length,
+          selectedCategoryIdPresent: Boolean(resolvedCategoryId),
+          source: 'repository',
+          epgPending: true,
+          discoverPending: false,
+        });
       }
-    } catch (error) {
+
+      prefetchChannelEpg(requestId, nextChannels, resolvedCategoryId);
+    } catch {
       if (requestId !== requestRef.current || signal.aborted) {
         return;
       }
 
-      // Keep last-good channels on refresh failure — do not wipe a usable browse list.
+      setChannelListPending(false);
       setStatus(channelsBaselineRef.current.length ? 'ready' : 'error');
       setErrorMessage('Unable to load live channels from your provider.');
     }
-  }, [applyCategoryCounts, bundle, initialCategoryId, commitChannels, loadChannelsForCategory, personalizationState.liveFavorites.length, prefetchChannelEpg, updateCategoryCount]);
+  }, [bundle, initialCategoryId, commitChannels, loadChannelsForCategory, prefetchChannelEpg, updateCategoryCount]);
 
   const loadCategoriesRef = useRef(loadCategories);
-  loadCategoriesRef.current = loadCategories;
 
   useEffect(() => {
+    loadCategoriesRef.current = loadCategories;
+  }, [loadCategories]);
+
+  useEffect(() => {
+    mountStartedAtRef.current = Date.now();
+    interactiveLoggedRef.current = false;
+    logLiveStartup('screen-mounted', {
+      elapsedMs: 0,
+      providerIdPresent: Boolean(bundle?.providerId),
+      selectedCategoryId: initialCategoryId,
+    });
+    logLivePerformance({
+      event: 'screen-mounted',
+      elapsedMs: 0,
+      providerIdPresent: Boolean(bundle?.providerId),
+      selectedCategoryIdPresent: isRealProviderLiveCategoryId(initialCategoryId),
+      source: 'memory',
+      epgPending: false,
+      discoverPending: false,
+    });
     void loadCategoriesRef.current();
-  }, [bundle?.generation, initialCategoryId]);
+  }, [bundle?.generation, bundle?.providerId, initialCategoryId]);
 
   useEffect(() => {
     return () => {
       loadAbortRef.current?.abort();
+      if (focusedEpgTimerRef.current) {
+        clearTimeout(focusedEpgTimerRef.current);
+        focusedEpgTimerRef.current = null;
+      }
+      cancelLiveTvEpgWork('live-model-unmount');
     };
   }, [bundle?.generation]);
 
@@ -314,11 +371,30 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         return [];
       }
 
+      logLiveCategory('selection-requested', { categoryId });
+      if (!isRealProviderLiveCategoryId(categoryId)) {
+        logLiveCategory('selection-rejected', {
+          categoryId,
+          reason: isSyntheticLiveFavoritesCategoryId(categoryId)
+            ? 'synthetic-favorites'
+            : 'invalid-provider-category',
+        });
+        return channelsBaselineRef.current;
+      }
+
       const requestId = ++requestRef.current;
+      const startedAt = Date.now();
       resetLiveTvFocusIdle();
       epgFetchedIdsRef.current.clear();
-      clearLiveTvEpgCache();
+      epgInFlightIdsRef.current.clear();
+      if (focusedEpgTimerRef.current) {
+        clearTimeout(focusedEpgTimerRef.current);
+        focusedEpgTimerRef.current = null;
+      }
+      cancelLiveTvEpgWork('category-switch');
       setSelectedCategoryId(categoryId);
+      setChannelListPending(true);
+      logLiveCategory('selection-accepted', { categoryId, reason: 'user-select' });
 
       try {
         const nextChannels = await loadChannelsForCategory(categoryId);
@@ -330,9 +406,20 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         const immediate = mapChannelsWithoutEpg(nextChannels);
         clearLiveTvChannelRowDataPool();
         commitChannels(immediate);
+        setChannelListPending(false);
         setStatus(immediate.length ? 'ready' : 'empty');
+        logLivePerformance({
+          event: 'category-switch-first-channels',
+          elapsedMs: Date.now() - startedAt,
+          providerIdPresent: Boolean(bundle.providerId),
+          channelCount: immediate.length,
+          selectedCategoryIdPresent: true,
+          source: 'repository',
+          epgPending: true,
+          discoverPending: false,
+        });
 
-        prefetchChannelEpg(requestId, nextChannels);
+        prefetchChannelEpg(requestId, nextChannels, categoryId);
 
         return immediate;
       } catch {
@@ -340,7 +427,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
           return [];
         }
 
-        // Retain previous category list on failure so the user is not left with an empty rail.
+        setChannelListPending(false);
         setStatus(channelsBaselineRef.current.length ? 'ready' : 'error');
         setErrorMessage('Unable to load channels for this category.');
         return channelsBaselineRef.current;
@@ -349,42 +436,64 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     [bundle, commitChannels, loadChannelsForCategory, prefetchChannelEpg, updateCategoryCount],
   );
 
-  useEffect(() => {
-    if (!baseCategories.length || selectedCategoryId !== 'favorites' || personalizationState.liveFavorites.length) {
-      return;
-    }
-
-    const fallback = categoriesWithFavorites[0]?.id ?? '';
-    if (fallback) {
-      void selectCategory(fallback);
-    }
-  }, [baseCategories.length, categoriesWithFavorites, personalizationState.liveFavorites.length, selectCategory, selectedCategoryId]);
-
   const enrichFocusedChannelEpg = useCallback(
     (channelId: string) => {
-      if (!bundle || epgFetchedIdsRef.current.has(channelId)) {
+      if (!bundle) {
         return;
       }
 
-      const channel = channels.find((item) => item.id === channelId);
-      if (!channel) {
-        return;
+      if (focusedEpgTimerRef.current) {
+        clearTimeout(focusedEpgTimerRef.current);
       }
 
-      epgFetchedIdsRef.current.add(channelId);
-      void enrichSingleChannelEpg(bundle, channel).then((enriched) => {
-        if (
-          enriched.current === channel.current &&
-          enriched.next === channel.next &&
-          enriched.following === channel.following
-        ) {
+      focusedEpgTimerRef.current = setTimeout(() => {
+        focusedEpgTimerRef.current = null;
+        const workload = getLiveTvWorkload();
+        const channel = channelsBaselineRef.current.find((item) => item.id === channelId);
+        if (!channel) {
           return;
         }
 
-        setChannels((current) => current.map((item) => (item.id === channelId ? enriched : item)));
-      });
+        const decision = shouldIssueFocusedEpgRequest({
+          channelId,
+          lastIssuedChannelId: lastFocusedEpgRef.current?.channelId,
+          lastIssuedAtMs: lastFocusedEpgRef.current?.atMs,
+          nowMs: Date.now(),
+          inFlight: epgInFlightIdsRef.current.has(channelId),
+          cached: epgFetchedIdsRef.current.has(channelId),
+          suspended: shouldSuspendLiveListEpg(workload),
+        });
+        if (decision !== 'issue') {
+          return;
+        }
+
+        lastFocusedEpgRef.current = { channelId, atMs: Date.now() };
+        epgFetchedIdsRef.current.add(channelId);
+        epgInFlightIdsRef.current.add(channelId);
+        logLiveEpgTrigger({
+          caller: 'useLiveTvScreenModel.enrichFocusedChannelEpg',
+          reason: 'focused-channel-current-program',
+          categoryId: selectedCategoryId,
+          channelCount: 1,
+        });
+        void enrichSingleChannelEpg(bundle, channel)
+          .then((enriched) => {
+            if (
+              enriched.current === channel.current &&
+              enriched.next === channel.next &&
+              enriched.following === channel.following
+            ) {
+              return;
+            }
+
+            setChannels((current) => current.map((item) => (item.id === channelId ? enriched : item)));
+          })
+          .finally(() => {
+            epgInFlightIdsRef.current.delete(channelId);
+          });
+      }, LIVE_EPG_FOCUS_DEBOUNCE_MS);
     },
-    [bundle, channels],
+    [bundle, selectedCategoryId],
   );
 
   const resolvePlaybackUrl = useCallback(
@@ -411,23 +520,23 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
   }, [channels, initialChannelId]);
 
   const categoryTotalCount = useMemo(() => {
-    const countableCategories = baseCategories.filter((category) => category.id !== 'favorites');
-    if (!countableCategories.length || countableCategories.some((category) => category.count == null)) {
+    if (!categories.length || categories.some((category) => category.count == null)) {
       return null;
     }
 
-    return countableCategories.reduce((total, category) => total + (category.count ?? 0), 0);
-  }, [baseCategories]);
+    return categories.reduce((total, category) => total + (category.count ?? 0), 0);
+  }, [categories]);
 
   return {
     bundle,
     isXtream,
     status: bundle ? status : 'error',
     errorMessage: bundle ? errorMessage : 'Provider is not connected.',
-    categories: categoriesWithFavorites,
+    categories,
     categoryTotalCount,
     channels,
     selectedCategoryId,
+    channelListPending,
     selectCategory,
     enrichFocusedChannelEpg,
     resolvePlaybackUrl,

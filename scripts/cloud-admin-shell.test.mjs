@@ -14,6 +14,7 @@ test('Cloud Admin mounts existing premium pages', () => {
   assert.match(cloud, /<AdminDashboard/);
   assert.match(cloud, /<AdminDevices/);
   assert.match(cloud, /<AdminInvitations/);
+  assert.match(cloud, /<AdminProviders/);
 });
 
 test('Cloud Admin wires device extension to admin-device-action', () => {

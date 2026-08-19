@@ -6,8 +6,8 @@ import { NovaLogo, NovaScreen } from '@/components/nova';
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
 import { isClosedBetaManagedFlow, isPersonalPairingEnabled } from '@/features/device';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
-import { clearProvidersForPairing, retryProviderInitialization, useProviderStore } from '@/features/providers/providerStore';
-import { downloadManagedProviderAssignment } from '@/features/device/managedProviderDownload';
+import { clearProvidersForPairing, useProviderStore } from '@/features/providers/providerStore';
+import { resolveStartupProvider } from '@/features/startup/resolveStartupProvider';
 import { novaTheme } from '@/theme';
 
 import {
@@ -19,39 +19,60 @@ import {
 type ProviderInitErrorScreenProps = {
   title?: string;
   message?: string;
+  retrying?: boolean;
+  onRetry?: () => Promise<unknown>;
 };
 
-export function ProviderInitErrorScreen({ title, message }: ProviderInitErrorScreenProps = {}) {
+export function ProviderInitErrorScreen({
+  title,
+  message,
+  retrying = false,
+  onRetry,
+}: ProviderInitErrorScreenProps = {}) {
   const router = useRouter();
   const authRetryAttemptedRef = useRef(false);
   const lastRetryAtRef = useRef(0);
+  const retryInFlightRef = useRef(false);
   const { isSwitchingProvider } = useProviderStore();
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
   const [focusedAction, setFocusedAction] = useState<'retry' | 'pair'>('retry');
   const [initFailed, setInitFailed] = useState(true);
+  const [localRetrying, setLocalRetrying] = useState(false);
   const allowPairAnother = isPersonalPairingEnabled() && !isClosedBetaManagedFlow();
+  const retryBusy = retrying || localRetrying || isSwitchingProvider;
 
   const retry = useCallback(async () => {
     const now = Date.now();
-    if (now - lastRetryAtRef.current < 400) {
+    if (retryInFlightRef.current || retrying || now - lastRetryAtRef.current < 400) {
       return;
     }
 
     lastRetryAtRef.current = now;
+    retryInFlightRef.current = true;
     authRetryAttemptedRef.current = true;
+    setLocalRetrying(true);
 
     try {
-      if (isClosedBetaManagedFlow()) {
-        await downloadManagedProviderAssignment().catch(() => undefined);
+      if (onRetry) {
+        await onRetry();
+        setInitFailed(true);
+        return;
       }
-      await retryProviderInitialization();
+      const result = await resolveStartupProvider({ source: 'retry' });
+      if (!result.ok) {
+        setInitFailed(true);
+        return;
+      }
       setInitFailed(false);
       authRetryAttemptedRef.current = false;
       router.replace('/main-menu');
     } catch {
       setInitFailed(true);
+    } finally {
+      retryInFlightRef.current = false;
+      setLocalRetrying(false);
     }
-  }, [router]);
+  }, [onRetry, retrying, router]);
 
   const pairAnother = useCallback(async () => {
     setInitFailed(false);
@@ -101,7 +122,7 @@ export function ProviderInitErrorScreen({ title, message }: ProviderInitErrorScr
           {message ?? 'Choose an option below to connect NovaCast to your provider.'}
         </Text>
 
-        {isSwitchingProvider ? (
+        {retryBusy ? (
           <>
             <ActivityIndicator color={novaTheme.colors.accentHover} size="large" />
             <Text style={styles.status}>Connecting to your provider...</Text>
@@ -113,6 +134,7 @@ export function ProviderInitErrorScreen({ title, message }: ProviderInitErrorScr
               hasTVPreferredFocus={focusedAction === 'retry'}
               onFocus={() => setFocusedAction('retry')}
               onPress={() => void retry()}
+              disabled={retryBusy}
               style={[styles.button, styles.primaryButton, novaTvFocus.base, focusedAction === 'retry' && novaTvFocus.active]}>
               <Text style={styles.primaryText}>Retry</Text>
             </Pressable>

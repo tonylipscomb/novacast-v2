@@ -266,7 +266,7 @@ test('unified playback control refs are stable and do not clear Android focus ha
   assert.match(controls, /const assignBackRef = useCallback/);
 });
 
-test('unified movie playback overlay keeps SurfaceView and never mounts a full-screen cover Pressable', async () => {
+test('unified VOD overlay uses TextureView; Live TV keeps SurfaceView default', async () => {
   const fs = await import('node:fs');
   const overlay = fs.readFileSync(
     new URL('../src/features/playback/unified/UnifiedPlayerOverlay.tsx', import.meta.url),
@@ -280,10 +280,20 @@ test('unified movie playback overlay keeps SurfaceView and never mounts a full-s
     new URL('../src/features/playback/unified/UnifiedPlayerHost.tsx', import.meta.url),
     'utf8',
   );
+  const live = fs.readFileSync(new URL('../src/features/live/LiveTvScreen.tsx', import.meta.url), 'utf8');
+  const surface = fs.readFileSync(
+    new URL('../src/features/playback/NovaStreamPlayer.tsx', import.meta.url),
+    'utf8',
+  );
 
-  assert.match(overlay, /surfaceType="surfaceView"/);
-  assert.doesNotMatch(overlay, /surfaceType="textureView"/);
-  assert.match(overlay, /playback-recovery-phase1-textureview/);
+  assert.match(overlay, /function resolveUnifiedPlayerSurfaceType/);
+  assert.match(overlay, /mediaType !== 'live'/);
+  assert.match(overlay, /return 'textureView'/);
+  assert.match(overlay, /surfaceType=\{effectiveSurfaceType\}/);
+  assert.match(overlay, /requestedSurfaceType/);
+  assert.match(overlay, /effectiveSurfaceType/);
+  assert.match(overlay, /rc-firetv-vod-textureview/);
+  assert.doesNotMatch(overlay, /surfaceType="surfaceView"/);
   assert.match(overlay, /backgroundColor: 'transparent'/);
   assert.match(overlay, /collapsable=\{false\}/);
   assert.doesNotMatch(overlay, /UnifiedPlayerInteractionLayer/);
@@ -291,4 +301,7 @@ test('unified movie playback overlay keeps SurfaceView and never mounts a full-s
   assert.doesNotMatch(interaction, /StyleSheet\.absoluteFill/);
   assert.match(host, /<Modal/);
   assert.match(host, /presentationStyle="overFullScreen"/);
+  assert.match(surface, /surfaceType = 'surfaceView'/);
+  assert.doesNotMatch(live, /surfaceType=/);
+  assert.doesNotMatch(live, /textureView/);
 });

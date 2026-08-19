@@ -5,6 +5,7 @@ import { BackHandler, findNodeHandle, Platform, Pressable, StyleSheet, Text, use
 
 import { getTvDensity } from '@/components/nova/tvDensity';
 import { createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
@@ -117,15 +118,26 @@ export function AppNotificationToast({ notification, captureFocus = false }: App
       return undefined;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (!focusedButtonRef.current) {
-        return false;
-      }
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'blocking-toast',
+        () => {
+          if (!focusedButtonRef.current) {
+            return false;
+          }
 
-      lockDismissFocusRef.current = false;
-      dismissNotification(notification.id);
-      return true;
-    });
+          lockDismissFocusRef.current = false;
+          dismissNotification(notification.id);
+          return true;
+        },
+        () => ({
+          screen: 'AppNotificationToast',
+          blocking,
+          notificationId: notification.id,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [blocking, notification.id]);

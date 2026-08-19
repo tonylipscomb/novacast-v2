@@ -1,4 +1,5 @@
-import { deviceAuthHeaders } from '@/features/device/deviceRegistration';
+import { deviceAuthHeaders, deviceMetadata, getDeviceIdentity } from '@/features/device/deviceRegistration';
+import { isLocalActivationBypassEnabled } from '@/features/device/deviceFeatureFlags';
 import { setContentPolicyOverride, type ContentPolicyId } from '@/features/content-policy/ContentPolicyService';
 import { connectXtreamProvider } from '@/features/providers/providerStore';
 import { markPairingCompleted } from '@/features/pairing/pairingState';
@@ -25,15 +26,27 @@ export async function downloadManagedProviderAssignment(): Promise<ManagedProvid
     throw new Error('managed_provider_unavailable');
   }
 
+  const localBypass = isLocalActivationBypassEnabled({ log: false });
+  const identity = await getDeviceIdentity().catch(() => null);
+  const authHeaders = await deviceAuthHeaders();
+  const localTestBypassHeaderSent = localBypass;
+  console.info('[NovaCast Managed Provider Download]', JSON.stringify({
+    event: 'request-auth-mode',
+    localBypassEligible: localBypass,
+    localTestBypassHeaderSent,
+    publicDeviceIdPresent: Boolean(identity?.publicDeviceCode || authHeaders['x-novacast-device-id']),
+    privateCredentialPresent: Boolean(identity?.deviceSecret || authHeaders['x-novacast-device-secret']),
+  }));
   const response = await fetch(`${api.apiUrl}/device-provider-assignment`, {
     method: 'POST',
     headers: {
       apikey: api.anonKey,
       Authorization: `Bearer ${api.anonKey}`,
       'Content-Type': 'application/json',
-      ...(await deviceAuthHeaders()),
+      ...authHeaders,
+      ...(localTestBypassHeaderSent ? { 'x-novacast-local-test-bypass': '1' } : {}),
     },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ metadata: deviceMetadata() }),
   });
 
   const payload = await response.json().catch(() => ({}));

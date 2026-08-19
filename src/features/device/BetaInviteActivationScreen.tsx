@@ -13,7 +13,7 @@ import {
 import { NovaSpaceLoader } from '@/components/nova';
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
 import { activateAndBootstrapManagedProvider } from '@/features/device/inviteActivation';
-import { useDeviceState } from '@/features/device/deviceActivation';
+import { initializeDevice, useDeviceState } from '@/features/device/deviceActivation';
 import { novaTheme } from '@/theme';
 
 const backgroundAsset = require('@/assets/images/pairingbackground.png');
@@ -31,9 +31,18 @@ export function BetaInviteActivationScreen({ onActivated }: { onActivated?: () =
   const [focused, setFocused] = useState<'code' | 'submit' | null>('code');
   const submittingRef = useRef(false);
 
-  const deviceCode = device.status?.publicDeviceCode ?? device.identity?.publicDeviceCode ?? 'REGISTERING…';
+  const deviceCode = device.status?.publicDeviceCode ?? device.identity?.publicDeviceCode ?? (device.state === 'registering' ? 'REGISTERING…' : 'UNAVAILABLE');
+  const registrationError = device.state === 'error'
+    ? 'Device registration could not finish. Retry registration, then enter your invitation code.'
+    : null;
 
   const normalizedCode = useMemo(() => code.replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 12), [code]);
+
+  const retryRegistration = useCallback(() => {
+    setError(null);
+    console.info('[NovaCast Device Registration]', JSON.stringify({ phase: 'retry-start' }));
+    void initializeDevice().catch(() => undefined);
+  }, []);
 
   const submit = useCallback(async () => {
     if (submittingRef.current) return;
@@ -88,8 +97,15 @@ export function BetaInviteActivationScreen({ onActivated }: { onActivated?: () =
   }, [normalizedCode, onActivated]);
 
   useEffect(() => {
-    if (phase === 'activating') return;
-  }, [phase]);
+    console.info('[NovaCast Device Registration]', JSON.stringify({
+      phase: 'screen-mounted',
+      screenPhase: phase,
+      deviceState: device.state,
+      installationIdentityPresent: Boolean(device.identity?.installationId),
+      privateCredentialPresent: Boolean(device.identity?.deviceSecret),
+      publicDeviceIdPresent: Boolean(device.identity?.publicDeviceCode),
+    }));
+  }, [device.identity, device.state, phase]);
 
   if (phase === 'activating') {
     return (
@@ -136,7 +152,16 @@ export function BetaInviteActivationScreen({ onActivated }: { onActivated?: () =
           ]}
         />
 
-        {error ? <Text style={[styles.error, { fontSize: 16 * scale }]}>{error}</Text> : null}
+        {error || registrationError ? <Text style={[styles.error, { fontSize: 16 * scale }]}>{error ?? registrationError}</Text> : null}
+
+        {device.state === 'error' ? (
+          <Pressable
+            focusable
+            onPress={retryRegistration}
+            style={[styles.submit, novaTvFocus.base, { paddingVertical: 12 * scale, paddingHorizontal: 22 * scale }]}>
+            <Text style={[styles.submitText, { fontSize: 16 * scale }]}>Retry registration</Text>
+          </Pressable>
+        ) : null}
 
         <Pressable
           focusable

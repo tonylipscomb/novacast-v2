@@ -1,11 +1,24 @@
 /**
- * Stage 3D / 3D.1 — Movies-only detail focus lifecycle.
+ * Stage 3D / 3D.1 / 4.2G — Movies-only detail focus lifecycle.
  * Pure helpers + diagnostics. MoviesScreen is the sole coordinator.
+ *
+ * @deprecated Stage 4.2M — The active Movies Detail path uses the guest overlay
+ * (`closeDetailOverlay` / MediaDetailOverlayShell) and must not enter these
+ * multi-phase close transitions. This module remains for legacy tests and
+ * unused coordinator branches until a later cleanup pass.
+ *
+ * Stage 4.2G/K natural return (mounted poster):
+ *   detail-open → return-focus-arming → return-focus-requested → return-focus-confirmed → browse-restored → browse
+ * Fallback (unmounted / generation change / etc.) retains closing-prepare → viewport → focus.
  */
 
 export type MoviesDetailFocusPhase =
   | 'browse'
   | 'detail-open'
+  /** Stage 4.2K: handoff armed; wait for native focus environment before request. */
+  | 'return-focus-arming'
+  | 'return-focus-requested'
+  | 'return-focus-confirmed'
   | 'closing-prepare'
   | 'closing-viewport'
   | 'closing-focus'
@@ -31,7 +44,11 @@ export type MoviesDetailFocusToken = {
   snapshot: MoviesBrowseFocusSnapshot;
 };
 
-export const MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS = 2200;
+/**
+ * Stage 4.2K: confirmation wait after a native-ready focus request.
+ * (Legacy 2200 ms caused a visible 2.2s stall on ONN.)
+ */
+export const MOVIES_DETAIL_FOCUS_CONFIRM_TIMEOUT_MS = 350;
 export const MOVIES_VIEWPORT_OFFSET_TOLERANCE_PX = 12;
 /** Stage 3D.3: event-driven browse handoff — one frame, not a long settle timer. */
 export const MOVIES_FOCUS_SUPPRESSION_RELEASE_MS = 32;
@@ -208,8 +225,166 @@ export function shouldReRequestMoviesPosterFocusAfterCorrective(input: {
   return !input.targetFocusConfirmed;
 }
 
+/**
+ * Stage 4.2F — Evidence-driven detail return path selection.
+ * Fast path: mounted poster + same grid/category/generation → focus under cover,
+ * correct native drift once, then reveal. Fallback retains Stage 3D.1 restore.
+ */
+export type MoviesDetailReturnPath =
+  | 'fast-mounted-target'
+  | 'fallback-target-unmounted'
+  | 'fallback-generation-changed'
+  | 'fallback-category-changed'
+  | 'fallback-grid-instance-changed'
+  | 'fallback-movie-missing'
+  | 'fallback-provider-changed';
+
+export type MoviesDetailOpenContext = {
+  providerId: string;
+  readableGeneration: number | null;
+  gridInstanceId: string | null;
+  /** Stage 4.2J: browse list revision frozen at Detail open. */
+  listRevision?: number;
+};
+
+export const MOVIES_FOCUS_STAGE4F_MARKER = 'stage4f-movies-detail-return-v1';
+/** Fast path allows a single covered corrective restore (no initial scroll). */
+export const MOVIES_FAST_PATH_MAX_VIEWPORT_RESTORES = 1;
+
+export function selectMoviesDetailReturnPath(input: {
+  hasSnapshot: boolean;
+  snapshotCategoryId: string | null;
+  selectedCategoryId: string;
+  openProviderId: string | null;
+  activeProviderId: string;
+  openReadableGeneration: number | null;
+  activeReadableGeneration: number | null;
+  openGridInstanceId: string | null;
+  activeGridInstanceId: string | null;
+  targetMovieId: string | null;
+  targetInVisibleMovies: boolean;
+  targetNativeHandleExists: boolean;
+  /** Stage 4.2J: immutable open-snapshot visibility (live indexes may be null). */
+  snapshotTargetWasVisible?: boolean;
+  /** Stage 4.2J: registered ref identity still matches snapshot. */
+  targetRefIdentityValid?: boolean;
+  /** Stage 4.2J: no list replacement since Detail opened. */
+  listRevisionUnchanged?: boolean;
+}): MoviesDetailReturnPath {
+  if (!input.hasSnapshot || !input.targetMovieId) {
+    return 'fallback-target-unmounted';
+  }
+  if (
+    input.openProviderId != null &&
+    input.openProviderId !== '' &&
+    input.openProviderId !== input.activeProviderId
+  ) {
+    return 'fallback-provider-changed';
+  }
+  if (
+    input.openReadableGeneration != null &&
+    input.activeReadableGeneration != null &&
+    input.openReadableGeneration !== input.activeReadableGeneration
+  ) {
+    return 'fallback-generation-changed';
+  }
+  if (
+    input.snapshotCategoryId != null &&
+    input.snapshotCategoryId !== '' &&
+    input.snapshotCategoryId !== input.selectedCategoryId
+  ) {
+    return 'fallback-category-changed';
+  }
+  if (
+    input.openGridInstanceId != null &&
+    input.activeGridInstanceId != null &&
+    input.openGridInstanceId !== input.activeGridInstanceId
+  ) {
+    return 'fallback-grid-instance-changed';
+  }
+  if (!input.targetInVisibleMovies) {
+    return 'fallback-movie-missing';
+  }
+  if (!input.targetNativeHandleExists) {
+    return 'fallback-target-unmounted';
+  }
+  // Stage 4.2J: a native handle alone is not a reliable mounted target.
+  if (input.snapshotTargetWasVisible === false) {
+    return 'fallback-target-unmounted';
+  }
+  if (input.targetRefIdentityValid === false) {
+    return 'fallback-target-unmounted';
+  }
+  if (input.listRevisionUnchanged === false) {
+    return 'fallback-target-unmounted';
+  }
+  return 'fast-mounted-target';
+}
+
+export function isMoviesDetailReturnFastPath(path: MoviesDetailReturnPath | null | undefined): boolean {
+  return path === 'fast-mounted-target';
+}
+
+/**
+ * Stage 4.2G natural mounted return: never emit initial-detail-restore or
+ * enter closing-viewport. Corrective scroll only after measured native drift.
+ */
+export function shouldUseMoviesNaturalReturnPath(
+  path: MoviesDetailReturnPath | null | undefined,
+): boolean {
+  return isMoviesDetailReturnFastPath(path);
+}
+
+/** Fast-path initial restore is a hard violation after Stage 4.2G. */
+export function isMoviesFastPathInitialRestoreViolation(input: {
+  returnPath: MoviesDetailReturnPath | null | undefined;
+  reason: 'initial' | 'corrective' | string;
+}): boolean {
+  return isMoviesDetailReturnFastPath(input.returnPath) && input.reason === 'initial';
+}
+
+export function shouldIssueMoviesInitialDetailRestore(
+  path: MoviesDetailReturnPath | null | undefined,
+): boolean {
+  return !isMoviesDetailReturnFastPath(path);
+}
+
+/** Skip no-op initial restore commands (ONN: duplicate delta-0 before focus). */
+export function shouldSkipZeroDeltaInitialRestore(input: {
+  requestedOffset: number;
+  currentOffset: number;
+  reason: 'initial' | 'corrective';
+  tolerancePx?: number;
+}): boolean {
+  if (input.reason !== 'initial') {
+    return false;
+  }
+  return isMoviesViewportOffsetStable({
+    currentOffset: input.currentOffset,
+    snapshotOffset: input.requestedOffset,
+    tolerancePx: input.tolerancePx,
+  });
+}
+
+export function resolveMoviesDetailReturnMaxViewportRestores(
+  path: MoviesDetailReturnPath | null | undefined,
+): number {
+  return isMoviesDetailReturnFastPath(path)
+    ? MOVIES_FAST_PATH_MAX_VIEWPORT_RESTORES
+    : MOVIES_MAX_VIEWPORT_RESTORES;
+}
+
+export function isMoviesNaturalReturnPhase(phase: MoviesDetailFocusPhase): boolean {
+  return (
+    phase === 'return-focus-arming' ||
+    phase === 'return-focus-requested' ||
+    phase === 'return-focus-confirmed'
+  );
+}
+
 export function isMoviesDetailClosingPhase(phase: MoviesDetailFocusPhase): boolean {
   return (
+    isMoviesNaturalReturnPhase(phase) ||
     phase === 'closing-prepare' ||
     phase === 'closing-viewport' ||
     phase === 'closing-focus' ||
@@ -217,9 +392,14 @@ export function isMoviesDetailClosingPhase(phase: MoviesDetailFocusPhase): boole
   );
 }
 
-/** Overlay stays mounted for open + every closing phase until exact confirm. */
+/** Overlay stays mounted for open + every closing/return phase until exact confirm. */
 export function isMoviesDetailOverlayMounted(phase: MoviesDetailFocusPhase): boolean {
   return phase === 'detail-open' || isMoviesDetailClosingPhase(phase);
+}
+
+/** Stage 4.2G: hold Detail fully opaque until focus + offset are confirmed. */
+export function shouldHoldMoviesDetailVisual(phase: MoviesDetailFocusPhase): boolean {
+  return isMoviesNaturalReturnPhase(phase) || phase === 'closing-confirm';
 }
 
 /**

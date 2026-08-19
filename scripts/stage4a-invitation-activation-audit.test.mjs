@@ -111,7 +111,8 @@ test('RPC raises precise codes for missing device / invite / expired / exhausted
 });
 
 test('registerDevice no-ops without pairing API (ordering implication)', () => {
-  assert.match(registration, /if \(!config\) return identity/);
+  assert.match(registration, /if \(!config\) \{/);
+  assert.match(registration, /return identity;/);
   assert.match(registration, /device-register/);
 });
 

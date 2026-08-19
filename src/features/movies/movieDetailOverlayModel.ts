@@ -1,5 +1,6 @@
 import type { MediaDetail } from '@/features/media-browser/mediaTypes';
 import type { MovieSummary } from '@/features/movies/movieTypes';
+import { COMPLETED_PROGRESS_PERCENT, isResumeEligible } from '@/features/playback/continuity/playbackContinuity';
 
 export type StreamQualityBadge = {
   id: string;
@@ -11,6 +12,19 @@ export type RelatedMovieCandidate = Pick<
   MovieSummary,
   'id' | 'title' | 'posterUrl' | 'genres' | 'year' | 'rating' | 'posterStyleKey' | 'categoryId'
 >;
+
+/** Stage 4.2B compact card contracts — readable from 8–12 feet on TV. */
+export const MOVIE_DETAIL_TITLE_MAX_LINES = 2;
+export const MOVIE_DETAIL_SYNOPSIS_MAX_LINES = 3;
+export const MOVIE_DETAIL_RELATED_LIMIT = 5;
+export const MOVIE_DETAIL_CAST_LIMIT = 3;
+export const MOVIE_DETAIL_GENRE_LIMIT = 3;
+export const MOVIE_DETAIL_OPEN_MS = 160;
+export const MOVIE_DETAIL_CLOSE_MS = 120;
+export const MOVIE_DETAIL_BLUR_MS = 150;
+export const MOVIE_DETAIL_FOCUS_MS = 110;
+/** Hide related row below this window height to avoid vertical overflow. */
+export const MOVIE_DETAIL_RELATED_MIN_HEIGHT = 700;
 
 /**
  * Derive display badges from already-loaded detail/summary fields.
@@ -82,8 +96,84 @@ export function formatMovieRating(value?: number | string | null): string | unde
   return undefined;
 }
 
-export function resolveContinueWatchingLabel(progressPercent?: number | null): string {
-  if (typeof progressPercent === 'number' && progressPercent > 0 && progressPercent < 90) {
+export function formatRuntimeDisplay(value?: string | number | null): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    const minutes = Math.round(value);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    const rem = minutes % 60;
+    return rem ? `${hours}h ${rem}m` : `${hours}h`;
+  }
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    return formatRuntimeDisplay(Number(trimmed));
+  }
+  return trimmed;
+}
+
+export function formatReleaseYear(value?: string | number | null): string | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 1800) {
+    return String(Math.round(value));
+  }
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const match = trimmed.match(/\b(19|20)\d{2}\b/);
+  return match?.[0] ?? trimmed;
+}
+
+export function formatMaturityRating(value?: string | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+export function formatDirectorLine(value?: string | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? `Dir. ${trimmed}` : undefined;
+}
+
+export function formatAudioLine(value?: string | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Build truthy metadata chips only — never emits empty / null / N/A placeholders.
+ */
+export function buildMovieDetailMetaChips(input: {
+  year?: string | number | null;
+  runtime?: string | number | null;
+  contentRating?: string | null;
+  rating?: number | string | null;
+  director?: string | null;
+  audio?: string | null;
+}): string[] {
+  const chips = [
+    formatReleaseYear(input.year),
+    formatRuntimeDisplay(input.runtime),
+    formatMaturityRating(input.contentRating),
+    formatMovieRating(input.rating) ? `${formatMovieRating(input.rating)}★` : undefined,
+    formatDirectorLine(input.director),
+    formatAudioLine(input.audio),
+  ].filter((chip): chip is string => Boolean(chip && chip.trim()));
+  return chips;
+}
+
+export function joinMetaChips(chips: string[], separator = '  ·  '): string {
+  return chips.filter((chip) => chip.trim().length > 0).join(separator);
+}
+
+export function resolveContinueWatchingLabel(
+  progressPercent?: number | null,
+  positionMs?: number | null,
+  durationMs?: number | null,
+): string {
+  if (typeof positionMs === 'number' && typeof durationMs === 'number' && durationMs > 0) {
+    return isResumeEligible(positionMs, durationMs) ? 'Resume' : 'Play';
+  }
+  if (typeof progressPercent === 'number' && progressPercent > 0 && progressPercent < COMPLETED_PROGRESS_PERCENT) {
     return 'Resume';
   }
   return 'Play';
@@ -93,7 +183,7 @@ export function resolveContinueWatchingProgress(progressPercent?: number | null)
   if (typeof progressPercent !== 'number' || !Number.isFinite(progressPercent)) {
     return null;
   }
-  if (progressPercent <= 0 || progressPercent >= 90) {
+  if (progressPercent <= 0 || progressPercent >= COMPLETED_PROGRESS_PERCENT) {
     return null;
   }
   return Math.max(1, Math.min(99, Math.round(progressPercent)));
@@ -120,7 +210,7 @@ function genreOverlapScore(left: string[] | undefined, right: string[] | undefin
 export function selectRelatedMovies(
   selected: RelatedMovieCandidate | null | undefined,
   candidates: RelatedMovieCandidate[],
-  limit = 12,
+  limit = MOVIE_DETAIL_RELATED_LIMIT,
 ): RelatedMovieCandidate[] {
   if (!selected || !candidates.length || limit <= 0) {
     return [];
@@ -155,4 +245,37 @@ export function selectRelatedMovies(
 
 export function heroBackdropUri(detail: Pick<MediaDetail, 'backdropUrl' | 'posterUrl'> | null | undefined) {
   return detail?.backdropUrl?.trim() || detail?.posterUrl?.trim() || null;
+}
+
+/** Concise non-focusable cast line for the compact card. */
+export function formatCastLine(
+  cast: Array<{ name?: string | null }> | null | undefined,
+  limit = MOVIE_DETAIL_CAST_LIMIT,
+): string | undefined {
+  if (!cast?.length) return undefined;
+  const names = cast
+    .map((member) => member.name?.trim())
+    .filter((name): name is string => Boolean(name))
+    .slice(0, limit);
+  if (!names.length) return undefined;
+  return `Cast: ${names.join(' • ')}`;
+}
+
+export function resolveTitleFontSize(windowWidth: number): number {
+  if (windowWidth >= 1800) return 36;
+  if (windowWidth >= 1400) return 32;
+  if (windowWidth >= 1100) return 28;
+  if (windowWidth >= 900) return 26;
+  return 22;
+}
+
+/** Compact card width/height within TV-safe margins. */
+export function resolveCompactDetailCardSize(windowWidth: number, windowHeight: number) {
+  const width = Math.min(Math.round(windowWidth * 0.78), 1480);
+  const height = Math.min(Math.round(windowHeight * 0.72), Math.round(windowHeight * 0.88));
+  return { width, height };
+}
+
+export function shouldShowCompactRelatedRow(windowHeight: number): boolean {
+  return windowHeight >= MOVIE_DETAIL_RELATED_MIN_HEIGHT;
 }

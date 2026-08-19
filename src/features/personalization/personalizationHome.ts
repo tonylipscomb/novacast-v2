@@ -11,6 +11,10 @@ import {
   type HomeContinueWatchingItem,
   type RecentItemRecord,
 } from './personalizationModel';
+import {
+  hydrateCanonicalMovies,
+  hydrateCanonicalSeriesList,
+} from './discoverZoneHydration';
 import { getLiveFavoriteEntries, getPersonalizationState } from './personalizationStore';
 import type { MovieSummary } from '../movies/movieTypes.ts';
 import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
@@ -28,6 +32,8 @@ export type HomeFavoriteSeries = SeriesSummary;
 export type HomePersonalizationSnapshot = {
   providerId: string;
   continueWatching: HomeContinueWatchingItem[];
+  watchlistMovies: HomeFavoriteMovie[];
+  watchlistSeries: HomeFavoriteSeries[];
   favoriteChannels: HomeFavoriteChannel[];
   favoriteMovies: HomeFavoriteMovie[];
   favoriteSeries: HomeFavoriteSeries[];
@@ -38,6 +44,8 @@ function emptySnapshot(): HomePersonalizationSnapshot {
   return {
     providerId: '',
     continueWatching: [],
+    watchlistMovies: [],
+    watchlistSeries: [],
     favoriteChannels: [],
     favoriteMovies: [],
     favoriteSeries: [],
@@ -63,7 +71,7 @@ export async function loadHomePersonalization(providerId: string, bundle: Provid
   const movieContinue = movieLibrary.watchHistory
     .map((entry) => {
       const durationMs = entry.durationMs ?? 0;
-      const positionMs = durationMs > 0 ? (durationMs * (entry.progressPercent ?? 0)) / 100 : 0;
+      const positionMs = entry.positionMs ?? (durationMs > 0 ? (durationMs * (entry.progressPercent ?? 0)) / 100 : 0);
       const movie = movieIndex.getEntry(entry.movieId);
       return {
         providerId,
@@ -75,6 +83,7 @@ export async function loadHomePersonalization(providerId: string, bundle: Provid
         durationMs,
         progressPercent: progressPercent(positionMs, durationMs),
         updatedAt: entry.watchedAt,
+        containerExtension: movie?.containerExtension ?? entry.containerExtension,
       } satisfies HomeContinueWatchingItem;
     })
     .filter((entry) => isContinueWatchingEligible(entry.positionMs, entry.durationMs));
@@ -105,14 +114,19 @@ export async function loadHomePersonalization(providerId: string, bundle: Provid
     .filter((entry) => isContinueWatchingEligible(entry.positionMs, entry.durationMs));
 
   const favoriteMovieIds = movieLibrary.favorites;
+  const watchlistMovieIds = movieLibrary.watchlist;
   const favoriteSeriesIds = [
     ...new Set([
       ...mediaLibrary.favoriteRecords.filter((item) => item.mediaType === 'series').map((item) => item.contentId),
       ...mediaLibrary.favorites,
     ]),
   ];
-  const favoriteMovies = movieIndex.getSummaries(favoriteMovieIds);
-  const favoriteSeries = seriesIndex.getSummaries(favoriteSeriesIds);
+  const [favoriteMovies, watchlistMovies, favoriteSeries, watchlistSeries] = await Promise.all([
+    hydrateCanonicalMovies(providerId, favoriteMovieIds),
+    hydrateCanonicalMovies(providerId, watchlistMovieIds),
+    hydrateCanonicalSeriesList(providerId, favoriteSeriesIds),
+    hydrateCanonicalSeriesList(providerId, mediaLibrary.watchlist),
+  ]);
 
   const historyItems: RecentItemRecord[] = [
     ...movieLibrary.watchHistory.map((entry) => ({
@@ -140,6 +154,8 @@ export async function loadHomePersonalization(providerId: string, bundle: Provid
   return {
     providerId,
     continueWatching: [...movieContinue, ...episodeContinue].sort((left, right) => right.updatedAt - left.updatedAt).slice(0, 20),
+    watchlistMovies,
+    watchlistSeries,
     favoriteChannels: liveFavorites.map((item) => ({
       id: item.contentId,
       title: item.title,

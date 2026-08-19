@@ -79,6 +79,22 @@ CREATE TABLE IF NOT EXISTS catalog_sync_state (
   PRIMARY KEY (provider_id, media_type)
 );
 
+CREATE TABLE IF NOT EXISTS catalog_generation_state (
+  provider_id TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  sync_generation INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  phase TEXT,
+  processed_count INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER,
+  completed_at INTEGER,
+  error_code TEXT,
+  PRIMARY KEY (provider_id, media_type, sync_generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_catalog_generation_state_provider_media_status
+  ON catalog_generation_state (provider_id, media_type, status, sync_generation);
+
 CREATE INDEX IF NOT EXISTS idx_catalog_items_provider_media
   ON catalog_items (provider_id, media_type);
 
@@ -186,6 +202,14 @@ CREATE INDEX IF NOT EXISTS idx_catalog_seasons_v2_provider_series
   ON catalog_seasons_v2 (provider_id, series_id, sync_generation);
 `;
 
+/** Additive sort fields for Recently Added / Most Popular. Existing rows stay readable. */
+export const CATALOG_MIGRATION_SQL_V4 = `
+CREATE INDEX IF NOT EXISTS idx_catalog_items_v2_provider_media_gen_added
+  ON catalog_items_v2 (provider_id, media_type, sync_generation, added_at);
+CREATE INDEX IF NOT EXISTS idx_catalog_items_v2_provider_media_gen_popularity
+  ON catalog_items_v2 (provider_id, media_type, sync_generation, popularity);
+`;
+
 export const CATALOG_REQUIRED_TABLES = [
   'catalog_providers',
   'catalog_categories',
@@ -211,6 +235,8 @@ export const CATALOG_REQUIRED_INDEXES = [
   'idx_catalog_items_v2_provider_media_gen_category',
   'idx_catalog_items_v2_provider_media_gen_title',
   'idx_catalog_items_v2_provider_media_gen_sort',
+  'idx_catalog_items_v2_provider_media_gen_added',
+  'idx_catalog_items_v2_provider_media_gen_popularity',
   'idx_catalog_categories_v2_provider_media_gen',
   'idx_catalog_categories_v2_provider_media_gen_sort',
   'idx_catalog_seasons_v2_provider_media_gen',

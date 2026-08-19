@@ -22,6 +22,8 @@ type NovaErrorBoundaryProps = {
   onRetry?: () => void;
   showHomeAction?: boolean;
   showProviderAction?: boolean;
+  /** When this value changes after a caught error, recover the children instead of keeping the fallback overlay. */
+  resetKey?: string | number;
 };
 
 type NovaErrorBoundaryState = {
@@ -69,7 +71,23 @@ export class NovaErrorBoundary extends Component<NovaErrorBoundaryProps, NovaErr
     }
   }
 
+  componentDidUpdate(prevProps: NovaErrorBoundaryProps) {
+    if (this.state.hasError && this.props.resetKey !== prevProps.resetKey) {
+      this.setState({ hasError: false, errorName: 'Error' });
+    }
+  }
+
   private handleRetry = () => {
+    console.info(
+      '[NovaCast Movies Recovery] ' +
+        JSON.stringify({
+          phase: 'boundaryRetry',
+          region: this.props.region,
+          sessionAlreadyInteractive: null,
+          localPresentationHydrated: null,
+          readyGenerationPresent: null,
+        }),
+    );
     this.props.onRetry?.();
     this.setState({ hasError: false, errorName: 'Error' });
   };

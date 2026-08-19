@@ -3,10 +3,12 @@ import type { ProviderRepositoryBundle } from '../../providers/providerBundle.ts
 import { GLOBAL_PREVIEW_LIMIT, SEARCH_PAGE_SIZE } from '../searchConstants.ts';
 import { createSearchTimer, logSearchTiming } from '../searchTiming.ts';
 import type { GroupedSearchResults, SearchPageRequest, SearchPageResult, SearchResult, SearchScope } from '../searchTypes.ts';
+import { resolveMoviesSearchDatasource } from '../moviesSearchDatasource.ts';
+import { resolveSeriesSearchDatasource } from '../seriesSearchDatasource.ts';
 import { searchGuidePrograms } from './guideSearchRepository.ts';
 import { searchLiveChannels } from './liveSearchRepository.ts';
 import { searchMovies } from './movieSearchRepository.ts';
-import { searchSeries } from './seriesSearchRepository.ts';
+import { searchSeries, searchSeriesDataSourceDirect } from './seriesSearchRepository.ts';
 
 export function createEmptyGroupedResults(): GroupedSearchResults {
   const empty = { items: [], totalCount: 0, hasMore: false };
@@ -41,7 +43,12 @@ export async function searchGlobalGroupedIncremental(
   const grouped = createEmptyGroupedResults();
 
   const tasks: Array<Promise<void>> = [
-    searchLiveChannels(bundle.providerId, bundle, { ...requestBase, offset: 0, limit: GLOBAL_PREVIEW_LIMIT })
+    searchLiveChannels(
+      bundle.providerId,
+      bundle,
+      { ...requestBase, offset: 0, limit: GLOBAL_PREVIEW_LIMIT },
+      { matchMode: 'global' }, // search-live-s1-global-mode
+    )
       .then((live) => {
         if (signal?.aborted) {
           return;
@@ -141,10 +148,27 @@ export async function searchByScope(
   switch (scope) {
     case 'live':
       return searchLiveChannels(bundle.providerId, bundle, request);
-    case 'movie':
-      return searchMovies(bundle.providerId, bundle.movies, request);
-    case 'series':
-      return searchSeries(bundle.providerId, bundle.seriesDataSource, request);
+    case 'movie': {
+      // search-s4-authoritative-sqlite
+      const selection = await resolveMoviesSearchDatasource({
+        providerId: bundle.providerId,
+        query: request.query,
+        bundleMovies: bundle.movies,
+      });
+      return searchMovies(bundle.providerId, selection.dataSource, request);
+    }
+    case 'series': {
+      // search-s4-authoritative-sqlite
+      const selection = await resolveSeriesSearchDatasource({
+        providerId: bundle.providerId,
+        query: request.query,
+        bundleSeriesDataSource: bundle.seriesDataSource,
+      });
+      if (selection.selectedDatasource === 'sqlite-v2') {
+        return searchSeriesDataSourceDirect(bundle.providerId, selection.dataSource, request);
+      }
+      return searchSeries(bundle.providerId, selection.dataSource, request);
+    }
     case 'guide':
       return searchGuidePrograms(bundle.providerId, request);
     case 'all':

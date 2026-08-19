@@ -47,9 +47,16 @@ export type DeviceHeartbeatResponse = {
   offlineGraceUntil: string | null;
 };
 
+export type DeviceAuthorization = {
+  backendActivated: boolean;
+  localBypassAuthorized: boolean;
+  effectiveAuthorized: boolean;
+};
+
 export type DeviceState = {
   identity: DeviceIdentity | null;
   status: DeviceStatusResponse | null;
+  authorization: DeviceAuthorization;
   state: 'idle' | 'registering' | 'checking' | 'ready' | 'offline' | 'revoked' | 'error';
   lastCheckedAt: number | null;
   error: string | null;

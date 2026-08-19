@@ -17,6 +17,7 @@ const initialState: UnifiedPlayerStoreSnapshot = {
   item: null,
   launchSource: null,
   errorMessage: null,
+  errorCategory: null,
   controlsVisible: true,
   positionMs: 0,
   durationMs: 0,
@@ -31,6 +32,7 @@ let publicSnapshot: UnifiedPlayerState = {
   item: state.item,
   launchSource: state.launchSource,
   errorMessage: state.errorMessage,
+  errorCategory: state.errorCategory,
   controlsVisible: state.controlsVisible,
   positionMs: state.positionMs,
   durationMs: state.durationMs,
@@ -45,6 +47,7 @@ function syncPublicSnapshot() {
     item: state.item,
     launchSource: state.launchSource,
     errorMessage: state.errorMessage,
+    errorCategory: state.errorCategory,
     controlsVisible: state.controlsVisible,
     positionMs: state.positionMs,
     durationMs: state.durationMs,
@@ -111,6 +114,7 @@ export function launchUnifiedPlayback(item: PlaybackItem, options: LaunchPlaybac
     item: normalizedItem,
     launchSource: options.launchSource ?? null,
     errorMessage: null,
+    errorCategory: null,
     controlsVisible: true,
     positionMs: normalizedItem.resumePositionMs ?? 0,
     durationMs: 0,
@@ -144,6 +148,7 @@ export function closeUnifiedPlayback() {
     item: null,
     launchSource: state.launchSource,
     errorMessage: null,
+    errorCategory: null,
     controlsVisible: true,
     positionMs: 0,
     durationMs: 0,
@@ -171,7 +176,7 @@ export function setUnifiedPlayerMachineState(machineState: UnifiedPlayerState['m
   setState({ machineState });
 }
 
-export function setUnifiedPlayerError(message: string | null) {
+export function setUnifiedPlayerError(message: string | null, errorCategory: string | null = null) {
   if (message && !state.item) {
     return;
   }
@@ -179,12 +184,14 @@ export function setUnifiedPlayerError(message: string | null) {
   setState({
     machineState: message ? 'error' : state.machineState === 'error' ? 'loading' : state.machineState,
     errorMessage: message,
+    errorCategory: message ? errorCategory : null,
   });
 }
 
 export function clearUnifiedPlayerError() {
   setState({
     errorMessage: null,
+    errorCategory: null,
     machineState: state.item ? 'loading' : 'idle',
   });
 }

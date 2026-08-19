@@ -48,14 +48,17 @@ test('2. Viewport restore occurs before poster focus', () => {
   assert.match(screen, /setDetailFocusPhaseSafe\('closing-viewport'\)/);
   assert.match(screen, /setDetailFocusPhaseSafe\('closing-focus'\)/);
   assert.match(screen, /Never transfer poster focus until the saved offset is stable/);
+  // Stage 4.2F: fallback path keeps double-rAF settle; fast path skips initial restore.
   assert.match(screen, /Double-rAF settle gate/);
+  assert.match(screen, /shouldIssueMoviesInitialDetailRestore|fast-mounted-target/);
   assert.match(grid, /reason: 'initial'/);
 });
 
 test('3. Exact saved offset is used via scrollToOffset', () => {
   assert.match(grid, /scrollToOffset\(\{ offset, animated: false \}\)/);
   assert.match(screen, /offset: snapshot\.verticalOffset/);
-  assert.match(screen, /Always re-assert the saved offset/);
+  // Stage 4.2F: fallback still restores saved offset; fast path corrects after focus.
+  assert.match(screen, /Fallback: restore saved offset once before focus|covered_corrective_scroll/);
 });
 
 test('4. Native offset drift after focus triggers one correction', () => {
@@ -140,13 +143,16 @@ test('9. Highlight remains visible after overlay removal', () => {
 test('10. No more than two focus requests occur', () => {
   assert.equal(MOVIES_MAX_FOCUS_REQUESTS, 2);
   assert.match(screen, /focusRequestCountRef/);
-  assert.match(screen, /focusRequestCountRef\.current >= MOVIES_MAX_FOCUS_REQUESTS/);
+  // Stage 4.2K: cap enforced via shouldIssueMoviesDetailCloseFocusRequest(maxFocusRequests).
+  assert.match(screen, /maxFocusRequests: MOVIES_MAX_FOCUS_REQUESTS|focusRequestCountRef\.current >= MOVIES_MAX_FOCUS_REQUESTS/);
 });
 
 test('11. No more than two viewport restores occur', () => {
   assert.equal(MOVIES_MAX_VIEWPORT_RESTORES, 2);
   assert.match(screen, /viewportRestoreCountRef/);
-  assert.match(screen, /viewportRestoreCountRef\.current < MOVIES_MAX_VIEWPORT_RESTORES/);
+  // Stage 4.2F: caps via resolveMoviesDetailReturnMaxViewportRestores (2 fallback / 1 fast).
+  assert.match(screen, /resolveMoviesDetailReturnMaxViewportRestores|MOVIES_MAX_VIEWPORT_RESTORES/);
+  assert.match(screen, /viewportRestoreCountRef\.current < maxRestores/);
 });
 
 test('12. Stage 3D remains the only coordinator', () => {

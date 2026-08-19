@@ -1,7 +1,7 @@
 {
   "name": "novacast-v2",
   "main": "expo-router/entry",
-  "version": "1.0.1",
+  "version": "1.0.4-beta",
   "dependencies": {
     "@expo/ui": "~57.0.4",
     "@expo/vector-icons": "^15.0.2",

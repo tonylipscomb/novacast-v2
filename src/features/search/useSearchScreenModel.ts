@@ -23,7 +23,9 @@ export function useSearchScreenModel() {
   const providerId = bundle?.providerId ?? '';
   const savedMemory = providerId ? getSearchScreenMemory(providerId) : null;
   const [query, setQueryState] = useState(savedMemory?.query ?? '');
-  const [scope, setScopeState] = useState<SearchScope>(savedMemory?.scope ?? 'all');
+  const initialScope: SearchScope = savedMemory?.scope === 'all' ? 'movie' : (savedMemory?.scope ?? 'movie');
+  // search-s2-normalize-scope
+  const [scope, setScopeState] = useState<SearchScope>(initialScope);
   const [results, setResults] = useState<SearchResult[]>([]);
   const [groupedResults, setGroupedResults] = useState<GroupedSearchResults | null>(null);
   const [status, setStatus] = useState<SearchLoadStatus>('idle');
@@ -63,9 +65,10 @@ export function useSearchScreenModel() {
 
   const setScope = useCallback(
     (nextScope: SearchScope) => {
-      setScopeState(nextScope);
+      const resolvedScope: SearchScope = nextScope === 'all' ? 'movie' : nextScope;
+      setScopeState(resolvedScope);
       if (providerId) {
-        rememberSearchScreenMemory(providerId, { scope: nextScope });
+        rememberSearchScreenMemory(providerId, { scope: resolvedScope });
       }
     },
     [providerId],

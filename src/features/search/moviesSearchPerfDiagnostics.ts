@@ -1,3 +1,5 @@
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
+
 /**
  * Stage: Movies Search Performance Audit — diagnostics only.
  * Filter: adb logcat | findstr /i "Movies Search"
@@ -95,7 +97,7 @@ export function beginMoviesSearchInput(input: {
     emitted: false,
   });
 
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Input] ' +
       JSON.stringify({
         queryLength: input.normalizedQueryLength,
@@ -245,7 +247,7 @@ function emitMoviesSearchRender(requestId: number) {
   if (!counters) {
     return;
   }
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Render] ' +
       JSON.stringify({
         ...counters,
@@ -284,8 +286,7 @@ export function emitMoviesSearchTiming(requestId: number, options?: { partial?: 
 
   const payload = {
     requestId: session.requestId,
-    query: session.query,
-    normalizedQueryLength: session.normalizedQueryLength,
+    queryLength: session.normalizedQueryLength,
     inputAt: session.inputAt,
     debounceStartedAt: session.debounceStartedAt,
     debounceReleasedAt: session.debounceReleasedAt,
@@ -310,7 +311,7 @@ export function emitMoviesSearchTiming(requestId: number, options?: { partial?: 
     marker: MARKER,
   };
 
-  console.info('[NovaCast Movies Search Timing] ' + JSON.stringify(payload));
+  novacastTrace('[NovaCast Movies Search Timing] ' + JSON.stringify(payload));
 
   if (!options?.partial && (session.stateAppliedAt != null || session.cancelled || session.stale)) {
     session.emitted = true;

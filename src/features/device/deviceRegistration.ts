@@ -1,13 +1,34 @@
 import * as Crypto from 'expo-crypto';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
+import { Platform } from 'react-native';
 import { getSecureValue, setSecureValue } from '@/features/providers/providerCredentialStore';
-import { readDeviceIdentity, writeDeviceIdentity } from './deviceStorage';
+import {
+  DEVICE_SECRET_KEY,
+  LEGACY_INSTALLATION_ID_KEY,
+  readDeviceIdentity,
+  readStoredDeviceIdentityKeys,
+  writeDeviceIdentity,
+} from './deviceStorage';
 import type { DeviceIdentity } from './deviceTypes';
 import { deviceFeatureFlags } from './deviceFeatureFlags';
 import { PAIRING_INSTALLATION_ID_KEY } from '@/features/pairing/pairingStorage';
+import { STARTUP_NETWORK_TIMEOUT_MS, withTimeout } from '@/features/startup/startupTimeouts';
+import {
+  interpretDeviceRegisterResponse,
+  isValidInstallationId,
+  shouldMintNewDeviceSecret,
+  shouldSkipDeviceRegister,
+} from './deviceRegisterIdempotency';
 
-const LEGACY_INSTALLATION_ID_KEY = 'novacast.installation.id';
+function logRegistration(fields: Record<string, unknown>) {
+  console.info('[NovaCast Device Registration]', JSON.stringify(fields));
+}
+
+function safeErrorCode(error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  return /^[a-z][a-z0-9_]{1,63}$/i.test(message) ? message.toLowerCase() : 'device_registration_failed';
+}
 
 function apiConfig() {
   const apiUrl = process.env.EXPO_PUBLIC_NOVACAST_PAIRING_API_URL?.trim().replace(/\/+$/, '');
@@ -17,10 +38,6 @@ function apiConfig() {
 
 function randomSecret() {
   return Crypto.getRandomBytesAsync(32).then((bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(''));
-}
-
-function isValidInstallationId(value: string | null | undefined): value is string {
-  return Boolean(value && /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(value));
 }
 
 async function resolveInstallationId() {
@@ -37,28 +54,108 @@ async function resolveInstallationId() {
   return Crypto.randomUUID();
 }
 
+async function persistCanonicalIdentity(identity: DeviceIdentity) {
+  await withTimeout(writeDeviceIdentity(identity), STARTUP_NETWORK_TIMEOUT_MS, 'device_identity_timeout');
+  await withTimeout(
+    setSecureValue(PAIRING_INSTALLATION_ID_KEY, identity.installationId),
+    STARTUP_NETWORK_TIMEOUT_MS,
+    'device_identity_timeout',
+  );
+}
+
 async function getOrCreateIdentity() {
-  const existing = await readDeviceIdentity();
-  if (existing) return existing;
-  const installationId = await resolveInstallationId();
-  const deviceSecret = await randomSecret();
-  const identity: DeviceIdentity = { installationId, deviceSecret, deviceId: null, publicDeviceCode: null };
-  await writeDeviceIdentity(identity);
-  // Keep the pairing key aligned so create/poll/redeem always share one installation hash.
-  await setSecureValue(PAIRING_INSTALLATION_ID_KEY, installationId);
-  return identity;
+  const startedAt = Date.now();
+  logRegistration({ event: 'identity-start' });
+  try {
+    const existing = await withTimeout(readDeviceIdentity(), STARTUP_NETWORK_TIMEOUT_MS, 'device_identity_timeout');
+    if (existing) {
+      await persistCanonicalIdentity(existing);
+      logRegistration({
+        event: 'identity-ready',
+        durationMs: Date.now() - startedAt,
+        installationIdentityPresent: true,
+        privateCredentialPresent: Boolean(existing.deviceSecret),
+        publicDeviceIdPresent: Boolean(existing.publicDeviceCode),
+        backendDeviceIdPresent: Boolean(existing.deviceId),
+      });
+      return existing;
+    }
+    const stored = await withTimeout(readStoredDeviceIdentityKeys(), STARTUP_NETWORK_TIMEOUT_MS, 'device_identity_timeout');
+    const installationId = await withTimeout(resolveInstallationId(), STARTUP_NETWORK_TIMEOUT_MS, 'device_identity_timeout');
+    const deviceSecret = shouldMintNewDeviceSecret(stored.deviceSecret)
+      ? await withTimeout(randomSecret(), STARTUP_NETWORK_TIMEOUT_MS, 'device_identity_timeout')
+      : stored.deviceSecret!;
+    const identity: DeviceIdentity = {
+      installationId,
+      deviceSecret,
+      deviceId: stored.deviceId,
+      publicDeviceCode: stored.publicDeviceCode,
+    };
+    await persistCanonicalIdentity(identity);
+    logRegistration({
+      event: 'identity-ready',
+      durationMs: Date.now() - startedAt,
+      installationIdentityPresent: true,
+      privateCredentialPresent: true,
+      publicDeviceIdPresent: Boolean(identity.publicDeviceCode),
+      backendDeviceIdPresent: Boolean(identity.deviceId),
+    });
+    return identity;
+  } catch (error) {
+    logRegistration({
+      event: 'identity-failed',
+      durationMs: Date.now() - startedAt,
+      errorCode: safeErrorCode(error),
+      errorName: error instanceof Error ? error.name : 'unknown',
+    });
+    throw error;
+  }
 }
 
 export async function getDeviceIdentity() {
   return getOrCreateIdentity();
 }
 
+function androidPlatformModel() {
+  if (Platform.OS !== 'android') {
+    return null;
+  }
+  const model = (Platform.constants as Record<string, unknown>).Model;
+  return typeof model === 'string' && model.trim() ? model : null;
+}
+
+function normalizePhysicalDeviceType(deviceType: Device.DeviceType | null) {
+  switch (deviceType) {
+    case Device.DeviceType.PHONE:
+      return 'phone';
+    case Device.DeviceType.TABLET:
+      return 'tablet';
+    case Device.DeviceType.TV:
+      return 'tv';
+    case Device.DeviceType.DESKTOP:
+      return 'desktop';
+    default:
+      return null;
+  }
+}
+
 export function deviceMetadata() {
+  const platformModel = androidPlatformModel();
+  const looksLikeEmulator =
+    Device.isDevice === false ||
+    [Device.modelName, platformModel, Device.manufacturer, Device.brand, Device.deviceName]
+      .filter((value): value is string => typeof value === 'string')
+      .join(' ')
+      .toLowerCase()
+      .match(
+        /sdk_gphone|sdk_googletv|sdk_google_atv|google_sdk|android sdk built for|generic_x86|generic_x86_64|aosp_on_x86|ranchu|goldfish|qemu|emulator|gphone|sdk_phone|android tv on/,
+      ) != null;
+
   return {
-    platform: Device.osName ?? 'unknown',
-    manufacturer: Device.manufacturer ?? null,
-    model: Device.modelName ?? null,
-    deviceType: Device.deviceType ? String(Device.deviceType) : null,
+    platform: Device.osName ?? Platform.OS ?? 'unknown',
+    manufacturer: Device.manufacturer ?? Device.brand ?? null,
+    model: Device.modelName ?? platformModel ?? null,
+    deviceType: looksLikeEmulator ? 'android_emulator' : normalizePhysicalDeviceType(Device.deviceType),
     osVersion: Device.osVersion ?? null,
     appVersion: Constants.expoConfig?.version ?? 'unknown',
     appBuild: Constants.expoConfig?.android?.versionCode?.toString() ?? Constants.expoConfig?.ios?.buildNumber ?? null,
@@ -66,29 +163,139 @@ export function deviceMetadata() {
 }
 
 export async function registerDevice() {
+  const startedAt = Date.now();
   const identity = await getOrCreateIdentity();
+  logRegistration({
+    event: 'config-check',
+    installationIdentityPresent: Boolean(identity.installationId),
+    privateCredentialPresent: Boolean(identity.deviceSecret),
+    publicDeviceIdPresent: Boolean(identity.publicDeviceCode),
+    backendDeviceIdPresent: Boolean(identity.deviceId),
+    backendConfigured: Boolean(apiConfig()),
+    registrationFunctionConfigured: Boolean(apiConfig()),
+    registrationEnabled: deviceFeatureFlags.registrationEnabled,
+  });
   if (!deviceFeatureFlags.registrationEnabled) return identity;
-  if (identity.deviceId && identity.publicDeviceCode) return identity;
+  if (shouldSkipDeviceRegister(identity)) return identity;
   const config = apiConfig();
-  if (!config) return identity;
+  if (!config) {
+    logRegistration({
+      event: 'config-unconfigured',
+      durationMs: Date.now() - startedAt,
+      backendConfigured: false,
+      registrationFunctionConfigured: false,
+      activationRequired: deviceFeatureFlags.activationRequired,
+    });
+    if (deviceFeatureFlags.activationRequired) {
+      logRegistration({
+        event: 'registration-failed',
+        durationMs: Date.now() - startedAt,
+        errorCode: 'pairing_api_unconfigured',
+        sanitizedErrorMessage: 'pairing_api_unconfigured',
+        retryable: false,
+        statusCode: null,
+      });
+    }
+    return identity;
+  }
+  logRegistration({
+    event: 'registration-start',
+    durationMs: Date.now() - startedAt,
+    installationIdentityPresent: true,
+    privateCredentialPresent: Boolean(identity.deviceSecret),
+    backendConfigured: true,
+    registrationFunctionConfigured: true,
+  });
   let response: Response;
   try {
-    response = await fetch(`${config.apiUrl}/device-register`, {
+    response = await withTimeout(fetch(`${config.apiUrl}/device-register`, {
       method: 'POST',
       headers: { apikey: config.anonKey, Authorization: `Bearer ${config.anonKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ installationId: identity.installationId, deviceSecret: identity.deviceSecret, metadata: deviceMetadata() }),
+    }), STARTUP_NETWORK_TIMEOUT_MS, 'device_registration_timeout');
+    logRegistration({ event: 'registration-response', durationMs: Date.now() - startedAt, statusCode: response.status });
+  } catch (error) {
+    logRegistration({
+      event: safeErrorCode(error) === 'device_registration_timeout' ? 'registration-timeout' : 'registration-failed',
+      durationMs: Date.now() - startedAt,
+      errorCode: safeErrorCode(error),
+      sanitizedErrorMessage: safeErrorCode(error),
+      errorName: error instanceof Error ? error.name : 'unknown',
+      retryable: true,
+      statusCode: null,
+      registrationFunctionConfigured: true,
     });
-  } catch {
     if (!deviceFeatureFlags.activationRequired) return identity;
-    throw new Error('device_registration_failed');
+    throw new Error(safeErrorCode(error));
   }
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || typeof payload.deviceId !== 'string' || typeof payload.publicDeviceCode !== 'string') {
+  const payload = await withTimeout(response.json().catch(() => ({})), STARTUP_NETWORK_TIMEOUT_MS, 'device_registration_timeout').catch((error) => {
+    logRegistration({
+      event: safeErrorCode(error) === 'device_registration_timeout' ? 'registration-timeout' : 'registration-failed',
+      durationMs: Date.now() - startedAt,
+      errorCode: safeErrorCode(error),
+      sanitizedErrorMessage: safeErrorCode(error),
+      errorName: error instanceof Error ? error.name : 'unknown',
+      retryable: true,
+      statusCode: response.status,
+    });
+    if (!deviceFeatureFlags.activationRequired) return {};
+    throw new Error(safeErrorCode(error));
+  }) as Record<string, unknown>;
+  const interpreted = interpretDeviceRegisterResponse({
+    ok: response.ok,
+    statusCode: response.status,
+    payload,
+    previousDeviceId: identity.deviceId,
+    previousPublicDeviceCode: identity.publicDeviceCode,
+  });
+  if (!interpreted.ok) {
+    logRegistration({
+      event: 'registration-failed',
+      durationMs: Date.now() - startedAt,
+      statusCode: response.status,
+      errorCode: interpreted.errorCode,
+      sanitizedErrorMessage: interpreted.errorCode,
+      retryable: response.status >= 500 || response.status === 429,
+    });
     if (!deviceFeatureFlags.activationRequired) return identity;
-    throw new Error(typeof payload.errorCategory === 'string' ? payload.errorCategory : 'device_registration_failed');
+    throw new Error(interpreted.errorCode);
   }
-  const registered = { ...identity, deviceId: payload.deviceId, publicDeviceCode: payload.publicDeviceCode };
-  await writeDeviceIdentity(registered);
+  logRegistration({
+    event: 'device-id-ready',
+    durationMs: Date.now() - startedAt,
+    statusCode: response.status,
+    publicDeviceIdPresent: true,
+    backendDeviceIdPresent: true,
+    retryable: false,
+  });
+  const registered = { ...identity, deviceId: interpreted.deviceId, publicDeviceCode: interpreted.publicDeviceCode };
+  logRegistration({ event: 'persist-start', durationMs: Date.now() - startedAt, publicDeviceIdPresent: true });
+  try {
+    await persistCanonicalIdentity(registered);
+  } catch (error) {
+    logRegistration({
+      event: 'registration-failed',
+      durationMs: Date.now() - startedAt,
+      errorCode: safeErrorCode(error),
+      sanitizedErrorMessage: safeErrorCode(error),
+      errorName: error instanceof Error ? error.name : 'unknown',
+      publicDeviceIdPresent: true,
+      retryable: true,
+    });
+    throw error;
+  }
+  if (interpreted.recovered) {
+    logRegistration({
+      event: 'existing-registration-recovered',
+      installationIdentityPresent: true,
+      publicDeviceIdPresent: true,
+      backendDeviceIdPresent: true,
+      statusCode: response.status,
+      activationRequired: deviceFeatureFlags.activationRequired,
+    });
+  }
+  logRegistration({ event: 'persist-complete', durationMs: Date.now() - startedAt, publicDeviceIdPresent: true });
+  logRegistration({ event: 'registration-complete', durationMs: Date.now() - startedAt, publicDeviceIdPresent: true });
   return registered;
 }
 

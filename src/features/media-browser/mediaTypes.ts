@@ -40,6 +40,8 @@ export type WatchHistoryEntry = {
   watchedAt: number;
   progressPercent?: number;
   durationMs?: number;
+  positionMs?: number;
+  episodeId?: string;
 };
 
 export type SeriesSummary = {
@@ -55,6 +57,7 @@ export type SeriesSummary = {
   releaseDate?: string | number;
   latestEpisodeDate?: string | number;
   popularity?: number;
+  providerSortOrder?: number;
   description?: string;
   genres: string[];
   posterStyleKey: string;
@@ -160,6 +163,12 @@ export type MediaDetail = {
   trailerUrl?: string;
   /** Provider-reported container extension for VOD streams (e.g. mp4, mkv, ts). */
   containerExtension?: string;
+  videoCodec?: string;
+  videoWidth?: number;
+  videoHeight?: number;
+  videoBitrate?: number;
+  /** Distinct provider direct_source URL when present. Never log credentials. */
+  directSource?: string;
   seasons: MediaDetailSeason[];
   episodes: MediaDetailEpisode[];
 };

@@ -8,7 +8,10 @@ export type NativeCatalogRecord = {
   artworkUrl?: string | null;
   backdropUrl?: string | null;
   rating?: string | number | null;
+  addedAt?: number | null;
+  popularity?: number | null;
   releaseDate?: string | null;
+  releaseYear?: number | null;
   streamExtension?: string | null;
   providerSortOrder?: number | null;
   seriesId?: string | null;
@@ -31,6 +34,11 @@ export type CatalogDecodeBatchStats = {
   maxBatchSize?: number;
   batchSize?: number;
   mediaType?: string;
+  responseTopLevelType?: string;
+  responseKeys?: string[];
+  arrayLength?: number;
+  errorReason?: string;
+  sanitizerRepairCount?: number;
 };
 
 export type CatalogDecodeBatch = {
@@ -50,4 +58,9 @@ export type StartCatalogDecodeOptions = {
   timeoutMs?: number;
   providerId?: string;
   expectedProviderId?: string;
+  generation?: number;
+  categoryIndex?: number;
+  categoryPosition?: number;
+  totalCategoryCount?: number;
+  requestAttempt?: number;
 };

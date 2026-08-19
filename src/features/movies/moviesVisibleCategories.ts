@@ -4,13 +4,13 @@ import type { MovieCategory } from './movieTypes';
 export const ALL_MOVIES_CATEGORY_ID = 'all';
 
 export type MoviesInitialCategoryReason =
-  | 'first-provider-category'
+  | 'first-populated-provider-category'
   | 'preserved-existing-selection'
   | 'selected-category-missing'
   | 'no-visible-categories'
   | 'no-nonzero-provider-category';
 
-const MARKER = 'stage3g3-part11-hide-all-movies-rail-v1';
+const MARKER = 'stage4e-atomic-generation-pinning-v1';
 
 export function getVisibleMovieCategories(categories: readonly MovieCategory[]): MovieCategory[] {
   return categories.filter((category) => category.id !== ALL_MOVIES_CATEGORY_ID);
@@ -41,6 +41,17 @@ function isVisibleProviderCategory(category: MovieCategory) {
   );
 }
 
+function isPopulatedProviderCategory(category: MovieCategory) {
+  if (!isVisibleProviderCategory(category)) {
+    return false;
+  }
+  // Never auto-select a known-empty provider category.
+  if (category.countKnown === true && category.count <= 0) {
+    return false;
+  }
+  return true;
+}
+
 function isValidPersistedSelection(categories: readonly MovieCategory[], categoryId?: string | null) {
   if (!categoryId || categoryId === ALL_MOVIES_CATEGORY_ID) {
     return false;
@@ -48,25 +59,14 @@ function isValidPersistedSelection(categories: readonly MovieCategory[], categor
   if (categoryId.startsWith('smart:') || categoryId.startsWith('section:')) {
     return false;
   }
-  return categories.some((category) => category.id === categoryId && isVisibleProviderCategory(category));
+  return categories.some(
+    (category) => category.id === categoryId && isPopulatedProviderCategory(category),
+  );
 }
 
-function pickFirstUsableProviderCategory(visibleProviderCategories: MovieCategory[]) {
-  if (!visibleProviderCategories.length) {
-    return null;
-  }
-
-  const first = visibleProviderCategories[0];
-  // Unknown counts (still syncing) are immediately selectable. Only skip rows we
-  // already know are empty after a completed item-generation count.
-  if (!(first.countKnown === true && first.count <= 0)) {
-    return first;
-  }
-
+function pickFirstPopulatedProviderCategory(visibleProviderCategories: MovieCategory[]) {
   return (
-    visibleProviderCategories.find(
-      (category) => !(category.countKnown === true && category.count <= 0),
-    ) ?? null
+    visibleProviderCategories.find((category) => isPopulatedProviderCategory(category)) ?? null
   );
 }
 
@@ -84,7 +84,8 @@ export function resolveMoviesInitialCategory(input: {
 } {
   const visible = getVisibleMovieCategories(input.categories);
   const visibleProviderCategories = visible.filter(isVisibleProviderCategory);
-  const visibleCategoryCount = visibleProviderCategories.length;
+  const populatedProviderCategories = visibleProviderCategories.filter(isPopulatedProviderCategory);
+  const visibleCategoryCount = populatedProviderCategories.length;
   const allMovies = input.categories.find((category) => category.id === ALL_MOVIES_CATEGORY_ID);
   const previous = input.previousCategoryId ?? '';
 
@@ -118,7 +119,7 @@ export function resolveMoviesInitialCategory(input: {
     };
   }
 
-  const picked = pickFirstUsableProviderCategory(visibleProviderCategories);
+  const picked = pickFirstPopulatedProviderCategory(visibleProviderCategories);
   if (!picked) {
     return {
       selectedCategoryId: allMovies?.id ?? ALL_MOVIES_CATEGORY_ID,
@@ -132,7 +133,7 @@ export function resolveMoviesInitialCategory(input: {
   const reason: MoviesInitialCategoryReason =
     previous && previous !== ALL_MOVIES_CATEGORY_ID
       ? 'selected-category-missing'
-      : 'first-provider-category';
+      : 'first-populated-provider-category';
 
   return {
     selectedCategoryId: picked.id,

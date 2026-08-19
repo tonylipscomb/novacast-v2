@@ -2,23 +2,25 @@
   "expo": {
     "name": "NovaCast",
     "slug": "novacast-v2",
-    "version": "1.0.1",
+    "version": "1.0.4-beta",
     "orientation": "landscape",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/novacast-launcher-icon.png",
     "scheme": "novacastv2",
     "userInterfaceStyle": "dark",
     "ios": {
       "icon": "./assets/images/ios-icon.png"
     },
     "android": {
+      "icon": "./assets/images/novacast-launcher-icon.png",
       "adaptiveIcon": {
         "backgroundColor": "#32145F",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "foregroundImage": "./assets/images/novacast-launcher-foreground.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "usesCleartextTraffic": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.novacast.novacastv2"
+      "package": "com.novacast.novacastv2",
+      "versionCode": 5
     },
     "web": {
       "output": "static",

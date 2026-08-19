@@ -8,7 +8,8 @@ export type SearchScreenMemory = {
 
 const DEFAULT_MEMORY: SearchScreenMemory = {
   query: '',
-  scope: 'all',
+  // search-s2-default-scope
+  scope: 'movie',
   focusedResultKey: null,
 };
 

@@ -1,3 +1,5 @@
+import { isBlockedProviderHost, parseProviderBaseUrl, stripPlayerApiPath } from './providerHealth.ts';
+
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 function encodeBase64(bytes: Uint8Array) {
@@ -48,46 +50,17 @@ export function normalizeInstallationId(value: unknown) {
 }
 
 export async function normalizeProviderUrl(value: unknown) {
-  if (typeof value !== 'string' || value.length > 500) {
-    throw new Error('invalid_provider_url');
-  }
-
-  const trimmed = value.trim().replace(/\/+$/, '');
-  let url: URL;
-  try {
-    url = new URL(trimmed);
-  } catch {
-    throw new Error('invalid_provider_url');
-  }
-
+  const url = parseProviderBaseUrl(value);
   const allowHttp = Deno.env.get('ALLOW_HTTP_PROVIDER') !== 'false';
   if (url.protocol === 'http:' && !allowHttp) {
     throw new Error('http_provider_not_allowed');
   }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new Error('invalid_provider_url');
-  }
-  if (url.username || url.password || url.search || url.hash) {
-    throw new Error('invalid_provider_url');
-  }
 
   const host = url.hostname.toLowerCase();
-  if (
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.endsWith('.local') ||
-    host === 'metadata.google.internal' ||
-    host === '169.254.169.254' ||
-    isPrivateIpv4(host) ||
-    host.includes(':')
-  ) {
-    throw new Error('unsafe_provider_target');
-  }
-
-  if (!isPrivateIpv4(host)) {
+  if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host) && !host.includes(':')) {
     try {
       const addresses = await Deno.resolveDns(host, 'A');
-      if (addresses.some((address) => isPrivateIpv4(address))) {
+      if (addresses.some((address) => isBlockedProviderHost(address))) {
         throw new Error('unsafe_provider_target');
       }
     } catch (error) {
@@ -98,15 +71,7 @@ export async function normalizeProviderUrl(value: unknown) {
     }
   }
 
-  return url.toString().replace(/\/$/, '');
-}
-
-function isPrivateIpv4(host: string) {
-  const parts = host.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return false;
-  }
-  return parts[0] === 10 || parts[0] === 127 || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) || (parts[0] === 192 && parts[1] === 168) || (parts[0] === 169 && parts[1] === 254);
+  return stripPlayerApiPath(url.toString());
 }
 
 export async function hashCode(code: string) {

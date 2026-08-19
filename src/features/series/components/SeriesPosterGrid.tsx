@@ -1,7 +1,8 @@
 import type { ElementRef } from 'react';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, StyleSheet, Text, View, useWindowDimensions, type ListRenderItemInfo } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { useAppTheme, type NovaTheme } from '@/theme';
@@ -11,6 +12,7 @@ import type { ContentSortOption } from '@/features/media-browser/contentSorting'
 import { shouldAutoFocusSortControl, shouldClaimPreferredPosterFocus, isLastPosterRow } from '@/features/media-browser/posterGridFocusPolicy';
 import { estimatePosterRowHeight, TV_POSTER_LIST_TUNING } from '@/features/media-browser/tvPosterListTuning';
 import { tvPerfRecordPosterRender, tvPerfSetVisiblePosters } from '@/features/perf/tvPerfStore';
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 
 import { SeriesPosterCard } from './SeriesPosterCard';
 
@@ -25,10 +27,23 @@ type SeriesPosterGridProps = {
   focusedSeriesId: string | null;
   selectedSeriesId: string | null;
   postersFocusable?: boolean;
+  /**
+   * Stage 4.2O.1: force exactly one poster focusable even while
+   * `postersFocusable` is false, so the Series Detail Popup V2 close path can
+   * make the origin card focusable in the same synchronous render as the
+   * close, instead of waiting on `postersFocusable` to flip (mirrors the
+   * equivalent `closingFocusMovieId` fix on `MoviePosterGrid`).
+   */
+  closingFocusSeriesId?: string | null;
   onFocusSeries: (series: SeriesSummary) => void;
   onSelectSeries: (series: SeriesSummary) => void;
   registerPosterRef?: (seriesId: string, instance: ElementRef<typeof View> | null) => void;
   loadMore: () => void | Promise<void>;
+  /**
+   * series-pagination-focus-v6_1-confirmed-handoff
+   * True only while an append is preserving native poster focus.
+   */
+  onPaginationFocusHandoffChange?: (active: boolean) => void;
   sortOption: ContentSortOption;
   onSortChange: (value: ContentSortOption) => void;
   showRatingSort?: boolean;
@@ -46,13 +61,15 @@ export function SeriesPosterGrid({
   hasMore,
   loading,
   categoryLoading = false,
-  focusedSeriesId: _focusedSeriesId,
+  focusedSeriesId,
   selectedSeriesId,
   postersFocusable = true,
+  closingFocusSeriesId = null,
   onFocusSeries,
   onSelectSeries,
   registerPosterRef,
   loadMore,
+  onPaginationFocusHandoffChange,
   sortOption,
   onSortChange,
   showRatingSort = true,
@@ -61,7 +78,6 @@ export function SeriesPosterGrid({
   sortFocusLeftHandle,
   onSortFocusHandleReady,
 }: SeriesPosterGridProps) {
-  void _focusedSeriesId;
   void isDiscover;
   const gridHeaderSuffix = loading ? 'Loading' : hasMore ? 'More available' : `${series.length} items`;
   const firstSeriesId = series[0]?.id;
@@ -71,19 +87,94 @@ export function SeriesPosterGrid({
   const sortControlRef = useRef<ContentSortControlHandle | null>(null);
   const sortMountedRef = useRef(false);
   const loadMoreInFlightRef = useRef(false);
+  const focusedSeriesIdRef = useRef<string | null>(focusedSeriesId);
+  const [paginationFocusAnchorId, setPaginationFocusAnchorId] = useState<string | null>(null);
+  const paginationRequestRef = useRef<{
+    anchorId: string;
+    anchorIndex: number;
+    previousLength: number;
+  } | null>(null);
+  const paginationRestoreCancelRef = useRef<(() => void) | null>(null);
+  const localPosterRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
   const onFocusSeriesRef = useRef(onFocusSeries);
   const onSelectSeriesRef = useRef(onSelectSeries);
   const registerPosterRefRef = useRef(registerPosterRef);
+  const onPaginationFocusHandoffChangeRef = useRef(onPaginationFocusHandoffChange);
+  const seriesLengthRef = useRef(series.length);
+  // series-pagination-focus-v6_2-stable-native-owner
+  // Keep changing pagination inputs in refs so poster onFocus identity stays stable.
+  const hasMoreRef = useRef(hasMore);
+  const loadingRef = useRef(loading);
+  const seriesRef = useRef(series);
+  const columnsRef = useRef(columns);
+  const loadMoreRef = useRef(loadMore);
+  const requestMoreRef = useRef<(() => void) | null>(null);
+  const paginationGuardWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { width } = useWindowDimensions();
 
   onFocusSeriesRef.current = onFocusSeries;
   onSelectSeriesRef.current = onSelectSeries;
   registerPosterRefRef.current = registerPosterRef;
+  onPaginationFocusHandoffChangeRef.current = onPaginationFocusHandoffChange;
+  seriesLengthRef.current = series.length;
+  hasMoreRef.current = hasMore;
+  loadingRef.current = loading;
+  seriesRef.current = series;
+  columnsRef.current = columns;
+  loadMoreRef.current = loadMore;
+  if (!focusedSeriesIdRef.current && focusedSeriesId) focusedSeriesIdRef.current = focusedSeriesId;
 
-  const handleFocusSeries = useCallback((nextSeries: SeriesSummary) => {
-    focusClaimedRef.current = true;
-    onFocusSeriesRef.current(nextSeries);
+  const releasePaginationFocusGuard = useCallback((reason: string) => {
+    const pending = paginationRequestRef.current;
+    if (!pending) {
+      return;
+    }
+
+    if (paginationGuardWatchdogRef.current) {
+      clearTimeout(paginationGuardWatchdogRef.current);
+      paginationGuardWatchdogRef.current = null;
+    }
+
+    paginationRequestRef.current = null;
+    paginationRestoreCancelRef.current?.();
+    paginationRestoreCancelRef.current = null;
+    setPaginationFocusAnchorId(null);
+    onPaginationFocusHandoffChangeRef.current?.(false);
+
+    console.info('[NovaCast Series Pagination Focus]', {
+      action: 'guard-released',
+      itemId: pending.anchorId,
+      reason,
+    });
   }, []);
+
+  const handleFocusSeries = useCallback(
+    (nextSeries: SeriesSummary) => {
+      focusClaimedRef.current = true;
+      focusedSeriesIdRef.current = nextSeries.id;
+      onFocusSeriesRef.current(nextSeries);
+
+      // series-pagination-focus-v6_3-lookahead-native-stable
+      // Begin the next SQLite page while the focused poster is still several
+      // rows above the boundary. This keeps pagination off the critical
+      // native-focus transition at the final row.
+      const currentSeries = seriesRef.current;
+      const focusedIndex = currentSeries.findIndex((item) => item.id === nextSeries.id);
+      const currentColumns = Math.max(1, columnsRef.current);
+      const prefetchRows = Math.max(4, TV_POSTER_LIST_TUNING.lookAheadRows);
+      const prefetchItemCount = currentColumns * prefetchRows;
+      const prefetchStartIndex = Math.max(0, currentSeries.length - prefetchItemCount);
+
+      if (
+        hasMoreRef.current &&
+        !loadingRef.current &&
+        focusedIndex >= prefetchStartIndex
+      ) {
+        requestMoreRef.current?.();
+      }
+    },
+    [],
+  );
 
   const handleSelectSeries = useCallback((nextSeries: SeriesSummary) => {
     onSelectSeriesRef.current(nextSeries);
@@ -91,6 +182,11 @@ export function SeriesPosterGrid({
 
   const handleRegisterRef = useCallback(
     (seriesId: string, instance: ElementRef<typeof View> | null) => {
+      if (instance) {
+        localPosterRefs.current.set(seriesId, instance);
+      } else {
+        localPosterRefs.current.delete(seriesId);
+      }
       if (seriesId === firstSeriesId) {
         firstCardRef.current = instance;
       }
@@ -100,18 +196,150 @@ export function SeriesPosterGrid({
   );
 
   const requestMore = useCallback(() => {
-    if (!hasMore || loading || loadMoreInFlightRef.current) {
+    if (!hasMoreRef.current || loadingRef.current || loadMoreInFlightRef.current) {
       return;
     }
 
+    const currentSeries = seriesRef.current;
+    const focusedId = focusedSeriesIdRef.current;
+    const focusedIndex = focusedId
+      ? currentSeries.findIndex((item) => item.id === focusedId)
+      : -1;
+    const previousLength = currentSeries.length;
+
     loadMoreInFlightRef.current = true;
+
+    console.info('[NovaCast Series Pagination Focus]', {
+      action: 'prefetch-started',
+      itemId: focusedId,
+      itemIndex: focusedIndex,
+      itemCount: previousLength,
+      trigger: 'actual-lookahead-focus',
+      strategy: 'native-focus-unchanged',
+    });
+
     void Promise.resolve()
-      .then(loadMore)
+      .then(() => loadMoreRef.current())
       .finally(() => {
         loadMoreInFlightRef.current = false;
+        console.info('[NovaCast Series Pagination Focus]', {
+          action: 'prefetch-settled',
+          itemId: focusedSeriesIdRef.current,
+          previousLength,
+          currentLength: seriesLengthRef.current,
+          strategy: 'native-focus-unchanged',
+        });
       });
-  }, [hasMore, loadMore, loading]);
+  }, []);
+  requestMoreRef.current = requestMore;
 
+  useEffect(() => {
+    if (!paginationFocusAnchorId) {
+      return;
+    }
+    console.info('[NovaCast Series Pagination Focus]', {
+      action: 'guard-committed',
+      itemId: paginationFocusAnchorId,
+      strategy: 'restore-same-anchor',
+    });
+  }, [paginationFocusAnchorId]);
+
+  useEffect(() => {
+    const pending = paginationRequestRef.current;
+    if (!pending || series.length <= pending.previousLength) {
+      return;
+    }
+
+    paginationRestoreCancelRef.current?.();
+    paginationRestoreCancelRef.current = null;
+    if (paginationGuardWatchdogRef.current) {
+      clearTimeout(paginationGuardWatchdogRef.current);
+      paginationGuardWatchdogRef.current = null;
+    }
+
+    console.info('[NovaCast Series Pagination Focus]', {
+      action: 'append-committed',
+      itemId: pending.anchorId,
+      itemIndex: pending.anchorIndex,
+      previousLength: pending.previousLength,
+      nextLength: series.length,
+    });
+
+    // React has committed the appended array. Give native layout two frames,
+    // then explicitly restore focus to the SAME poster that was focused before
+    // pagination. This is the important difference from V4/V5: no
+    // scrollToIndex and no predicted nextFocusDown target.
+    let cancelled = false;
+    let cancelFocusRequest: (() => void) | null = null;
+
+    const frame1 = requestAnimationFrame(() => {
+      const frame2 = requestAnimationFrame(() => {
+        if (cancelled || paginationRequestRef.current !== pending) {
+          return;
+        }
+
+        console.info('[NovaCast Series Pagination Focus]', {
+          action: 'restore-requested',
+          itemId: pending.anchorId,
+          itemIndex: pending.anchorIndex,
+        });
+
+        cancelFocusRequest = requestTvFocus({
+          screen: 'series',
+          source: 'SeriesPosterGrid',
+          region: 'poster-grid',
+          itemId: pending.anchorId,
+          reason: 'pagination-preserve-same-poster',
+          maxFrames: 30,
+          isActive: () => !cancelled && paginationRequestRef.current === pending,
+          getTarget: () => localPosterRefs.current.get(pending.anchorId),
+          onSettled: (status) => {
+            if (cancelled || paginationRequestRef.current !== pending) {
+              return;
+            }
+
+            console.info('[NovaCast Series Pagination Focus]', {
+              action: 'restore-settled',
+              itemId: pending.anchorId,
+              status,
+            });
+
+            if (status !== 'executed') {
+              releasePaginationFocusGuard(`restore-${status}`);
+              return;
+            }
+
+            // requestTvFocus "executed" only means .focus() was issued.
+            // Keep the grid anchor + surrounding chrome lock until the poster
+            // actually reports onFocus. A short watchdog avoids a permanent lock
+            // if Android does not emit onFocus because the anchor never lost it.
+            if (paginationGuardWatchdogRef.current) {
+              clearTimeout(paginationGuardWatchdogRef.current);
+            }
+            paginationGuardWatchdogRef.current = setTimeout(() => {
+              if (paginationRequestRef.current === pending) {
+                releasePaginationFocusGuard('focus-confirm-watchdog');
+              }
+            }, 500);
+          },
+        });
+        paginationRestoreCancelRef.current = cancelFocusRequest;
+      });
+
+      if (cancelled) {
+        cancelAnimationFrame(frame2);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame1);
+      cancelFocusRequest?.();
+      if (paginationRestoreCancelRef.current === cancelFocusRequest) {
+        paginationRestoreCancelRef.current = null;
+      }
+    };
+  }, [releasePaginationFocusGuard, series.length]);
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -169,37 +397,46 @@ export function SeriesPosterGrid({
       return (
         <SeriesPosterCard
           series={item}
-          focusable={postersFocusable}
+          focusable={postersFocusable || closingFocusSeriesId === item.id}
           trapFocusDown={isLastPosterRow({ index, itemCount: series.length, columns })}
-          hasPreferredFocus={shouldClaimPreferredPosterFocus({
-            focusClaimed: focusClaimedRef.current,
-            itemId: item.id,
-            seedId: focusSeedRef.current,
-          })}
+          hasPreferredFocus={
+            closingFocusSeriesId != null
+              ? closingFocusSeriesId === item.id
+              : shouldClaimPreferredPosterFocus({
+                  focusClaimed: focusClaimedRef.current,
+                  itemId: item.id,
+                  seedId: focusSeedRef.current,
+                })
+          }
           onFocus={handleFocusSeries}
           onPress={handleSelectSeries}
           registerRef={(instance) => handleRegisterRef(item.id, instance)}
         />
       );
     },
-    [columns, handleFocusSeries, handleRegisterRef, handleSelectSeries, postersFocusable, series.length],
+    [
+      closingFocusSeriesId,
+      columns,
+      handleFocusSeries,
+      handleRegisterRef,
+      handleSelectSeries,
+      postersFocusable,
+      paginationFocusAnchorId,
+      series.length,
+    ],
   );
 
   const keyExtractor = useCallback((item: SeriesSummary) => item.id, []);
-
-  const loadingLabel = `Loading ${selectedCategoryLabel}â€¦`;
+  const loadingLabel = `Loading ${selectedCategoryLabel}...`;
+  // media-category-hero-standard-v1
+  // Category switches use the hero spaceship loader.
+  // Pagination keeps the approved bottom-center glass pill.
   const showInitialLoader = categoryLoading && series.length === 0 && !emptyNotice;
   const showLoadingOverlay = categoryLoading && series.length > 0;
-  const showFooterLoader = loading && !categoryLoading && series.length > 0;
-  const listFooter = useMemo(
-    () =>
-      showFooterLoader ? (
-        <View style={styles.footerLoader}>
-          <NovaSpaceLoader label="Loading moreâ€¦" variant="inline" />
-        </View>
-      ) : null,
-    [showFooterLoader, styles.footerLoader],
-  );
+  // series-pagination-loader-movies-parity-v1
+  // Visual-only parity with Movies: bottom-center glass pill while an
+  // additional Series page is loading. This does not trigger pagination.
+  const showPaginationLoader = loading && !categoryLoading && series.length > 0;
 
   return (
     <View style={styles.panel}>
@@ -214,6 +451,7 @@ export function SeriesPosterGrid({
             onChange={onSortChange}
             showRating={showRatingSort}
             nextFocusLeft={sortFocusLeftHandle}
+            focusable={closingFocusSeriesId == null && postersFocusable}
           />
           <Text style={styles.subtitle}>{gridHeaderSuffix}</Text>
         </View>
@@ -221,7 +459,12 @@ export function SeriesPosterGrid({
 
       {showInitialLoader ? (
         <View style={styles.loadingStage}>
-          <NovaSpaceLoader label={loadingLabel} />
+          <View style={styles.categoryLoaderContent}>
+            <Text style={styles.categoryLoaderLabel} numberOfLines={2}>
+              {loadingLabel}
+            </Text>
+            <NovaSpaceLoader label={loadingLabel} variant="hero" />
+          </View>
         </View>
       ) : emptyNotice ? (
         <View style={styles.emptyNotice}>
@@ -247,16 +490,34 @@ export function SeriesPosterGrid({
             windowSize={TV_POSTER_LIST_TUNING.windowSize}
             maxToRenderPerBatch={TV_POSTER_LIST_TUNING.maxToRenderPerBatch}
             updateCellsBatchingPeriod={TV_POSTER_LIST_TUNING.updateCellsBatchingPeriod}
-            initialNumToRender={columns * 3}
+            initialNumToRender={columns * TV_POSTER_LIST_TUNING.initialRows}
             getItemLayout={getItemLayout}
-            onEndReachedThreshold={TV_POSTER_LIST_TUNING.onEndReachedThreshold}
-            onEndReached={requestMore}
-            ListFooterComponent={listFooter}
             renderItem={renderItem}
           />
           {showLoadingOverlay ? (
-            <View style={styles.loadingOverlay} pointerEvents="none">
-              <NovaSpaceLoader label={loadingLabel} />
+            <View
+              style={styles.loadingOverlay}
+              pointerEvents="none"
+              accessible={false}
+              focusable={false}>
+              <View style={styles.categoryLoaderDim} />
+              <View style={styles.categoryLoaderContent}>
+                <Text style={styles.categoryLoaderLabel} numberOfLines={2}>
+                  {loadingLabel}
+                </Text>
+                <NovaSpaceLoader label={loadingLabel} variant="hero" />
+              </View>
+            </View>
+          ) : null}
+          {showPaginationLoader ? (
+            <View
+              style={styles.paginationLoaderBar}
+              pointerEvents="none"
+              accessible={false}
+              focusable={false}>
+              <BlurView intensity={10} tint="dark" style={styles.paginationLoaderPill}>
+                <NovaSpaceLoader label="Loading more series..." variant="inline" />
+              </BlurView>
             </View>
           ) : null}
         </View>
@@ -326,9 +587,8 @@ function createStyles(theme: NovaTheme) {
     },
     loadingStage: {
       flex: 1,
-      alignItems: 'center',
-      justifyContent: 'center',
-      paddingBottom: 24,
+      minHeight: 0,
+      position: 'relative',
     },
     listStage: {
       flex: 1,
@@ -337,14 +597,64 @@ function createStyles(theme: NovaTheme) {
     loadingOverlay: {
       ...StyleSheet.absoluteFillObject,
       alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor:
-        String(theme.colors.background) === '#F3EEE4' ? 'rgba(26,21,16,0.45)' : 'rgba(0,0,0,0.35)',
+      justifyContent: 'flex-start',
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      zIndex: 3,
     },
-    footerLoader: {
+    categoryLoaderDim: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0, 0, 0, 0.28)',
+    },
+    categoryLoaderContent: {
+      position: 'absolute',
+      top: '42%',
+      left: 12,
+      right: 12,
       alignItems: 'center',
       justifyContent: 'center',
-      paddingVertical: 16,
+      gap: 24,
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      transform: [{ translateY: -52 }],
+    },
+    // media-category-hero-compact-v2
+    categoryLoaderLabel: {
+      color: theme.colors.textPrimary,
+      fontSize: 18,
+      lineHeight: 22,
+      fontWeight: '700',
+      letterSpacing: 0.1,
+      textAlign: 'center',
+      paddingHorizontal: 24,
+      backgroundColor: 'transparent',
+      zIndex: 1,
+      textShadowColor: 'rgba(0, 0, 0, 0.65)',
+      textShadowOffset: { width: 0, height: 1 },
+      textShadowRadius: 5,
+    },
+    paginationLoaderBar: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 14,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      zIndex: 3,
+    },
+    paginationLoaderPill: {
+      overflow: 'hidden',
+      flexDirection: 'row',
+      alignItems: 'center',
+      minHeight: 44,
+      paddingHorizontal: 18,
+      paddingVertical: 9,
+      borderRadius: 22,
+      backgroundColor: 'rgba(4, 10, 24, 0.7)',
+      borderWidth: 1,
+      borderColor: 'rgba(95, 149, 216, 0.35)',
     },
   });
 }

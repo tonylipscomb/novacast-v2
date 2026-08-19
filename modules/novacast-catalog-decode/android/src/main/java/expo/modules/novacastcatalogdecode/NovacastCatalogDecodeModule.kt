@@ -2,6 +2,7 @@ package expo.modules.novacastcatalogdecode
 
 import android.util.JsonReader
 import android.util.JsonToken
+import android.util.Log
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -14,7 +15,10 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedInputStream
+import java.io.IOException
 import java.io.InputStreamReader
+import java.io.Reader
+import java.util.ArrayDeque
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
@@ -80,6 +84,11 @@ class NovacastCatalogDecodeModule : Module() {
         val timeoutMs = ((options["timeoutMs"] as? Number)?.toLong() ?: 60_000L).coerceIn(5_000L, 180_000L)
         val providerId = options["providerId"] as? String ?: ""
         val expectedProviderId = options["expectedProviderId"] as? String ?: providerId
+        val generation = (options["generation"] as? Number)?.toInt()
+        val categoryIndex = (options["categoryIndex"] as? Number)?.toInt()
+        val categoryPosition = (options["categoryPosition"] as? Number)?.toInt()
+        val totalCategoryCount = (options["totalCategoryCount"] as? Number)?.toInt()
+        val requestAttempt = ((options["requestAttempt"] as? Number)?.toInt() ?: 1)
 
         val jobId = UUID.randomUUID().toString()
         val job = DecodeJob(
@@ -91,6 +100,11 @@ class NovacastCatalogDecodeModule : Module() {
           timeoutMs = timeoutMs,
           providerId = providerId,
           expectedProviderId = expectedProviderId,
+          generation = generation,
+          categoryIndex = categoryIndex,
+          categoryPosition = categoryPosition,
+          totalCategoryCount = totalCategoryCount,
+          requestAttempt = requestAttempt,
         )
         jobs[jobId] = job
         job.start(scope) {
@@ -181,6 +195,146 @@ class NovacastCatalogDecodeModule : Module() {
   }
 }
 
+private const val MAX_SERIES_SANITIZER_REPAIRS_PER_CATEGORY = 8
+private const val SERIES_DECODER_AUDIT_TAG = "NovaCast Series Decoder Audit"
+
+private data class SeriesEscapeRepair(
+  val count: Int,
+  val offset: Long,
+  val kind: String,
+)
+
+/** Repairs malformed JSON escapes before JsonReader sees the response. */
+private class SeriesJsonEscapeSanitizingReader(
+  private val source: Reader,
+  private val maxRepairs: Int,
+  private val onRepair: (SeriesEscapeRepair) -> Unit,
+) : Reader() {
+  private var insideString = false
+  private var sourceOffset = 0L
+  private var repairCount = 0
+  private var pendingSourceChar: Int? = null
+  private val sourceBuffer = CharArray(4096)
+  private var sourceBufferPosition = 0
+  private var sourceBufferLimit = 0
+  private val outputQueue = ArrayDeque<Int>()
+
+  override fun read(cbuf: CharArray, off: Int, len: Int): Int {
+    if (len == 0) return 0
+    var count = 0
+    while (count < len) {
+      val next = nextSanitizedChar()
+      if (next < 0) {
+        return if (count == 0) -1 else count
+      }
+      cbuf[off + count] = next.toChar()
+      count += 1
+    }
+    return count
+  }
+
+  override fun close() {
+    source.close()
+  }
+
+  private fun readRaw(): Int {
+    val pending = pendingSourceChar
+    if (pending != null) {
+      pendingSourceChar = null
+      return pending
+    }
+    while (sourceBufferPosition >= sourceBufferLimit) {
+      val readCount = source.read(sourceBuffer, 0, sourceBuffer.size)
+      if (readCount < 0) return -1
+      if (readCount == 0) continue
+      sourceBufferPosition = 0
+      sourceBufferLimit = readCount
+    }
+    val value = sourceBuffer[sourceBufferPosition++].code
+    sourceOffset += 1
+    return value
+  }
+
+  private fun nextSanitizedChar(): Int {
+    if (outputQueue.isNotEmpty()) return outputQueue.removeFirst()
+    val value = readRaw()
+    if (value < 0) return value
+    val char = value.toChar()
+
+    if (!insideString) {
+      if (char == '"') insideString = true
+      return value
+    }
+
+    if (char == '"') {
+      insideString = false
+      return value
+    }
+    if (char != '\\') return value
+
+    val escaped = readRaw()
+    if (escaped < 0) {
+      return repairedLiteral("\\\\", "truncated-escape")
+    }
+    if (escaped.toChar() != 'u') {
+      return if (escaped.toChar() in VALID_SIMPLE_ESCAPES) {
+        emitString("${char}${escaped.toChar()}")
+      } else {
+        repairedLiteral("\\\\${escaped.toChar()}", "invalid-simple-escape")
+      }
+    }
+
+    val digits = StringBuilder(4)
+    repeat(4) {
+      val candidate = readRaw()
+      if (candidate < 0) return malformedUnicodeLiteral(digits.toString(), "truncated-unicode-escape")
+      val candidateChar = candidate.toChar()
+      if (candidateChar == '"') {
+        pendingSourceChar = candidate
+        return malformedUnicodeLiteral(digits.toString(), "truncated-unicode-escape")
+      }
+      if (candidateChar !in HEX_DIGITS) {
+        return malformedUnicodeLiteral(
+          digits.append(candidateChar).toString(),
+          "invalid-unicode-escape",
+        )
+      }
+      digits.append(candidateChar)
+    }
+
+    // Valid \uXXXX is emitted unchanged.
+    return emitString("\\u${digits}")
+  }
+
+  private fun malformedUnicodeLiteral(consumed: String, kind: String): Int {
+    val literal = StringBuilder("\\\\u")
+    consumed.forEach { char ->
+      if (char == '\\') literal.append("\\\\") else literal.append(char)
+    }
+    return repairedLiteral(literal.toString(), kind)
+  }
+
+  private fun repairedLiteral(value: String, kind: String): Int {
+    repairCount += 1
+    onRepair(SeriesEscapeRepair(repairCount, sourceOffset, kind))
+    if (repairCount > maxRepairs) {
+      throw IOException("series_sanitizer_threshold_exceeded")
+    }
+    return emitString(value)
+  }
+
+  private fun emitString(value: String): Int {
+    if (value.isEmpty()) return -1
+    value.drop(1).forEach { outputQueue.addLast(it.code) }
+    return value[0].code
+  }
+
+  companion object {
+    private const val VALID_SIMPLE_ESCAPES = "\"\\/bfnrt"
+    private const val HEX_DIGITS = "0123456789abcdefABCDEF"
+  }
+}
+
 private data class DecodeBatch(
   val jobId: String,
   val items: List<Map<String, Any?>>,
@@ -208,6 +362,11 @@ private class DecodeJob(
   private val timeoutMs: Long,
   private val providerId: String,
   private val expectedProviderId: String,
+  private val generation: Int?,
+  private val categoryIndex: Int?,
+  private val categoryPosition: Int?,
+  private val totalCategoryCount: Int?,
+  private val requestAttempt: Int,
 ) {
   private val channel = Channel<DecodeBatch>(capacity = 0) // rendezvous backpressure
   private val cancelled = AtomicBoolean(false)
@@ -225,6 +384,12 @@ private class DecodeJob(
   private var emptyCategoryIdCount = 0
   private var batchesEmitted = 0
   private var maxBatchSize = 0
+  private var responseTopLevelType: String? = null
+  private var responseKeys: List<String> = emptyList()
+  private var arrayLength: Int? = null
+  private var errorReason: String? = null
+  private var sanitizerRepairCount = 0
+  private var decoderStage = "queued"
 
   fun queuedBatchEstimate(): Int = if (channel.isEmpty) 0 else 1
 
@@ -248,12 +413,23 @@ private class DecodeJob(
           DecodeBatch(jobId = jobId, items = emptyList(), done = true, cancelled = true),
         )
       } catch (error: Throwable) {
+        if (mediaType == "series") {
+          Log.w(
+            SERIES_DECODER_AUDIT_TAG,
+            "event=stream-read-failed categoryId=${filterCategoryId ?: "null"} " +
+              "decoderStage=$decoderStage sanitizerRepairCount=$sanitizerRepairCount " +
+              "readerType=${if (mediaType == "series") "SeriesJsonEscapeSanitizingReader" else "InputStreamReader"} " +
+              "bufferState=decoder-managed-stream " +
+              "exceptionClass=${error::class.java.simpleName} exceptionMessage=${error.message ?: "null"}",
+          )
+        }
         channel.trySend(
           DecodeBatch(
             jobId = jobId,
             items = emptyList(),
             done = true,
             error = error.message ?: "decode_failed",
+            stats = snapshotStats(),
           ),
         )
       } finally {
@@ -278,6 +454,7 @@ private class DecodeJob(
   }
 
   private suspend fun runDecode() {
+    decoderStage = "open-connection"
     val started = System.currentTimeMillis()
     val connection = (URL(requestUrl).openConnection() as HttpURLConnection).apply {
       connectTimeout = timeoutMs.toInt().coerceAtMost(120_000)
@@ -288,6 +465,7 @@ private class DecodeJob(
     }
 
     try {
+      decoderStage = "read-response-headers"
       val code = connection.responseCode
       headersMs = System.currentTimeMillis() - started
       if (code !in 200..299) {
@@ -295,10 +473,41 @@ private class DecodeJob(
       }
 
       val parseStarted = System.currentTimeMillis()
+      decoderStage = "stream-json"
       val input = BufferedInputStream(connection.inputStream)
-      JsonReader(InputStreamReader(input, Charsets.UTF_8)).use { reader ->
+      val inputReader = InputStreamReader(input, Charsets.UTF_8)
+      val sanitizedReader = if (mediaType == "series") {
+        SeriesJsonEscapeSanitizingReader(
+          inputReader,
+          MAX_SERIES_SANITIZER_REPAIRS_PER_CATEGORY,
+        ) { repair ->
+          sanitizerRepairCount = repair.count
+          if (repair.count > MAX_SERIES_SANITIZER_REPAIRS_PER_CATEGORY) {
+            errorReason = "series_sanitizer_threshold_exceeded"
+            Log.w(
+              SERIES_DECODER_AUDIT_TAG,
+              "event=sanitizer-threshold-exceeded categoryId=${filterCategoryId ?: "null"} " +
+                "sanitizerRepairCount=${repair.count} safePosition=${repair.offset} " +
+                "escapeKind=${repair.kind}",
+            )
+          } else {
+            Log.w(
+              SERIES_DECODER_AUDIT_TAG,
+              "event=${if (repair.kind.contains("unicode")) "malformed-unicode-escape-repaired" else "malformed-escape-repaired"} " +
+                "categoryId=${filterCategoryId ?: "null"} " +
+                "rowIndex=$rawSeen sanitizerRepairCount=${repair.count} safePosition=${repair.offset} " +
+                "escapeKind=${repair.kind} replacementStrategy=literal-escaped-text",
+            )
+          }
+        }
+      } else {
+        inputReader
+      }
+      JsonReader(sanitizedReader).use { reader ->
+        decoderStage = "json-reader"
         when (reader.peek()) {
           JsonToken.BEGIN_ARRAY -> {
+            responseTopLevelType = "array"
             reader.beginArray()
             val buffer = ArrayList<Map<String, Any?>>(batchSize)
             var matchedIndex = 0
@@ -308,7 +517,8 @@ private class DecodeJob(
                 continue
               }
               rawSeen += 1
-              val item = readObject(reader) ?: continue
+              val item = readObject(reader)
+              item ?: continue
               val itemCategory = stringField(item, "category_id")
               if (itemCategory.isNullOrEmpty()) {
                 emptyCategoryIdCount += 1
@@ -329,17 +539,31 @@ private class DecodeJob(
               }
             }
             reader.endArray()
+            arrayLength = rawSeen
             if (buffer.isNotEmpty()) {
               emitBatch(buffer.toList(), done = false)
               buffer.clear()
             }
           }
           JsonToken.BEGIN_OBJECT -> {
-            // Some panels wrap arrays; skip unsupported shapes with a clear error.
-            reader.skipValue()
+            responseTopLevelType = "object"
+            reader.beginObject()
+            val keys = ArrayList<String>(8)
+            while (reader.hasNext()) {
+              val key = reader.nextName()
+              if (keys.size < 20) {
+                keys.add(key)
+              }
+              reader.skipValue()
+            }
+            reader.endObject()
+            responseKeys = keys
+            errorReason = "top_level_object_not_supported"
             throw IllegalStateException("unexpected_json_object")
           }
           else -> {
+            responseTopLevelType = reader.peek().name.lowercase()
+            errorReason = "unsupported_top_level_token"
             reader.skipValue()
             throw IllegalStateException("unexpected_json")
           }
@@ -384,6 +608,16 @@ private class DecodeJob(
     "maxBatchSize" to maxBatchSize,
     "batchSize" to batchSize,
     "mediaType" to mediaType,
+    "responseTopLevelType" to responseTopLevelType,
+    "responseKeys" to responseKeys,
+    "arrayLength" to arrayLength,
+    "errorReason" to errorReason,
+    "generation" to generation,
+    "categoryIndex" to categoryIndex,
+    "categoryPosition" to categoryPosition,
+    "totalCategoryCount" to totalCategoryCount,
+    "requestAttempt" to requestAttempt,
+    "sanitizerRepairCount" to sanitizerRepairCount,
   )
 
   private fun normalize(raw: Map<String, Any?>, index: Int): Map<String, Any?> {
@@ -402,7 +636,10 @@ private class DecodeJob(
         "artworkUrl" to firstString(raw, "cover", "stream_icon"),
         "backdropUrl" to firstString(raw, "backdrop_path"),
         "rating" to numberOrString(raw["rating"]),
-        "releaseDate" to firstString(raw, "releasedate", "releaseDate"),
+        "releaseDate" to usableReleaseDate(firstString(raw, "releasedate", "releaseDate")),
+        "releaseYear" to parseYear(raw),
+        "addedAt" to unixTimestampMs(raw["added"]),
+        "popularity" to finitePositiveNumber(raw["popularity"]),
         "providerSortOrder" to index,
         "streamExtension" to null,
       )
@@ -416,7 +653,10 @@ private class DecodeJob(
         "artworkUrl" to firstString(raw, "stream_icon", "cover", "movie_image"),
         "backdropUrl" to firstString(raw, "backdrop_path"),
         "rating" to numberOrString(raw["rating"]),
-        "releaseDate" to firstString(raw, "releasedate", "releaseDate"),
+        "releaseDate" to usableReleaseDate(firstString(raw, "releasedate", "releaseDate")),
+        "releaseYear" to parseYear(raw),
+        "addedAt" to unixTimestampMs(raw["added"]),
+        "popularity" to finitePositiveNumber(raw["popularity"]),
         "streamExtension" to stringField(raw, "container_extension"),
         "providerSortOrder" to index,
         "seriesId" to null,
@@ -480,6 +720,62 @@ private class DecodeJob(
       }
     }
     return null
+  }
+
+  private fun usableReleaseDate(value: String?): String? {
+    if (value.isNullOrBlank()) {
+      return null
+    }
+    val trimmed = value.trim()
+    if (trimmed.matches(Regex("0+")) || trimmed.startsWith("0000")) {
+      return null
+    }
+    return trimmed
+  }
+
+  private fun parseYear(raw: Map<String, Any?>): Int? {
+    val candidates = listOf(raw["year"], raw["releasedate"], raw["releaseDate"])
+    for (candidate in candidates) {
+      when (candidate) {
+        is Number -> {
+          val year = candidate.toInt()
+          if (year in 1900..2100) {
+            return year
+          }
+        }
+        is String -> {
+          val trimmed = candidate.trim()
+          trimmed.toIntOrNull()?.let { year ->
+            if (year in 1900..2100) {
+              return year
+            }
+          }
+          Regex("""\b(19|20)\d{2}\b""").find(trimmed)?.value?.toIntOrNull()?.let { return it }
+        }
+      }
+    }
+    return null
+  }
+
+  private fun unixTimestampMs(value: Any?): Long? {
+    val raw = when (value) {
+      is Number -> value.toLong()
+      is String -> value.trim().toLongOrNull() ?: return null
+      else -> return null
+    }
+    if (raw <= 0L) {
+      return null
+    }
+    return if (raw < 1_000_000_000_000L) raw * 1000L else raw
+  }
+
+  private fun finitePositiveNumber(value: Any?): Double? {
+    val parsed = when (value) {
+      is Number -> value.toDouble()
+      is String -> value.trim().toDoubleOrNull() ?: return null
+      else -> return null
+    }
+    return if (parsed.isFinite() && parsed > 0.0) parsed else null
   }
 
   private fun numberOrString(value: Any?): Any? = when (value) {

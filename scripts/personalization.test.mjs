@@ -17,9 +17,12 @@ import {
 import {
   clearMediaLibraryCacheForTests,
   getMediaLibraryState,
+  getRecentlyWatchedSeriesIds,
   recordEpisodeProgress,
   removeContinueWatching,
+  resolveWatchHistorySeriesId,
   toggleMediaFavorite,
+  toggleMediaWatchlist,
 } from '../src/features/media-browser/mediaLibraryStore.ts';
 import {
   clearMovieLibraryCacheForTests,
@@ -27,6 +30,7 @@ import {
   recordWatch,
   removeContinueWatching as removeMovieContinueWatching,
   toggleFavorite,
+  toggleWatchlist,
 } from '../src/features/movies/smart/movieLibraryStore.ts';
 import { buildProgressKey, getResumePositionMs, savePlaybackProgress } from '../src/features/playback/unified/playbackProgressStore.ts';
 
@@ -92,11 +96,11 @@ test('movie and series favorites remain provider-scoped', async () => {
 });
 
 test('continue watching thresholds exclude short starts and completed items', () => {
-  assert.equal(isContinueWatchingEligible(29_999, 600_000), false);
-  assert.equal(isContinueWatchingEligible(30_000, 600_000), true);
+  assert.equal(isContinueWatchingEligible(59_999, 600_000), false);
+  assert.equal(isContinueWatchingEligible(60_000, 600_000), true);
   assert.equal(isContinueWatchingEligible(570_000, 600_000), false);
   assert.equal(isContinueWatchingEligible(540_000, 600_000), false);
-  assert.equal(COMPLETED_PROGRESS_PERCENT, 95);
+  assert.equal(COMPLETED_PROGRESS_PERCENT, 92);
   assert.equal(progressPercent(300_000, 600_000), 50);
   assert.equal(progressPercent(0, 0), 0);
 });
@@ -105,12 +109,20 @@ test('Home exposes only populated personalization rows', () => {
   assert.deepEqual(
     getVisibleHomeRows({
       continueWatching: [{ id: 'resume-1' }],
+      watchlist: [],
       favoriteChannels: [],
-      favoriteMovies: [{ id: 'movie-1' }],
-      favoriteSeries: [],
-      recentlyWatched: [],
+      favorites: [{ id: 'movie-1' }],
     }),
-    ['continueWatching', 'favoriteMovies'],
+    ['continueWatching', 'favorites'],
+  );
+  assert.deepEqual(
+    getVisibleHomeRows({
+      continueWatching: [],
+      watchlist: [{ id: 'watch-1' }],
+      favoriteChannels: [{ id: 'ch-1' }],
+      favorites: [],
+    }),
+    ['watchlist', 'favoriteChannels'],
   );
 });
 
@@ -141,7 +153,10 @@ test('movie and episode progress use the existing resume path and can be removed
   await removeMovieContinueWatching(providerId, 'movie-resume');
   await removeContinueWatching(providerId, 'series-resume:1:2');
   assert.equal(await getResumePositionMs(buildProgressKey(providerId, 'movie', 'movie-resume')), 0);
-  assert.equal(await getResumePositionMs(buildProgressKey(providerId, 'episode', 'episode-resume')), 0);
+  // Dismissing the series rail row does not wipe per-episode history used by detail/resume.
+  assert.equal(await getResumePositionMs(buildProgressKey(providerId, 'episode', 'episode-resume')), 90_000);
+  assert.equal(resolveWatchHistorySeriesId({ mediaId: 'series-resume:1:2' }), 'series-resume');
+  assert.deepEqual(await getRecentlyWatchedSeriesIds(providerId), ['series-resume']);
 });
 
 test('recent items are deduplicated newest first and provider scoped', async () => {
@@ -153,4 +168,50 @@ test('recent items are deduplicated newest first and provider scoped', async () 
 
   const items = dedupeRecentItems(await (await import('../src/features/personalization/personalizationStore.ts')).getRecentItems(providerId));
   assert.deepEqual(items.map((item) => item.contentId), ['movie-1', 'episode-1']);
+});
+
+test('movie favorite and watchlist stay independent across playback', async () => {
+  clearMovieLibraryCacheForTests();
+  const providerId = `movie-lists-${Date.now()}`;
+
+  await toggleFavorite(providerId, 'movie-both');
+  await toggleWatchlist(providerId, 'movie-both');
+  await toggleWatchlist(providerId, 'movie-watch-only');
+  await recordWatch(providerId, {
+    movieId: 'movie-both',
+    title: 'Both',
+    progressPercent: 20,
+    durationMs: 600_000,
+    positionMs: 120_000,
+  });
+
+  const state = await getMovieLibraryState(providerId);
+  assert.equal(state.favorites.includes('movie-both'), true);
+  assert.equal(state.watchlist.includes('movie-both'), true);
+  assert.equal(state.watchlist.includes('movie-watch-only'), true);
+  assert.equal(state.favorites.includes('movie-watch-only'), false);
+
+  await toggleFavorite(providerId, 'movie-both');
+  const afterFavoriteOff = await getMovieLibraryState(providerId);
+  assert.equal(afterFavoriteOff.favorites.includes('movie-both'), false);
+  assert.equal(afterFavoriteOff.watchlist.includes('movie-both'), true);
+});
+
+test('series favorite and watchlist stay independent', async () => {
+  clearMediaLibraryCacheForTests();
+  const providerId = `series-lists-${Date.now()}`;
+
+  await toggleMediaFavorite(providerId, 'series-both', 'series', { title: 'Both' });
+  await toggleMediaWatchlist(providerId, 'series-both');
+  await toggleMediaWatchlist(providerId, 'series-watch-only');
+
+  const before = await getMediaLibraryState(providerId);
+  assert.equal(before.favorites.includes('series-both'), true);
+  assert.equal(before.watchlist.includes('series-both'), true);
+
+  await toggleMediaFavorite(providerId, 'series-both', 'series', { title: 'Both' });
+  const after = await getMediaLibraryState(providerId);
+  assert.equal(after.favorites.includes('series-both'), false);
+  assert.equal(after.watchlist.includes('series-both'), true);
+  assert.equal(after.watchlist.includes('series-watch-only'), true);
 });

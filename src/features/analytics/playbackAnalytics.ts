@@ -58,12 +58,53 @@ function emit(eventName: 'playback_requested' | 'playback_started' | 'playback_f
   void enqueueAnalyticsEvent(eventName, input).catch(() => undefined);
 }
 
+export function extractPlaybackHttpStatus(error: unknown): number | null {
+  const value =
+    typeof error === 'string'
+      ? error
+      : error instanceof Error
+        ? `${error.name} ${error.message}`
+        : String(error ?? '');
+  const match = value.match(
+    /InvalidResponseCodeException[:\s]+(\d{3})|Response code[:\s]+(\d{3})|HTTP\s+(\d{3})|\b(401|403|404|429|458|5\d{2})\b/i,
+  );
+  if (!match) {
+    return null;
+  }
+  const raw = match[1] || match[2] || match[3] || match[4];
+  const status = Number(raw);
+  return Number.isFinite(status) ? status : null;
+}
+
 export function normalizePlaybackFailure(error: unknown): PlaybackFailureCategory {
-  const value = typeof error === 'string' ? error.toLowerCase() : '';
-  if (/cancel|abort|back|close/.test(value)) return 'user_cancelled';
+  const value =
+    typeof error === 'string'
+      ? error.toLowerCase()
+      : error instanceof Error
+        ? `${error.name} ${error.message}`.toLowerCase()
+        : String(error ?? '').toLowerCase();
+
+  // Stage 4.2L.1: classify HTTP response codes before broad keyword matching.
+  // Never treat bare "playback" as user_cancelled (legacy /back/ matched it).
+  const httpStatus = extractPlaybackHttpStatus(error);
+  if (httpStatus === 401 || httpStatus === 403) return 'provider';
+  if (httpStatus === 404) return 'provider';
+  if (httpStatus === 429) return 'provider';
+  if (httpStatus === 458) return 'provider';
+  if (httpStatus != null && httpStatus >= 500 && httpStatus <= 599) return 'provider';
+  if (httpStatus != null) return 'provider';
+
+  if (/\b(cancel(?:led)?|abort(?:ed)?|user[_ -]?cancel(?:led)?)\b/.test(value)) {
+    return 'user_cancelled';
+  }
+  if (/\b(user[_ -]?back|navigat(?:e|ed|ion)?[_ -]?back)\b/.test(value)) {
+    return 'user_cancelled';
+  }
   if (/timeout|timed out|stall/.test(value)) return 'timeout';
   if (/network|connection|offline|unreachable|dns/.test(value)) return 'network';
-  if (/provider|authorization|forbidden|unauthorized|not found/.test(value)) return 'provider';
+  if (/provider|authorization|forbidden|unauthorized|not found|458|rate.?limit/.test(value)) {
+    return 'provider';
+  }
   if (/decoder|decode|codec|format/.test(value)) return 'decoder';
   if (/unsupported|not supported/.test(value)) return 'unsupported';
   return 'unknown';

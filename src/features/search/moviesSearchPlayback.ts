@@ -2,6 +2,7 @@
  * Stage 3G.4 — Search-origin Movie Detail playback diagnostics / payload checks.
  */
 
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import type { MovieSummary } from '../movies/movieTypes.ts';
 
 import type { MoviesDetailSource } from './moviesSearchSelection.ts';
@@ -30,7 +31,7 @@ export function logMoviesSearchPlayback(payload: {
   playbackStarted: boolean;
   failureReason: string | null;
 }) {
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Playback] ' +
       JSON.stringify({
         ...payload,

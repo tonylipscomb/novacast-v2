@@ -25,6 +25,7 @@ export function SearchMediaDetailLayer({ media }: SearchMediaDetailLayerProps) {
     closeDetail,
     retryDetail,
     startMoviePlayback,
+    continueWatchingLabel,
     playFirstEpisode,
     playEpisodeById,
     setSelectedSeasonId,
@@ -45,7 +46,7 @@ export function SearchMediaDetailLayer({ media }: SearchMediaDetailLayerProps) {
       detail={overlayDetail}
       detailError={detailError}
       detailLoading={detailLoading}
-      continueWatchingLabel="Play"
+      continueWatchingLabel={continueWatchingLabel}
       isFavorite={
         movie
           ? movieLibrary.isFavorite(movie.id)

@@ -17,6 +17,7 @@ type NovaFocusRowProps = {
   onFocus?: () => void;
   accessibilityLabel?: string;
   trailing?: React.ReactNode;
+  leading?: React.ReactNode;
   style?: StyleProp<ViewStyle>;
   nextFocusUp?: number;
   nextFocusDown?: number;
@@ -33,6 +34,7 @@ export function NovaFocusRow({
   onFocus,
   accessibilityLabel,
   trailing,
+  leading,
   style,
   nextFocusUp,
   nextFocusDown,
@@ -58,6 +60,7 @@ export function NovaFocusRow({
       {...(nextFocusDown ? { nextFocusDown } : null)}
       {...(nextFocusLeft ? { nextFocusLeft } : null)}
       style={[styles.row, novaTvFocus.base, showFocused && novaTvFocus.active, style]}>
+      {leading}
       {meta ? (
         <Text style={[styles.meta, showFocused && styles.metaFocused]} numberOfLines={1}>
           {meta}

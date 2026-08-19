@@ -5,17 +5,24 @@ import test from 'node:test';
 import {
   computeContentIdOverlapRatio,
   createVodCategoryProbeAccumulator,
+  evaluateSparsePerCategoryCoverage,
   evaluateVodCategoryFilterCapability,
   normalizeStreamCategoryId,
   resolveCatalogItemCategoryId,
+  selectVodCategoryProbeIds,
   MOVIES_UNCATEGORIZED_CATEGORY_ID,
+  VOD_CATEGORY_FILTER_CAPABILITY_STORAGE_VERSION,
 } from '../src/features/catalog/vodCategoryFilterCapability.ts';
-import { validateMoviesCategoryDistribution } from '../src/features/catalog/moviesCategoryDistributionValidation.ts';
+import {
+  assessMoviesCatalogIntegrity,
+  validateMoviesCategoryDistribution,
+} from '../src/features/catalog/moviesCategoryDistributionValidation.ts';
 import { mapNativeRecordToCatalogItem } from '../src/features/catalog/catalogSqliteSyncWriter.ts';
 
 const sync = fs.readFileSync('src/features/providers/providerCatalogSync.ts', 'utf8');
 const repository = fs.readFileSync('src/features/catalog/catalogRepository.ts', 'utf8');
 const writer = fs.readFileSync('src/features/catalog/catalogSqliteSyncWriter.ts', 'utf8');
+const repos = fs.readFileSync('src/features/providers/providerRepositories.ts', 'utf8');
 const kotlin = fs.readFileSync(
   'modules/novacast-catalog-decode/android/src/main/java/expo/modules/novacastcatalogdecode/NovacastCatalogDecodeModule.kt',
   'utf8',
@@ -24,6 +31,9 @@ const focusLifecycle = fs.readFileSync('src/features/movies/moviesDetailFocusLif
 const moviesScreen = fs.readFileSync('src/features/movies/MoviesScreen.tsx', 'utf8');
 const seriesScreen = fs.readFileSync('src/features/series/SeriesScreen.tsx', 'utf8');
 const liveGuide = fs.readFileSync('src/features/guide/GuideCategoryRail.tsx', 'utf8');
+const sparseRepair = fs.readFileSync('src/features/movies/moviesSparseCatalogRepair.ts', 'utf8');
+const sqlite = fs.readFileSync('src/features/movies/data/SqliteMovieDataSource.ts', 'utf8');
+const loader = fs.readFileSync('src/features/movies/moviesLoaderState.ts', 'utf8');
 
 test('1. An unfiltered category response is detected', () => {
   const probeA = createVodCategoryProbeAccumulator('netflix');
@@ -198,7 +208,180 @@ test('12. No focus, loader, Series, Live TV, Search, or playback files change fo
   assert.match(moviesScreen, /primaryLoaderOverlay|listOverlays/);
   assert.match(seriesScreen, /Series/);
   assert.match(liveGuide, /Guide|Live/);
-  assert.match(sync, /stage3c2-vod-full-dump-sync-v1/);
+  assert.match(sync, /stage4d-vod-ingestion-repair-v1/);
   // SQLite Movies item sync must not depend on Discover smart categories being enabled.
   assert.match(sync, /const syncMovieItems = smartCategoriesEnabled \|\| Boolean\(sqliteHandle\?\.enabled\)/);
+});
+
+test('13. Two zero-result filter probes are inconclusive (full dump)', () => {
+  const capability = evaluateVodCategoryFilterCapability({
+    providerId: 'p1',
+    probes: [
+      {
+        requestedCategoryId: 'a',
+        returnedCount: 0,
+        distinctReturnedCategoryIds: 0,
+        matchingRequestedCategoryCount: 0,
+        firstContentIds: [],
+        contentIdSample: [],
+      },
+      {
+        requestedCategoryId: 'b',
+        returnedCount: 0,
+        distinctReturnedCategoryIds: 0,
+        matchingRequestedCategoryCount: 0,
+        firstContentIds: [],
+        contentIdSample: [],
+      },
+    ],
+    metadataCategoryCount: 439,
+  });
+  assert.equal(capability.status, 'inconclusive');
+  assert.equal(capability.filteringReliable, false);
+  assert.equal(capability.reason, 'zero-result-probes-inconclusive');
+  assert.match(sync, /filterStatus !== 'reliable'/);
+});
+
+test('14. One populated + one zero probe does not become reliable', () => {
+  const populated = createVodCategoryProbeAccumulator('a');
+  populated.onRecords(
+    Array.from({ length: 80 }, (_, index) => ({
+      mediaType: 'movie',
+      contentId: `a${index}`,
+      categoryId: 'a',
+      title: 't',
+    })),
+  );
+  const capability = evaluateVodCategoryFilterCapability({
+    providerId: 'p1',
+    probes: [
+      populated.sample,
+      {
+        requestedCategoryId: 'b',
+        returnedCount: 0,
+        distinctReturnedCategoryIds: 0,
+        matchingRequestedCategoryCount: 0,
+        firstContentIds: [],
+        contentIdSample: [],
+      },
+    ],
+  });
+  assert.notEqual(capability.status, 'reliable');
+  assert.equal(capability.filteringReliable, false);
+});
+
+test('15. Two strong distinct-category probes may be reliable', () => {
+  const a = createVodCategoryProbeAccumulator('netflix');
+  const b = createVodCategoryProbeAccumulator('boxing');
+  a.onRecords(
+    Array.from({ length: 120 }, (_, index) => ({
+      mediaType: 'movie',
+      contentId: `n${index}`,
+      categoryId: 'netflix',
+      title: 't',
+    })),
+  );
+  b.onRecords(
+    Array.from({ length: 120 }, (_, index) => ({
+      mediaType: 'movie',
+      contentId: `b${index}`,
+      categoryId: 'boxing',
+      title: 't',
+    })),
+  );
+  const capability = evaluateVodCategoryFilterCapability({
+    providerId: 'p1',
+    probes: [a.sample, b.sample],
+  });
+  assert.equal(capability.status, 'reliable');
+  assert.equal(capability.filteringReliable, true);
+  assert.equal(capability.reason, 'category-filter-confirmed');
+});
+
+test('16. Capability storage version is v4 (v3 cache ignored)', () => {
+  assert.equal(VOD_CATEGORY_FILTER_CAPABILITY_STORAGE_VERSION, 4);
+  const capabilitySource = fs.readFileSync(
+    'src/features/catalog/vodCategoryFilterCapability.ts',
+    'utf8',
+  );
+  assert.match(capabilitySource, /vod-category-filter-capability\/v\$\{VOD_CATEGORY_FILTER_CAPABILITY_STORAGE_VERSION\}\//);
+  assert.match(capabilitySource, /VOD_CATEGORY_FILTER_CAPABILITY_STORAGE_VERSION = 4/);
+});
+
+test('17. 439 metadata / 2 populated item categories is rejected', () => {
+  const result = validateMoviesCategoryDistribution({
+    generation: 9,
+    totalItems: 500,
+    distinctCategoryIds: 2,
+    metadataCategoryCount: 439,
+    nonzeroCategoryCount: 2,
+    largestCategoryId: 'persian',
+    largestCategoryCount: 400,
+  });
+  assert.equal(result.validationPassed, false);
+  const integrity = assessMoviesCatalogIntegrity({
+    metadataCategoryCount: 439,
+    nonzeroCategoryCount: 2,
+    distinctItemCategoryIds: 2,
+    totalItems: 500,
+  });
+  assert.equal(integrity.degraded, true);
+});
+
+test('18. 439 metadata / 5 populated categories is rejected', () => {
+  const result = validateMoviesCategoryDistribution({
+    generation: 9,
+    totalItems: 800,
+    distinctCategoryIds: 5,
+    metadataCategoryCount: 439,
+    nonzeroCategoryCount: 5,
+    largestCategoryId: 'persian',
+    largestCategoryCount: 200,
+  });
+  assert.equal(result.validationPassed, false);
+});
+
+test('19. Mid-sync sparse coverage aborts to full dump once', () => {
+  const sparse = evaluateSparsePerCategoryCoverage({
+    categoriesAttempted: 12,
+    categoriesReturningItems: 1,
+    categoriesReturningZero: 11,
+    metadataCategoryCount: 439,
+    distinctItemCategoryIds: 1,
+    decodedItemCount: 40,
+  });
+  assert.equal(sparse.suspicious, true);
+  assert.match(sync, /sparse_per_category_ingestion/);
+  assert.match(sync, /strategyFallbackUsed/);
+  assert.match(sync, /evaluateSparsePerCategoryCoverage/);
+});
+
+test('20. Full-dump URL omits category_id=all', () => {
+  const start = repos.indexOf('getCatalogListRequestUrl(categoryId: string)');
+  const fn = repos.slice(start, start + 350);
+  assert.ok(fn.includes("if (!categoryId || categoryId === 'all')"));
+  assert.ok(fn.includes("return client.buildPlayerApiUrl('get_vod_streams');"));
+  // Filtered path still uses category_id; unfiltered all-path must not.
+  const allBranch = fn.slice(0, fn.indexOf("return client.buildPlayerApiUrl('get_vod_streams',"));
+  assert.doesNotMatch(allBranch, /category_id:\s*categoryId/);
+});
+
+test('21. Probe selection spreads across provider categories', () => {
+  const ids = Array.from({ length: 100 }, (_, i) => String(i + 1));
+  const selected = selectVodCategoryProbeIds(ids, { limit: 6 });
+  assert.ok(selected.length >= 4 && selected.length <= 6);
+  assert.ok(selected.includes('1'));
+  assert.ok(selected.includes('100'));
+  assert.ok(!selected.includes('all'));
+});
+
+test('22. Active sparse generation schedules bounded repair', () => {
+  assert.match(sparseRepair, /repairDegradedMoviesCatalogIfNeeded/);
+  assert.match(sparseRepair, /invalidateVodCategoryFilterCapability/);
+  assert.match(sparseRepair, /forceMoviesFullDumpForProvider|invalidateMoviesCatalogSyncCheckpoint/);
+  assert.match(sparseRepair, /once per provider\/generation|markRepairedGeneration|alreadyRepaired/);
+  assert.match(sqlite, /repairing-sparse-generation/);
+  assert.match(loader, /Repairing movie library…/);
+  assert.match(sync, /CATALOG_SYNC_CHECKPOINT_VERSION = 15/);
+  assert.match(sync, /scheduleMoviesCatalogRepair|forceMoviesFullDumpForProvider/);
 });

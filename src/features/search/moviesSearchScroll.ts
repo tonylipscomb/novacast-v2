@@ -1,3 +1,5 @@
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
+
 /**
  * Stage 3G.1 — safe Movies Search FlatList scrolling.
  * With numColumns, VirtualizedList length is row-count; scrollToIndex must use row index.
@@ -71,7 +73,7 @@ export function planMoviesSearchScroll(input: {
 }
 
 export function logMoviesSearchScroll(payload: MoviesSearchScrollLog) {
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Scroll] ' +
       JSON.stringify({
         ...payload,

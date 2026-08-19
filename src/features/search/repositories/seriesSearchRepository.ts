@@ -1,7 +1,7 @@
 import { entryToSeriesSummary, getSeriesCatalogIndex, type SeriesCatalogEntry } from '../../series/smart/seriesCatalogIndex.ts';
 import type { SeriesDataSource } from '../../series/data/SeriesDataSource.ts';
 
-import { scanCatalogForSearch } from '../searchCatalogScan.ts';
+import { scanCatalogForSearchAsync } from '../searchCatalogScan.ts';
 import { SEARCH_PROVIDER_FALLBACK_TIMEOUT_MS } from '../searchConstants.ts';
 import { createSearchTimer, logSearchTiming, withSearchTimeout } from '../searchTiming.ts';
 import type { SearchPageRequest, SearchPageResult, SeriesSearchResult } from '../searchTypes.ts';
@@ -21,23 +21,26 @@ function entryToSearchResult(providerId: string, entry: SeriesCatalogEntry): Ser
   };
 }
 
-function searchSeriesCatalogIndex(
+async function searchSeriesCatalogIndex(
   providerId: string,
   query: string,
   offset: number,
   limit: number,
-): SearchPageResult<SeriesSearchResult> | null {
+  signal?: AbortSignal,
+): Promise<SearchPageResult<SeriesSearchResult> | null> {
+  // search-s3-cancellable-series
   const index = getSeriesCatalogIndex(providerId);
   if (!index.size) {
     return null;
   }
 
   const timer = createSearchTimer();
-  const page = scanCatalogForSearch<SeriesCatalogEntry, SeriesSearchResult>({
+  const page = await scanCatalogForSearchAsync<SeriesCatalogEntry, SeriesSearchResult>({
     query,
     offset,
     limit,
     forEachEntry: (visit) => index.forEachEntry(visit),
+    signal,
     dedupeKey: (entry) => entry.seriesId || entry.id,
     toCandidate: (entry) => ({
       title: entry.title,
@@ -63,6 +66,61 @@ function searchSeriesCatalogIndex(
   return page;
 }
 
+export async function searchSeriesDataSourceDirect(
+  providerId: string,
+  dataSource: SeriesDataSource | null | undefined,
+  request: SearchPageRequest,
+): Promise<SearchPageResult<SeriesSearchResult>> {
+  // search-s4-authoritative-sqlite
+  if (request.signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+
+  if (!dataSource?.searchSeries) {
+    return { items: [], totalCount: 0, hasMore: false };
+  }
+
+  const timer = createSearchTimer();
+  const page = await dataSource.searchSeries({
+    query: request.query,
+    offset: request.offset,
+    limit: request.limit,
+    signal: request.signal,
+  });
+
+  if (request.signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+
+  const seenSeriesIds = new Set<string>();
+  const deduped = page.items.filter((item) => {
+    const key = item.seriesId || item.id;
+    if (seenSeriesIds.has(key)) {
+      return false;
+    }
+    seenSeriesIds.add(key);
+    return true;
+  });
+
+  const mapped: SearchPageResult<SeriesSearchResult> = {
+    items: deduped.map((series) => seriesSummaryToSearchResult(providerId, series)),
+    totalCount: page.totalCount,
+    hasMore: page.hasMore,
+  };
+
+  const elapsed = timer.elapsed();
+  logSearchTiming({
+    stage: 'sqlite',
+    scope: 'series',
+    queryLength: request.query.trim().length,
+    repository: 'sqlite',
+    returnedCount: mapped.items.length,
+    queryDurationMs: elapsed,
+    totalDurationMs: elapsed,
+  });
+
+  return mapped;
+}
 export async function searchSeries(
   providerId: string,
   dataSource: SeriesDataSource | null | undefined,
@@ -72,7 +130,7 @@ export async function searchSeries(
     throw new DOMException('Aborted', 'AbortError');
   }
 
-  const indexed = searchSeriesCatalogIndex(providerId, request.query, request.offset, request.limit);
+  const indexed = await searchSeriesCatalogIndex(providerId, request.query, request.offset, request.limit, request.signal);
   if (indexed) {
     return indexed;
   }
@@ -88,9 +146,11 @@ export async function searchSeries(
         query: request.query,
         offset: request.offset,
         limit: request.limit,
+        signal: request.signal,
       }),
       SEARCH_PROVIDER_FALLBACK_TIMEOUT_MS,
       'Series search timed out while your library is still indexing.',
+      request.signal,
     );
 
     if (request.signal?.aborted) {

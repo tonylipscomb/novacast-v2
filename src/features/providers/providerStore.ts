@@ -501,7 +501,9 @@ export async function switchActiveProvider(providerId: string) {
 
       // Keep the old bundle untouched until candidate validation succeeds.
       closeActivePlayback();
-      cancelProviderCatalogSync(current.selectedProviderId || undefined);
+      if (current.selectedProviderId && current.selectedProviderId !== providerId) {
+        cancelProviderCatalogSync(current.selectedProviderId);
+      }
       await writeState(next);
       stateCommitted = true;
       activateRepositoryBundle(candidateBundle);
@@ -619,7 +621,9 @@ export async function connectXtreamProvider(input: {
 
       if (activate) {
         closeActivePlayback();
-        cancelProviderCatalogSync(current.selectedProviderId || undefined);
+        if (current.selectedProviderId && current.selectedProviderId !== providerId) {
+          cancelProviderCatalogSync(current.selectedProviderId);
+        }
       }
       await runPairingTransactionStep('writeState', () => writeState(next), {
         providerId,
@@ -748,7 +752,9 @@ export async function retryProviderInitialization() {
     };
 
     closeActivePlayback();
-    cancelProviderCatalogSync(current.selectedProviderId || undefined);
+    if (current.selectedProviderId && current.selectedProviderId !== selected.id) {
+      cancelProviderCatalogSync(current.selectedProviderId);
+    }
     await writeState(nextState);
     stateCommitted = true;
     activateRepositoryBundle(candidateBundle);

@@ -11,9 +11,31 @@ import { estimatePosterRowHeight, TV_POSTER_LIST_TUNING } from '@/features/media
 import { tvPerfRecordPosterRender, tvPerfSetVisiblePosters } from '@/features/perf/tvPerfStore';
 
 import type { MovieSummary } from '../movieTypes';
-import { getMoviesDetailOpenForDiagnostics } from '../moviesDiagnosticsState';
+import {
+  getMoviesDetailOpenForDiagnostics,
+  getMoviesOnnTraceSnapshot,
+  inferMovieGridUnmountReason,
+} from '../moviesDiagnosticsState';
 import { MoviePosterCard } from './MoviePosterCard';
 import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
+import {
+  getOnnMoviesGridInstanceId,
+  isOnnMoviesTraceEnabled,
+  nextOnnMoviesGridInstanceId,
+  noteOnnMoviesMount,
+  noteOnnMoviesRender,
+  noteOnnMoviesUnmount,
+  setOnnMoviesGridMounted,
+  traceOnnMoviesEvent,
+  traceOnnMoviesScrollCommand,
+  traceOnnMoviesScrollSample,
+} from '@/features/diagnostics/onnMoviesTrace';
+import { shouldSkipZeroDeltaInitialRestore } from '../moviesDetailFocusLifecycle';
+import {
+  applyMoviesBrowseListHostNativeFocus,
+  resolveMoviesBrowseListHostProps,
+} from '../moviesBrowseListHostFocus';
+import { logMoviesDetailV2FocusOwnership } from '../moviesDetailPopupV2';
 
 type MoviePosterGridProps = {
   movies: MovieSummary[];
@@ -35,6 +57,8 @@ type MoviePosterGridProps = {
   emptyNotice?: string | null;
   sortFocusLeftHandle?: number;
   onSortFocusHandleReady?: (handle: number | undefined) => void;
+  /** Native focusable for the Sort control's D-pad — e.g. false while a detail popup is open. */
+  sortFocusable?: boolean;
   restoreMovieId?: string | null;
   restoreMovieIndex?: number | null;
   restoreScrollOffset?: number | null;
@@ -44,14 +68,19 @@ type MoviePosterGridProps = {
   /** Stage 3D: after exact confirm, block any further restore scrolls. */
   restoreScrollBlocked?: boolean;
   /**
-   * Stage 3D.1: restore exact saved offset via scrollToOffset (never top-row align).
-   * `initial` once per close; `corrective` at most once after focus drift.
+   * Stage 3D.1 / 4.2G: restore exact saved offset via scrollToOffset (never top-row align).
+   * Stage 4.2G fast path: only `corrective` after measured native drift — never `initial`.
    */
   viewportRestoreCommand?: {
     token: string;
     offset: number;
     reason: 'initial' | 'corrective';
   } | null;
+  /**
+   * Stage 4.2G: when false, the offscreen saved-offset effect must not issue
+   * initial-detail-restore (prevents the physical ONN fast-path violation).
+   */
+  allowOffscreenInitialRestore?: boolean;
   /** Stage 3D: during closing, only this poster may be focusable. */
   closingFocusMovieId?: string | null;
   /**
@@ -100,6 +129,7 @@ export function MoviePosterGrid({
   emptyNotice = null,
   sortFocusLeftHandle,
   onSortFocusHandleReady,
+  sortFocusable = true,
   restoreMovieId = null,
   restoreMovieIndex = null,
   restoreScrollOffset = null,
@@ -108,6 +138,7 @@ export function MoviePosterGrid({
   restorationToken = null,
   restoreScrollBlocked = false,
   viewportRestoreCommand = null,
+  allowOffscreenInitialRestore = true,
   closingFocusMovieId = null,
   postRestorePreferredMovieId = null,
   pinnedHighlightMovieId = null,
@@ -137,9 +168,16 @@ export function MoviePosterGrid({
   const visibleRangeRef = useRef({ firstIndex: null as number | null, lastIndex: null as number | null });
   const restorationScrollIssuedRef = useRef<string | null>(null);
   const viewportRestoreIssuedKeyRef = useRef<string | null>(null);
+  const gridInstanceIdRef = useRef<string | null>(null);
+  const selectedCategoryIdRef = useRef(selectedCategoryId);
+  selectedCategoryIdRef.current = selectedCategoryId;
 
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const hostProps = resolveMoviesBrowseListHostProps({
+    hostEnabled: postersFocusable,
+    lockScroll: lockScrollForFocusRestore,
+  });
 
   onFocusMovieRef.current = onFocusMovie;
   onSelectMovieRef.current = onSelectMovie;
@@ -148,6 +186,10 @@ export function MoviePosterGrid({
   // without widening the mount/unmount effect dependencies.
   moviesDiagnosticsRef.current = movies;
   restorationTokenDiagnosticsRef.current = restorationToken;
+
+  if (isOnnMoviesTraceEnabled()) {
+    noteOnnMoviesRender('MoviePosterGrid');
+  }
 
   useEffect(() => {
     const previous = previousMoviesDataRef.current;
@@ -169,6 +211,29 @@ export function MoviePosterGrid({
   }, [columns, movies]);
 
   useEffect(() => {
+    applyMoviesBrowseListHostNativeFocus(listRef.current, hostProps.hostFocusable);
+  }, [hostProps.hostFocusable, postersFocusable]);
+
+  useEffect(() => {
+    const instanceId = nextOnnMoviesGridInstanceId();
+    gridInstanceIdRef.current = instanceId;
+    setOnnMoviesGridMounted(true, instanceId);
+    const snap = getMoviesOnnTraceSnapshot();
+    noteOnnMoviesMount('MoviePosterGrid', {
+      instanceId,
+      columns,
+      categoryId: selectedCategoryIdRef.current,
+      movieCount: moviesDiagnosticsRef.current.length,
+    });
+    traceOnnMoviesEvent('Render', 'movie_grid_mount', {
+      instanceId,
+      columns,
+      categoryId: selectedCategoryIdRef.current,
+      movieCount: moviesDiagnosticsRef.current.length,
+      generation: snap.readableGeneration,
+      detailOpen: getMoviesDetailOpenForDiagnostics(),
+      restorationActive: Boolean(restorationTokenDiagnosticsRef.current),
+    });
     console.info(
       '[NovaCast Movies FlatList] ' +
         JSON.stringify({
@@ -182,6 +247,28 @@ export function MoviePosterGrid({
         }),
     );
     return () => {
+      const lastCategoryId = selectedCategoryIdRef.current;
+      const lastMovieCount = moviesDiagnosticsRef.current.length;
+      const snap = getMoviesOnnTraceSnapshot();
+      noteOnnMoviesUnmount('MoviePosterGrid', {
+        instanceId,
+        categoryId: lastCategoryId,
+        movieCount: lastMovieCount,
+      });
+      traceOnnMoviesEvent('Render', 'movie_grid_unmount', {
+        instanceId,
+        lastCategoryId,
+        lastMovieCount,
+        categoriesLength: snap.categoriesLength,
+        loadStatus: snap.loadStatus,
+        detailOpen: getMoviesDetailOpenForDiagnostics(),
+        restorationActive: Boolean(restorationTokenDiagnosticsRef.current),
+        reason: inferMovieGridUnmountReason(),
+      });
+      setOnnMoviesGridMounted(false, instanceId);
+      if (getOnnMoviesGridInstanceId() === instanceId) {
+        gridInstanceIdRef.current = null;
+      }
       console.info(
         '[NovaCast Movies FlatList] ' +
           JSON.stringify({
@@ -268,6 +355,19 @@ export function MoviePosterGrid({
     if (restoreScrollBlocked || !viewportRestoreCommand) {
       return;
     }
+    // Stage 4.2G: natural/fast path must never execute initial-detail-restore.
+    if (!allowOffscreenInitialRestore && viewportRestoreCommand.reason === 'initial') {
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesEvent('Scroll', 'fast_path_initial_restore_violation', {
+          token: viewportRestoreCommand.token,
+          reason: 'initial-detail-restore',
+          source: 'MoviePosterGrid.viewportRestoreCommand',
+          requestedOffset: viewportRestoreCommand.offset,
+          currentOffset: currentOffsetRef.current,
+        });
+      }
+      return;
+    }
     const commandKey = `${viewportRestoreCommand.token}:${viewportRestoreCommand.reason}`;
     if (viewportRestoreIssuedKeyRef.current === commandKey) {
       return;
@@ -276,6 +376,26 @@ export function MoviePosterGrid({
 
     const offset = Math.max(0, viewportRestoreCommand.offset);
     try {
+      const currentOffset = currentOffsetRef.current;
+      // Stage 4.2F: never execute duplicate zero-delta initial restores.
+      if (
+        shouldSkipZeroDeltaInitialRestore({
+          reason: viewportRestoreCommand.reason,
+          requestedOffset: offset,
+          currentOffset,
+        })
+      ) {
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Scroll', 'duplicate_initial_restore_prevented', {
+            token: viewportRestoreCommand.token,
+            requestedOffset: offset,
+            currentOffset,
+            delta: 0,
+            source: 'MoviePosterGrid',
+          });
+        }
+        return;
+      }
       console.info(
         '[NovaCast Movies Scroll Command] ' +
           JSON.stringify({
@@ -287,13 +407,41 @@ export function MoviePosterGrid({
             method: 'scrollToOffset',
             requestedIndex: restoreMovieIndex,
             requestedOffset: offset,
-            currentOffset: currentOffsetRef.current,
+            currentOffset,
             focusedMovieId: selectedMovieId,
             restorationActive: true,
+            covered: viewportRestoreCommand.reason === 'corrective',
             timestamp: Date.now(),
           }),
       );
+      traceOnnMoviesScrollCommand({
+        requestedOffset: offset,
+        currentOffset,
+        animated: false,
+        reason:
+          viewportRestoreCommand.reason === 'corrective'
+            ? 'corrective-native-focus-drift'
+            : 'initial-detail-restore',
+        restorationToken: viewportRestoreCommand.token,
+        restoreAttempt: viewportRestoreCommand.reason === 'corrective' ? 2 : 1,
+        detailPhase: getMoviesOnnTraceSnapshot().detailFocusPhase,
+        categoryId: selectedCategoryIdRef.current,
+      });
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesScrollSample(
+          'scroll-before-request',
+          { offset: currentOffset, requestedOffset: offset },
+          true,
+        );
+      }
       listRef.current?.scrollToOffset({ offset, animated: false });
+      if (isOnnMoviesTraceEnabled()) {
+        traceOnnMoviesScrollSample(
+          'scroll-first-after-request',
+          { offset: currentOffsetRef.current, requestedOffset: offset },
+          true,
+        );
+      }
       console.info(
         '[NovaCast Movies Viewport Restore] ' +
           JSON.stringify({
@@ -318,6 +466,7 @@ export function MoviePosterGrid({
       viewportRestoreIssuedKeyRef.current = null;
     }
   }, [
+    allowOffscreenInitialRestore,
     restoreMovieId,
     restoreMovieIndex,
     restoreScrollBlocked,
@@ -331,8 +480,10 @@ export function MoviePosterGrid({
   // Offscreen-at-open fallback: restore the saved window with offset only.
   // Never top-row-align the target. Snapshot-visible targets must not use
   // index positioning even if live viewability is stale.
+  // Stage 4.2G: disabled for natural/fast mounted return (no initial restore).
   useEffect(() => {
     if (
+      !allowOffscreenInitialRestore ||
       restoreScrollBlocked ||
       viewportRestoreCommand ||
       snapshotTargetWasVisible ||
@@ -350,6 +501,7 @@ export function MoviePosterGrid({
     restorationScrollIssuedRef.current = restorationToken;
     const offset = Math.max(0, restoreScrollOffset);
     try {
+      const currentOffset = currentOffsetRef.current;
       console.info(
         '[NovaCast Movies Scroll Command] ' +
           JSON.stringify({
@@ -358,17 +510,28 @@ export function MoviePosterGrid({
             method: 'scrollToOffset',
             requestedIndex: restoreMovieIndex,
             requestedOffset: offset,
-            currentOffset: currentOffsetRef.current,
+            currentOffset,
             focusedMovieId: selectedMovieId,
             restorationActive: true,
             timestamp: Date.now(),
           }),
       );
+      traceOnnMoviesScrollCommand({
+        requestedOffset: offset,
+        currentOffset,
+        animated: false,
+        reason: 'initial-detail-restore',
+        restorationToken,
+        restoreAttempt: 1,
+        detailPhase: getMoviesOnnTraceSnapshot().detailFocusPhase,
+        categoryId: selectedCategoryIdRef.current,
+      });
       listRef.current?.scrollToOffset({ offset, animated: false });
     } catch {
       restorationScrollIssuedRef.current = null;
     }
   }, [
+    allowOffscreenInitialRestore,
     restoreMovieId,
     restoreMovieIndex,
     restoreScrollBlocked,
@@ -382,6 +545,16 @@ export function MoviePosterGrid({
   const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const offset = Math.max(0, event.nativeEvent.contentOffset.y);
     currentOffsetRef.current = offset;
+    if (isOnnMoviesTraceEnabled()) {
+      traceOnnMoviesScrollSample('movies-grid', {
+        offset,
+        firstIndex: visibleRangeRef.current.firstIndex,
+        lastIndex: visibleRangeRef.current.lastIndex,
+        categoryId: selectedCategoryIdRef.current,
+        gridInstanceId: gridInstanceIdRef.current,
+        restorationActive: Boolean(restorationTokenDiagnosticsRef.current),
+      });
+    }
     onViewportChange?.({ offset, ...visibleRangeRef.current });
   }, [onViewportChange]);
 
@@ -429,18 +602,21 @@ export function MoviePosterGrid({
               ? pinnedHighlightMovieId === item.id
               : closingFocusMovieId === item.id || postRestorePreferredMovieId === item.id
           }
+          auditSelected={selectedMovieId != null && selectedMovieId === item.id}
           hasPreferredFocus={
             // Stage 3D.2: restored poster retains preferred ownership after confirm.
             postRestorePreferredMovieId != null
               ? postRestorePreferredMovieId === item.id
-              : // Stage 3D: never let first-poster preferred focus compete during close.
-                closingFocusMovieId != null || suppressPreferredFocus
-                ? false
-                : shouldClaimPreferredPosterFocus({
-                    focusClaimed: focusClaimedRef.current || selectedMovieId != null,
-                    itemId: item.id,
-                    seedId: focusSeedRef.current,
-                  })
+              : // Stage 4.2L.1: immutable close target is the only preferred owner during close.
+                closingFocusMovieId != null
+                ? closingFocusMovieId === item.id
+                : suppressPreferredFocus
+                  ? false
+                  : shouldClaimPreferredPosterFocus({
+                      focusClaimed: focusClaimedRef.current || selectedMovieId != null,
+                      itemId: item.id,
+                      seedId: focusSeedRef.current,
+                    })
           }
           onFocus={handleFocusMovie}
           onPress={handleSelectMovie}
@@ -481,6 +657,7 @@ export function MoviePosterGrid({
             onChange={onSortChange}
             showRating={showRatingSort}
             nextFocusLeft={sortFocusLeftHandle}
+            focusable={sortFocusable}
           />
           <Text style={styles.subtitle}>{gridHeaderSuffix}</Text>
         </View>
@@ -498,12 +675,29 @@ export function MoviePosterGrid({
       ) : (
         <View style={styles.listStage}>
           <FlatList
-            ref={listRef}
+            ref={(instance) => {
+              listRef.current = instance;
+              applyMoviesBrowseListHostNativeFocus(instance, hostProps.hostFocusable);
+            }}
             data={movies}
             key={columns}
             numColumns={columns}
             keyExtractor={keyExtractor}
-            scrollEnabled={!lockScrollForFocusRestore}
+            focusable={hostProps.hostFocusable}
+            accessible={hostProps.hostFocusable}
+            scrollEnabled={hostProps.scrollEnabled}
+            onFocus={() => {
+              if (!postersFocusable) {
+                logMoviesDetailV2FocusOwnership({
+                  phase: 'unexpected-background-focus',
+                  detailOpen: true,
+                  focusIssued: false,
+                  focusedRegion: 'poster-list-host',
+                  categoryHostFocusable: false,
+                  posterHostFocusable: true,
+                });
+              }
+            }}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.list}
             columnWrapperStyle={columns > 1 ? styles.row : undefined}
@@ -518,6 +712,7 @@ export function MoviePosterGrid({
             onScroll={handleScroll}
             scrollEventThrottle={16}
             onViewableItemsChanged={handleViewableItemsChanged}
+            extraData={`${postersFocusable}:${sortFocusable}:${hostProps.scrollEnabled}:${closingFocusMovieId ?? ''}`}
             renderItem={renderItem}
           />
           {listOverlays}

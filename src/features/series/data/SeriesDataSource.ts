@@ -12,6 +12,13 @@ export interface SeriesDataSource {
   }): Promise<{
     items: SeriesSummary[];
     totalCount: number;
+    /**
+     * series-total-count-exactness-v1
+     * false means totalCount is only a lower-bound/pagination estimate and
+     * must not overwrite an authoritative category count.
+     * Omitted means exact/backward-compatible for existing provider sources.
+     */
+    totalCountIsExact?: boolean;
     hasMore: boolean;
   }>;
 
@@ -19,6 +26,8 @@ export interface SeriesDataSource {
     query: string;
     offset: number;
     limit: number;
+    // search-s3-cancellable-series
+    signal?: AbortSignal;
   }): Promise<{
     items: SeriesSummary[];
     totalCount: number;

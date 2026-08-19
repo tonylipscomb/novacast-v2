@@ -23,6 +23,7 @@ export function AdminDashboard({
   onRefresh,
   refreshing,
   onCreateInvite,
+  onAddProvider,
 }: {
   data: DashboardData | null;
   devices: Row[];
@@ -32,6 +33,7 @@ export function AdminDashboard({
   onRefresh: () => void;
   refreshing: boolean;
   onCreateInvite: () => void;
+  onAddProvider?: () => void;
 }) {
   const deviceCount = devices.length;
   const recent = data?.mostRecentDevice ?? deriveMostRecent(devices);
@@ -56,7 +58,7 @@ export function AdminDashboard({
       <Panel title="Beta activity" action={<span className="panelSelect">Registrations  7 days</span>} className="activityPanel">{chart.length ? <div className="barChart" aria-label="Device registrations over the last seven days">{chart.map((point) => <div className="barItem" key={point.date} title={`${point.date}: ${point.value}`}><div className="barTrack"><div className="barFill" style={{ height: `${Math.max((point.value / max) * 100, point.value ? 8 : 2)}%` }} /></div><small>{formatDay(point.date)}</small></div>)}</div> : <Empty text="Historical activity will appear after device registrations." />}<button className="textLink" onClick={() => onNavigate('devices')}>View device activity </button></Panel>
       <Panel title="Recent activity" className="recentPanel">{activity.length ? <div className="activityList">{activity.slice(0, 5).map((item) => <div className="activityItem" key={`${item.type}-${item.timestamp}`}><span className={`activityIcon ${item.type}`}>{item.type === 'error' ? '!' : item.type === 'activation' ? '' : ''}</span><div><strong>{item.title}</strong><small>{item.context ?? 'NovaCast Cloud Admin'}</small></div><time>{relativeTime(item.timestamp)}</time></div>)}</div> : <Empty text="No activity events are available yet." />}<button className="textLink" onClick={() => onNavigate('devices')}>View all activity </button></Panel>
     </div>
-    <Panel title="Quick actions" className="quickPanel"><div className="quickActions"><QuickAction icon="" label="Create invitation" onClick={onCreateInvite} /><QuickAction icon="" label="Add provider" onClick={() => onNavigate('providers')} /><QuickAction icon="" label="View devices" onClick={() => onNavigate('devices')} /><QuickAction icon="" label="Send announcement" disabled /><QuickAction icon="" label="System health" onClick={onRefresh} /><QuickAction icon="" label="Export report" onClick={() => exportReport(data, devices, invitations, providers)} /></div></Panel>
+    <Panel title="Quick actions" className="quickPanel"><div className="quickActions"><QuickAction icon="" label="Create invitation" onClick={onCreateInvite} /><QuickAction icon="" label="Add provider" onClick={onAddProvider ?? (() => onNavigate('providers'))} /><QuickAction icon="" label="View devices" onClick={() => onNavigate('devices')} /><QuickAction icon="" label="Send announcement" disabled /><QuickAction icon="" label="System health" onClick={onRefresh} /><QuickAction icon="" label="Export report" onClick={() => exportReport(data, devices, invitations, providers)} /></div></Panel>
     <div className="dashboardFoot"><span>{data?.lastUpdatedAt ? `Last data update ${relativeTime(String(data.lastUpdatedAt))}` : 'Dashboard data is secured by NovaCast admin APIs.'}</span><button onClick={onRefresh} disabled={refreshing}>{refreshing ? 'Refreshing' : 'Refresh dashboard'}</button></div>
   </div>;
 }

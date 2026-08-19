@@ -14,6 +14,7 @@ import {
   getWatchlistIds,
 } from '../movies/smart/movieLibraryStore.ts';
 import { isPlaybackActivityActive } from '../playback/playbackActivityStore.ts';
+import { ensureLiveSearchSqliteCatalog } from '../search/liveSearchSqliteCatalog.ts';
 import type { ProviderLiveRepository, ProviderSeriesRepository } from './providerRepositories.ts';
 import {
   scheduleCatalogSyncResume,
@@ -22,6 +23,10 @@ import {
   waitUntilPlaybackIdleForCatalogSync,
   CATALOG_SYNC_IDLE_TIMEOUT_MS,
 } from './catalogSyncPlayback.ts';
+import {
+  isCatalogGuidePriorityActive,
+  waitUntilCatalogGuidePriorityIdle,
+} from './catalogSyncGuidePriority.ts';
 import {
   getCategoryCountIndexSync,
   mergeCategoryCountIndex,
@@ -67,6 +72,7 @@ import {
 import { loadAllMoviesForCatalogIndex, loadAllSeriesForCatalogIndex } from './catalogCategoryLoader.ts';
 import { logSmartCategoryCatalogAudit } from './catalogSyncAudit.ts';
 import { earlyBootMark, earlyBootTimed } from '../diagnostics/earlyBootAudit.ts';
+import { isNovaCastCatalogTraceEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import {
   buildCatalogSyncKey,
   cancelCatalogSync,
@@ -79,7 +85,6 @@ import {
   type CatalogProgressThrottle,
 } from '../catalog/index.ts';
 import {
-  awaitSeriesCategoryGateForProvider,
   createDisabledCatalogSqliteMediaSyncHandle,
   finishCatalogSqliteMediaSync,
   mapMovieSummaryToCatalogItem,
@@ -89,6 +94,8 @@ import {
   writeCatalogItemsFromSourceBudgeted,
   writeCategoriesFromSourceBudgeted,
   recordCatalogSqliteDecoded,
+  recordCatalogSqliteCategoryResult,
+  recordCatalogSqliteCheckpoint,
   type CatalogSqliteMediaSyncHandle,
 } from '../catalog/catalogSqliteSyncWriter.ts';
 import {
@@ -101,24 +108,33 @@ import {
 import {
   getCatalogCategoryCounts,
   getCatalogTotalCount,
+  getCatalogSyncState,
   resolveReadableCatalogGeneration,
 } from '../catalog/catalogRepository.ts';
 import {
   createVodCategoryProbeAccumulator,
+  evaluateSparsePerCategoryCoverage,
   evaluateVodCategoryFilterCapability,
   normalizeStreamCategoryId,
   readVodCategoryFilterCapability,
+  selectVodCategoryProbeIds,
   writeVodCategoryFilterCapability,
   type VodCategoryProbeSample,
 } from '../catalog/vodCategoryFilterCapability.ts';
 import type { MovieSummary } from '../movies/movieTypes.ts';
 import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
+import { emitSeriesSqliteEvent } from '../series/seriesDiagnostics.ts';
 
 const PERF_LOG_PREFIX = '[NovaCast CatalogSync]';
 const CATALOG_SYNC_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-const CATALOG_SYNC_CHECKPOINT_VERSION = 14; // Stage 3C.2: SQLite Movies item sync independent of smart categories
+// Stage 4.2D: bump invalidates stale "complete" checkpoints that skipped sparse repair.
+const CATALOG_SYNC_CHECKPOINT_VERSION = 15;
 const CATALOG_SYNC_CHECKPOINT_PREFIX = '@novacast/catalog-sync-checkpoint/';
 const syncInFlight = new Map<string, Promise<void>>();
+const syncAuditRuns = new Map<string, { requestId: string; runId: string; source: string; runToken: number; startedAt: number }>();
+let syncAuditSequence = 0;
+/** One-shot Movies full-dump force (sparse repair / capability invalidate). */
+const forceMoviesFullDumpByProvider = new Map<string, string>();
 
 /** Shell-settle delays before automatic catalog work (ms). Zeroed in unit tests. */
 let movieCatalogScheduleDelayMs = 2500;
@@ -153,15 +169,8 @@ type CatalogSyncCheckpoint = {
   updatedAt: number;
 };
 
-declare const __DEV__: boolean | undefined;
-
 function isCatalogSyncDebugEnabled() {
-  return (
-    (typeof __DEV__ !== 'undefined' && __DEV__) ||
-    (typeof process !== 'undefined' &&
-      (process.env?.EXPO_PUBLIC_NOVACAST_DEBUG === 'true' ||
-        process.env?.EXPO_PUBLIC_NOVACAST_CATALOG_AUDIT === '1'))
-  );
+  return isNovaCastCatalogTraceEnabled();
 }
 
 function isSyncRunStale(runToken: number) {
@@ -208,6 +217,62 @@ function logSync(providerId: string, message: string, payload: Record<string, un
   }
 
   console.info(PERF_LOG_PREFIX, { providerId, message, ...payload });
+}
+
+function logSyncLifecycle(
+  providerId: string,
+  event: string,
+  payload: Record<string, unknown> = {},
+) {
+  if (!isCatalogSyncDebugEnabled()) {
+    return;
+  }
+  const active = syncAuditRuns.get(providerId);
+  console.info('[NovaCast Catalog Sync Lifecycle Audit]', {
+    providerId,
+    event,
+    activeRunPresent: Boolean(active),
+    activeRunId: active?.runId ?? null,
+    activeRequestId: active?.requestId ?? null,
+    activeRunToken: active?.runToken ?? null,
+    activeRunAgeMs: active ? Date.now() - active.startedAt : null,
+    ...payload,
+  });
+}
+
+function logMovieCategoryTiming(input: {
+  generation: number | null;
+  categoryId: string;
+  matched: number;
+  providerNativeMs: number;
+  sqliteWriteMs: number;
+  checkpointMs: number;
+  idleYieldMs: number;
+  totalMs: number;
+}) {
+  if (!isCatalogSyncDebugEnabled()) {
+    return;
+  }
+  if (
+    input.totalMs < 2000 &&
+    input.sqliteWriteMs < 1000 &&
+    input.providerNativeMs < 2000 &&
+    input.checkpointMs < 250
+  ) {
+    return;
+  }
+  console.info('[NovaCast Movie Category Timing]', input);
+}
+
+function logMovieCompletionPhase(phase: string, generation: number | null, startedAt: number) {
+  if (!isCatalogSyncDebugEnabled()) {
+    return;
+  }
+  console.info('[NovaCast Movie Completion Phase]', {
+    phase,
+    generation,
+    durationMs: Date.now() - startedAt,
+  });
 }
 
 function catalogSyncCheckpointKey(providerId: string) {
@@ -312,16 +377,20 @@ export function subscribeMovieCatalogReady(providerId: string, listener: (genera
   listeners.add(listener);
   const subscriptionInstance = ++movieReadySubscriptionInstance;
   movieReadyListeners.set(providerId, listeners);
-  console.info('[NovaCast Movies] catalog_subscription_added', {
-    providerId,
-    subscriptionInstance,
-  });
-  return () => {
-    listeners.delete(listener);
-    console.info('[NovaCast Movies] catalog_subscription_removed', {
+  if (isCatalogSyncDebugEnabled()) {
+    console.info('[NovaCast Movies] catalog_subscription_added', {
       providerId,
       subscriptionInstance,
     });
+  }
+  return () => {
+    listeners.delete(listener);
+    if (isCatalogSyncDebugEnabled()) {
+      console.info('[NovaCast Movies] catalog_subscription_removed', {
+        providerId,
+        subscriptionInstance,
+      });
+    }
     if (!listeners.size) {
       movieReadyListeners.delete(providerId);
     }
@@ -330,12 +399,14 @@ export function subscribeMovieCatalogReady(providerId: string, listener: (genera
 
 function notifyMovieCatalogReady(providerId: string, generation: number) {
   const listeners = movieReadyListeners.get(providerId);
-  console.info('[Movies Catalog Publication]', {
-    event: 'ready-published',
-    providerId,
-    generation,
-    listenerCount: listeners?.size ?? 0,
-  });
+  if (isCatalogSyncDebugEnabled()) {
+    console.info('[Movies Catalog Publication]', {
+      event: 'ready-published',
+      providerId,
+      generation,
+      listenerCount: listeners?.size ?? 0,
+    });
+  }
   listeners?.forEach((listener) => listener(generation));
 }
 
@@ -367,12 +438,18 @@ function notifyMovieCategoriesUpdated(providerId: string, generation: number, ca
   }
   lastMovieCategoriesUpdatedSignature.set(providerId, signature);
   const listeners = movieCategoriesUpdatedListeners.get(providerId);
-  console.info('[NovaCast Movies] movie-categories-updated', {
-    providerId,
-    generation,
-    categoryCount,
-    listenerCount: listeners?.size ?? 0,
-  });
+  // Metadata-only: must not imply the Movies library is ready for browsing.
+  // Item activation + resolveReadableCatalogGeneration still gate usable reads.
+  if (isCatalogSyncDebugEnabled()) {
+    console.info('[NovaCast Movies] movie-categories-updated', {
+      providerId,
+      generation,
+      categoryCount,
+      preparing: true,
+      message: 'Preparing movie library',
+      listenerCount: listeners?.size ?? 0,
+    });
+  }
   listeners?.forEach((listener) => listener({ generation, categoryCount }));
 }
 
@@ -627,6 +704,31 @@ async function yieldForPlaybackIfNeeded(
   jobType: string,
   runToken: number,
 ): Promise<boolean> {
+  // NOVACAST_GUIDE_V2_3D_CATALOG_PRIORITY_V1
+  // Guide XMLTV owns foreground priority over background catalog work.
+  // Existing Movies/Series loops already enter this gate between heavy jobs.
+  if (isCatalogGuidePriorityActive()) {
+    logSync(providerId, 'sync-yielded-for-guide', {
+      checkpoint,
+      jobType,
+    });
+
+    await waitUntilCatalogGuidePriorityIdle();
+
+    if (isSyncRunStale(runToken)) {
+      logSync(providerId, 'sync-cancelled', {
+        checkpoint,
+        reason: 'provider-reset',
+      });
+
+      return false;
+    }
+
+    logSync(providerId, 'sync-resumed-after-guide', {
+      checkpoint,
+      jobType,
+    });
+  }
   // Always give the JS event loop a chance to service Home focus/input.
   // When playback is active we fully pause; otherwise take a short idle slot
   // plus one macrotask so D-pad handlers can run between heavy category jobs.
@@ -726,22 +828,37 @@ async function buildSeriesLibraryContext(providerId: string) {
   });
 }
 
-async function buildMovieSmartCache(providerId: string, runToken: number) {
+function smartCacheAuditNow() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+}
+
+async function buildMovieSmartCache(providerId: string, runToken: number, generation?: number) {
   const index = getMovieCatalogIndex(providerId);
   if (!index.size) {
     return;
   }
 
   const started = Date.now();
+  const contextStarted = smartCacheAuditNow();
   const ctx = await buildMovieLibraryContext(providerId);
+  const libraryContextMs = Math.round(smartCacheAuditNow() - contextStarted);
   const cacheEntries: Record<string, SmartCategoryCacheEntry> = {};
   const catalogCompleteness = index.getCompleteness();
   const isCancelled = () => isSyncRunStale(runToken);
 
   const snapshot = index.listAllEntries();
+  const lookupIndexStarted = smartCacheAuditNow();
+  const snapshotById = new Map<string, (typeof snapshot)[number]>();
+  const snapshotOrder = new Map<string, number>();
+  snapshot.forEach((entry, order) => {
+    snapshotById.set(entry.id, entry);
+    snapshotOrder.set(entry.id, order);
+  });
+  const lookupIndexBuildMs = Math.round(smartCacheAuditNow() - lookupIndexStarted);
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
   logSync(providerId, 'movie-smart-snapshot', { snapshotSize: snapshot.length });
 
+  let smartCategoryIndex = 0;
   for (const definition of getActiveSmartCategoryDefinitions()) {
     if (!(await yieldForPlaybackIfNeeded(providerId, `movie-smart:${definition.key}`, 'movies-smart', runToken))) {
       return;
@@ -752,6 +869,17 @@ async function buildMovieSmartCache(providerId: string, runToken: number) {
 
     let items: ReturnType<typeof querySmartCategoryOnIndex>['items'] | null = null;
     const queryStarted = Date.now();
+    const auditStarted = smartCacheAuditNow();
+    let candidateCount = 0;
+    let candidateLookupCount = 0;
+    let lookupIndexBuildForCategoryMs = smartCategoryIndex === 0 ? lookupIndexBuildMs : 0;
+    let candidateResolutionMs = 0;
+    let filteringMs = 0;
+    let sortingMs = 0;
+    let mappingMs = 0;
+    let dedupeMs = 0;
+    let sqliteQueryMs = 0;
+    let fullSnapshotPassCount = 0;
     try {
       if (definition.key === SMART_CATEGORY_KEY_NEW_RELEASES) {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -766,32 +894,78 @@ async function buildMovieSmartCache(providerId: string, runToken: number) {
         };
       } else if (definition.idOrder) {
         const orderedIds = definition.idOrder(ctx);
-        const rank = new Map(orderedIds.map((id, order) => [id, order]));
-        const filtered: typeof snapshot = [];
-        await processTimeBudgeted(
-          snapshot,
-          (entry) => {
-            if (definition.predicate(entry, ctx) && rank.has(entry.id)) {
-              filtered.push(entry);
-            }
-          },
-          { isCancelled, minItems: 40, maxItems: 120, kind: 'generic', targetMs: 35 },
-        );
-        filtered.sort(
-          (left, right) =>
-            (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
-        );
+        candidateCount = orderedIds.length;
+        const dedupeStarted = smartCacheAuditNow();
+        const seenIds = new Set<string>();
+        const uniqueIds = orderedIds.filter((id) => {
+          if (seenIds.has(id)) {
+            return false;
+          }
+          seenIds.add(id);
+          return true;
+        });
+        dedupeMs = Math.round(smartCacheAuditNow() - dedupeStarted);
+
+        const resolutionStarted = smartCacheAuditNow();
+        const resolved: typeof snapshot = [];
+        for (const id of uniqueIds) {
+          candidateLookupCount += 1;
+          const entry = snapshotById.get(id);
+          if (entry) {
+            resolved.push(entry);
+          }
+        }
+        candidateResolutionMs = Math.round(smartCacheAuditNow() - resolutionStarted);
+
+        const filteringStarted = smartCacheAuditNow();
+        const filtered = resolved.filter((entry) => definition.predicate(entry, ctx));
+        filteringMs = Math.round(smartCacheAuditNow() - filteringStarted);
         const capped = definition.maxItems ? filtered.slice(0, definition.maxItems) : filtered;
         items = capped.slice(0, 240);
+        const mappingStarted = smartCacheAuditNow();
         cacheEntries[definition.key] = {
           categoryKey: definition.key,
           title: definition.name,
           count: capped.length,
           itemIds: items.map((entry) => entry.id),
         };
+        mappingMs = Math.round(smartCacheAuditNow() - mappingStarted);
+      } else if (definition.key === 'your-favorites') {
+        candidateCount = ctx.favorites.size;
+        const resolutionStarted = smartCacheAuditNow();
+        const resolved: typeof snapshot = [];
+        for (const id of ctx.favorites) {
+          candidateLookupCount += 1;
+          const entry = snapshotById.get(id);
+          if (entry) {
+            resolved.push(entry);
+          }
+        }
+        candidateResolutionMs = Math.round(smartCacheAuditNow() - resolutionStarted);
+
+        const filteringStarted = smartCacheAuditNow();
+        const filtered = resolved.filter((entry) => definition.predicate(entry, ctx));
+        filteringMs = Math.round(smartCacheAuditNow() - filteringStarted);
+        const sortingStarted = smartCacheAuditNow();
+        filtered.sort((left, right) => {
+          const result = definition.sort(left, right);
+          return result || (snapshotOrder.get(left.id) ?? 0) - (snapshotOrder.get(right.id) ?? 0);
+        });
+        sortingMs = Math.round(smartCacheAuditNow() - sortingStarted);
+        const capped = filtered.slice(0, definition.maxItems ?? 240);
+        items = capped.slice(0, 240);
+        const mappingStarted = smartCacheAuditNow();
+        cacheEntries[definition.key] = {
+          categoryKey: definition.key,
+          title: definition.name,
+          count: capped.length,
+          itemIds: items.map((entry) => entry.id),
+        };
+        mappingMs = Math.round(smartCacheAuditNow() - mappingStarted);
       } else {
         const maxItems = definition.maxItems ?? 240;
         const top: typeof snapshot = [];
+        fullSnapshotPassCount = 1;
         await processTimeBudgeted(
           snapshot,
           (entry) => {
@@ -807,15 +981,45 @@ async function buildMovieSmartCache(providerId: string, runToken: number) {
           { isCancelled, minItems: 40, maxItems: 80, kind: 'generic', targetMs: 30 },
         );
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const sortingStarted = smartCacheAuditNow();
         top.sort(definition.sort);
+        sortingMs = Math.round(smartCacheAuditNow() - sortingStarted);
         const capped = top.slice(0, maxItems);
         items = capped.slice(0, 240);
+        const mappingStarted = smartCacheAuditNow();
         cacheEntries[definition.key] = {
           categoryKey: definition.key,
           title: definition.name,
           count: capped.length,
           itemIds: items.map((entry) => entry.id),
         };
+        mappingMs = Math.round(smartCacheAuditNow() - mappingStarted);
+      }
+      const totalMs = Math.round(smartCacheAuditNow() - auditStarted);
+      const accountedMs =
+        candidateResolutionMs + filteringMs + sortingMs + mappingMs + dedupeMs;
+      const otherComputeMs = Math.max(0, totalMs - accountedMs);
+      if (isCatalogSyncDebugEnabled()) {
+        console.info('[NovaCast Movie Smart Cache Compute Audit]', {
+          categoryKey: definition.key,
+          snapshotSize: snapshot.length,
+          candidateCount,
+          libraryContextMs,
+          sqliteQueryMs,
+          lookupIndexBuildMs: lookupIndexBuildForCategoryMs,
+          candidateResolutionMs,
+          filteringMs,
+          sortingMs,
+          mappingMs,
+          dedupeMs,
+          otherComputeMs,
+          totalMs,
+          fullSnapshotPassCount,
+          candidateLookupCount,
+          resultCount: items?.length ?? 0,
+          sharedLookupIndexReused: true,
+          sharedSnapshotPassCount: 1,
+        });
       }
       logSmartCategoryCatalogAudit({
         providerId,
@@ -830,9 +1034,11 @@ async function buildMovieSmartCache(providerId: string, runToken: number) {
         snapshotSize: snapshot.length,
         count: cacheEntries[definition.key]?.count ?? 0,
       });
+      logMovieCompletionPhase(`smart-cache:${definition.key}`, generation ?? null, queryStarted);
     } finally {
       releaseBatch(`movie-smart:${definition.key}`, items);
     }
+    smartCategoryIndex += 1;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
@@ -1014,30 +1220,55 @@ function resolveLiveChannelCount(providerId: string) {
   return 0;
 }
 
-async function refreshLiveChannelSummary(providerId: string, live: ProviderLiveRepository, runToken: number) {
-  if (!live.getCategoryCounts) {
-    return null;
-  }
-
+async function refreshLiveChannelSummary(
+  providerId: string,
+  live: ProviderLiveRepository,
+  liveCategories: Awaited<ReturnType<ProviderLiveRepository['getCategories']>>,
+  runToken: number,
+) {
+  // live-search-sqlite-background-v1
   try {
-    const counts = await live.getCategoryCounts();
+    const catalog = await ensureLiveSearchSqliteCatalog({
+      providerId,
+      live,
+      categories: liveCategories,
+      isCancelled: () => isSyncRunStale(runToken),
+    });
     if (isSyncRunStale(runToken)) {
       return null;
     }
 
-    await mergeCategoryCountIndex(providerId, 'live', counts);
-    const liveChannelCount = live.getTotalChannelCount
-      ? await live.getTotalChannelCount()
-      : sumCategoryCounts({
-          providerId,
-          mediaType: 'live',
-          counts,
-          updatedAt: Date.now(),
-        });
+    let counts = catalog.counts;
+    let liveChannelCount = catalog.channelCount;
+
+    // Preserve the old provider-count path as a safety fallback while the first
+    // persistent index is unavailable or a provider category temporarily fails.
+    if ((!catalog.ready || liveChannelCount <= 0) && live.getCategoryCounts) {
+      counts = await live.getCategoryCounts();
+      if (isSyncRunStale(runToken)) {
+        return null;
+      }
+      liveChannelCount = live.getTotalChannelCount
+        ? await live.getTotalChannelCount()
+        : sumCategoryCounts({
+            providerId,
+            mediaType: 'live',
+            counts,
+            updatedAt: Date.now(),
+          });
+    }
+
+    if (Object.keys(counts).length) {
+      await mergeCategoryCountIndex(providerId, 'live', counts);
+    }
 
     if (liveChannelCount > 0) {
       await writeProviderLibrarySummary(providerId, { liveChannelCount });
-      logSync(providerId, 'live-channel-count-refreshed', { liveChannelCount });
+      logSync(providerId, 'live-channel-count-refreshed', {
+        liveChannelCount,
+        searchCatalogReady: catalog.ready,
+        searchCatalogRebuilt: catalog.rebuilt,
+      });
     }
 
     return liveChannelCount;
@@ -1058,7 +1289,7 @@ async function resolveAndRefreshLiveChannelCount(
     return liveChannelCount;
   }
 
-  const refreshedLiveChannelCount = await refreshLiveChannelSummary(providerId, live, runToken);
+  const refreshedLiveChannelCount = await refreshLiveChannelSummary(providerId, live, liveCategories, runToken);
   if (refreshedLiveChannelCount && refreshedLiveChannelCount > 0) {
     return refreshedLiveChannelCount;
   }
@@ -1131,6 +1362,7 @@ export type ProviderCatalogSyncInput = {
   providerId: string;
   providerType?: string;
   displayName?: string;
+  requestSource?: string;
   movies: MovieDataSource;
   series: ProviderSeriesRepository;
   live: ProviderLiveRepository;
@@ -1140,6 +1372,11 @@ async function shouldSkipMovieSync(setup: CatalogSyncSetup, runToken: number) {
   const { smartCategoriesEnabled, movieCategoryIds, seriesCategoryIds } = setup;
   const providerId = setup.input.providerId;
   const now = Date.now();
+  const { shouldRequestSortMetadataUpgrade } = await import('../catalog/catalogSortMetadataUpgrade.ts');
+  if (await shouldRequestSortMetadataUpgrade(providerId, 'movie')) {
+    logSync(providerId, 'movie-sync-resumed-sort-metadata-upgrade', {});
+    return false;
+  }
 
   if (
     !setup.checkpointMatches ||
@@ -1180,6 +1417,24 @@ async function shouldSkipSeriesSync(setup: CatalogSyncSetup, runToken: number) {
   const { smartCategoriesEnabled, movieCategoryIds, seriesCategoryIds } = setup;
   const providerId = setup.input.providerId;
   const now = Date.now();
+  // A failed generation must get a real rebuild even if the provider-wide
+  // checkpoint/count cache still looks fresh.
+  const seriesSyncState = await getCatalogSyncState(providerId, 'series').catch(() => null);
+  if (seriesSyncState?.status === 'error') {
+    console.info('[NovaCast Series Generation Resume Guard]', {
+      providerId,
+      action: 'force-series-rebuild',
+      reason: 'previous-series-sync-error',
+      failedGeneration: seriesSyncState.generation,
+    });
+    return false;
+  }
+
+  const { shouldRequestSortMetadataUpgrade } = await import('../catalog/catalogSortMetadataUpgrade.ts');
+  if (await shouldRequestSortMetadataUpgrade(providerId, 'series')) {
+    logSync(providerId, 'series-sync-resumed-sort-metadata-upgrade', {});
+    return false;
+  }
 
   if (
     !setup.checkpointMatches ||
@@ -1210,6 +1465,7 @@ export async function runMovieCatalogSync(
   input: ProviderCatalogSyncInput,
   runToken: number,
   coordinatorKey: string,
+  runId?: string,
 ) {
   const { providerId, movies } = input;
   const started = Date.now();
@@ -1219,9 +1475,20 @@ export async function runMovieCatalogSync(
   notifyPhase(providerId, 'syncing');
   markCatalogAuditSync('started', { providerId, mediaType: 'movie' });
   logSync(providerId, 'movie-sync-started');
+  logSyncLifecycle(providerId, 'movie-worker-started', {
+    runToken,
+    generationTokenState: isSyncRunStale(runToken) ? 'stale' : 'current',
+    movieWorkerState: 'running',
+  });
+
+  let categoryLoopStarted = false;
+  let categoryLoopFinished = false;
+  let categoryDataObserved = false;
+  let retrySource: string | null = null;
 
   if (isCancelled()) {
     logSync(providerId, 'movie-sync-cancelled', { reason: 'provider-reset' });
+    logSyncLifecycle(providerId, 'movie-loop-exit', { runToken, reason: 'cancelled-before-work' });
     return;
   }
 
@@ -1241,8 +1508,10 @@ export async function runMovieCatalogSync(
   const { smartCategoriesEnabled, movieCategories } = setup;
   const movieIndex = smartCategoriesEnabled ? getMovieCatalogIndex(providerId) : null;
   const canResumeCheckpoint = setup.checkpointMatches && Boolean(setup.checkpoint);
+  let movieIndexWasActive = false;
   if (smartCategoriesEnabled && !canResumeCheckpoint) {
     movieIndex?.beginSync();
+    movieIndexWasActive = true;
   }
 
   let sqliteHandle: CatalogSqliteMediaSyncHandle | null = null;
@@ -1252,6 +1521,7 @@ export async function runMovieCatalogSync(
       mediaType: 'movie',
       providerType: input.providerType ?? 'unknown',
       displayName: input.displayName ?? null,
+      runId,
     });
 
     if (sqliteHandle.enabled) {
@@ -1273,15 +1543,58 @@ export async function runMovieCatalogSync(
       }
     }
 
-    // Let Series finish category SQLite upserts before Movies begins item ingest/writes.
-    // Prevents multi-second mutex/JS stalls from overlapping category + item writers.
-    await awaitSeriesCategoryGateForProvider(providerId);
+    const movieStartIndexBeforeGuard = setup.resumeMovieIndex;
+    const checkpointGeneration: number | null = null;
+    const freshMovieGeneration = sqliteHandle.enabled;
+    const sameGenerationResume = !freshMovieGeneration && canResumeCheckpoint;
+    let movieStartIndex = setup.resumeMovieIndex;
+    if (freshMovieGeneration) {
+      movieStartIndex = 0;
+      for (const categoryId of Object.keys(setup.movieCountMap)) {
+        delete setup.movieCountMap[categoryId];
+      }
+      if (smartCategoriesEnabled && canResumeCheckpoint) {
+        movieIndex?.beginSync();
+        movieIndexWasActive = true;
+      }
+      console.info('[NovaCast Movie Generation Resume Guard]', {
+        providerId,
+        generation: sqliteHandle.generation,
+        checkpointGeneration,
+        checkpointResumeMovieIndex: setup.resumeMovieIndex,
+        movieCategoryCount: movieCategories.length,
+        movieStartIndexBeforeGuard,
+        movieStartIndexAfterGuard: movieStartIndex,
+        sameGenerationResume: false,
+        freshGeneration: true,
+        action: 'fresh-generation-full-rewalk',
+        reason: canResumeCheckpoint
+          ? 'sqlite-generation-does-not-own-provider-checkpoint'
+          : 'new-sqlite-generation',
+      });
+    } else {
+      console.info('[NovaCast Movie Generation Resume Guard]', {
+        providerId,
+        generation: 0,
+        checkpointGeneration,
+        checkpointResumeMovieIndex: setup.resumeMovieIndex,
+        movieCategoryCount: movieCategories.length,
+        movieStartIndexBeforeGuard,
+        movieStartIndexAfterGuard: movieStartIndex,
+        sameGenerationResume,
+        freshGeneration: false,
+        action: sameGenerationResume ? 'same-generation-resume' : 'start-from-zero',
+        reason: sameGenerationResume
+          ? 'checkpoint-resume-preserved-for-non-sqlite-path'
+          : 'checkpoint-not-resumable',
+      });
+    }
 
     await writeCatalogSyncCheckpointSafe(
       setup,
       runToken,
-      setup.resumeMovieIndex < movieCategories.length ? 'movies' : 'series',
-      setup.resumeMovieIndex,
+      movieStartIndex < movieCategories.length ? 'movies' : 'series',
+      movieStartIndex,
       setup.resumeSeriesIndex,
     );
 
@@ -1291,8 +1604,18 @@ export async function runMovieCatalogSync(
     const nativeAvailable = isNativeCatalogDecodeAvailable();
     const writerOnly = isCatalogSqliteWriterOnlyDiagnosticEnabled();
     const syncMovieItems = smartCategoriesEnabled || Boolean(sqliteHandle?.enabled);
-    let filteringReliable = true;
-    let movieSyncStrategy: 'full-dump-stream-category' | 'filtered-per-category' = 'filtered-per-category';
+    // A fresh generation owns its own complete category walk. Reusing a
+    // completed checkpoint index here can skip every Movie category and make
+    // the completion barrier correctly reject an empty generation.
+    let filteringReliable = false;
+    let filterStatus: 'reliable' | 'unreliable' | 'inconclusive' = 'inconclusive';
+    let filterReason = 'insufficient-populated-probes';
+    let movieSyncStrategy: 'full-dump-stream-category' | 'filtered-per-category' = 'full-dump-stream-category';
+    let strategyFallbackUsed = false;
+    const forcedFullDumpReason = forceMoviesFullDumpByProvider.get(providerId) ?? null;
+    if (forcedFullDumpReason) {
+      forceMoviesFullDumpByProvider.delete(providerId);
+    }
 
     logSync(providerId, 'movie-filter-capability-gate', {
       nativeAvailable,
@@ -1300,33 +1623,51 @@ export async function runMovieCatalogSync(
       smartCategoriesEnabled,
       syncMovieItems,
       movieCategoryCount: movieCategories.length,
+      forcedFullDumpReason,
     });
 
-    if (nativeAvailable && sqliteHandle?.enabled) {
+    if (nativeAvailable && sqliteHandle?.enabled && !forcedFullDumpReason) {
       const cachedCapability = await readVodCategoryFilterCapability(providerId);
-      const providerCategoryIds = movieCategories
-        .map((category) => category.id)
-        .filter((id) => id && id !== 'all' && !String(id).startsWith('section:') && !String(id).startsWith('smart:'));
-      // Probe spread-out categories (not only the first two) so last-write-wins victims are included.
-      const probeCategoryIds =
-        providerCategoryIds.length >= 2
-          ? [
-              providerCategoryIds[Math.floor(providerCategoryIds.length * 0.2)]!,
-              providerCategoryIds[Math.floor(providerCategoryIds.length * 0.8)]!,
-            ]
-          : providerCategoryIds.slice(0, 2);
+      const providerCategoryIds = movieCategories.map((category) => category.id);
+      const probeCategoryIds = selectVodCategoryProbeIds(providerCategoryIds, {
+        countHints: setup.movieHintCounts,
+        limit: 6,
+      });
 
-      if (cachedCapability && Date.now() - cachedCapability.probedAt < 7 * 24 * 60 * 60 * 1000) {
-        filteringReliable = cachedCapability.filteringReliable;
+      if (
+        cachedCapability &&
+        cachedCapability.status === 'reliable' &&
+        Date.now() - cachedCapability.probedAt < 7 * 24 * 60 * 60 * 1000
+      ) {
+        filteringReliable = true;
+        filterStatus = 'reliable';
+        filterReason = cachedCapability.reason;
         logSync(providerId, 'movie-filter-capability-cache-hit', {
           filteringReliable,
-          reason: cachedCapability.reason,
+          status: filterStatus,
+          reason: filterReason,
         });
-      } else if (probeCategoryIds.length >= 2) {
+      } else if (probeCategoryIds.length >= 1) {
         const probes: VodCategoryProbeSample[] = [];
         for (const categoryId of probeCategoryIds) {
           if (isCancelled()) {
+            logSyncLifecycle(providerId, 'movie-loop-exit', { runToken, categoryIndex: null, categoryId, reason: 'cancelled-during-probe' });
             return;
+          }
+          // Stop early only after reliability is strongly proven.
+          if (probes.filter((probe) => probe.returnedCount >= 50).length >= 2) {
+            const early = evaluateVodCategoryFilterCapability({
+              providerId,
+              probes,
+              metadataCategoryCount: providerCategoryIds.length,
+            });
+            if (early.status === 'reliable' || early.status === 'unreliable') {
+              filterStatus = early.status;
+              filteringReliable = early.filteringReliable;
+              filterReason = early.reason;
+              await writeVodCategoryFilterCapability(early);
+              break;
+            }
           }
           const probeUrl = movies.getCatalogListRequestUrl?.(categoryId) ?? null;
           if (!probeUrl) {
@@ -1348,6 +1689,7 @@ export async function runMovieCatalogSync(
             },
           });
           if (probeResult.cancelled || isCancelled()) {
+            logSyncLifecycle(providerId, 'movie-loop-exit', { runToken, categoryIndex: null, categoryId, reason: probeResult.cancelled ? 'native-probe-cancelled' : 'cancelled-after-probe' });
             return;
           }
           probes.push(accumulator.sample);
@@ -1359,7 +1701,7 @@ export async function runMovieCatalogSync(
             firstContentIds: accumulator.sample.firstContentIds,
           });
         }
-        if (probes.length >= 1) {
+        if (probes.length >= 1 && filterStatus === 'inconclusive') {
           const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie').catch(() => 0);
           const previousTotal =
             readableGeneration > 0
@@ -1372,10 +1714,13 @@ export async function runMovieCatalogSync(
               previousTotal,
               ...probes.map((probe) => probe.returnedCount),
             ),
+            metadataCategoryCount: providerCategoryIds.length,
           });
           await writeVodCategoryFilterCapability(capability);
           filteringReliable = capability.filteringReliable;
-        } else {
+          filterStatus = capability.status;
+          filterReason = capability.reason;
+        } else if (probes.length < 1) {
           logSync(providerId, 'movie-filter-capability-probe-failed', {
             reason: 'no-probe-samples',
             probeCategoryIds,
@@ -1387,10 +1732,21 @@ export async function runMovieCatalogSync(
           probeCategoryIds,
         });
       }
+    } else if (forcedFullDumpReason) {
+      filteringReliable = false;
+      filterStatus = 'unreliable';
+      filterReason = forcedFullDumpReason;
     }
 
-    if (!filteringReliable && nativeAvailable && sqliteHandle?.enabled) {
+    // Inconclusive and unreliable both use the safer full-dump strategy.
+    const useFullDump =
+      Boolean(forcedFullDumpReason) ||
+      !filteringReliable ||
+      filterStatus !== 'reliable';
+
+    if (useFullDump && nativeAvailable && sqliteHandle?.enabled) {
       movieSyncStrategy = 'full-dump-stream-category';
+      categoryLoopStarted = true;
       const fullDumpUrl = movies.getCatalogListRequestUrl?.('all') ?? null;
       if (!fullDumpUrl) {
         throw new Error('movie_full_dump_url_unavailable');
@@ -1486,6 +1842,7 @@ export async function runMovieCatalogSync(
       });
 
       if (fullDumpResult.cancelled || isCancelled()) {
+        logSyncLifecycle(providerId, 'movie-loop-exit', { runToken, reason: fullDumpResult.cancelled ? 'native-full-dump-cancelled' : 'cancelled-after-full-dump' });
         return;
       }
 
@@ -1513,8 +1870,10 @@ export async function runMovieCatalogSync(
             distinctStreamCategoryIds: distinctStreamCategoryIds.size,
             missingCategoryIdCount,
             filteringReliable: false,
+            filterStatus,
+            filterReason,
             strategy: movieSyncStrategy,
-            marker: 'stage3c2-vod-full-dump-sync-v1',
+            marker: 'stage4d-vod-ingestion-repair-v1',
           }),
       );
       console.info(
@@ -1522,7 +1881,7 @@ export async function runMovieCatalogSync(
           JSON.stringify({
             generation: sqliteHandle.generation,
             samples: assignmentSamples,
-            marker: 'stage3c2-vod-full-dump-sync-v1',
+            marker: 'stage4d-vod-ingestion-repair-v1',
           }),
       );
 
@@ -1533,8 +1892,9 @@ export async function runMovieCatalogSync(
         movieCategories.length,
         setup.resumeSeriesIndex,
       );
-    } else {
+    } else if (nativeAvailable && sqliteHandle?.enabled) {
       movieSyncStrategy = 'filtered-per-category';
+      categoryLoopStarted = true;
       console.info(
         '[NovaCast Movies Full Dump Sync] ' +
           JSON.stringify({
@@ -1546,14 +1906,76 @@ export async function runMovieCatalogSync(
             metadataCategoryCount: movieCategories.length,
             distinctStreamCategoryIds: 0,
             missingCategoryIdCount: 0,
-            filteringReliable: true,
+            filteringReliable,
+            filterStatus,
+            filterReason,
             strategy: movieSyncStrategy,
-            marker: 'stage3c2-vod-full-dump-sync-v1',
+            marker: 'stage4d-vod-ingestion-repair-v1',
           }),
       );
 
+      let categoriesAttempted = 0;
+      let categoriesReturningItems = 0;
+      let categoriesReturningZero = 0;
+      let decodedItemCount = 0;
+      const distinctItemCategoryIds = new Set<string>();
+      let abortedForSparse = false;
+
+      const movieStartIndexBeforeEntryGuard = movieStartIndex;
+      if (
+        sqliteHandle.enabled &&
+        movieCategories.length > 0 &&
+        movieStartIndex >= movieCategories.length
+      ) {
+        movieStartIndex = 0;
+        for (const categoryId of Object.keys(setup.movieCountMap)) {
+          delete setup.movieCountMap[categoryId];
+        }
+        if (smartCategoriesEnabled && !movieIndexWasActive) {
+          movieIndex?.beginSync();
+          movieIndexWasActive = true;
+        }
+        console.info('[NovaCast Movie Generation Resume Guard]', {
+          providerId,
+          generation: sqliteHandle.generation,
+          checkpointGeneration: null,
+          checkpointResumeMovieIndex: setup.resumeMovieIndex,
+          movieCategoryCount: movieCategories.length,
+          movieStartIndexBeforeGuard: movieStartIndexBeforeEntryGuard,
+          movieStartIndexAfterGuard: movieStartIndex,
+          movieIndexWasActive: movieIndexWasActive,
+          movieIndexActiveAfterGuard: movieIndexWasActive,
+          sameGenerationResume: false,
+          freshGeneration: true,
+          action: 'fresh-generation-full-rewalk-corrected-before-crawl',
+          reason: 'terminal-start-index-on-fresh-sqlite-generation',
+        });
+      }
+      const willEnterMovieCategoryCrawl =
+        movieCategories.length > 0 && movieStartIndex < movieCategories.length && syncMovieItems;
+      console.info('[NovaCast Movie Category Crawl Entry]', {
+        providerId,
+        generation: sqliteHandle.generation,
+        movieCategoryCount: movieCategories.length,
+        startIndex: movieStartIndex,
+        remainingCategoryCount: Math.max(0, movieCategories.length - movieStartIndex),
+        syncMovieItems,
+        filteringReliable,
+        movieIndexActive: movieIndexWasActive,
+        willCrawl: willEnterMovieCategoryCrawl,
+        skipReason: willEnterMovieCategoryCrawl
+          ? null
+          : movieCategories.length <= 0
+            ? 'no-movie-categories'
+            : movieStartIndex >= movieCategories.length
+              ? 'start-index-at-or-after-category-count'
+              : !syncMovieItems
+                ? 'movie-item-sync-disabled'
+                : 'unknown',
+      });
+
       for (
-        let movieCategoryIndex = setup.resumeMovieIndex;
+        let movieCategoryIndex = movieStartIndex;
         movieCategoryIndex < movieCategories.length;
         movieCategoryIndex += 1
       ) {
@@ -1562,16 +1984,23 @@ export async function runMovieCatalogSync(
           publishCatalogProgress(setup);
           setup.progressThrottle.flush();
           schedulePendingHeavySync(providerId, input);
+          logSyncLifecycle(providerId, 'movie-loop-exit', { runToken, categoryIndex: movieCategoryIndex, categoryId: category.id, reason: 'playback-deferral' });
           return;
         }
         if (isCancelled()) {
+          logSyncLifecycle(providerId, 'movie-loop-exit', { runToken, categoryIndex: movieCategoryIndex, categoryId: category.id, reason: 'cancelled-before-category' });
           return;
         }
 
         const categoryStarted = Date.now();
+        let providerNativeMs = 0;
+        let sqliteWriteMs = 0;
+        let checkpointMs = 0;
+        let idleYieldMs = 0;
         markCatalogAuditCategory('movie', 'fetch_start', { categoryId: category.id });
         beginVodCategoryPhaseProfile(category.id);
         let items: Awaited<ReturnType<NonNullable<MovieDataSource['listCategoryMovies']>>> | null = null;
+        let categoryMatched = 0;
 
         try {
           if (syncMovieItems) {
@@ -1589,17 +2018,34 @@ export async function runMovieCatalogSync(
 
             if (useNative && requestUrl) {
               let matched = 0;
+              logSyncLifecycle(providerId, 'native-request-start', {
+                mediaType: 'movie',
+                runToken,
+                categoryIndex: movieCategoryIndex,
+                categoryId: category.id,
+                generation: sqliteHandle?.generation ?? null,
+                activeNativeRequest: true,
+              });
               const decodeResult = await streamXtreamCategoryDecode({
                 requestUrl,
                 mediaType: 'movie',
                 filterCategoryId: category.id,
                 providerId,
+                generation: sqliteHandle?.generation,
+                categoryIndex: movieCategoryIndex,
+                categoryPosition: movieCategoryIndex + 1,
+                totalCategoryCount: movieCategories.length,
+                requestAttempt: 1,
                 isCancelled,
                 onBatch: async (records) => {
+                  const sqliteCallbackStarted = Date.now();
                   try {
                     matched += records.length;
                     if (sqliteHandle) {
                       recordCatalogSqliteDecoded(sqliteHandle, records.length);
+                    }
+                    for (const record of records) {
+                      distinctItemCategoryIds.add(normalizeStreamCategoryId(record.categoryId));
                     }
                     if (sqliteWriterOnly) {
                       if (sqliteHandle?.enabled && records.length) {
@@ -1644,14 +2090,30 @@ export async function runMovieCatalogSync(
                     }
                     releaseBatch(`movie-native-mapped:${category.id}`, mapped);
                   } finally {
+                    sqliteWriteMs += Date.now() - sqliteCallbackStarted;
                     releaseBatch(`movie-native-raw:${category.id}`, records);
                   }
                 },
               });
+              logSyncLifecycle(providerId, 'native-request-settled', {
+                mediaType: 'movie',
+                runToken,
+                categoryIndex: movieCategoryIndex,
+                categoryId: category.id,
+                generation: sqliteHandle?.generation ?? null,
+                activeNativeRequest: false,
+                cancelled: decodeResult.cancelled,
+                matched: decodeResult.matched,
+              });
+              providerNativeMs =
+                Number(decodeResult.stats.headersMs ?? 0) +
+                Number(decodeResult.stats.downloadParseMs ?? 0);
               if (decodeResult.cancelled || isCancelled()) {
+                logSyncLifecycle(providerId, 'movie-loop-exit', { runToken, categoryIndex: movieCategoryIndex, categoryId: category.id, reason: decodeResult.cancelled ? 'native-category-cancelled' : 'cancelled-after-category' });
                 return;
               }
               matched = decodeResult.matched;
+              categoryMatched = matched;
               setup.movieCountMap[category.id] = matched;
               markCatalogAuditItems(matched, 'processed');
               addVodCategoryPhaseMs('jsonParseMs', Number(decodeResult.stats.downloadParseMs ?? 0));
@@ -1667,6 +2129,7 @@ export async function runMovieCatalogSync(
             } else {
               const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
               items = loaded.items;
+              categoryMatched = items.length;
               if (sqliteHandle) {
                 recordCatalogSqliteDecoded(sqliteHandle, items.length);
               }
@@ -1701,6 +2164,7 @@ export async function runMovieCatalogSync(
             }
           } else if (movies.getCategoryCount) {
             setup.movieCountMap[category.id] = await movies.getCategoryCount(category.id);
+            categoryMatched = setup.movieCountMap[category.id] ?? 0;
           }
 
           const durationMs = Date.now() - categoryStarted;
@@ -1720,22 +2184,351 @@ export async function runMovieCatalogSync(
             durationMs,
             mode: categoryMode,
           });
+          if (sqliteHandle) {
+            recordCatalogSqliteCategoryResult(sqliteHandle, { itemCount: categoryMatched });
+          }
         } catch (error) {
           finishVodCategoryPhaseProfile({
             failed: true,
             error: error instanceof Error ? error.message : String(error),
           });
+          if (sqliteHandle) {
+            recordCatalogSqliteCategoryResult(sqliteHandle, { itemCount: 0, failed: true });
+          }
+          throw error;
+        } finally {
+          releaseBatch(`movie-category:${category.id}`, items);
+        }
+
+        if (syncMovieItems && category.id !== 'all' && !String(category.id).startsWith('section:') && !String(category.id).startsWith('smart:')) {
+          categoriesAttempted += 1;
+          decodedItemCount += categoryMatched;
+          if (categoryMatched > 0) {
+            categoriesReturningItems += 1;
+          } else {
+            categoriesReturningZero += 1;
+          }
+
+          const sparse = evaluateSparsePerCategoryCoverage({
+            categoriesAttempted,
+            categoriesReturningItems,
+            categoriesReturningZero,
+            metadataCategoryCount: movieCategories.length,
+            distinctItemCategoryIds: distinctItemCategoryIds.size,
+            decodedItemCount,
+          });
+          if (sparse.suspicious && !strategyFallbackUsed) {
+            abortedForSparse = true;
+            strategyFallbackUsed = true;
+            logSync(providerId, 'movie-sparse-per-category-abort', {
+              reason: sparse.reason,
+              categoriesAttempted,
+              categoriesReturningItems,
+              categoriesReturningZero,
+              decodedItemCount,
+              distinctItemCategoryIds: distinctItemCategoryIds.size,
+              metadataCategoryCount: movieCategories.length,
+            });
+            await writeVodCategoryFilterCapability({
+              providerId,
+              status: 'unreliable',
+              filteringReliable: false,
+              testedCategoryIds: [],
+              overlapRatio: 0,
+              returnedCategoryIdCounts: [],
+              reason: sparse.reason ?? 'sparse-per-category-coverage',
+              probedAt: Date.now(),
+              storageVersion: 4,
+            });
+            await finishCatalogSqliteMediaSync({
+              handle: sqliteHandle,
+              ok: false,
+              errorCode: 'sparse_per_category_ingestion',
+              nativeDone: false,
+            });
+            retrySource = 'sparse_per_category_ingestion';
+            logSyncLifecycle(providerId, 'movie-generation-replaced-after-failure', {
+              runToken,
+              failedGeneration: sqliteHandle.generation,
+              retrySource,
+              pendingRequestPresent: pendingSyncInputs.has(providerId),
+            });
+            // One automatic strategy fallback: new generation + full dump.
+            sqliteHandle = await startCatalogSqliteMediaSync({
+              providerId,
+              mediaType: 'movie',
+              providerType: input.providerType ?? 'unknown',
+              displayName: input.displayName ?? null,
+              runId,
+            });
+            if (sqliteHandle.enabled) {
+              await writeCategoriesFromSourceBudgeted(
+                sqliteHandle,
+                movieCategories,
+                (category, index) => ({
+                  providerId,
+                  mediaType: 'movie' as const,
+                  categoryId: category.id,
+                  categoryName: category.name,
+                  sortOrder: index,
+                  syncGeneration: sqliteHandle!.generation,
+                }),
+                { isCancelled },
+              );
+            }
+            movieSyncStrategy = 'full-dump-stream-category';
+            filteringReliable = false;
+            filterStatus = 'unreliable';
+            filterReason = sparse.reason ?? 'sparse-per-category-coverage';
+            break;
+          }
+        }
+
+        const checkpointStarted = Date.now();
+        await writeCatalogSyncCheckpointSafe(setup, runToken, 'movies', movieCategoryIndex + 1, setup.resumeSeriesIndex);
+        checkpointMs = Date.now() - checkpointStarted;
+        if (sqliteHandle) {
+          recordCatalogSqliteCheckpoint(sqliteHandle, movieCategoryIndex + 1);
+        }
+        if (movieCategoryIndex === movieStartIndex || (movieCategoryIndex + 1) % 5 === 0) {
+          publishCatalogProgress(setup);
+        }
+        const idleStarted = Date.now();
+        await waitForCatalogSyncIdleSlot();
+        idleYieldMs = Date.now() - idleStarted;
+        logMovieCategoryTiming({
+          generation: sqliteHandle?.generation ?? null,
+          categoryId: category.id,
+          matched: categoryMatched,
+          providerNativeMs,
+          sqliteWriteMs,
+          checkpointMs,
+          idleYieldMs,
+          totalMs: Date.now() - categoryStarted,
+        });
+      }
+
+      if (abortedForSparse && sqliteHandle?.enabled && movieSyncStrategy === 'full-dump-stream-category') {
+        // Fall through by re-entering full-dump via a nested path: schedule force and rethrow
+        // so the outer sync can restart cleanly is fragile — run full dump inline instead.
+        forceMoviesFullDumpByProvider.set(providerId, filterReason);
+        const fullDumpUrl = movies.getCatalogListRequestUrl?.('all') ?? null;
+        if (!fullDumpUrl) {
+          throw new Error('movie_full_dump_url_unavailable');
+        }
+        let rawStreamCount = 0;
+        let decodedStreamCount = 0;
+        let missingCategoryIdCount = 0;
+        const distinctStreamCategoryIds = new Set<string>();
+        const distinctContentIds = new Set<string>();
+        const fullDumpResult = await streamXtreamCategoryDecode({
+          requestUrl: fullDumpUrl,
+          mediaType: 'movie',
+          filterCategoryId: 'all',
+          providerId,
+          isCancelled,
+          onBatch: async (records) => {
+            rawStreamCount += records.length;
+            if (sqliteHandle) {
+              recordCatalogSqliteDecoded(sqliteHandle, records.length);
+            }
+            for (const record of records) {
+              const source =
+                record.categoryId != null && String(record.categoryId).trim() !== ''
+                  ? String(record.categoryId)
+                  : null;
+              if (!source) {
+                missingCategoryIdCount += 1;
+              }
+              distinctStreamCategoryIds.add(normalizeStreamCategoryId(record.categoryId));
+              if (record.contentId) {
+                distinctContentIds.add(record.contentId);
+              }
+            }
+            decodedStreamCount += records.length;
+            if (writerOnly) {
+              await writeCatalogItemsFromSourceBudgeted(
+                sqliteHandle!,
+                records,
+                (record) =>
+                  mapNativeRecordToCatalogItem(
+                    record,
+                    providerId,
+                    'movie',
+                    'all',
+                    sqliteHandle!.generation,
+                    { allowCategoryFallback: false },
+                  ),
+                { isCancelled, mapKind: 'movieMapping' },
+              );
+              return;
+            }
+            const mapped = records.map((record) => {
+              const categoryId = normalizeStreamCategoryId(record.categoryId);
+              return nativeRecordToMovieSummary({ ...record, categoryId }, categoryId) as MovieSummary;
+            });
+            if (movieIndex && mapped.length) {
+              await processTimeBudgeted(
+                mapped,
+                (movie) => {
+                  movieIndex.ingest([movie]);
+                },
+                { isCancelled },
+              );
+            }
+            if (sqliteHandle?.enabled && mapped.length) {
+              await writeCatalogItemsFromSourceBudgeted(
+                sqliteHandle,
+                mapped,
+                (movie) => mapMovieSummaryToCatalogItem(movie, providerId, sqliteHandle!.generation),
+                { isCancelled, mapKind: 'movieMapping' },
+              );
+            }
+          },
+        });
+      if (fullDumpResult.cancelled || isCancelled()) {
+        logSyncLifecycle(providerId, 'movie-category-loop-exit', {
+          runToken,
+          generation: sqliteHandle.generation,
+          categoryLoopStarted,
+          categoryLoopFinished: false,
+          reason: fullDumpResult.cancelled ? 'native-full-dump-cancelled' : 'cancelled-after-full-dump',
+        });
+        return;
+      }
+      categoryLoopFinished = true;
+      categoryDataObserved = decodedStreamCount > 0;
+      logSyncLifecycle(providerId, 'movie-category-loop-finished', {
+        runToken,
+        generation: sqliteHandle.generation,
+        strategy: movieSyncStrategy,
+        decodedStreamCount,
+        categoryLoopStarted,
+        categoryLoopFinished,
+      });
+        markCatalogAuditItems(decodedStreamCount, 'processed');
+        console.info(
+          '[NovaCast Movies Full Dump Sync] ' +
+            JSON.stringify({
+              providerId,
+              generation: sqliteHandle.generation,
+              rawStreamCount: fullDumpResult.stats.rawSeen ?? rawStreamCount,
+              decodedStreamCount,
+              distinctContentIds: distinctContentIds.size,
+              metadataCategoryCount: movieCategories.length,
+              distinctStreamCategoryIds: distinctStreamCategoryIds.size,
+              missingCategoryIdCount,
+              filteringReliable: false,
+              filterStatus,
+              filterReason,
+              strategy: 'full-dump-stream-category',
+              fallbackFrom: 'sparse_per_category_ingestion',
+              marker: 'stage4d-vod-ingestion-repair-v1',
+            }),
+        );
+        forceMoviesFullDumpByProvider.delete(providerId);
+        categoryLoopFinished = true;
+        logSyncLifecycle(providerId, 'movie-category-loop-finished', {
+          runToken,
+          generation: sqliteHandle.generation,
+          strategy: movieSyncStrategy,
+          decodedStreamCount,
+          categoryLoopStarted,
+          categoryLoopFinished,
+          retrySource,
+        });
+      }
+      if (!abortedForSparse) {
+        categoryLoopFinished = true;
+        categoryDataObserved =
+          (sqliteHandle?.accounting.processedCategoryCount ?? 0) > 0 ||
+          (sqliteHandle?.accounting.decodedCount ?? 0) > 0;
+      }
+    } else {
+      // Non-native / non-SQLite path: legacy per-category ingest (no capability gate).
+      movieSyncStrategy = 'filtered-per-category';
+      for (
+        let movieCategoryIndex = movieStartIndex;
+        movieCategoryIndex < movieCategories.length;
+        movieCategoryIndex += 1
+      ) {
+        const category = movieCategories[movieCategoryIndex];
+        if (!(await yieldForPlaybackIfNeeded(providerId, `movie-category:${category.id}`, 'movies', runToken))) {
+          publishCatalogProgress(setup);
+          setup.progressThrottle.flush();
+          schedulePendingHeavySync(providerId, input);
+          return;
+        }
+        if (isCancelled()) {
+          return;
+        }
+
+        const categoryStarted = Date.now();
+        markCatalogAuditCategory('movie', 'fetch_start', { categoryId: category.id });
+        beginVodCategoryPhaseProfile(category.id);
+        let items: Awaited<ReturnType<NonNullable<MovieDataSource['listCategoryMovies']>>> | null = null;
+
+        try {
+          if (syncMovieItems) {
+            const loaded = await loadAllMoviesForCatalogIndex(movies, category.id);
+            items = loaded.items;
+            if (loaded.truncated && movieIndex) {
+              movieIndex.markCategoryLoadTruncated();
+            }
+            if (items.length && movieIndex) {
+              const ingestStarted = Date.now();
+              await processTimeBudgeted(
+                items,
+                (movie) => {
+                  movieIndex.ingest([movie]);
+                },
+                { isCancelled },
+              );
+              addVodCategoryPhaseMs('ingestMs', Date.now() - ingestStarted);
+            }
+            setup.movieCountMap[category.id] = items.length;
+            markCatalogAuditItems(items.length, 'processed');
+            if (sqliteHandle) {
+              recordCatalogSqliteCategoryResult(sqliteHandle, { itemCount: items.length });
+            }
+          } else if (movies.getCategoryCount) {
+            setup.movieCountMap[category.id] = await movies.getCategoryCount(category.id);
+          }
+
+          const durationMs = Date.now() - categoryStarted;
+          finishVodCategoryPhaseProfile({
+            mode: syncMovieItems ? 'full' : 'count-only',
+            durationMs,
+          });
+          markCatalogAuditCategory('movie', 'fetch_done', {
+            categoryId: category.id,
+            count: setup.movieCountMap[category.id] ?? 0,
+            durationMs,
+          });
+        } catch (error) {
+          finishVodCategoryPhaseProfile({
+            failed: true,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (sqliteHandle) {
+            recordCatalogSqliteCategoryResult(sqliteHandle, { itemCount: 0, failed: true });
+          }
           throw error;
         } finally {
           releaseBatch(`movie-category:${category.id}`, items);
         }
 
         await writeCatalogSyncCheckpointSafe(setup, runToken, 'movies', movieCategoryIndex + 1, setup.resumeSeriesIndex);
-        if (movieCategoryIndex === setup.resumeMovieIndex || (movieCategoryIndex + 1) % 5 === 0) {
+        if (sqliteHandle) {
+          recordCatalogSqliteCheckpoint(sqliteHandle, movieCategoryIndex + 1);
+        }
+        if (movieCategoryIndex === movieStartIndex || (movieCategoryIndex + 1) % 5 === 0) {
           publishCatalogProgress(setup);
         }
         await waitForCatalogSyncIdleSlot();
       }
+      categoryLoopFinished = true;
+      categoryDataObserved = (sqliteHandle?.accounting.processedCategoryCount ?? 0) > 0;
     }
 
     if (movieIndex && smartCategoriesEnabled && !isCancelled()) {
@@ -1744,7 +2537,10 @@ export async function runMovieCatalogSync(
         return;
       }
       const rankStarted = Date.now();
-      const rankResult = await rankUniqueItemsInBatches(movieIndex.listAllEntries(), {
+      const rankLoadStarted = Date.now();
+      const rankItems = movieIndex.listAllEntries();
+      const loadMs = Date.now() - rankLoadStarted;
+      const rankResult = await rankUniqueItemsInBatches(rankItems, {
         contentType: 'movie',
         batchSize: VOD_REGION_RANK_BATCH_SIZE,
         isCancelled,
@@ -1758,6 +2554,59 @@ export async function runMovieCatalogSync(
         durationMs: Date.now() - rankStarted,
         batchSize: VOD_REGION_RANK_BATCH_SIZE,
       });
+      console.info('[NovaCast Movie Region Ranking Audit]', {
+        generation: sqliteHandle?.generation ?? null,
+        inputItemCount: rankItems.length,
+        outputItemCount: rankResult.ranked,
+        regionCount: 3,
+        fullCatalogPassCount: 1,
+        sortCount: 0,
+        filterCount: 1,
+        normalizationCount: 0,
+        sqliteQueryCount: 0,
+        loadMs,
+        indexBuildMs: 0,
+        rankingMs: Date.now() - rankStarted - loadMs,
+        sortMs: 0,
+        serializationMs: 0,
+        totalMs: Date.now() - rankStarted,
+        strategy: 'single-pass-ranking-dedicated-region-budget',
+        batches: rankResult.batches,
+        skipped: rankResult.skipped,
+      });
+      console.info('[NovaCast Movie Region Ranking Scheduler Audit]', {
+        generation: sqliteHandle?.generation ?? null,
+        inputItemCount: rankItems.length,
+        initialBatchSize: rankResult.initialBatchSize,
+        minBatchSizeSeen: rankResult.minBatchSizeSeen,
+        maxBatchSizeSeen: rankResult.maxBatchSizeSeen,
+        averageBatchSize: rankResult.averageBatchSize,
+        finalBatchSize: rankResult.finalBatchSize,
+        batchCount: rankResult.batches,
+        yieldCount: rankResult.yieldCount,
+        pressureReductionCount: rankResult.pressureReductionCount,
+        pressureIncreaseCount: rankResult.pressureIncreaseCount,
+        measuredMacrotaskLagMaxMs: rankResult.measuredMacrotaskLagMaxMs,
+        measuredMacrotaskLagAverageMs: rankResult.measuredMacrotaskLagAverageMs,
+        totalYieldMs: rankResult.totalYieldMs,
+        computeMs: rankResult.computeMs,
+        computeVodRegionRankMs: rankResult.computeVodRegionRankMs,
+        setRegionRankMs: rankResult.setRegionRankMs,
+        averageComputeVodRegionRankUsPerItem: rankResult.averageComputeVodRegionRankUsPerItem,
+        averageSetRegionRankUsPerItem: rankResult.averageSetRegionRankUsPerItem,
+        totalMs: Date.now() - rankStarted,
+        budgetKind: 'regionRanking',
+      });
+      console.info('[NovaCast Movie Region Ranking Compute Audit]', {
+        generation: sqliteHandle?.generation ?? null,
+        totalItems: rankResult.ranked,
+        computeVodRegionRankMs: rankResult.computeVodRegionRankMs,
+        setRegionRankMs: rankResult.setRegionRankMs,
+        averageComputeVodRegionRankUsPerItem: rankResult.averageComputeVodRegionRankUsPerItem,
+        averageSetRegionRankUsPerItem: rankResult.averageSetRegionRankUsPerItem,
+        totalComputeMs: rankResult.computeMs,
+      });
+      logMovieCompletionPhase('movie-region-ranking', sqliteHandle?.generation ?? null, rankStarted);
     }
 
     if (smartCategoriesEnabled) {
@@ -1773,7 +2622,9 @@ export async function runMovieCatalogSync(
         schedulePendingHeavySync(providerId, input);
         return;
       }
-      await buildMovieSmartCache(providerId, runToken);
+      const smartStarted = Date.now();
+      await buildMovieSmartCache(providerId, runToken, sqliteHandle?.generation);
+      logMovieCompletionPhase('smart-category-build', sqliteHandle?.generation ?? null, smartStarted);
     }
 
     if (isCancelled()) {
@@ -1783,6 +2634,7 @@ export async function runMovieCatalogSync(
         ok: false,
         errorCode: 'cancelled',
       });
+      logSyncLifecycle(providerId, 'movie-loop-exit', { runToken, reason: 'cancelled-before-completion' });
       return;
     }
 
@@ -1790,12 +2642,41 @@ export async function runMovieCatalogSync(
     setup.progressThrottle.flush();
     movieIndex?.commitSync();
 
+    const completionStarted = Date.now();
+    const activeSyncAudit = syncAuditRuns.get(providerId);
+    console.info('[NovaCast Movie Completion Entry Audit]', {
+      generation: sqliteHandle?.generation ?? 0,
+      runId: activeSyncAudit?.runId ?? runId ?? null,
+      requestId: activeSyncAudit?.requestId ?? null,
+      processedCategoryCount: sqliteHandle?.accounting.processedCategoryCount ?? 0,
+      expectedCategoryCount: movieCategories.length,
+      checkpointCategoryIndex: sqliteHandle?.accounting.checkpointCategoryIndex ?? 0,
+      nativeDone: true,
+      writerDrained: sqliteHandle?.accounting.writerDrained ?? false,
+      pendingWriteCount: sqliteHandle?.accounting.pendingWriteCount ?? 0,
+      categoryLoopStarted,
+      categoryLoopFinished,
+      categoryDataObserved,
+      completionEntryReason:
+        categoryLoopFinished && categoryDataObserved
+          ? 'category-crawl-terminal'
+          : 'category-crawl-not-terminal-or-empty',
+      previousGeneration: null,
+      previousGenerationFailure: null,
+      pendingRequestPresent: pendingSyncInputs.has(providerId),
+      retrySource,
+      generationTokenState: isSyncRunStale(runToken) ? 'stale' : 'current',
+    });
+    if (movieCategories.length > 0 && (!categoryLoopFinished || !categoryDataObserved)) {
+      throw new Error('movie_category_crawl_not_terminal');
+    }
     const movieFinishOk = await finishCatalogSqliteMediaSync({
       handle: sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'movie'),
       ok: true,
       processedCount: Object.values(setup.movieCountMap).reduce((sum, count) => sum + count, 0),
       nativeDone: true,
     });
+    logMovieCompletionPhase('completion-barrier-and-promotion', sqliteHandle?.generation ?? null, completionStarted);
     if (!movieFinishOk) {
       throw new Error('movie_completion_barrier_failed');
     }
@@ -1817,6 +2698,11 @@ export async function runMovieCatalogSync(
     notifyMovieCatalogReady(providerId, sqliteHandle?.generation ?? 0);
     markMediaJobComplete(providerId, 'movie');
   } catch (error) {
+    logSyncLifecycle(providerId, 'movie-loop-error', {
+      runToken,
+      error: error instanceof Error ? error.message : String(error),
+      generationTokenState: isSyncRunStale(runToken) ? 'stale' : 'current',
+    });
     movieIndex?.abortSync();
     if (sqliteHandle?.enabled) {
       await finishCatalogSqliteMediaSync({
@@ -1834,6 +2720,7 @@ export async function runSeriesCatalogSync(
   input: ProviderCatalogSyncInput,
   runToken: number,
   coordinatorKey: string,
+  runId?: string,
 ) {
   const { providerId, series, live } = input;
   const started = Date.now();
@@ -1843,9 +2730,15 @@ export async function runSeriesCatalogSync(
   notifyPhase(providerId, 'syncing');
   markCatalogAuditSync('started', { providerId, mediaType: 'series' });
   logSync(providerId, 'series-sync-started');
+  logSyncLifecycle(providerId, 'series-worker-started', {
+    runToken,
+    generationTokenState: isSyncRunStale(runToken) ? 'stale' : 'current',
+    seriesWorkerState: 'running',
+  });
 
   if (isCancelled()) {
     logSync(providerId, 'series-sync-cancelled', { reason: 'provider-reset' });
+    logSyncLifecycle(providerId, 'series-loop-exit', { runToken, reason: 'cancelled-before-work' });
     return;
   }
 
@@ -1878,7 +2771,16 @@ export async function runSeriesCatalogSync(
       mediaType: 'series',
       providerType: input.providerType ?? 'unknown',
       displayName: input.displayName ?? null,
+      runId,
     });
+
+    if (sqliteHandle.enabled) {
+      emitSeriesSqliteEvent('series_sqlite_refresh_started', {
+        providerId,
+        generation: sqliteHandle.generation,
+        categoryCount: seriesCategories.length,
+      });
+    }
 
     if (sqliteHandle.enabled) {
       await writeCategoriesFromSourceBudgeted(
@@ -1904,8 +2806,27 @@ export async function runSeriesCatalogSync(
       setup.resumeSeriesIndex,
     );
 
+    // Generation-safe tables cannot resume item progress from an older
+    // generation. Every fresh SQLite Series generation must own a complete
+    // category/item walk of its own.
+    const seriesStartIndex = sqliteHandle?.enabled ? 0 : setup.resumeSeriesIndex;
+    if (sqliteHandle?.enabled) {
+      for (const categoryId of Object.keys(setup.seriesCountMap)) {
+        delete setup.seriesCountMap[categoryId];
+      }
+      if (smartCategoriesEnabled && canResumeCheckpoint) {
+        seriesIndex?.beginSync();
+      }
+      console.info('[NovaCast Series Generation Resume Guard]', {
+        providerId,
+        generation: sqliteHandle.generation,
+        checkpointResumeSeriesIndex: setup.resumeSeriesIndex,
+        seriesStartIndex,
+        action: 'fresh-generation-full-rewalk',
+      });
+    }
     for (
-      let seriesCategoryIndex = setup.resumeSeriesIndex;
+      let seriesCategoryIndex = seriesStartIndex;
       seriesCategoryIndex < seriesCategories.length;
       seriesCategoryIndex += 1
     ) {
@@ -1914,9 +2835,11 @@ export async function runSeriesCatalogSync(
         publishCatalogProgress(setup);
         setup.progressThrottle.flush();
         schedulePendingHeavySync(providerId, input);
+        logSyncLifecycle(providerId, 'series-loop-exit', { runToken, categoryIndex: seriesCategoryIndex, categoryId: category.id, reason: 'playback-deferral' });
         return;
       }
       if (isCancelled()) {
+        logSyncLifecycle(providerId, 'series-loop-exit', { runToken, categoryIndex: seriesCategoryIndex, categoryId: category.id, reason: 'cancelled-before-category' });
         return;
       }
 
@@ -1938,6 +2861,14 @@ export async function runSeriesCatalogSync(
           }
 
           if (useNative && requestUrl) {
+            logSyncLifecycle(providerId, 'native-request-start', {
+              mediaType: 'series',
+              runToken,
+              categoryIndex: seriesCategoryIndex,
+              categoryId: category.id,
+              generation: sqliteHandle?.generation ?? null,
+              activeNativeRequest: true,
+            });
             const decodeResult = await streamXtreamCategoryDecode({
               requestUrl,
               mediaType: 'series',
@@ -1997,7 +2928,18 @@ export async function runSeriesCatalogSync(
                 }
               },
             });
+            logSyncLifecycle(providerId, 'native-request-settled', {
+              mediaType: 'series',
+              runToken,
+              categoryIndex: seriesCategoryIndex,
+              categoryId: category.id,
+              generation: sqliteHandle?.generation ?? null,
+              activeNativeRequest: false,
+              cancelled: decodeResult.cancelled,
+              matched: decodeResult.matched,
+            });
             if (decodeResult.cancelled || isCancelled()) {
+              logSyncLifecycle(providerId, 'series-loop-exit', { runToken, categoryIndex: seriesCategoryIndex, categoryId: category.id, reason: decodeResult.cancelled ? 'native-category-cancelled' : 'cancelled-after-category' });
               return;
             }
             setup.seriesCountMap[category.id] = decodeResult.matched;
@@ -2073,7 +3015,7 @@ export async function runSeriesCatalogSync(
         setup.movieCategories.length,
         seriesCategoryIndex + 1,
       );
-      if (seriesCategoryIndex === setup.resumeSeriesIndex || (seriesCategoryIndex + 1) % 5 === 0) {
+      if (seriesCategoryIndex === seriesStartIndex || (seriesCategoryIndex + 1) % 5 === 0) {
         publishCatalogProgress(setup);
       }
       await waitForCatalogSyncIdleSlot();
@@ -2109,6 +3051,7 @@ export async function runSeriesCatalogSync(
         ok: false,
         errorCode: 'cancelled',
       });
+      logSyncLifecycle(providerId, 'series-loop-exit', { runToken, reason: 'cancelled-before-completion' });
       return;
     }
 
@@ -2116,11 +3059,36 @@ export async function runSeriesCatalogSync(
     setup.progressThrottle.flush();
     seriesIndex?.commitSync();
 
-    await finishCatalogSqliteMediaSync({
-      handle: sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'series'),
+    const seriesProcessedCount = Object.values(setup.seriesCountMap).reduce((sum, count) => sum + count, 0);
+    const seriesFinishHandle = sqliteHandle ?? createDisabledCatalogSqliteMediaSyncHandle(providerId, 'series');
+    const seriesFinishOk = await finishCatalogSqliteMediaSync({
+      handle: seriesFinishHandle,
       ok: true,
-      processedCount: Object.values(setup.seriesCountMap).reduce((sum, count) => sum + count, 0),
+      processedCount: seriesProcessedCount,
     });
+    if (seriesFinishHandle.enabled) {
+      if (seriesFinishOk) {
+        emitSeriesSqliteEvent('series_sqlite_refresh_validated', {
+          providerId,
+          generation: seriesFinishHandle.generation,
+          rowCount: seriesProcessedCount,
+        });
+        emitSeriesSqliteEvent('series_sqlite_generation_promoted', {
+          providerId,
+          generation: seriesFinishHandle.generation,
+          rowCount: seriesProcessedCount,
+        });
+      } else {
+        emitSeriesSqliteEvent('series_sqlite_refresh_failed', {
+          providerId,
+          generation: seriesFinishHandle.generation,
+          reason: 'promotion_validation_failed',
+        });
+      }
+    }
+    if (!seriesFinishOk) {
+      throw new Error('series_completion_barrier_failed');
+    }
 
     await writeCatalogSyncCheckpointSafe(
       setup,
@@ -2138,12 +3106,25 @@ export async function runSeriesCatalogSync(
     markCatalogAuditSync('completed', { providerId, mediaType: 'series', durationMs: Date.now() - started });
     markMediaJobComplete(providerId, 'series');
   } catch (error) {
+    logSyncLifecycle(providerId, 'series-loop-error', {
+      runToken,
+      error: error instanceof Error ? error.message : String(error),
+      generationTokenState: isSyncRunStale(runToken) ? 'stale' : 'current',
+    });
     seriesIndex?.abortSync();
     if (sqliteHandle?.enabled) {
+      const errorCode = error instanceof Error ? error.message : 'series_sync_failed';
+      if (errorCode !== 'series_completion_barrier_failed') {
+        emitSeriesSqliteEvent('series_sqlite_refresh_failed', {
+          providerId,
+          generation: sqliteHandle.generation,
+          reason: errorCode,
+        });
+      }
       await finishCatalogSqliteMediaSync({
         handle: sqliteHandle,
         ok: false,
-        errorCode: error instanceof Error ? error.message : 'series_sync_failed',
+        errorCode,
       });
     }
     throw error;
@@ -2160,20 +3141,56 @@ export async function runProviderCatalogSync(input: ProviderCatalogSyncInput, ru
   ]);
 }
 
-function startProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: number) {
+function startProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: number, requestId: string) {
   const providerId = input.providerId;
+  const runId = `run-${++syncAuditSequence}`;
+  logSyncLifecycle(providerId, 'provider-sync-enter', {
+    requestId,
+    runId,
+    runToken,
+    coordinatorState: 'starting',
+    pendingRequestPresent: pendingSyncInputs.has(providerId),
+  });
+  syncAuditRuns.set(providerId, { requestId, runId, source: input.requestSource ?? 'unspecified', runToken, startedAt: Date.now() });
+  logSyncLifecycle(providerId, 'sync-run-created', {
+    requestId,
+    runId,
+    runToken,
+    requestSource: input.requestSource ?? 'unspecified',
+    generationTokenState: 'current',
+  });
   const movieKey = buildCatalogSyncKey(providerId, 'movie');
   const seriesKey = buildCatalogSyncKey(providerId, 'series');
 
   const task = Promise.all([
     scheduleCatalogSync(
       movieKey,
-      () => runMovieCatalogSync(input, runToken, movieKey),
+      () => {
+        logSyncLifecycle(providerId, 'provider-sync-starting', {
+          requestId,
+          runId,
+          runToken,
+          mediaType: 'movie',
+          coordinatorState: 'running',
+          pendingRequestPresent: pendingSyncInputs.has(providerId),
+        });
+        return runMovieCatalogSync(input, runToken, movieKey, runId);
+      },
       { delayMs: movieCatalogScheduleDelayMs },
     ),
     scheduleCatalogSync(
       seriesKey,
-      () => runSeriesCatalogSync(input, runToken, seriesKey),
+      () => {
+        logSyncLifecycle(providerId, 'provider-sync-starting', {
+          requestId,
+          runId,
+          runToken,
+          mediaType: 'series',
+          coordinatorState: 'running',
+          pendingRequestPresent: pendingSyncInputs.has(providerId),
+        });
+        return runSeriesCatalogSync(input, runToken, seriesKey, runId);
+      },
       { delayMs: seriesCatalogScheduleDelayMs },
     ),
   ])
@@ -2194,10 +3211,27 @@ function startProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: num
         error: error instanceof Error ? error.message : String(error),
         cachedDataPreserved: true,
       });
+      logSyncLifecycle(providerId, 'sync-run-rejected', {
+        requestId,
+        runId,
+        runToken,
+        error: error instanceof Error ? error.message : String(error),
+      });
     })
     .finally(() => {
       syncInFlight.delete(providerId);
       catalogSyncSetupCache.delete(catalogSyncSetupKey(providerId, runToken));
+      const active = syncAuditRuns.get(providerId);
+      logSyncLifecycle(providerId, 'sync-run-resolved', {
+        requestId,
+        runId,
+        runToken,
+        generationTokenState: runToken === syncGeneration ? 'current' : 'stale',
+        pendingRequestPresent: pendingSyncInputs.has(providerId),
+      });
+      if (active?.runId === runId) {
+        syncAuditRuns.delete(providerId);
+      }
       if (runToken !== syncGeneration) {
         return;
       }
@@ -2213,21 +3247,104 @@ function startProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: num
 }
 
 export function scheduleProviderCatalogSync(input: ProviderCatalogSyncInput) {
+  const requestId = `request-${++syncAuditSequence}`;
+  logSyncLifecycle(input.providerId, 'coordinator-enter', {
+    requestId,
+    requestSource: input.requestSource ?? 'unspecified',
+    coordinatorState: syncInFlight.has(input.providerId) ? 'active' : 'idle',
+    pendingRequestPresent: pendingSyncInputs.has(input.providerId),
+  });
   markCatalogAuditSync('requested', { providerId: input.providerId });
-  logSync(input.providerId, 'sync-requested');
+  logSync(input.providerId, 'sync-requested', { requestId, requestSource: input.requestSource ?? 'unspecified' });
 
   const existing = syncInFlight.get(input.providerId);
   if (existing) {
-    // Keep the latest request; resume once the in-flight job finishes.
-    pendingSyncInputs.set(input.providerId, input);
+    const active = syncAuditRuns.get(input.providerId);
+    const duplicateActivation =
+      input.requestSource === 'provider-bundle-activation' &&
+      active?.source === 'provider-bundle-activation';
+    // Duplicate provider activation requests attach to the existing bootstrap.
+    // They must not become a second generation after the first run completes.
+    if (!duplicateActivation) {
+      // Keep the latest non-bootstrap request; resume once the in-flight job finishes.
+      pendingSyncInputs.set(input.providerId, input);
+    }
+    logSyncLifecycle(input.providerId, 'sync-request-deduped', {
+      requestId,
+      requestSource: input.requestSource ?? 'unspecified',
+      requestedWhileActive: true,
+      dedupeAction: duplicateActivation ? 'attach-existing-bootstrap' : 'queue-latest-refresh',
+      pendingRequestPresent: pendingSyncInputs.has(input.providerId),
+    });
+    logSyncLifecycle(input.providerId, 'coordinator-deduped', {
+      requestId,
+      requestSource: input.requestSource ?? 'unspecified',
+      coordinatorState: 'active',
+      pendingRequestPresent: pendingSyncInputs.has(input.providerId),
+      duplicateActivation,
+    });
     return existing;
   }
 
   const runToken = syncGeneration;
-  return startProviderCatalogSync(input, runToken);
+  logSyncLifecycle(input.providerId, 'coordinator-queued', {
+    requestId,
+    requestSource: input.requestSource ?? 'unspecified',
+    coordinatorState: 'queued',
+    pendingRequestPresent: pendingSyncInputs.has(input.providerId),
+    runToken,
+  });
+  return startProviderCatalogSync(input, runToken, requestId);
+}
+
+/** Stage 4.2D: force the next Movies sync onto full-dump-stream-category. */
+export function forceMoviesFullDumpForProvider(providerId: string, reason: string) {
+  forceMoviesFullDumpByProvider.set(providerId, reason);
+}
+
+/** Invalidate the completed checkpoint so sparse catalogs cannot skip repair. */
+export async function invalidateMoviesCatalogSyncCheckpoint(providerId: string): Promise<void> {
+  if (typeof AsyncStorage.removeItem !== 'function') {
+    return;
+  }
+  await AsyncStorage.removeItem(catalogSyncCheckpointKey(providerId)).catch(() => undefined);
+}
+
+/**
+ * Movies-only sparse repair: force full dump, invalidate checkpoint, reschedule sync.
+ * Does not clear credentials, activation, Live TV, or Series data.
+ */
+export function scheduleMoviesCatalogRepair(input: {
+  providerId: string;
+  forceFullDump: boolean;
+  reason: string;
+  movies: MovieDataSource;
+  series: ProviderSeriesRepository;
+  live: ProviderLiveRepository;
+  providerType?: string;
+  displayName?: string;
+}) {
+  if (input.forceFullDump) {
+    forceMoviesFullDumpForProvider(input.providerId, input.reason);
+  }
+  void invalidateMoviesCatalogSyncCheckpoint(input.providerId);
+  return scheduleProviderCatalogSync({
+    providerId: input.providerId,
+    providerType: input.providerType,
+    displayName: input.displayName,
+    movies: input.movies,
+    series: input.series,
+    live: input.live,
+  });
 }
 
 export function cancelProviderCatalogSync(providerId?: string) {
+  if (providerId) {
+    logSyncLifecycle(providerId, 'sync-run-cancelled', {
+      reason: 'provider-catalog-sync-cancelled',
+      syncGenerationBefore: syncGeneration,
+    });
+  }
   syncGeneration += 1;
   if (providerId) {
     pendingSyncInputs.delete(providerId);
@@ -2267,10 +3384,13 @@ export async function hydrateProviderLibraryCaches(providerId: string) {
 
 export function clearProviderCatalogSyncForTests() {
   syncInFlight.clear();
+  syncAuditRuns.clear();
+  syncAuditSequence = 0;
   pendingSyncInputs.clear();
   syncListeners.clear();
   catalogSyncSetupCache.clear();
   mediaJobCompletion.clear();
+  forceMoviesFullDumpByProvider.clear();
   checkpointWriteChain = Promise.resolve();
   syncGeneration = 0;
   lastReleasedBatchLabel = null;
@@ -2278,6 +3398,10 @@ export function clearProviderCatalogSyncForTests() {
   seriesCatalogScheduleDelayMs = 0;
   lastCheckpointWriteAt = 0;
   clearCatalogSyncCoordinatorForTests();
+}
+
+export function getForceMoviesFullDumpReasonForTests(providerId: string) {
+  return forceMoviesFullDumpByProvider.get(providerId) ?? null;
 }
 
 export function setCatalogSyncShellDelaysForTests(delays: {

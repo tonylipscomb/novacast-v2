@@ -8,7 +8,9 @@ import {
   launchUnifiedPlayback,
   subscribeUnifiedPlayer,
 } from './unifiedPlayerStore.ts';
-import { prepareUnifiedPlaybackLaunch } from './UnifiedPlayerController.tsx';
+import { buildProgressKey, getSavedProgress, resetPlaybackProgress } from './playbackProgressStore.ts';
+import { resolveLaunchResumePosition } from '../continuity/playbackResumeGate.ts';
+import { getAppSettingsSync } from '@/features/settings/appSettingsStore.ts';
 
 /**
  * Activity-only snapshot — excludes positionMs/durationMs so browse screens
@@ -64,8 +66,54 @@ export function useUnifiedPlayer() {
   previousActiveRef.current = isActive;
 
   const launchPlayback = useCallback(async (item: PlaybackItem, options?: LaunchPlaybackOptions) => {
-    const prepared = await prepareUnifiedPlaybackLaunch(item);
-    launchUnifiedPlayback(prepared, options);
+    if (item.mediaType === 'live' || !item.providerId) {
+      launchUnifiedPlayback(item, options);
+      return;
+    }
+
+    if (!getAppSettingsSync().resumePlayback) {
+      launchUnifiedPlayback({ ...item, resumePositionMs: 0 }, options);
+      return;
+    }
+
+    const policy = options?.resumePolicy ?? (item.resumePositionMs != null && item.resumePositionMs > 0 ? 'silent' : 'prompt');
+    const saved = await getSavedProgress(buildProgressKey(item.providerId, item.mediaType, item.id));
+    if (policy === 'silent') {
+      launchUnifiedPlayback(
+        {
+          ...item,
+          resumePositionMs: item.resumePositionMs ?? saved?.positionMs ?? 0,
+        },
+        options,
+      );
+      return;
+    }
+    const decision = await resolveLaunchResumePosition({
+      policy,
+      contentId: item.id,
+      mediaType: item.mediaType,
+      title: item.title,
+      positionMs: item.resumePositionMs ?? saved?.positionMs ?? 0,
+      durationMs: saved?.durationMs ?? 0,
+      seasonNumber: item.seasonNumber,
+      episodeNumber: item.episodeNumber,
+    });
+
+    if (decision.action === 'cancel') {
+      return;
+    }
+
+    if (decision.resetProgress) {
+      await resetPlaybackProgress(buildProgressKey(item.providerId, item.mediaType, item.id));
+    }
+
+    launchUnifiedPlayback(
+      {
+        ...item,
+        resumePositionMs: decision.resumePositionMs,
+      },
+      options,
+    );
   }, []);
 
   const closePlayback = useCallback(() => {

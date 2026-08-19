@@ -21,7 +21,8 @@ export function createInitialLiveTvState(
   return {
     selectedCategoryId,
     selectedChannelId,
-    // Arrive on Live TV / a category with an auto-starting preview of the landing channel.
+    // Fixture / search direct-play bootstrap: start preview for an already-chosen channel.
+    // Normal Live TV open uses createLiveTvLandingState (idle, no autoplay).
     previewChannelId: hasChannel ? selectedChannelId : null,
     previewStatus: hasChannel ? 'loading' : 'idle',
     previewRequestId: hasChannel ? 1 : 0,
@@ -31,13 +32,25 @@ export function createInitialLiveTvState(
   };
 }
 
+/** Open Live TV with restored selection/focus targets but no automatic preview. */
+export function createLiveTvLandingState(
+  selectedCategoryId = 'entertainment',
+  selectedChannelId = 'entertainment-nova-one',
+): LiveTvState {
+  return {
+    selectedCategoryId,
+    selectedChannelId,
+    previewChannelId: null,
+    previewStatus: 'idle',
+    previewRequestId: 0,
+    previewError: null,
+    previewConfirmedChannelId: null,
+    fullscreenChannelId: null,
+  };
+}
+
 export function selectLiveCategory(state: LiveTvState, categoryId: string, firstChannelId: string): LiveTvState {
-  if (
-    state.selectedCategoryId === categoryId &&
-    state.selectedChannelId === firstChannelId &&
-    state.previewChannelId === firstChannelId &&
-    (state.previewStatus === 'loading' || state.previewStatus === 'ready')
-  ) {
+  if (state.selectedCategoryId === categoryId && state.selectedChannelId === firstChannelId) {
     return state;
   }
 
@@ -46,7 +59,6 @@ export function selectLiveCategory(state: LiveTvState, categoryId: string, first
       ...state,
       selectedCategoryId: categoryId,
       selectedChannelId: '',
-      previewConfirmedChannelId: null,
       fullscreenChannelId: null,
     };
   }
@@ -55,12 +67,7 @@ export function selectLiveCategory(state: LiveTvState, categoryId: string, first
     ...state,
     selectedCategoryId: categoryId,
     selectedChannelId: firstChannelId,
-    // Explicit category selection (OK/press): auto-start preview for the first channel once.
-    previewChannelId: firstChannelId,
-    previewConfirmedChannelId: firstChannelId,
-    previewStatus: 'loading',
-    previewRequestId: state.previewRequestId + 1,
-    previewError: null,
+    // Category browse must not start or switch the embedded preview.
     fullscreenChannelId: null,
   };
 }
@@ -77,20 +84,19 @@ export function clearPreviewConfirmationOnFocus(state: LiveTvState, focusedChann
 }
 
 /**
- * Record focus without changing selection or starting preview.
- * Selection stays on the last OK/category tune.
+ * Record focus without changing selection, confirmation, or starting preview.
+ * Focus must never mutate the active preview. Confirmation stays so a later
+ * OK on the already-previewing channel can still enter fullscreen.
  */
 export function focusLiveChannel(state: LiveTvState, channelId: string): LiveTvState {
-  let next = clearPreviewConfirmationOnFocus(state, channelId);
-
-  if (next.fullscreenChannelId && next.fullscreenChannelId !== channelId) {
-    next = {
-      ...next,
+  if (state.fullscreenChannelId && state.fullscreenChannelId !== channelId) {
+    return {
+      ...state,
       fullscreenChannelId: null,
     };
   }
 
-  return next;
+  return state;
 }
 
 /**
@@ -115,7 +121,21 @@ export function applyDebouncedPreview(state: LiveTvState, channelId: string): Li
   };
 }
 
-export function chooseLiveChannel(state: LiveTvState, channelId: string): LiveTvState {
+export type ChooseLiveChannelOrigin = 'browse' | 'search';
+
+export type ChooseLiveChannelOptions = {
+  origin?: ChooseLiveChannelOrigin;
+};
+
+export function chooseLiveChannel(
+  state: LiveTvState,
+  channelId: string,
+  options?: ChooseLiveChannelOptions,
+): LiveTvState {
+  if (options?.origin === 'search') {
+    return surfLiveFullscreenChannel(state, channelId);
+  }
+
   const canEnterFullscreen =
     state.previewConfirmedChannelId === channelId &&
     state.previewChannelId === channelId &&
@@ -169,6 +189,36 @@ export function resolveLivePreview(
     ...state,
     previewStatus: outcome,
     previewError: outcome === 'error' ? errorMessage ?? 'This channel could not be loaded right now.' : null,
+  };
+}
+
+export function surfLiveFullscreenChannel(state: LiveTvState, channelId: string): LiveTvState {
+  if (
+    state.previewChannelId === channelId &&
+    (state.previewStatus === 'loading' || state.previewStatus === 'ready') &&
+    state.fullscreenChannelId === channelId
+  ) {
+    return state;
+  }
+
+  if (state.previewChannelId === channelId && (state.previewStatus === 'loading' || state.previewStatus === 'ready')) {
+    return {
+      ...state,
+      selectedChannelId: channelId,
+      previewConfirmedChannelId: channelId,
+      fullscreenChannelId: channelId,
+    };
+  }
+
+  return {
+    ...state,
+    selectedChannelId: channelId,
+    previewChannelId: channelId,
+    previewConfirmedChannelId: channelId,
+    previewStatus: 'loading',
+    previewRequestId: state.previewRequestId + 1,
+    previewError: null,
+    fullscreenChannelId: channelId,
   };
 }
 

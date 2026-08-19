@@ -4,9 +4,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { ContinueWatchingEntry, WatchHistoryEntry } from './mediaTypes';
 import type { FavoriteRecord } from '../personalization/personalizationModel.ts';
 
+import { COMPLETED_PROGRESS_PERCENT, isContinueWatchingEligible } from '../playback/continuity/playbackContinuity.ts';
+
 const STORAGE_KEY = '@novacast/media-library';
 const LEGACY_MOVIE_KEY = '@novacast/movie-library';
-const WATCHED_THRESHOLD_PERCENT = 90;
 const MAX_HISTORY = 300;
 
 export type ProviderMediaLibraryState = {
@@ -50,6 +51,8 @@ function normalizeWatchEntry(value: unknown): WatchHistoryEntry | null {
     watchedAt: typeof entry.watchedAt === 'number' ? entry.watchedAt : Date.now(),
     progressPercent: typeof entry.progressPercent === 'number' ? entry.progressPercent : undefined,
     durationMs: typeof entry.durationMs === 'number' ? entry.durationMs : undefined,
+    positionMs: typeof entry.positionMs === 'number' ? entry.positionMs : undefined,
+    episodeId: typeof entry.episodeId === 'string' ? entry.episodeId : undefined,
   };
 }
 
@@ -144,7 +147,7 @@ function migrateLegacyMovieStore(legacy: unknown, providerId: string): ProviderM
       : [],
     continueWatching: Array.isArray(state.watchHistory)
       ? state.watchHistory
-          .filter((entry) => (entry.progressPercent ?? 100) < WATCHED_THRESHOLD_PERCENT)
+          .filter((entry) => isContinueWatchingEligible((entry.durationMs ?? 0) * ((entry.progressPercent ?? 0) / 100), entry.durationMs ?? 0))
           .map((entry) => ({
             mediaKind: 'movie' as const,
             providerId,
@@ -303,8 +306,12 @@ export async function updateContinueWatching(
   const progressPercent = entry.progressPercent ?? computeProgressPercent(entry.positionMs, entry.durationMs);
   const lastWatchedAt = entry.lastWatchedAt ?? Date.now();
 
-  if (progressPercent >= WATCHED_THRESHOLD_PERCENT) {
-    const continueWatching = current.continueWatching.filter((item) => item.mediaId !== entry.mediaId);
+  if (!isContinueWatchingEligible(entry.positionMs, entry.durationMs) || progressPercent >= COMPLETED_PROGRESS_PERCENT) {
+    const continueWatching = current.continueWatching.filter((item) =>
+      entry.mediaKind === 'episode' && entry.seriesId
+        ? item.seriesId !== entry.seriesId
+        : item.mediaId !== entry.mediaId,
+    );
     await writeStore({ ...store, [providerId]: { ...current, continueWatching } });
     return null;
   }
@@ -312,7 +319,11 @@ export async function updateContinueWatching(
   const nextEntry: ContinueWatchingEntry = { ...entry, providerId, progressPercent, lastWatchedAt };
   const continueWatching = [
     nextEntry,
-    ...current.continueWatching.filter((item) => item.mediaId !== entry.mediaId),
+    ...current.continueWatching.filter((item) =>
+      entry.mediaKind === 'episode' && entry.seriesId
+        ? item.seriesId !== entry.seriesId
+        : item.mediaId !== entry.mediaId,
+    ),
   ].slice(0, 50);
 
   await writeStore({ ...store, [providerId]: { ...current, continueWatching } });
@@ -357,6 +368,8 @@ export async function recordEpisodeProgress(input: {
     categoryId: input.categoryId,
     progressPercent: computeProgressPercent(input.positionMs, input.durationMs),
     durationMs: input.durationMs,
+    positionMs: input.positionMs,
+    episodeId: input.episodeId,
   });
 
   return updateContinueWatching(input.providerId, {
@@ -374,6 +387,47 @@ export async function recordEpisodeProgress(input: {
     positionMs: input.positionMs,
     durationMs: input.durationMs,
   });
+}
+
+export async function handoffSeriesContinueWatchingToNextEpisode(input: {
+  providerId: string;
+  seriesId: string;
+  seasonNumber: string;
+  episodeNumber: string;
+  episodeId: string;
+  title: string;
+  seriesTitle?: string;
+  artworkUrl?: string;
+  durationMs?: number;
+}) {
+  const store = await readStore();
+  const current = getProviderState(store, input.providerId);
+  const mediaId = buildEpisodeMediaId(input.seriesId, input.seasonNumber, input.episodeNumber);
+  const nextEntry: ContinueWatchingEntry = {
+    mediaKind: 'episode',
+    mediaId,
+    providerId: input.providerId,
+    seriesId: input.seriesId,
+    seasonNumber: input.seasonNumber,
+    episodeNumber: input.episodeNumber,
+    episodeId: input.episodeId,
+    title: input.title,
+    seriesTitle: input.seriesTitle,
+    artworkUrl: input.artworkUrl,
+    positionMs: 0,
+    durationMs: input.durationMs ?? 0,
+    progressPercent: 0,
+    lastWatchedAt: Date.now(),
+  };
+  const continueWatching = [
+    nextEntry,
+    ...current.continueWatching.filter((item) => item.seriesId !== input.seriesId),
+  ].slice(0, 50);
+  await writeStore({
+    ...store,
+    [input.providerId]: { ...current, continueWatching },
+  });
+  return nextEntry;
 }
 
 export async function getFavoriteIds(providerId: string) {
@@ -408,12 +462,41 @@ export async function getWatchlistIds(providerId: string) {
   return watchlist;
 }
 
+export function resolveWatchHistorySeriesId(entry: { seriesId?: string; mediaId: string }): string {
+  if (entry.seriesId) {
+    return entry.seriesId;
+  }
+  const [seriesId] = entry.mediaId.split(':');
+  return seriesId || entry.mediaId;
+}
+
 export async function getRecentlyWatchedIds(providerId: string, limit = 50) {
   const { watchHistory } = await getMediaLibraryState(providerId);
   return watchHistory
     .sort((left, right) => right.watchedAt - left.watchedAt)
     .slice(0, limit)
     .map((entry) => entry.mediaId);
+}
+
+export async function getRecentlyWatchedSeriesIds(providerId: string, limit = 50) {
+  const { watchHistory } = await getMediaLibraryState(providerId);
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of [...watchHistory].sort((left, right) => right.watchedAt - left.watchedAt)) {
+    if (entry.mediaKind !== 'episode') {
+      continue;
+    }
+    const seriesId = resolveWatchHistorySeriesId(entry);
+    if (!seriesId || seen.has(seriesId)) {
+      continue;
+    }
+    seen.add(seriesId);
+    ids.push(seriesId);
+    if (ids.length >= limit) {
+      break;
+    }
+  }
+  return ids;
 }
 
 export function clearMediaLibraryCacheForTests() {
@@ -460,9 +543,35 @@ export function useMediaLibraryStore(providerId: string) {
       ready,
       isFavorite: (mediaId: string) => state.favorites.includes(mediaId) || state.favoriteRecords.some((item) => item.contentId === mediaId),
       isWatchlisted: (mediaId: string) => state.watchlist.includes(mediaId),
-      seriesContinueWatching: (seriesId: string) =>
-        state.continueWatching.find((entry) => entry.mediaKind === 'episode' && entry.seriesId === seriesId) ?? null,
+      seriesContinueWatching: (seriesId: string) => {
+        const current = state.continueWatching.find((entry) => entry.mediaKind === 'episode' && entry.seriesId === seriesId);
+        if (current) {
+          return current;
+        }
+        const last = state.watchHistory.find((entry) => entry.mediaKind === 'episode' && entry.seriesId === seriesId);
+        if (!last) {
+          return null;
+        }
+        const durationMs = last.durationMs ?? 0;
+        const positionMs = durationMs > 0 ? (durationMs * (last.progressPercent ?? 0)) / 100 : 0;
+        return {
+          mediaKind: 'episode' as const,
+          providerId,
+          mediaId: last.mediaId,
+          seriesId: last.seriesId,
+          seasonNumber: last.seasonNumber,
+          episodeNumber: last.episodeNumber,
+          title: last.title,
+          seriesTitle: last.seriesTitle,
+          artworkUrl: last.artworkUrl,
+          categoryId: last.categoryId,
+          positionMs,
+          durationMs,
+          progressPercent: last.progressPercent ?? 0,
+          lastWatchedAt: last.watchedAt,
+        };
+      },
     }),
-    [ready, state],
+    [providerId, ready, state],
   );
 }

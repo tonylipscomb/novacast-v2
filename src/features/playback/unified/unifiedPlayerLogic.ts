@@ -1,11 +1,19 @@
 import type { PlaybackActivityType } from '../playbackActivityStore.ts';
 import type { PlaybackItem, PlaybackLaunchSource, PlaybackMode, UnifiedPlayerMachineState } from './types.ts';
+import {
+  isDevicePerformanceRiskMessage,
+  isUnsupportedVideoFormatMessage,
+  isVideoDecoderInitFailure,
+  UNSUPPORTED_VIDEO_FORMAT_CATEGORY,
+  UNSUPPORTED_VIDEO_FORMAT_ERROR,
+} from './moviePlaybackCompatibility.ts';
+import { resolveVodSeekDirection, VOD_SEEK_STEP_MS } from './vodSeek.ts';
 
 export const UNIFIED_PLAYER_CHROME_AUTO_HIDE_MS = 4000;
 export const UNIFIED_PLAYER_LOADING_TIMEOUT_MS = 20_000;
 export const UNIFIED_PLAYER_BUFFERING_TIMEOUT_MS = 30_000;
 export const SEEK_BACK_MS = 10_000;
-export const SEEK_FORWARD_MS = 30_000;
+export const SEEK_FORWARD_MS = 10_000;
 
 export type UnifiedBackAction = 'close-playback' | 'leave-screen' | 'swallow';
 
@@ -112,6 +120,38 @@ export function shouldAutoHideUnifiedControls(machineState: UnifiedPlayerMachine
   );
 }
 
+/**
+ * Chrome may appear for a real playback transition (session start, pause, error).
+ * It must not reappear merely because auto-hide set controlsVisible=false.
+ */
+export function shouldRevealChromeFromPlaybackState(input: {
+  playbackActive: boolean;
+  previousPlaybackActive: boolean;
+  machineState: UnifiedPlayerMachineState;
+  previousMachineState: UnifiedPlayerMachineState | null;
+  isPlaying: boolean;
+  previousIsPlaying: boolean;
+  itemId?: string | null;
+  previousItemId?: string | null;
+}): boolean {
+  if (!input.playbackActive) {
+    return false;
+  }
+  if (!input.previousPlaybackActive) {
+    return true;
+  }
+  if (input.itemId && input.itemId !== input.previousItemId) {
+    return true;
+  }
+  if (input.machineState === 'error' && input.previousMachineState !== 'error') {
+    return true;
+  }
+  if (!input.isPlaying && input.previousIsPlaying) {
+    return true;
+  }
+  return false;
+}
+
 export const UNIFIED_CONTROL_ACTIVATE_DEBOUNCE_MS = 120;
 export const UNIFIED_SEEK_STEP_MS = 10_000;
 export const UNIFIED_SEEK_FLUSH_DEBOUNCE_MS = 120;
@@ -175,18 +215,14 @@ export function resolveUnifiedOverlayKeyAction(
     return null;
   }
 
-  if (isUnifiedControlActivateKey(key, keyCode)) {
-    return 'toggle-play';
-  }
-
-  if (isUnifiedDpadNavigationKey(key, keyCode)) {
+  if (isUnifiedControlActivateKey(key, keyCode) || isUnifiedDpadNavigationKey(key, keyCode)) {
     return 'reveal';
   }
 
   return null;
 }
 
-export type UnifiedControlFocusId = 'back' | 'rewind' | 'play' | 'forward' | 'seek';
+export type UnifiedControlFocusId = 'back' | 'rewind' | 'play' | 'forward' | 'seek' | 'previousEpisode' | 'nextEpisode';
 
 type UnifiedKeyEvent = {
   key?: string;
@@ -213,7 +249,16 @@ function isArrowDown(event: UnifiedKeyEvent): boolean {
 export function resolveUnifiedControlFocusMove(
   current: UnifiedControlFocusId,
   event: UnifiedKeyEvent,
+  options?: {
+    episodeButtonsVisible?: boolean;
+    canGoPreviousEpisode?: boolean;
+    canGoNextEpisode?: boolean;
+  },
 ): UnifiedControlFocusId | null {
+  const episodeButtonsVisible = Boolean(options?.episodeButtonsVisible);
+  const canGoPreviousEpisode = Boolean(options?.canGoPreviousEpisode);
+  const canGoNextEpisode = Boolean(options?.canGoNextEpisode);
+
   if (current === 'seek') {
     if (isArrowUp(event)) {
       return 'play';
@@ -225,21 +270,33 @@ export function resolveUnifiedControlFocusMove(
   }
 
   if (isArrowLeft(event)) {
+    if (current === 'nextEpisode') {
+      return 'forward';
+    }
     if (current === 'forward') {
       return 'play';
     }
     if (current === 'play') {
       return 'rewind';
     }
+    if (current === 'rewind') {
+      return episodeButtonsVisible && canGoPreviousEpisode ? 'previousEpisode' : null;
+    }
     return null;
   }
 
   if (isArrowRight(event)) {
+    if (current === 'previousEpisode') {
+      return 'rewind';
+    }
     if (current === 'rewind') {
       return 'play';
     }
     if (current === 'play') {
       return 'forward';
+    }
+    if (current === 'forward') {
+      return episodeButtonsVisible && canGoNextEpisode ? 'nextEpisode' : null;
     }
     return null;
   }
@@ -248,7 +305,7 @@ export function resolveUnifiedControlFocusMove(
     if (current === 'play') {
       return 'seek';
     }
-    if (current === 'rewind' || current === 'forward') {
+    if (current === 'rewind' || current === 'forward' || current === 'previousEpisode' || current === 'nextEpisode') {
       return 'back';
     }
     return null;
@@ -261,7 +318,7 @@ export function resolveUnifiedControlFocusMove(
     if (current === 'play') {
       return 'seek';
     }
-    if (current === 'rewind' || current === 'forward') {
+    if (current === 'rewind' || current === 'forward' || current === 'previousEpisode' || current === 'nextEpisode') {
       return 'seek';
     }
     return null;
@@ -298,13 +355,8 @@ export function resolveUnifiedSeekPosition(
 }
 
 export function resolveUnifiedSeekDelta(eventType?: string | null): number | null {
-  if (eventType === 'left' || eventType === 'ArrowLeft' || eventType === 'DPAD_LEFT') {
-    return -UNIFIED_SEEK_STEP_MS;
-  }
-  if (eventType === 'right' || eventType === 'ArrowRight' || eventType === 'DPAD_RIGHT') {
-    return UNIFIED_SEEK_STEP_MS;
-  }
-  return null;
+  const direction = resolveVodSeekDirection({ eventType });
+  return direction == null ? null : direction * VOD_SEEK_STEP_MS;
 }
 
 export function shouldHandleUnifiedSeekRemoteEvent(input: {
@@ -337,7 +389,16 @@ export function shouldAssignUnifiedPlayerInitialFocus(input: {
   return input.visible && !input.initialFocusAssigned && input.focusedControl == null;
 }
 
-export function sanitizePlaybackErrorMessage(_raw?: string | null): string {
+export function sanitizePlaybackErrorMessage(
+  raw?: string | null,
+  mediaType?: string | null,
+): string {
+  if (mediaType === 'movie' && isDevicePerformanceRiskMessage(raw)) {
+    return raw ?? UNSUPPORTED_VIDEO_FORMAT_ERROR;
+  }
+  if (mediaType === 'movie' && (isUnsupportedVideoFormatMessage(raw) || isVideoDecoderInitFailure(raw))) {
+    return UNSUPPORTED_VIDEO_FORMAT_ERROR;
+  }
   return 'Playback unavailable';
 }
 
@@ -355,8 +416,12 @@ export type PlaybackNotificationSpec = {
 export function resolveUnifiedPlaybackNotification(
   machineState: UnifiedPlayerMachineState,
   retryAttemptedAndStillFailing: boolean,
+  errorCategory?: string | null,
 ): PlaybackNotificationSpec | null {
   if (machineState !== 'error') {
+    return null;
+  }
+  if (errorCategory === UNSUPPORTED_VIDEO_FORMAT_CATEGORY) {
     return null;
   }
 

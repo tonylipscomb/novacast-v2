@@ -56,8 +56,10 @@ test('Movies completion barrier verifies rows before completeCatalogSync', () =>
   assert.match(sync, /subscribeMovieCatalogReady/);
 });
 
-test('Stage 4 movie categories stream for category-rail while pendingCategories remain staged', () => {
-  assert.match(writer, /Stage 4 category-rail/);
+test('Stage 4 movie categories stream to SQLite while pendingCategories remain staged', () => {
+  // Categories may stream for sync progress; Movies UI readiness is gated separately (4.2A).
+  assert.match(writer, /Stage 4 \/ 4\.2A/);
+  assert.match(writer, /must not treat/);
   assert.match(writer, /handle\.pendingCategories = categories\.map\(mapCategory\)/);
   assert.match(writer, /sqlite-categories-streamed/);
   assert.match(writer, /categories: handle\.pendingCategories/);

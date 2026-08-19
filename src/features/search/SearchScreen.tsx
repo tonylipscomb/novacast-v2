@@ -17,6 +17,7 @@ import { NovaTvShell, type NovaNavigationFocusHandles } from '@/components/nova'
 import { NovaFocusRow } from '@/components/nova/NovaFocusRow';
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
@@ -132,28 +133,40 @@ export function SearchScreen() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (searchMedia.detailOpen) {
-        searchMedia.closeDetail();
-        return true;
-      }
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'search-screen',
+        () => {
+          if (searchMedia.detailOpen) {
+            searchMedia.closeDetail();
+            return true;
+          }
 
-      if (searchMedia.playbackClosing) {
-        return true;
-      }
+          if (searchMedia.playbackClosing) {
+            return true;
+          }
 
-      if (searchMedia.playbackActive) {
-        searchMedia.closePlayback();
-        return true;
-      }
+          if (searchMedia.playbackActive) {
+            searchMedia.closePlayback();
+            return true;
+          }
 
-      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
-        return true;
-      }
+          if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
+            return true;
+          }
 
-      router.replace(TV_HOME_ROUTE);
-      return true;
-    });
+          router.replace(TV_HOME_ROUTE);
+          return true;
+        },
+        () => ({
+          screen: 'SearchScreen',
+          detailOpen: searchMedia.detailOpen,
+          playbackActive: searchMedia.playbackActive,
+          playbackClosing: searchMedia.playbackClosing,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
   }, [
@@ -234,6 +247,19 @@ export function SearchScreen() {
     (result: SearchResult) => {
       const key = searchResultKey(result);
       setFocusedResultKey(key);
+
+      // search-live-unified-direct-v2
+      // Keep Search mounted under the app-wide Unified Player. That preserves the query,
+      // result list, and native focused row so Back returns to the exact Search context.
+      if (result.type === 'live') {
+        rememberSearchScreenMemory(activeProviderId, {
+          query,
+          scope,
+          focusedResultKey: key,
+        });
+        searchMedia.startLivePlayback(result);
+        return;
+      }
 
       if (result.type === 'movie' || result.type === 'series') {
         rememberSearchScreenMemory(activeProviderId, {

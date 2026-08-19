@@ -289,7 +289,7 @@ test('movie playback remains unchanged', async () => {
   assert.equal(resumeMs, 120_000);
 });
 
-test('smart series data source prepends Discover rows', async () => {
+test('smart series data source keeps provider categories and does not inject Discover', async () => {
   clearMoviesSettingsCacheForTests();
   await setHideSmartCategories(false);
   resetSeriesCatalogIndex('demo-provider');
@@ -298,12 +298,8 @@ test('smart series data source prepends Discover rows', async () => {
   const smart = createSmartSeriesDataSource(base, 'demo-provider');
   const categories = await smart.getCategories();
 
-  const discoverIndex = categories.findIndex((category) => category.id === 'section:discover');
-  const providerIndex = categories.findIndex((category) => category.id === 'section:provider');
-
-  assert.ok(discoverIndex >= 0);
-  assert.ok(providerIndex > discoverIndex);
-  assert.ok(categories.some((category) => category.kind === 'smart'));
+  assert.equal(categories.findIndex((category) => category.id === 'section:discover'), -1);
+  assert.equal(categories.some((category) => category.kind === 'smart'), false);
   assert.ok(categories.some((category) => category.kind === 'provider'));
 });
 
@@ -324,11 +320,8 @@ test('smart series data source loads provider and smart category pages', async (
   });
   assert.ok(providerPage.items.length > 0);
 
-  const smartCategory = (await smart.getCategories()).find((category) => category.kind === 'smart');
-  assert.ok(smartCategory);
-
   const smartPage = await smart.getSeriesPage({
-    categoryId: smartCategory.id,
+    categoryId: 'smart:favorites',
     offset: 0,
     limit: 5,
   });

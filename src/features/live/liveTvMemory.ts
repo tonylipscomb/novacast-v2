@@ -1,3 +1,5 @@
+import { isSyntheticLiveFavoritesCategoryId, sanitizePersistedLiveCategoryId } from '../providers/liveCategoryIdSafety.ts';
+
 export type LiveTvMemory = {
   selectedCategoryId: string;
   selectedChannelId: string;
@@ -30,15 +32,35 @@ function getMemoryForProvider(providerId: string) {
   return next;
 }
 
+function sanitizeLiveTvMemory(memory: LiveTvMemory): LiveTvMemory {
+  const selectedCategoryId = sanitizePersistedLiveCategoryId(memory.selectedCategoryId);
+  const focusedCategoryId =
+    memory.focusedCategoryId && !isSyntheticLiveFavoritesCategoryId(memory.focusedCategoryId)
+      ? memory.focusedCategoryId
+      : selectedCategoryId || null;
+
+  if (memory.selectedCategoryId === selectedCategoryId && memory.focusedCategoryId === focusedCategoryId) {
+    return memory;
+  }
+
+  memory.selectedCategoryId = selectedCategoryId;
+  memory.focusedCategoryId = focusedCategoryId;
+  return memory;
+}
+
 export function getLiveTvMemory(providerId = 'demo-provider') {
-  return getMemoryForProvider(providerId);
+  return sanitizeLiveTvMemory(getMemoryForProvider(providerId));
 }
 
 export function rememberLiveTvMemory(providerId: string, next: Partial<LiveTvMemory>) {
-  memoryByProvider.set(providerId, {
-    ...getMemoryForProvider(providerId),
-    ...next,
-  });
+  const current = getMemoryForProvider(providerId);
+  memoryByProvider.set(
+    providerId,
+    sanitizeLiveTvMemory({
+      ...current,
+      ...next,
+    }),
+  );
 }
 
 export function resetLiveTvMemory(providerId?: string) {

@@ -61,6 +61,17 @@ Deno.serve(async (request) => {
     if (!managedProviderId) {
       return jsonResponse({ errorCategory: 'managed_provider_required' }, 400);
     }
+    const { data: managedProvider, error: providerError } = await client
+      .from('managed_providers')
+      .select('id,status')
+      .eq('id', managedProviderId)
+      .maybeSingle();
+    if (providerError || !managedProvider) {
+      return jsonResponse({ errorCategory: 'provider_not_found' }, 400);
+    }
+    if (String(managedProvider.status ?? '') !== 'active') {
+      return jsonResponse({ errorCategory: 'provider_inactive' }, 400);
+    }
     const { data, error } = await client
       .from('beta_invites')
       .insert({

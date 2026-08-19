@@ -1,10 +1,13 @@
 import { DEFAULT_BROWSE_CATEGORY_ID } from '../media-browser/mediaCategoryUtils.ts';
+import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 
 type SeriesScreenMemory = {
   selectedCategoryId: string;
   focusedSeriesId: string | null;
   selectedSeriesId: string | null;
   selectedSeasonId: string | null;
+  openDiscoverZone?: boolean;
+  pendingSeriesDetail?: SeriesSummary | null;
 };
 
 const DEFAULT_MEMORY: SeriesScreenMemory = {
@@ -12,6 +15,7 @@ const DEFAULT_MEMORY: SeriesScreenMemory = {
   focusedSeriesId: null,
   selectedSeriesId: null,
   selectedSeasonId: null,
+  pendingSeriesDetail: null,
 };
 
 const memoryByProvider = new Map<string, SeriesScreenMemory>();

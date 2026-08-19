@@ -243,27 +243,37 @@ export function createProviderSeriesDataSource(
       return repository.getCatalogListRequestUrl?.(categoryId) ?? null;
     },
 
-    async searchSeries({ query, offset, limit }) {
+    async searchSeries({ query, offset, limit, signal }) {
+      // search-s3-cancellable-series
+      const throwIfAborted = () => {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      };
+      throwIfAborted();
       const normalized = normalizeSearchQuery(query);
       if (!normalized) {
         return { items: [], totalCount: 0, hasMore: false };
       }
 
       const categories = await repository.getCategories();
+      throwIfAborted();
       const seenSeriesIds = new Set<string>();
       const matches: SeriesSummary[] = [];
 
       for (const category of categories) {
+        throwIfAborted();
         let items = categoryCache.get(category.id);
         if (!items) {
           const posters = await repository.getSeries(category.id);
+          throwIfAborted();
           items = posters.map((poster, index) => mapPosterToSummary(poster, category.id, index));
           if (items.length <= MAX_CACHED_CATEGORY_ITEMS) {
             categoryCache.set(category.id, items);
           }
         }
 
+        let searchItemIndex = 0;
         for (const item of items) {
+          if ((searchItemIndex++ & 255) === 0) throwIfAborted();
           const dedupeKey = item.seriesId || item.id;
           if (seenSeriesIds.has(dedupeKey)) {
             continue;

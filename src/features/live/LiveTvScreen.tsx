@@ -23,6 +23,7 @@ import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-vid
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
 import type { PlaybackItem } from '@/features/playback/unified/types';
 import { playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
@@ -37,13 +38,13 @@ import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
 import {
-  applyDebouncedPreview,
   chooseLiveChannel,
-  clearPreviewConfirmationOnFocus,
   closeLiveFullscreen,
   createInitialLiveTvState,
+  createLiveTvLandingState,
   createLiveTvShellState,
   focusLiveChannel,
+  surfLiveFullscreenChannel,
   LIVE_TV_LOAD_NOTIFICATION_ID,
   LIVE_TV_NOTIFICATION_DURATION_MS,
   LIVE_TV_PREVIEW_NOTIFICATION_ID,
@@ -59,7 +60,6 @@ import {
   didFullscreenJustClose,
   didFullscreenJustOpen,
   isChannelPressEnteringFullscreen,
-  shouldFocusPreviewActionAfterChannelOk,
   type FullscreenLaunchSource,
 } from './liveTvFocusRestoration';
 import {
@@ -80,6 +80,7 @@ import { LiveTvChannelList } from './LiveTvChannelList';
 import { formatLiveTvCategoryCount } from './liveTvCategoryCount';
 import type { LiveTvChannelRowShellData } from './liveTvChannelRowData';
 import { getLiveTvMemory, rememberLiveTvMemory } from './liveTvMemory';
+import { sanitizePersistedLiveCategoryId } from '@/features/providers/liveCategoryIdSafety';
 import {
   recordRecentItem,
   toggleLiveFavorite,
@@ -96,21 +97,66 @@ import {
   shouldClearPreviewStreamUrl,
 } from './liveTvPreviewScheduling';
 import {
-  shouldApplyDebouncedPreviewTune,
   shouldLoadCategoryOnFocusAlone,
-  shouldSkipPreviewRestart,
 } from './liveTvFocusPreview';
 import {
   recordLiveTvFocusEvent,
-  recordLiveTvPreviewCancel,
-  recordLiveTvPreviewStart,
 } from './liveTvFocusDiagnostics';
+import { LiveTvFocusRouter, type LiveTvFocusRouterHandle } from './LiveTvFocusRouter';
+import { logLiveSelection } from './liveTvSelectionDiagnostics';
+import {
+  LIVE_SURF_OVERLAY_HIDE_MS,
+  createLiveSurfSessionId,
+  logLiveSurf,
+  resolveLiveSurfAdjacent,
+  shouldApplyLiveSurfResolution,
+} from './liveTvSurf';
+import {
+  LIVE_CHANNEL_SURF_DEBOUNCE_MS,
+  shouldHandleLiveChannelSurf,
+} from '@/features/playback/continuity/playbackContinuity';
 import { getLiveTvRowVisualFlags } from './liveTvUiPerfMode';
+import { favoriteSurfQueueIds, hydrateFavoriteLiveChannels } from './liveFavoriteHydration';
+import { logLivePerformance } from './liveTvDiagnostics';
+import { LiveTvChannelListReveal, LiveTvPlanetLoader } from './LiveTvPlanetLoader';
+import {
+  logLiveChannelPanelLoader,
+  resolveLiveChannelPanelLoaderKind,
+  shouldShowLiveChannelPanelLoader,
+} from './liveTvChannelPanelLoader';
+import { patchLiveTvWorkload } from './liveTvWorkload';
+import { cancelLiveTvEpgWork } from './liveTvChannelEpg';
+import { cancelLiveSearchCatalogBuild } from '@/features/search/liveSearchSqliteCatalog';
 import { useLiveTvScreenModel } from './useLiveTvScreenModel';
+import { getLiveChannelIndexEntry } from '@/features/search/liveChannelIndex';
 import { displayLiveProgramText, isRawLiveStreamValue } from './liveTvProgramText';
+import {
+  isLiveSearchUiBlockingSurf,
+  mergeLiveSearchPlaybackChannels,
+  buildLiveSearchResultIds,
+  createLiveSearchBrowseSnapshot,
+  decideLiveSearchScreenBack,
+  getLastLiveSearchBackConsumedAtMs,
+  logLiveSearchBack,
+  markLiveSearchBackConsumed,
+  resolveLivePlaybackChannel,
+  resolveLiveSearchSurfQueue,
+  restoreLiveSearchBrowseState,
+  shouldKeepLiveSearchMounted,
+  shouldLiveSearchBlockBackgroundFocus,
+  shouldRestoreLiveBrowseFocusAfterFullscreen,
+  shouldShowLiveSearchOverlay,
+  suppressLiveSearchOverlayClose,
+  toLiveSearchPlaybackChannel,
+  type LiveSearchBrowseSnapshot,
+  type LiveSearchPlaybackChannel,
+} from './liveTvSearchSession';
+import { logLiveSearchFocus } from '@/features/search/liveSearchResultsScroll';
 import { SearchOverlay } from '@/features/search/SearchOverlay';
+import { DiscoverZoneOverlay } from '@/features/personalization/DiscoverZoneOverlay';
 import { searchLiveChannels } from '@/features/search/repositories/liveSearchRepository';
-import type { SearchResult } from '@/features/search/searchTypes';
+import type { LiveSearchResult, SearchResult } from '@/features/search/searchTypes';
+import { MovieToolbar } from '@/features/movies/components/MovieToolbar';
 
 const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false } as const) : {};
 
@@ -157,10 +203,12 @@ export function LiveTvScreen() {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
-  const routeParams = useLocalSearchParams<{ categoryId?: string | string[]; channelId?: string | string[]; returnRoute?: string | string[] }>();
+  const routeParams = useLocalSearchParams<{ categoryId?: string | string[]; channelId?: string | string[]; returnRoute?: string | string[]; directPlay?: string | string[] }>();
   const { width, height } = useWindowDimensions();
   const tvDensity = getTvDensity(width);
   const navigationGateRef = useRef(createTvNavigationGate());
+  // search-live-directplay-v1
+  const directPlayConsumedRef = useRef(false);
   const { selectedProvider, selectedProviderLabel, selectedProviderExpiration } = useProviderStore();
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
   const { state: personalizationState } = usePersonalizationStore(activeProviderId);
@@ -174,6 +222,10 @@ export function LiveTvScreen() {
       : routeParams.returnRoute === 'search'
         ? '/search'
         : TV_HOME_ROUTE;
+  const directPlayRequested =
+    routeParams.returnRoute === 'search' &&
+    routeParams.directPlay === '1' &&
+    Boolean(routeChannelId && routeCategoryId);
   const {
     bundle,
     status: loadStatus,
@@ -182,12 +234,16 @@ export function LiveTvScreen() {
     categoryTotalCount,
     channels,
     selectedCategoryId,
+    channelListPending,
     selectCategory: loadCategoryChannels,
     enrichFocusedChannelEpg,
     resolvePlaybackUrl,
     reload,
     initialChannel,
-  } = useLiveTvScreenModel(routeCategoryId ?? liveMemory.selectedCategoryId, routeChannelId ?? liveMemory.selectedChannelId);
+  } = useLiveTvScreenModel(
+    sanitizePersistedLiveCategoryId(routeCategoryId ?? liveMemory.selectedCategoryId),
+    routeChannelId ?? liveMemory.selectedChannelId,
+  );
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
   const liveRetryAttemptedRef = useRef(false);
   const livePreviewRetryAttemptedRef = useRef(false);
@@ -199,7 +255,17 @@ export function LiveTvScreen() {
   const [fullscreenChromeVisible, setFullscreenChromeVisible] = useState(true);
   const [focusedAction, setFocusedAction] = useState<'favorite' | 'fullscreen' | 'retry' | 'search' | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [discoverZoneOpen, setDiscoverZoneOpen] = useState(false);
   const [searchOverlayReady, setSearchOverlayReady] = useState(false);
+  const [searchRestoreChannelId, setSearchRestoreChannelId] = useState<string | null>(null);
+  const [searchCloseFocusHold, setSearchCloseFocusHold] = useState(false);
+  const searchToolbarRef = useRef<View | null>(null);
+  const searchCloseHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveSearchBrowseSnapshotRef = useRef<LiveSearchBrowseSnapshot | null>(null);
+  const liveSearchResultIdsRef = useRef<string[]>([]);
+  const liveSearchSurfQueueRef = useRef<string[] | null>(null);
+  const liveSearchSelectedIdRef = useRef<string | null>(null);
+  const liveSearchPlaybackByIdRef = useRef<Map<string, LiveSearchPlaybackChannel>>(new Map());
   const [fullscreenRetryNodeTag, setFullscreenRetryNodeTag] = useState<number | null>(null);
   const chromeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bootstrapState = useMemo(() => {
@@ -209,8 +275,13 @@ export function LiveTvScreen() {
 
     const categoryId = selectedCategoryId || channels[0]?.categoryId || '';
     const channelId = initialChannel?.id ?? channels[0]?.id ?? '';
-    return createInitialLiveTvState(categoryId, channelId);
-  }, [channels, initialChannel, selectedCategoryId]);
+    // Search direct-play still bootstraps an explicit preview so the existing
+    // ready → tuneChannel fullscreen path can run. Normal open stays idle.
+    if (directPlayRequested) {
+      return createInitialLiveTvState(categoryId, channelId);
+    }
+    return createLiveTvLandingState(categoryId, channelId);
+  }, [channels, directPlayRequested, initialChannel, selectedCategoryId]);
   const liveState = interactionState ?? bootstrapState;
   liveStateRef.current = liveState;
   const shellLiveState = useMemo(() => {
@@ -222,7 +293,107 @@ export function LiveTvScreen() {
     return createLiveTvShellState(categoryId);
   }, [categories, selectedCategoryId]);
   const renderState = liveState ?? shellLiveState;
-  const searchBlocksBrowse = searchOverlayReady;
+  const searchOverlayVisible = shouldShowLiveSearchOverlay({
+    searchSessionOpen: searchOpen,
+    fullscreenChannelId: liveState?.fullscreenChannelId,
+  });
+  const showChannelPanelLoader = shouldShowLiveChannelPanelLoader({
+    channelListPending,
+    loadStatus,
+    channelCount: channels.length,
+    searchOverlayVisible,
+    fullscreenActive: Boolean(liveState?.fullscreenChannelId),
+  });
+  const searchOwnsBackgroundFocus = shouldLiveSearchBlockBackgroundFocus(searchOverlayVisible, searchCloseFocusHold);
+  const searchOpenRef = useRef(false);
+  const searchOverlayVisibleRef = useRef(false);
+  searchOpenRef.current = searchOpen;
+  searchOverlayVisibleRef.current = searchOverlayVisible;
+  const wasFullscreenRef = useRef(false);
+  const hadReadyChannelListRef = useRef(false);
+  const channelLoaderShownAtRef = useRef(0);
+  const channelLoaderVisibleRef = useRef(false);
+  const channelLoaderKindRef = useRef<'initial' | 'category'>('initial');
+  if (channels.length > 0 && loadStatus === 'ready') {
+    hadReadyChannelListRef.current = true;
+  }
+
+  useEffect(() => {
+    if (showChannelPanelLoader === channelLoaderVisibleRef.current) {
+      return;
+    }
+
+    if (showChannelPanelLoader) {
+      const kind = resolveLiveChannelPanelLoaderKind({
+        channelListPending,
+        channelCount: channels.length,
+        hadReadyChannelList: hadReadyChannelListRef.current,
+      });
+      channelLoaderKindRef.current = kind;
+      channelLoaderShownAtRef.current = Date.now();
+      logLiveChannelPanelLoader({
+        event: kind === 'initial' ? 'initial-loader-shown' : 'category-loader-shown',
+        categoryIdPresent: Boolean(selectedCategoryId),
+        channelCount: channels.length,
+      });
+    } else {
+      const kind = channelLoaderKindRef.current;
+      const durationMs = channelLoaderShownAtRef.current ? Date.now() - channelLoaderShownAtRef.current : 0;
+      logLiveChannelPanelLoader({
+        event: kind === 'initial' ? 'initial-loader-hidden' : 'category-loader-hidden',
+        categoryIdPresent: Boolean(selectedCategoryId),
+        channelCount: channels.length,
+        durationMs,
+      });
+    }
+    channelLoaderVisibleRef.current = showChannelPanelLoader;
+  }, [channelListPending, channels.length, selectedCategoryId, showChannelPanelLoader]);
+
+  useEffect(() => {
+    patchLiveTvWorkload(
+      {
+        activeScreen: 'live',
+        fullscreenActive: Boolean(liveState?.fullscreenChannelId),
+        searchOverlayVisible,
+      },
+      { log: true, reason: 'live-screen-flags' },
+    );
+    if (searchOverlayVisible || liveState?.fullscreenChannelId) {
+      cancelLiveTvEpgWork(searchOverlayVisible ? 'search-overlay' : 'fullscreen');
+    }
+  }, [liveState?.fullscreenChannelId, searchOverlayVisible]);
+
+  useEffect(() => {
+    return () => {
+      patchLiveTvWorkload(
+        {
+          activeScreen: 'other',
+          fullscreenActive: false,
+          searchOverlayVisible: false,
+          searchImeActive: false,
+          surfTransitionInFlight: false,
+        },
+        { log: true, reason: 'live-screen-unmount' },
+      );
+    };
+  }, []);
+
+  const previousLiveProviderIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const nextId = bundle?.providerId ?? '';
+    const previousId = previousLiveProviderIdRef.current;
+    if (previousId && previousId !== nextId) {
+      cancelLiveSearchCatalogBuild(previousId);
+    }
+    previousLiveProviderIdRef.current = nextId || null;
+  }, [bundle?.providerId]);
+  useEffect(() => {
+    const isFullscreen = Boolean(liveState?.fullscreenChannelId);
+    if (wasFullscreenRef.current && !isFullscreen && !searchOpenRef.current) {
+      liveSearchSurfQueueRef.current = null;
+    }
+    wasFullscreenRef.current = isFullscreen;
+  }, [liveState?.fullscreenChannelId]);
   const fullscreenChannelIdRef = useRef<string | null>(null);
   useEffect(() => {
     fullscreenChannelIdRef.current = liveState?.fullscreenChannelId ?? null;
@@ -255,12 +426,24 @@ export function LiveTvScreen() {
   }
 
   const selectedChannel = useMemo(
-    () => channels.find((channel) => channel.id === liveState?.selectedChannelId) ?? channels[0] ?? null,
+    () =>
+      resolveLivePlaybackChannel(liveState?.selectedChannelId, channels, liveSearchPlaybackByIdRef.current) ??
+      channels[0] ??
+      null,
     [channels, liveState?.selectedChannelId],
   );
   const previewChannel = useMemo(
-    () => channels.find((channel) => channel.id === liveState?.previewChannelId) ?? selectedChannel,
+    () =>
+      resolveLivePlaybackChannel(liveState?.previewChannelId, channels, liveSearchPlaybackByIdRef.current) ??
+      selectedChannel,
     [channels, selectedChannel, liveState?.previewChannelId],
+  );
+  const [focusedChannelId, setFocusedChannelId] = useState<string | null>(
+    liveMemory.focusedChannelId ?? null,
+  );
+  const focusedChannel = useMemo(
+    () => channels.find((channel) => channel.id === focusedChannelId) ?? null,
+    [channels, focusedChannelId],
   );
   const rowVisualFlags = getLiveTvRowVisualFlags();
   const frozenPreviewChannelRef = useRef<ProviderLiveChannel | null>(null);
@@ -279,10 +462,14 @@ export function LiveTvScreen() {
   }
   const detailPanelChannel = rowVisualFlags.freezeDetailPanel
     ? frozenPreviewChannelRef.current ?? previewChannel
-    : previewChannel;
+    : (focusedChannel ?? selectedChannel ?? previewChannel);
   const detailChannelIsFavorite = personalizationState.liveFavorites.map((item) => item.contentId).includes(detailPanelChannel?.id ?? '');
+  const liveFavoriteContentIds = useMemo(
+    () => new Set(personalizationState.liveFavorites.map((item) => item.contentId)),
+    [personalizationState.liveFavorites],
+  );
   const fullscreenChannel = useMemo(
-    () => channels.find((channel) => channel.id === liveState?.fullscreenChannelId) ?? null,
+    () => resolveLivePlaybackChannel(liveState?.fullscreenChannelId, channels, liveSearchPlaybackByIdRef.current),
     [channels, liveState?.fullscreenChannelId],
   );
   const livePlaybackItem = useMemo<PlaybackItem | null>(() => {
@@ -320,8 +507,7 @@ export function LiveTvScreen() {
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [categoryNextFocusRightHandle, setCategoryNextFocusRightHandle] = useState<number | undefined>();
-  const pendingPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const focusedChannelIdRef = useRef<string | null>(null);
+  const focusedChannelIdRef = useRef<string | null>(liveMemory.focusedChannelId ?? null);
   const [categoryFocusEpoch, setCategoryFocusEpoch] = useState(0);
   const watchButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenCloseButtonRef = useRef<ElementRef<typeof View>>(null);
@@ -332,11 +518,12 @@ export function LiveTvScreen() {
   const fullscreenRetryFocusKeyRef = useRef<string | null>(null);
   const fullscreenInteractionRef = useRef<ElementRef<typeof View>>(null);
   const lastChannelOkPressRef = useRef<LiveTvOkPressRecord | null>(null);
-  const pendingPreviewActionFocusRef = useRef<string | null>(null);
   const preferredCategoryFocusId = useRef(liveMemory.focusedCategoryId ?? categories[0]?.id ?? null);
   const preferredChannelFocusId = useRef(liveMemory.focusedChannelId ?? channels[0]?.id ?? null);
   const preferCategoryFocusRef = useRef(true);
   const preferChannelFocusRef = useRef(true);
+  const surfSessionIdRef = useRef<string | null>(null);
+  const intendedSurfChannelIdRef = useRef<string | null>(null);
 
   const registerFullscreenRetryButtonRef = useCallback((instance: ElementRef<typeof View> | null) => {
     fullscreenRetryButtonRef.current = instance;
@@ -397,19 +584,65 @@ export function LiveTvScreen() {
 
     const channelId = liveState.previewChannelId;
     const requestId = liveState.previewRequestId;
-    const channel = channels.find((item) => item.id === channelId) ?? null;
+    const channel = resolveLivePlaybackChannel(channelId, channels, liveSearchPlaybackByIdRef.current);
     const timer = setTimeout(() => {
+      const latest = liveStateRef.current;
+      const surfSessionActive = Boolean(surfSessionIdRef.current && latest?.fullscreenChannelId);
+      if (
+        !latest ||
+        latest.previewRequestId !== requestId ||
+        latest.previewChannelId !== channelId ||
+        (surfSessionActive &&
+          !shouldApplyLiveSurfResolution({
+            requestId,
+            latestRequestId: latest.previewRequestId,
+            toChannelId: channelId,
+            latestChannelId: intendedSurfChannelIdRef.current,
+          }))
+      ) {
+        if (surfSessionActive) {
+          logLiveSurf({
+            event: 'stale-transition-dropped',
+            toChannelId: channelId,
+            fromChannelId: latest?.fullscreenChannelId ?? latest?.previewChannelId ?? null,
+            requestId,
+            surfSessionId: surfSessionIdRef.current,
+          });
+        }
+        logLiveSelection('stale-preview-ignored', {
+          focusedChannelId: focusedChannelIdRef.current,
+          activePreviewChannelId: latest?.previewChannelId ?? null,
+          actionSource: 'preview-resolve',
+          requestToken: requestId,
+        });
+        return;
+      }
+
       const playbackUrl = resolvePlaybackUrl(channel);
       if (!playbackUrl) {
         setPreviewStreamUrl(null);
         setState((current) =>
-          resolveLivePreview(current ?? liveState, requestId, channelId, 'error', 'This channel is unavailable right now.'),
+          resolveLivePreview(current ?? latest, requestId, channelId, 'error', 'This channel is unavailable right now.'),
         );
         return;
       }
 
       setPreviewStreamUrl(playbackUrl);
-      setState((current) => resolveLivePreview(current ?? liveState, requestId, channelId, 'ready'));
+      if (surfSessionActive) {
+        logLiveSurf({
+          event: 'source-resolved',
+          toChannelId: channelId,
+          requestId,
+          surfSessionId: surfSessionIdRef.current,
+        });
+      }
+      logLiveSelection('preview-active', {
+        focusedChannelId: focusedChannelIdRef.current,
+        activePreviewChannelId: channelId,
+        actionSource: 'preview-resolve',
+        requestToken: requestId,
+      });
+      setState((current) => resolveLivePreview(current ?? latest, requestId, channelId, 'ready'));
     }, PREVIEW_FOCUS_DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
@@ -429,40 +662,100 @@ export function LiveTvScreen() {
       return;
     }
 
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (guide.visible) {
-        return true;
-      }
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'live-screen',
+        () => {
+          if (guide.visible) {
+            return true;
+          }
 
-      const action = decideLiveTvBackAction(
-        fullscreenChannelIdRef.current,
-        isRestoringFullscreenFocusRef.current,
-      );
+          const nowMs = Date.now();
+          const lastConsumedAtMs = getLastLiveSearchBackConsumedAtMs();
+          const searchBack = decideLiveSearchScreenBack({
+            searchSessionOpen: searchOpenRef.current,
+            overlayVisible: searchOverlayVisibleRef.current,
+            fullscreenActive: Boolean(fullscreenChannelIdRef.current),
+            nowMs,
+            lastConsumedAtMs,
+          });
+          logLiveSearchBack({
+            event: 'live-back-received',
+            overlayVisible: searchOverlayVisibleRef.current,
+            fullscreenActive: Boolean(fullscreenChannelIdRef.current),
+            restoreFocusLiveChannelId: liveSearchSelectedIdRef.current,
+            timestampDeltaMs: lastConsumedAtMs > 0 ? nowMs - lastConsumedAtMs : null,
+            source: 'LiveTvScreen',
+          });
 
-      if (action === 'close-fullscreen') {
-        setState((current) => closeLiveFullscreen(current ?? liveState ?? bootstrapState ?? createInitialLiveTvState('', '')));
-        return true;
-      }
+          if (searchBack.action === 'suppress-duplicate') {
+            logLiveSearchBack({
+              event: 'back-suppressed-duplicate',
+              overlayVisible: searchOverlayVisibleRef.current,
+              fullscreenActive: Boolean(fullscreenChannelIdRef.current),
+              timestampDeltaMs: lastConsumedAtMs > 0 ? nowMs - lastConsumedAtMs : null,
+              source: 'LiveTvScreen',
+            });
+            return true;
+          }
 
-      if (action === 'swallow') {
-        // Native focus is still being restored onto the control that launched
-        // fullscreen (bounded animation frames via requestTvFocus).
-        // fullscreenChannelId is already cleared at this instant, so without this
-        // guard a stray/rapid second Back during that brief window would open the
-        // Content Hub instead of leaving focus to settle on this screen.
-        return true;
-      }
+          if (searchBack.action === 'swallow-leave-screen') {
+            logLiveSearchBack({
+              event: 'back-suppressed-duplicate',
+              overlayVisible: searchOverlayVisibleRef.current,
+              fullscreenActive: false,
+              focusedRegion: 'live-browse',
+              source: 'LiveTvScreen-search-owns-back',
+            });
+            return true;
+          }
 
-      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
-        return true;
-      }
+          const action = decideLiveTvBackAction(
+            fullscreenChannelIdRef.current,
+            isRestoringFullscreenFocusRef.current,
+          );
 
-      router.replace(returnRoute);
-      return true;
-    });
+          if (action === 'close-fullscreen') {
+            if (searchOpenRef.current) {
+              suppressLiveSearchOverlayClose(nowMs);
+              markLiveSearchBackConsumed(nowMs);
+            }
+            if (directPlayRequested) {
+              playbackAnalyticsTracker.stop('user_back');
+              router.replace(returnRoute);
+              return true;
+            }
+            setState((current) => closeLiveFullscreen(current ?? liveState ?? bootstrapState ?? createInitialLiveTvState('', '')));
+            return true;
+          }
+
+          if (action === 'swallow') {
+            // Native focus is still being restored onto the control that launched
+            // fullscreen (bounded animation frames via requestTvFocus).
+            // fullscreenChannelId is already cleared at this instant, so without this
+            // guard a stray/rapid second Back during that brief window would open the
+            // Content Hub instead of leaving focus to settle on this screen.
+            return true;
+          }
+
+          if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
+            return true;
+          }
+
+          router.replace(returnRoute);
+          return true;
+        },
+        () => ({
+          screen: 'LiveTvScreen',
+          guideVisible: guide.visible,
+          fullscreenChannelId: fullscreenChannelIdRef.current,
+        }),
+      ),
+    );
 
     return () => subscription.remove();
-  }, [bootstrapState, guide.visible, liveState, returnRoute, router]);
+  }, [bootstrapState, directPlayRequested, guide.visible, liveState, returnRoute, router]);
 
   // Imperatively owns native TV focus across both fullscreen transitions,
   // because `hasTVPreferredFocus` is only a mount-time hint: it does not
@@ -482,8 +775,17 @@ export function LiveTvScreen() {
       return;
     }
 
-    const source = fullscreenLaunchSourceRef.current;
     const targetChannelId = liveState?.selectedChannelId ?? null;
+    if (closing && !shouldRestoreLiveBrowseFocusAfterFullscreen(searchOpen)) {
+      setSearchRestoreChannelId(liveSearchSelectedIdRef.current ?? targetChannelId);
+      isRestoringFullscreenFocusRef.current = true;
+      const timer = setTimeout(() => {
+        isRestoringFullscreenFocusRef.current = false;
+      }, 120);
+      return () => clearTimeout(timer);
+    }
+
+    const source = fullscreenLaunchSourceRef.current;
     isRestoringFullscreenFocusRef.current = true;
 
     const cancel = requestTvFocus({
@@ -507,35 +809,7 @@ export function LiveTvScreen() {
     });
 
     return cancel;
-  }, [liveState?.fullscreenChannelId, liveState?.selectedChannelId]);
-
-  useEffect(() => {
-    const requestedChannelId = pendingPreviewActionFocusRef.current;
-    if (
-      !requestedChannelId ||
-      requestedChannelId !== liveState?.selectedChannelId ||
-      requestedChannelId !== liveState?.previewChannelId ||
-      liveState.fullscreenChannelId
-    ) {
-      return;
-    }
-
-    pendingPreviewActionFocusRef.current = null;
-    return requestTvFocus({
-      screen: 'live',
-      source: 'LiveTvScreen',
-      region: 'preview-actions',
-      itemId: liveState?.selectedChannelId ?? null,
-      reason: 'preview-action-after-ok',
-      getTarget: () => watchButtonRef.current,
-    });
-  }, [
-    liveState?.fullscreenChannelId,
-    liveState?.previewChannelId,
-    liveState?.previewRequestId,
-    liveState?.previewStatus,
-    liveState?.selectedChannelId,
-  ]);
+  }, [liveState?.fullscreenChannelId, liveState?.selectedChannelId, searchOpen]);
 
   useEffect(() => {
     if (!liveState?.fullscreenChannelId || fullscreenFrameStatus !== 'pending') {
@@ -606,10 +880,17 @@ export function LiveTvScreen() {
       // Chrome visibility is synchronized with the fullscreen lifecycle.
       // eslint-disable-next-line react-hooks/set-state-in-effect -- this reset prevents stale fullscreen controls after close.
       setFullscreenChromeVisible(true);
+      surfSessionIdRef.current = null;
+      intendedSurfChannelIdRef.current = null;
       return;
     }
 
-    setFullscreenChromeVisible(true);
+    if (!surfSessionIdRef.current) {
+      // Fresh fullscreen open may show chrome; in-session channel surf must not.
+      setFullscreenChromeVisible(true);
+      surfSessionIdRef.current = createLiveSurfSessionId();
+    }
+    intendedSurfChannelIdRef.current = liveState.fullscreenChannelId;
   }, [clearChromeHideTimer, liveState?.fullscreenChannelId]);
 
   useEffect(() => {
@@ -644,6 +925,10 @@ export function LiveTvScreen() {
       return;
     }
 
+    if (surfRequestIdRef.current > 0) {
+      return;
+    }
+
     const focusKey = `${liveState.fullscreenChannelId}:${fullscreenFrameStatus}`;
     if (fullscreenRetryFocusKeyRef.current === focusKey) {
       return;
@@ -661,32 +946,8 @@ export function LiveTvScreen() {
   }, [fullscreenFallbackVisible, fullscreenFrameStatus, liveState?.fullscreenChannelId]);
 
   useEffect(() => {
-    if (showFullscreenChrome || !liveState?.fullscreenChannelId || fullscreenFrameStatus !== 'ready') {
-      return;
-    }
-
-    return requestTvFocus({
-      screen: 'live',
-      source: 'LiveTvScreen',
-      region: 'fullscreen-interaction',
-      itemId: liveState.fullscreenChannelId,
-      reason: 'fullscreen-chrome-hidden',
-      getTarget: () => fullscreenInteractionRef.current,
-    });
-  }, [showFullscreenChrome, fullscreenFrameStatus, liveState?.fullscreenChannelId]);
-
-  useEffect(() => {
     syncLiveTvMemory();
   }, [syncLiveTvMemory]);
-
-  useEffect(() => {
-    return () => {
-      if (pendingPreviewTimerRef.current) {
-        clearTimeout(pendingPreviewTimerRef.current);
-        pendingPreviewTimerRef.current = null;
-      }
-    };
-  }, []);
 
   const scrollCategoryIntoView = useCallback(
     (categoryId: string) => {
@@ -709,13 +970,6 @@ export function LiveTvScreen() {
     refreshBoundaryFocusHandles();
   }, [refreshBoundaryFocusHandles, renderState?.selectedCategoryId, renderState?.selectedChannelId, channels.length]);
 
-  const cancelPendingPreview = useCallback(() => {
-    if (pendingPreviewTimerRef.current) {
-      clearTimeout(pendingPreviewTimerRef.current);
-      pendingPreviewTimerRef.current = null;
-    }
-  }, []);
-
   const focusCategoryRow = useCallback(
     (categoryId: string) => {
       preferredCategoryFocusId.current = categoryId;
@@ -727,11 +981,21 @@ export function LiveTvScreen() {
 
   const focusChannelRow = useCallback(
     (channelId: string) => {
+      const previousFocusedId = focusedChannelIdRef.current;
       preferredChannelFocusId.current = channelId;
       focusedChannelIdRef.current = channelId;
       preferChannelFocusRef.current = false;
       recordLiveTvFocusEvent(channelId);
       enrichFocusedChannelEpg(channelId);
+      setFocusedChannelId((current) => (current === channelId ? current : channelId));
+
+      if (previousFocusedId !== channelId) {
+        logLiveSelection('focus-changed', {
+          focusedChannelId: channelId,
+          activePreviewChannelId: liveStateRef.current?.previewChannelId ?? null,
+          actionSource: 'channel-focus',
+        });
+      }
 
       setState((current) => {
         const base = current ?? liveStateRef.current;
@@ -741,70 +1005,82 @@ export function LiveTvScreen() {
         const next = focusLiveChannel(base, channelId);
         return next === base ? current : next;
       });
-
-      cancelPendingPreview();
-
-      const active = liveStateRef.current;
-      if (
-        active &&
-        shouldSkipPreviewRestart({
-          channelId,
-          previewChannelId: active.previewChannelId,
-          previewStatus: active.previewStatus,
-        })
-      ) {
-        return;
-      }
-
-      pendingPreviewTimerRef.current = setTimeout(() => {
-        pendingPreviewTimerRef.current = null;
-        if (!shouldApplyDebouncedPreviewTune(channelId, focusedChannelIdRef.current)) {
-          recordLiveTvPreviewCancel(channelId);
-          return;
-        }
-
-        setState((current) => {
-          const base = current ?? liveStateRef.current;
-          if (!base) {
-            return current;
-          }
-          if (
-            shouldSkipPreviewRestart({
-              channelId,
-              previewChannelId: base.previewChannelId,
-              previewStatus: base.previewStatus,
-            })
-          ) {
-            return current;
-          }
-          recordLiveTvPreviewStart(channelId);
-          if (shouldClearPreviewStreamUrl(base.previewChannelId, channelId)) {
-            setPreviewStreamUrl(null);
-          }
-          return applyDebouncedPreview(base, channelId);
-        });
-      }, PREVIEW_FOCUS_DEBOUNCE_MS);
     },
-    [cancelPendingPreview, enrichFocusedChannelEpg],
+    [enrichFocusedChannelEpg],
   );
 
   const closeLiveSearch = useCallback(() => {
-    setSearchOpen(false);
-    setSearchOverlayReady(false);
-    const channelId = liveStateRef.current?.selectedChannelId ?? null;
-    if (!channelId) {
+    if (!searchOpenRef.current) {
       return;
+    }
+    const snapshot = liveSearchBrowseSnapshotRef.current;
+    liveSearchSurfQueueRef.current = null;
+    liveSearchSelectedIdRef.current = null;
+    liveSearchBrowseSnapshotRef.current = null;
+    setSearchRestoreChannelId(null);
+    setSearchOpen(false);
+    searchOpenRef.current = false;
+    setSearchOverlayReady(false);
+    setSearchCloseFocusHold(true);
+    if (searchCloseHoldTimerRef.current) {
+      clearTimeout(searchCloseHoldTimerRef.current);
+    }
+    searchCloseHoldTimerRef.current = setTimeout(() => {
+      setSearchCloseFocusHold(false);
+    }, 240);
+    setState((current) => restoreLiveSearchBrowseState(current ?? liveStateRef.current, snapshot));
+    logLiveSearchBack({
+      event: 'overlay-close-complete',
+      overlayVisible: false,
+      searchQueryPresent: false,
+      source: 'LiveTvScreen',
+    });
+    logLiveSearchFocus({
+      event: 'close-focus-request',
+      overlayVisible: false,
+      source: 'LiveTvScreen',
+    });
+
+    if (snapshot?.categoryId) {
+      scrollCategoryIntoView(snapshot.categoryId);
     }
 
     requestTvFocus({
       screen: 'live',
       source: 'LiveTvScreen',
-      region: 'channel-row',
-      itemId: channelId,
+      region: 'search-toolbar',
+      itemId: 'live-search',
       reason: 'restore-after-search-close',
-      getTarget: () => channelRowRefs.current.get(channelId),
+      getTarget: () => searchToolbarRef.current,
+      onSettled: (status) => {
+        logLiveSearchFocus({
+          event: 'close-focus-confirmed',
+          overlayVisible: false,
+          source: `LiveTvScreen:${status}`,
+        });
+        if (searchCloseHoldTimerRef.current) {
+          clearTimeout(searchCloseHoldTimerRef.current);
+          searchCloseHoldTimerRef.current = null;
+        }
+        setSearchCloseFocusHold(false);
+      },
     });
-  }, []);
+  }, [scrollCategoryIntoView]);
+
+  const openLiveSearch = useCallback(() => {
+    if (searchOpen) {
+      closeLiveSearch();
+      return;
+    }
+
+    liveSearchBrowseSnapshotRef.current = createLiveSearchBrowseSnapshot({
+      categoryId: liveStateRef.current?.selectedCategoryId ?? selectedCategoryId,
+      channelId: liveStateRef.current?.selectedChannelId ?? null,
+    });
+    liveSearchSurfQueueRef.current = null;
+    setSearchRestoreChannelId(null);
+    setSearchOpen(true);
+  }, [closeLiveSearch, searchOpen, selectedCategoryId]);
 
   const handleSearchSelect = useCallback(
     (result: SearchResult) => {
@@ -812,20 +1088,80 @@ export function LiveTvScreen() {
         return;
       }
 
-      closeLiveSearch();
-      focusChannelRow(result.id);
+      liveSearchSelectedIdRef.current = result.id;
+      liveSearchSurfQueueRef.current = liveSearchResultIdsRef.current.slice();
+      liveSearchPlaybackByIdRef.current.set(result.id, toLiveSearchPlaybackChannel(result));
       preferredChannelFocusId.current = result.id;
       preferChannelFocusRef.current = true;
-      setState((current) => chooseLiveChannel(current ?? liveState ?? createInitialLiveTvState(undefined, result.id), result.id));
+      const channel = resolveLivePlaybackChannel(result.id, channels, liveSearchPlaybackByIdRef.current);
+      if (channel) {
+        void recordRecentItem({
+          providerId: activeProviderId,
+          mediaType: 'live',
+          contentId: channel.id,
+          title: channel.name,
+          artworkUrl: channel.logoUrl,
+          categoryId: channel.categoryId,
+        });
+      }
+      setState((current) => chooseLiveChannel(current ?? liveState ?? createInitialLiveTvState(undefined, result.id), result.id, { origin: 'search' }));
       syncLiveTvMemory();
     },
-    [closeLiveSearch, focusChannelRow, liveState, syncLiveTvMemory],
+    [activeProviderId, channels, liveState, syncLiveTvMemory],
+  );
+
+  const playFavoriteFromDiscoverZone = useCallback(
+    async (channelId: string) => {
+      if (!bundle) {
+        return;
+      }
+      const browseCategoryId = selectedCategoryId;
+      setDiscoverZoneOpen(false);
+      const savedFavoriteIds = [
+        ...new Set([
+          ...personalizationState.liveFavorites.map((item) => item.contentId).filter(Boolean),
+          channelId,
+        ]),
+      ];
+      const hydrated = hydrateFavoriteLiveChannels({
+        favoriteIds: savedFavoriteIds,
+        loadedChannels: channels,
+        getIndexEntry: (id) => getLiveChannelIndexEntry(activeProviderId, id),
+        favoriteRecords: personalizationState.liveFavorites,
+      });
+      const favoriteIds = favoriteSurfQueueIds(savedFavoriteIds, hydrated.channels);
+      liveSearchSurfQueueRef.current = favoriteIds;
+      preferredChannelFocusId.current = channelId;
+      preferChannelFocusRef.current = true;
+      for (const favorite of hydrated.channels) {
+        liveSearchPlaybackByIdRef.current.set(favorite.id, favorite);
+      }
+      const channel = resolveLivePlaybackChannel(channelId, channels, liveSearchPlaybackByIdRef.current);
+      if (!channel) {
+        return;
+      }
+      void recordRecentItem({
+        providerId: activeProviderId,
+        mediaType: 'live',
+        contentId: channel.id,
+        title: channel.name,
+        artworkUrl: channel.logoUrl,
+        categoryId: channel.categoryId,
+      });
+      setState((current) =>
+        chooseLiveChannel(current ?? liveState ?? createLiveTvLandingState(browseCategoryId, channelId), channelId, {
+          origin: 'search',
+        }),
+      );
+      syncLiveTvMemory();
+    },
+    [activeProviderId, bundle, channels, liveState, personalizationState.liveFavorites, selectedCategoryId, syncLiveTvMemory],
   );
 
   const selectCategory = (categoryId: string) => {
+    liveSearchSurfQueueRef.current = null;
     liveRetryAttemptedRef.current = false;
     preferredCategoryFocusId.current = categoryId;
-    cancelPendingPreview();
     setCategoryFocusEpoch((value) => value + 1);
     scrollCategoryIntoView(categoryId);
     void loadCategoryChannels(categoryId).then((nextChannels) => {
@@ -835,8 +1171,11 @@ export function LiveTvScreen() {
       // Category OK must leave the category rail and land in the channel list.
       preferCategoryFocusRef.current = false;
       preferChannelFocusRef.current = Boolean(nextChannelId);
+      if (nextChannelId) {
+        setFocusedChannelId(nextChannelId);
+      }
       setState((current) =>
-        current ? selectLiveCategory(current, categoryId, nextChannelId) : createInitialLiveTvState(categoryId, nextChannelId),
+        current ? selectLiveCategory(current, categoryId, nextChannelId) : createLiveTvLandingState(categoryId, nextChannelId),
       );
       syncLiveTvMemory();
       if (nextChannelId) {
@@ -870,13 +1209,23 @@ export function LiveTvScreen() {
       }
 
       lastChannelOkPressRef.current = { channelId, at: now };
-      cancelPendingPreview();
       const base = interactionState ?? liveState;
-      const nextState = chooseLiveChannel(base ?? createInitialLiveTvState(undefined, channelId), channelId);
+      const nextState = chooseLiveChannel(base ?? createLiveTvLandingState(undefined, channelId), channelId);
       if (isChannelPressEnteringFullscreen(base, channelId)) {
         fullscreenLaunchSourceRef.current = 'channel';
-      } else if (shouldFocusPreviewActionAfterChannelOk(base, nextState, channelId)) {
-        pendingPreviewActionFocusRef.current = channelId;
+        logLiveSelection('fullscreen-requested', {
+          focusedChannelId: focusedChannelIdRef.current,
+          activePreviewChannelId: channelId,
+          actionSource: 'channel-ok',
+          requestToken: nextState.previewRequestId,
+        });
+      } else if ((base?.previewRequestId ?? 0) !== nextState.previewRequestId) {
+        logLiveSelection('preview-requested', {
+          focusedChannelId: focusedChannelIdRef.current,
+          activePreviewChannelId: channelId,
+          actionSource: 'channel-ok',
+          requestToken: nextState.previewRequestId,
+        });
       }
 
       recordLiveTvChannelTune();
@@ -896,10 +1245,224 @@ export function LiveTvScreen() {
       if (shouldClearPreviewStreamUrl(liveState?.previewChannelId ?? null, channelId)) {
         setPreviewStreamUrl(null);
       }
-      setState((current) => chooseLiveChannel(current ?? liveState ?? createInitialLiveTvState(undefined, channelId), channelId));
+      setState((current) => chooseLiveChannel(current ?? liveState ?? createLiveTvLandingState(undefined, channelId), channelId));
       syncLiveTvMemory();
     },
     [activeProviderId, channels, enrichFocusedChannelEpg, interactionState, liveState, syncLiveTvMemory],
+  );
+
+  useEffect(() => {
+    if (
+      !directPlayRequested ||
+      directPlayConsumedRef.current ||
+      !routeChannelId ||
+      liveState?.selectedChannelId !== routeChannelId ||
+      liveState.previewChannelId !== routeChannelId ||
+      liveState.previewStatus !== 'ready' ||
+      liveState.fullscreenChannelId
+    ) {
+      return;
+    }
+
+    // Reuse the normal Live OK/tune path once the requested channel's preview is actually ready.
+    // This preserves normal playback URL resolution, recents, analytics, focus, and fullscreen behavior.
+    directPlayConsumedRef.current = true;
+    tuneChannel(routeChannelId);
+  }, [directPlayRequested, liveState, routeChannelId, tuneChannel]);
+
+  const liveSurfRouterRef = useRef<LiveTvFocusRouterHandle | null>(null);
+  const lastSettledSurfRequestIdRef = useRef(0);
+  const [surfOverlay, setSurfOverlay] = useState<{ channelId: string; name: string; number?: string } | null>(null);
+  const [liveSurfHandles, setLiveSurfHandles] = useState<{
+    anchor: number | null;
+    left: number | null;
+    right: number | null;
+  }>({
+    anchor: null,
+    left: null,
+    right: null,
+  });
+  const surfTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const surfOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const surfTokenRef = useRef(0);
+  const surfRequestIdRef = useRef(0);
+
+  const surfLiveChannel = useCallback(
+    (delta: 1 | -1): boolean => {
+      if (
+        !shouldHandleLiveChannelSurf({
+          isLive: true,
+          fullscreenActive: Boolean(liveStateRef.current?.fullscreenChannelId),
+          modalOpen: isLiveSearchUiBlockingSurf(searchOverlayVisible) || guide.visible,
+        })
+      ) {
+        return false;
+      }
+
+      const currentId = liveStateRef.current?.fullscreenChannelId ?? liveStateRef.current?.previewChannelId ?? null;
+      const adjacent = resolveLiveSurfAdjacent({
+        channelIds: resolveLiveSearchSurfQueue(
+          liveSearchSurfQueueRef.current,
+          channels.map((channel) => channel.id),
+        ),
+        currentId,
+        direction: delta,
+      });
+      const requestId = surfRequestIdRef.current + 1;
+      surfRequestIdRef.current = requestId;
+
+      if (adjacent.kind === 'noop') {
+        logLiveSurf({
+          event: 'single-channel-noop',
+          direction: delta,
+          fromChannelId: adjacent.fromChannelId,
+          fromIndex: adjacent.fromIndex,
+          toIndex: adjacent.toIndex,
+          queueLength: adjacent.queueLength,
+          surfSessionId: surfSessionIdRef.current,
+          requestId,
+        });
+        return false;
+      }
+
+      patchLiveTvWorkload({ surfTransitionInFlight: true }, { log: true, reason: 'surf-start' });
+      cancelLiveTvEpgWork('surf-priority');
+      logLiveSurf({
+        event: 'adjacent-resolved',
+        direction: delta,
+        fromChannelId: adjacent.fromChannelId,
+        toChannelId: adjacent.toChannelId,
+        fromIndex: adjacent.fromIndex,
+        toIndex: adjacent.toIndex,
+        queueLength: adjacent.queueLength,
+        surfSessionId: surfSessionIdRef.current,
+        requestId,
+      });
+
+      const nextId = adjacent.toChannelId;
+      intendedSurfChannelIdRef.current = nextId;
+      const nextChannel = resolveLivePlaybackChannel(nextId, channels, liveSearchPlaybackByIdRef.current);
+      setSurfOverlay({
+        channelId: nextId,
+        name: nextChannel?.name ?? 'Channel',
+        number: nextChannel?.number ? String(nextChannel.number) : undefined,
+      });
+      if (surfOverlayTimerRef.current) {
+        clearTimeout(surfOverlayTimerRef.current);
+      }
+      surfOverlayTimerRef.current = setTimeout(() => {
+        setSurfOverlay((current) => (current?.channelId === nextId ? null : current));
+      }, LIVE_SURF_OVERLAY_HIDE_MS);
+      preferredChannelFocusId.current = nextId;
+      focusedChannelIdRef.current = nextId;
+
+      if (surfTimerRef.current) {
+        clearTimeout(surfTimerRef.current);
+      }
+      const token = surfTokenRef.current + 1;
+      surfTokenRef.current = token;
+      surfTimerRef.current = setTimeout(() => {
+        if (surfTokenRef.current !== token || intendedSurfChannelIdRef.current !== nextId) {
+          logLiveSurf({
+            event: 'stale-transition-dropped',
+            direction: delta,
+            toChannelId: nextId,
+            surfSessionId: surfSessionIdRef.current,
+            requestId,
+          });
+          return;
+        }
+        logLiveSurf({
+          event: 'source-requested',
+          direction: delta,
+          fromChannelId: adjacent.fromChannelId,
+          toChannelId: nextId,
+          fromIndex: adjacent.fromIndex,
+          toIndex: adjacent.toIndex,
+          queueLength: adjacent.queueLength,
+          surfSessionId: surfSessionIdRef.current,
+          requestId,
+        });
+        logLiveSurf({
+          event: 'transition-start',
+          direction: delta,
+          fromChannelId: adjacent.fromChannelId,
+          toChannelId: nextId,
+          surfSessionId: surfSessionIdRef.current,
+          requestId,
+        });
+        setState((current) => {
+          const base = current ?? liveStateRef.current;
+          if (!base) {
+            return current;
+          }
+          if (shouldClearPreviewStreamUrl(base.previewChannelId, nextId)) {
+            setPreviewStreamUrl(null);
+          }
+          return surfLiveFullscreenChannel(base, nextId);
+        });
+        logLiveSelection('preview-requested', {
+          focusedChannelId: nextId,
+          activePreviewChannelId: nextId,
+          actionSource: 'live-surf',
+          requestToken: (liveStateRef.current?.previewRequestId ?? 0) + 1,
+        });
+      }, LIVE_CHANNEL_SURF_DEBOUNCE_MS);
+      return true;
+    },
+    [channels, guide.visible, searchOverlayVisible],
+  );
+
+  const visibleSurfOverlay = surfOverlay;
+
+  useEffect(() => {
+    if (
+      surfRequestIdRef.current > 0 &&
+      liveState?.previewStatus === 'ready' &&
+      liveState.fullscreenChannelId &&
+      liveState.fullscreenChannelId === intendedSurfChannelIdRef.current &&
+      lastSettledSurfRequestIdRef.current !== surfRequestIdRef.current
+    ) {
+      lastSettledSurfRequestIdRef.current = surfRequestIdRef.current;
+      patchLiveTvWorkload({ surfTransitionInFlight: false }, { log: true, reason: 'surf-complete' });
+      logLiveSurf({
+        event: 'transition-complete',
+        toChannelId: liveState.fullscreenChannelId,
+        surfSessionId: surfSessionIdRef.current,
+        requestId: surfRequestIdRef.current,
+      });
+      liveSurfRouterRef.current?.notifyTransitionSettled();
+    }
+  }, [liveState?.fullscreenChannelId, liveState?.previewStatus]);
+
+  useEffect(() => {
+    if (
+      surfRequestIdRef.current > 0 &&
+      liveState?.previewStatus === 'error' &&
+      liveState.fullscreenChannelId &&
+      liveState.fullscreenChannelId === intendedSurfChannelIdRef.current &&
+      lastSettledSurfRequestIdRef.current !== surfRequestIdRef.current
+    ) {
+      lastSettledSurfRequestIdRef.current = surfRequestIdRef.current;
+      patchLiveTvWorkload({ surfTransitionInFlight: false }, { log: true, reason: 'surf-failed' });
+      logLiveSurf({
+        event: 'transition-failed',
+        toChannelId: liveState.fullscreenChannelId,
+        surfSessionId: surfSessionIdRef.current,
+        requestId: surfRequestIdRef.current,
+      });
+      liveSurfRouterRef.current?.notifyTransitionSettled();
+    }
+  }, [liveState?.fullscreenChannelId, liveState?.previewStatus]);
+
+  const handleLiveSurfSentinelFocus = useCallback(
+    (direction: 1 | -1) => {
+      const started = surfLiveChannel(direction);
+      if (!started) {
+        liveSurfRouterRef.current?.notifyTransitionSettled();
+      }
+    },
+    [surfLiveChannel],
   );
 
   const watchFullScreen = () => {
@@ -908,6 +1471,12 @@ export function LiveTvScreen() {
     }
 
     fullscreenLaunchSourceRef.current = 'button';
+    logLiveSelection('fullscreen-requested', {
+      focusedChannelId: focusedChannelIdRef.current,
+      activePreviewChannelId: liveState.previewChannelId,
+      actionSource: 'watch-button',
+      requestToken: liveState.previewRequestId,
+    });
     setState((current) => {
       const base = current ?? liveState;
       return {
@@ -918,7 +1487,21 @@ export function LiveTvScreen() {
   };
 
   const executeLiveSearch = useCallback(
-    (request: Parameters<typeof searchLiveChannels>[2]) => searchLiveChannels(activeProviderId, bundle, request),
+    async (request: Parameters<typeof searchLiveChannels>[2]) => {
+      const page = await searchLiveChannels(activeProviderId, bundle, request);
+      const liveItems = page.items.filter((item): item is LiveSearchResult => item.type === 'live');
+      liveSearchResultIdsRef.current = buildLiveSearchResultIds(
+        liveItems,
+        liveSearchResultIdsRef.current,
+        request.offset > 0,
+      );
+      liveSearchPlaybackByIdRef.current = mergeLiveSearchPlaybackChannels(
+        liveSearchPlaybackByIdRef.current,
+        liveItems,
+        request.offset <= 0,
+      );
+      return page;
+    },
     [activeProviderId, bundle],
   );
 
@@ -1017,14 +1600,30 @@ export function LiveTvScreen() {
     }
   }, [searchOpen]);
 
+  useEffect(() => {
+    if (!searchOverlayVisible) {
+      return;
+    }
+    logLiveSearchFocus({
+      event: 'modal-focus-owned',
+      overlayVisible: true,
+      queryLength: null,
+      source: searchOverlayReady ? 'overlay-ready' : 'overlay-visible',
+    });
+    logLiveSearchFocus({
+      event: 'background-focus-blocked',
+      overlayVisible: true,
+      source: 'LiveTvScreen',
+    });
+  }, [searchOverlayReady, searchOverlayVisible]);
+
   const showFatalPanel = !bundle || (categories.length === 0 && loadStatus !== 'loading');
 
   if (loadStatus === 'loading' && categories.length === 0) {
     return (
       <NovaTvShell activeId="live" title="Live TV" subtitle="Browse channels without losing the picture." preferActiveNavigationFocus={false} compactNavigationRail expirationLabel={selectedProviderExpiration}>
         <View style={styles.statePanel}>
-          <NovaSpaceLoader label="Loading Live TV…" />
-          <Text style={styles.stateCopy}>Fetching channels from your provider.</Text>
+          <LiveTvPlanetLoader label="Loading channels…" />
         </View>
       </NovaTvShell>
     );
@@ -1080,8 +1679,7 @@ export function LiveTvScreen() {
     return (
       <NovaTvShell activeId="live" title="Live TV" subtitle="Browse channels without losing the picture." preferActiveNavigationFocus={false} compactNavigationRail expirationLabel={selectedProviderExpiration}>
         <View style={styles.statePanel}>
-          <NovaSpaceLoader label="Loading Live TV…" />
-          <Text style={styles.stateCopy}>Preparing channel list.</Text>
+          <LiveTvPlanetLoader label="Loading channels…" />
         </View>
       </NovaTvShell>
     );
@@ -1096,12 +1694,40 @@ export function LiveTvScreen() {
         subtitle="Browse channels without losing the picture."
         providerLabel={selectedProviderLabel}
         preferActiveNavigationFocus={false}
-        compactNavigationRail>
+        navigationFocusable={!searchOwnsBackgroundFocus}
+        compactNavigationRail
+        headerSupplement={
+          <MovieToolbar
+            accessibilityLabel="Search Live TV"
+            buttonRef={searchToolbarRef}
+            focusable={!searchOverlayVisible && !renderState.fullscreenChannelId}
+            onSearchFocus={() => setFocusedAction('search')}
+            onSearchPress={openLiveSearch}
+            discoverZoneOpen={discoverZoneOpen}
+            onDiscoverPress={() => {
+              if (searchOpen) {
+                closeLiveSearch();
+              }
+              logLivePerformance({
+                event: 'discover-zone-open',
+                elapsedMs: 0,
+                providerIdPresent: Boolean(activeProviderId && activeProviderId !== 'no-provider'),
+                categoryCount: categories.length,
+                channelCount: channels.length,
+                selectedCategoryIdPresent: Boolean(selectedCategoryId),
+                source: 'memory',
+                epgPending: false,
+                discoverPending: true,
+              });
+              setDiscoverZoneOpen(true);
+            }}
+          />
+        }>
         <View
           style={styles.screen}
-          pointerEvents={searchBlocksBrowse ? 'none' : 'auto'}
-          importantForAccessibility={searchBlocksBrowse ? 'no-hide-descendants' : 'auto'}
-          accessibilityElementsHidden={searchBlocksBrowse}>
+          pointerEvents={searchOwnsBackgroundFocus ? 'none' : 'auto'}
+          importantForAccessibility={searchOwnsBackgroundFocus ? 'no-hide-descendants' : 'auto'}
+          accessibilityElementsHidden={searchOwnsBackgroundFocus}>
         <View
           style={[
             styles.mainGrid,
@@ -1118,19 +1744,7 @@ export function LiveTvScreen() {
             ]}>
             <View style={styles.panelHeader}>
               <Text style={styles.panelTitle}>Categories</Text>
-              <View style={styles.panelHeaderActions}>
-                <Pressable
-                  focusable
-                  accessibilityRole="button"
-                  accessibilityLabel="Search Live TV"
-                  onFocus={() => setFocusedAction('search')}
-                  onBlur={() => setFocusedAction(null)}
-                  onPress={() => setSearchOpen(true)}
-                  style={[styles.searchButton, novaTvFocus.base, focusedAction === 'search' && styles.textFocusActive]}>
-                  <MaterialCommunityIcons name="magnify" size={18} color={focusedAction === 'search' ? theme.colors.textPrimary : theme.colors.accentHover} />
-                </Pressable>
-                <Text style={styles.panelCount}>{formatLiveTvCategoryCount(categoryTotalCount)}</Text>
-              </View>
+              <Text style={styles.panelCount}>{formatLiveTvCategoryCount(categoryTotalCount)}</Text>
             </View>
             <FlatList
               ref={categoriesRef}
@@ -1173,10 +1787,12 @@ export function LiveTvScreen() {
             <View style={styles.panelHeader}>
               <Text style={styles.panelTitle}>Channels</Text>
               <Text style={styles.panelCount}>
-                {loadStatus === 'loading' ? '...' : channels.length.toLocaleString()}
+                {showChannelPanelLoader ? '...' : channels.length.toLocaleString()}
               </Text>
             </View>
-            {channels.length === 0 && loadStatus === 'error' ? (
+            {showChannelPanelLoader ? (
+              <LiveTvPlanetLoader label="Loading channels…" />
+            ) : channels.length === 0 && loadStatus === 'error' ? (
               <View style={styles.inlineStateNotice}>
                 <MaterialCommunityIcons name="cloud-off-outline" size={22} color={theme.colors.textMuted} />
                 <Text style={styles.inlineStateText}>No channels to display right now.</Text>
@@ -1187,17 +1803,19 @@ export function LiveTvScreen() {
                 <Text style={styles.inlineStateText}>No channels in this category.</Text>
               </View>
             ) : (
-              <LiveTvChannelList
-                channels={channels}
-                selectedChannelId={renderState.selectedChannelId}
-                previewChannelId={renderState.previewChannelId}
-                preferFocusChannelId={preferChannelFocusRef.current ? preferredChannelFocusId.current : null}
-                categoryFocusLeftHandle={categoryFocusLeftHandle}
-                listRef={channelsRef}
-                onTuneChannel={tuneChannel}
-                onChannelFocus={focusChannelRow}
-                registerRowRef={registerChannelRowRef}
-              />
+              <LiveTvChannelListReveal revealKey={renderState.selectedCategoryId || selectedCategoryId}>
+                <LiveTvChannelList
+                  channels={channels}
+                  selectedChannelId={renderState.selectedChannelId}
+                  previewChannelId={renderState.previewChannelId}
+                  preferFocusChannelId={preferChannelFocusRef.current ? preferredChannelFocusId.current : null}
+                  categoryFocusLeftHandle={categoryFocusLeftHandle}
+                  listRef={channelsRef}
+                  onTuneChannel={tuneChannel}
+                  onChannelFocus={focusChannelRow}
+                  registerRowRef={registerChannelRowRef}
+                />
+              </LiveTvChannelListReveal>
             )}
           </View>
 
@@ -1305,8 +1923,30 @@ export function LiveTvScreen() {
       </NovaTvShell>
       ) : null}
 
-      {fullscreenChannel && hasLiveStream ? (
+      {fullscreenChannel ? (
         <View style={[styles.fullscreenOverlay, { width, height }]}>
+          <LiveTvFocusRouter
+            ref={liveSurfRouterRef}
+            enabled
+            chromeVisible={showFullscreenChrome || fullscreenFallbackVisible}
+            fromChannelId={fullscreenChannel.id}
+            surfSessionId={surfSessionIdRef.current}
+            onAnchorPress={revealFullscreenChrome}
+            onSentinelFocus={handleLiveSurfSentinelFocus}
+            onHandlesChange={(next) => {
+              setLiveSurfHandles((current) => {
+                if (
+                  current.anchor === next.anchor &&
+                  current.left === next.left &&
+                  current.right === next.right
+                ) {
+                  return current;
+                }
+                return { anchor: next.anchor, left: next.left, right: next.right };
+              });
+            }}
+          />
+          {hasLiveStream ? (
           <NovaStreamSurface
             player={liveStreamPlayer}
             contentFit="cover"
@@ -1315,7 +1955,19 @@ export function LiveTvScreen() {
             onPlayingChange={handleLivePlayerPlayingChange}
             onTimeUpdate={handleLivePlayerTimeUpdate}
           />
-          {shouldShowFullscreenLoadingOverlay(fullscreenFrameStatus) ? (
+          ) : null}
+          {visibleSurfOverlay ? (
+            <View pointerEvents="none" style={styles.fullscreenStatusOverlay}>
+              <Text style={styles.fullscreenEyebrow}>
+                {visibleSurfOverlay.number ? `Channel ${visibleSurfOverlay.number}` : 'Live'}
+              </Text>
+              <Text style={styles.fullscreenTitle}>{displayStreamTitle(visibleSurfOverlay.name)}</Text>
+              {liveState?.previewStatus === 'loading' && liveState.previewChannelId === visibleSurfOverlay.channelId ? (
+                <Text style={styles.previewLoadingCopy}>Loading...</Text>
+              ) : null}
+            </View>
+          ) : null}
+          {shouldShowFullscreenLoadingOverlay(fullscreenFrameStatus) && !visibleSurfOverlay ? (
             <View style={styles.fullscreenStatusOverlay}>
               <NovaSpaceLoader label="Starting playback…" />
               <Text style={styles.previewLoadingCopy}>{displayStreamTitle(fullscreenChannel.name)}</Text>
@@ -1331,17 +1983,25 @@ export function LiveTvScreen() {
               <Pressable
                 ref={registerFullscreenRetryButtonRef}
                 focusable
-                hasTVPreferredFocus={fullscreenRetryFocusKeyRef.current === null}
+                hasTVPreferredFocus={fullscreenRetryFocusKeyRef.current === null && surfRequestIdRef.current === 0}
                 accessibilityRole="button"
                 accessibilityLabel="Retry"
-                {...(fullscreenRetryNodeTag
+                {...(liveSurfHandles.anchor != null
                   ? {
-                      nextFocusLeft: fullscreenRetryNodeTag,
-                      nextFocusRight: fullscreenRetryNodeTag,
-                      nextFocusUp: fullscreenRetryNodeTag,
-                      nextFocusDown: fullscreenRetryNodeTag,
+                      nextFocusLeft: liveSurfHandles.anchor,
+                      nextFocusRight: liveSurfHandles.anchor,
+                      ...(fullscreenRetryNodeTag
+                        ? { nextFocusUp: fullscreenRetryNodeTag, nextFocusDown: fullscreenRetryNodeTag }
+                        : {}),
                     }
-                  : null)}
+                  : fullscreenRetryNodeTag
+                    ? {
+                        nextFocusLeft: fullscreenRetryNodeTag,
+                        nextFocusRight: fullscreenRetryNodeTag,
+                        nextFocusUp: fullscreenRetryNodeTag,
+                        nextFocusDown: fullscreenRetryNodeTag,
+                      }
+                    : null)}
                 onFocus={() => setFocusedAction('retry')}
                 onBlur={() => setFocusedAction(null)}
                 onPress={retryFullscreenPlayback}
@@ -1360,7 +2020,10 @@ export function LiveTvScreen() {
                 <Pressable
                   ref={fullscreenCloseButtonRef}
                   focusable
-                  hasTVPreferredFocus
+                  hasTVPreferredFocus={false}
+                  {...(liveSurfHandles.anchor != null
+                    ? { nextFocusLeft: liveSurfHandles.anchor, nextFocusRight: liveSurfHandles.anchor }
+                    : {})}
                   onPress={() => {
                     setState((current) => closeLiveFullscreen(current ?? renderState));
                   }}
@@ -1388,7 +2051,7 @@ export function LiveTvScreen() {
           {!showFullscreenChrome && !fullscreenFallbackVisible ? (
             <Pressable
               ref={fullscreenInteractionRef}
-              focusable
+              focusable={false}
               hasTVPreferredFocus={false}
               onPress={revealFullscreenChrome}
               style={styles.fullscreenInteractionLayer}
@@ -1397,15 +2060,29 @@ export function LiveTvScreen() {
         </View>
       ) : null}
 
+      <DiscoverZoneOverlay
+        visible={discoverZoneOpen && !liveState?.fullscreenChannelId}
+        providerId={activeProviderId}
+        scope="live"
+        onClose={() => setDiscoverZoneOpen(false)}
+        onSelectItem={(item) => {
+          void playFavoriteFromDiscoverZone(item.id);
+        }}
+      />
       <SearchOverlay
-        visible={searchOpen}
+        visible={searchOverlayVisible}
+        retainMounted={shouldKeepLiveSearchMounted(searchOpen)}
+        restoreFocusLiveChannelId={searchRestoreChannelId}
+        onRestoreFocusHandled={() => setSearchRestoreChannelId(null)}
         scope="live"
         providerId={activeProviderId}
         title="Search Live TV"
+        placeholder="Search Live TV channels"
         executeSearch={executeLiveSearch}
         onReady={() => setSearchOverlayReady(true)}
         onClose={closeLiveSearch}
         onSelectResult={handleSearchSelect}
+        favoriteContentIds={liveFavoriteContentIds}
       />
 
       <WalkthroughOverlay
@@ -1602,20 +2279,6 @@ function createStyles(theme: NovaTheme) {
     fontWeight: '700',
     textAlign: 'center',
     paddingVertical: 4,
-  },
-  panelHeaderActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  searchButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 0,
-    borderWidth: 0,
-    backgroundColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   categoryList: {
     gap: 3,

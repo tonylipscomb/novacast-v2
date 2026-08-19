@@ -189,7 +189,8 @@ test('Series navigation cannot auto-wire Search preferred focus from poster grid
   );
   assert.doesNotMatch(moviesGrid, /hasTVPreferredFocus=\{true\}/);
   assert.doesNotMatch(seriesGrid, /Search/);
-  assert.doesNotMatch(toolbar, /hasTVPreferredFocus/);
+  // Toolbar may expose hasTVPreferredFocus={false}; never auto-prefer Search.
+  assert.doesNotMatch(toolbar, /hasTVPreferredFocus=\{true\}/);
 });
 
 test('Discover category counts apply cache/index on open and load progressively on focus', async () => {

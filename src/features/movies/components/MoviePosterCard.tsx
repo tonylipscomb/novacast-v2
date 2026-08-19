@@ -1,9 +1,14 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ElementRef } from 'react';
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
+import {
+  isOnnMoviesTraceEnabled,
+  noteOnnMoviesRender,
+  traceOnnMoviesEvent,
+} from '@/features/diagnostics/onnMoviesTrace';
 import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { displayStreamTitle, formatMediaMetaLabel } from '@/features/series/metadata/titleNormalization';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -22,6 +27,8 @@ type MoviePosterCardProps = {
    * even if native onBlur fires. Does not request focus.
    */
   forceFocused?: boolean;
+  /** Audit-only: count renders for the currently selected poster. */
+  auditSelected?: boolean;
   onFocus: (movie: MovieSummary) => void;
   onPress?: (movie: MovieSummary) => void;
   registerRef?: (instance: ElementRef<typeof Pressable> | null, instanceToken: string) => void;
@@ -63,6 +70,7 @@ function moviePosterCardPropsAreEqual(previous: MoviePosterCardProps, next: Movi
     previous.movie === next.movie &&
     previous.hasPreferredFocus === next.hasPreferredFocus &&
     previous.forceFocused === next.forceFocused &&
+    previous.auditSelected === next.auditSelected &&
     previous.focusable === next.focusable &&
     previous.isDiscover === next.isDiscover &&
     previous.trapFocusDown === next.trapFocusDown &&
@@ -76,6 +84,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
   movie,
   hasPreferredFocus,
   forceFocused = false,
+  auditSelected = false,
   onFocus,
   onPress,
   registerRef,
@@ -90,6 +99,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
   const showFocused = isFocused || forceFocused;
   const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
   const [selfFocusHandle, setSelfFocusHandle] = useState<number | undefined>();
+  const nativeHandleRef = useRef<number | null>(null);
   const instanceToken = useMemo(() => `movie-poster-${++posterInstanceSequence}-${movie.id}`, [movie.id]);
   const posterColors = getPosterColors(movie.posterStyleKey);
   const initials = makeInitials(movie.title);
@@ -101,6 +111,10 @@ export const MoviePosterCard = memo(function MoviePosterCard({
     rating: movie.rating,
     genre: movie.genres[0],
   });
+
+  if (isOnnMoviesTraceEnabled() && auditSelected) {
+    noteOnnMoviesRender('MoviePosterCard:selected');
+  }
 
   // FlatList recycles cells without always firing blur — clear stale focus chrome.
   useEffect(() => {
@@ -120,34 +134,19 @@ export const MoviePosterCard = memo(function MoviePosterCard({
   const bindRef = useCallback(
     (instance: ElementRef<typeof Pressable> | null) => {
       registerRef?.(instance, instanceToken);
+      const handle = instance ? findNodeHandle(instance) ?? null : null;
+      nativeHandleRef.current = handle;
       if (!trapFocusDown) {
         setSelfFocusHandle((prev) => (prev === undefined ? prev : undefined));
         return;
       }
-      const handle = instance ? findNodeHandle(instance) ?? undefined : undefined;
-      setSelfFocusHandle((prev) => (prev === handle ? prev : handle));
+      setSelfFocusHandle((prev) => (prev === (handle ?? undefined) ? prev : handle ?? undefined));
     },
     [instanceToken, registerRef, trapFocusDown],
   );
 
-  return (
-    <Pressable
-      ref={bindRef}
-      focusable={focusable}
-      disabled={!focusable}
-      hasTVPreferredFocus={hasPreferredFocus}
-      {...(trapFocusDown && selfFocusHandle != null ? { nextFocusDown: selfFocusHandle } : null)}
-      onFocus={() => {
-        recordFocusAudit({ component: 'MoviePosterCard', action: 'focus-received', itemId: movie.id });
-        setIsFocused(true);
-        onFocus(movie);
-      }}
-      onBlur={() => {
-        // Local native focus cleared; forceFocused may still pin chrome during correction.
-        setIsFocused(false);
-      }}
-      onPress={() => onPress?.(movie)}
-      style={styles.card}>
+  const cardBody = (
+    <>
       <View style={[styles.posterShell, showFocused && styles.posterShellFocused]}>
         <View
           style={[
@@ -202,6 +201,41 @@ export const MoviePosterCard = memo(function MoviePosterCard({
         {metaPrimary && movie.genres[0] ? <View style={styles.metaDot} /> : null}
         <Text style={styles.meta}>{movie.genres[0] ?? 'Feature'}</Text>
       </View>
+    </>
+  );
+
+  if (!focusable) {
+    return (
+      <View style={styles.card} focusable={false} accessible={false} pointerEvents="none">
+        {cardBody}
+      </View>
+    );
+  }
+
+  return (
+    <Pressable
+      ref={bindRef}
+      focusable
+      accessible
+      hasTVPreferredFocus={hasPreferredFocus}
+      {...(trapFocusDown && selfFocusHandle != null ? { nextFocusDown: selfFocusHandle } : null)}
+      onFocus={() => {
+        recordFocusAudit({ component: 'MoviePosterCard', action: 'focus-received', itemId: movie.id });
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Focus', 'poster_card_on_focus', {
+            movieId: movie.id,
+            nativeHandle: nativeHandleRef.current,
+          });
+        }
+        setIsFocused(true);
+        onFocus(movie);
+      }}
+      onBlur={() => {
+        setIsFocused(false);
+      }}
+      onPress={() => onPress?.(movie)}
+      style={styles.card}>
+      {cardBody}
     </Pressable>
   );
 }, moviePosterCardPropsAreEqual);

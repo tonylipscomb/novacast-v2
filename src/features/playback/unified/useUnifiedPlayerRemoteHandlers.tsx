@@ -5,24 +5,47 @@ import { Platform } from 'react-native';
 import {
   isUnifiedDpadNavigationKey,
   isUnifiedTvSelectEvent,
-  UNIFIED_CONTROL_ACTIVATE_DEBOUNCE_MS,
 } from './unifiedPlayerLogic.ts';
+import { getUnifiedPlayerState } from './unifiedPlayerStore.ts';
 import {
   isUnifiedRemoteDebugEnabled,
   logUnifiedRemoteEvent,
   logUnifiedRemoteTvHandlerAvailability,
 } from './unifiedRemoteDebug.ts';
+import {
+  canEnterVodSeek,
+  isVodSeekKeyUp,
+  isVodSeekMediaType,
+  logTvInputRaw,
+  logVodSeekRemote,
+  resolveHiddenVodSeekRemoteAction,
+  resolveVodSeekDirection,
+} from './vodSeek.ts';
+import {
+  logPlayerChromeFocus,
+  resolvePlayerChromeWakeKey,
+  shouldConsumePlayerChromeWake,
+  shouldRouteVisiblePlayerChromeInput,
+} from './playerChromeWake.ts';
 
 type TvEventPayload = {
   eventType?: string;
   eventKeyAction?: number;
+  keyCode?: number;
+  key?: string;
 };
 
 type UnifiedPlayerRemoteHandlersInput = {
   enabled: boolean;
   controlsVisible: boolean;
+  mediaType?: string | null;
+  upNextActive?: boolean;
   onTogglePlay: () => void;
-  onRevealControls: () => void;
+  onRevealControls: (source?: 'remote-handler' | 'generic-dpad') => void;
+  onRequestDefaultFocus?: () => void;
+  getSeekPreviewActive?: () => boolean;
+  getTimelineFocused?: () => boolean;
+  getTimelineHandlePresent?: () => boolean;
 };
 
 function noopUseTVEventHandler(_handler: (event: TvEventPayload) => void) {
@@ -58,26 +81,60 @@ function UnifiedPlayerRemoteUseTvHookListener({
 export function UnifiedPlayerRemoteHandlers({
   enabled,
   controlsVisible,
-  onTogglePlay,
+  mediaType = null,
+  upNextActive = false,
+  onTogglePlay: _onTogglePlay,
   onRevealControls,
+  onRequestDefaultFocus,
+  getSeekPreviewActive,
+  getTimelineFocused,
+  getTimelineHandlePresent,
 }: UnifiedPlayerRemoteHandlersInput) {
-  const lastActivateAtRef = useRef(0);
+  const wakeConsumedRef = useRef(false);
   const controlsVisibleRef = useRef(controlsVisible);
-  const onTogglePlayRef = useRef(onTogglePlay);
+  const mediaTypeRef = useRef(mediaType);
+  const upNextActiveRef = useRef(upNextActive);
   const onRevealControlsRef = useRef(onRevealControls);
+  const onRequestDefaultFocusRef = useRef(onRequestDefaultFocus);
+  const getSeekPreviewActiveRef = useRef(getSeekPreviewActive);
+  const getTimelineFocusedRef = useRef(getTimelineFocused);
+  const getTimelineHandlePresentRef = useRef(getTimelineHandlePresent);
   const enabledRef = useRef(enabled);
 
   useEffect(() => {
     controlsVisibleRef.current = controlsVisible;
+    if (controlsVisible) {
+      wakeConsumedRef.current = false;
+    }
   }, [controlsVisible]);
 
   useEffect(() => {
-    onTogglePlayRef.current = onTogglePlay;
-  }, [onTogglePlay]);
+    mediaTypeRef.current = mediaType;
+  }, [mediaType]);
+
+  useEffect(() => {
+    upNextActiveRef.current = upNextActive;
+  }, [upNextActive]);
 
   useEffect(() => {
     onRevealControlsRef.current = onRevealControls;
   }, [onRevealControls]);
+
+  useEffect(() => {
+    onRequestDefaultFocusRef.current = onRequestDefaultFocus;
+  }, [onRequestDefaultFocus]);
+
+  useEffect(() => {
+    getSeekPreviewActiveRef.current = getSeekPreviewActive;
+  }, [getSeekPreviewActive]);
+
+  useEffect(() => {
+    getTimelineFocusedRef.current = getTimelineFocused;
+  }, [getTimelineFocused]);
+
+  useEffect(() => {
+    getTimelineHandlePresentRef.current = getTimelineHandlePresent;
+  }, [getTimelineHandlePresent]);
 
   useEffect(() => {
     enabledRef.current = enabled;
@@ -88,12 +145,61 @@ export function UnifiedPlayerRemoteHandlers({
       return;
     }
 
+    const liveState = getUnifiedPlayerState();
     const keyAction = resolveKeyAction(event.eventKeyAction);
-    const eventType = event.eventType ?? 'unknown';
-    const isDpadEvent = isUnifiedDpadNavigationKey(eventType, null);
+    const eventType = event.eventType ?? event.key ?? 'unknown';
+    const keyCode = event.keyCode ?? null;
+    const isDpadEvent = isUnifiedDpadNavigationKey(eventType, keyCode);
     const isSelectEvent = isUnifiedTvSelectEvent(eventType);
+    const direction = resolveVodSeekDirection({
+      eventType,
+      eventKeyAction: event.eventKeyAction,
+      keyCode,
+      key: event.key,
+    });
+    const mediaTypeNow = liveState.item?.mediaType ?? mediaTypeRef.current;
+    const controlsVisibleNow = liveState.controlsVisible;
+    const durationMs = liveState.durationMs;
+    const allowSeek = mediaTypeNow !== 'live';
+    const seekPreviewActive = getSeekPreviewActiveRef.current?.() === true;
+    const timelineFocused = getTimelineFocusedRef.current?.() === true;
+    const nativeTimelineHandlePresent = getTimelineHandlePresentRef.current?.() === true;
+    const vodEligible = isVodSeekMediaType(mediaTypeNow) && canEnterVodSeek(durationMs);
+    const hiddenVodSeekEligible = vodEligible && !controlsVisibleNow && direction != null;
 
-    if (keyAction != null && keyAction !== 'down' && !isDpadEvent && !isSelectEvent) {
+    logTvInputRaw({
+      source,
+      rawEventType: eventType,
+      eventKeyAction: event.eventKeyAction ?? null,
+      keyCode,
+      controlsVisible: controlsVisibleNow,
+      focusedControl: timelineFocused ? 'seek' : null,
+      mediaType: mediaTypeNow,
+    });
+
+    const remoteFields = {
+      mediaType: mediaTypeNow,
+      controlsVisible: controlsVisibleNow,
+      allowSeek,
+      timelineFocused,
+      seekPreviewActive,
+      vodEligible,
+      hiddenVodSeekEligible,
+      nativeTimelineHandlePresent,
+      eventType,
+      eventKeyAction: event.eventKeyAction ?? null,
+      keyCode,
+      direction,
+    };
+
+    if (direction != null) {
+      logVodSeekRemote({
+        event: 'remote-received',
+        ...remoteFields,
+      });
+    }
+
+    if (keyAction != null && keyAction !== 'down' && !isDpadEvent && !isSelectEvent && direction == null) {
       return;
     }
 
@@ -107,21 +213,116 @@ export function UnifiedPlayerRemoteHandlers({
       });
     }
 
-    if (controlsVisibleRef.current) {
+    const wakeKey = resolvePlayerChromeWakeKey({
+      eventType,
+      key: event.key,
+      keyCode,
+    });
+    const wakeInput = {
+      controlsVisible: controlsVisibleNow || wakeConsumedRef.current,
+      upNextActive: upNextActiveRef.current,
+      mediaType: mediaTypeNow,
+      key: wakeKey,
+      eventKeyAction: event.eventKeyAction,
+    };
+
+    if (shouldConsumePlayerChromeWake(wakeInput) && !isVodSeekKeyUp(event.eventKeyAction)) {
+      wakeConsumedRef.current = true;
+      logPlayerChromeFocus({
+        event: 'wake-input',
+        key: wakeKey,
+        mediaType: mediaTypeNow,
+        focusedControl: null,
+      });
+      logPlayerChromeFocus({
+        event: 'wake-consumed',
+        key: wakeKey,
+        mediaType: mediaTypeNow,
+        focusedControl: null,
+      });
+      onRevealControlsRef.current('remote-handler');
+      onRequestDefaultFocusRef.current?.();
       return;
     }
 
-    if (isSelectEvent) {
-      if (Date.now() - lastActivateAtRef.current < UNIFIED_CONTROL_ACTIVATE_DEBOUNCE_MS) {
-        return;
+    if (
+      shouldRouteVisiblePlayerChromeInput({
+        controlsVisible: controlsVisibleNow,
+        upNextActive: upNextActiveRef.current,
+        mediaType: mediaTypeNow,
+        key: wakeKey,
+      })
+    ) {
+      logPlayerChromeFocus({
+        event: 'visible-input-routed',
+        key: wakeKey,
+        mediaType: mediaTypeNow,
+        focusedControl: timelineFocused ? 'seek' : null,
+      });
+    }
+
+    const action = resolveHiddenVodSeekRemoteAction({
+      controlsVisible: controlsVisibleNow,
+      mediaType: mediaTypeNow,
+      durationMs,
+      eventType,
+      eventKeyAction: event.eventKeyAction,
+      keyCode,
+      seekPreviewActive,
+      timelineFocused,
+    });
+
+    if (action === 'hidden-vod-seek' && direction != null) {
+      logVodSeekRemote({
+        event: 'remote-fell-through',
+        ...remoteFields,
+        eventConsumedBy: 'hidden-focus-sentinel',
+      });
+      return;
+    }
+
+    if (action === 'preview-step' && direction != null) {
+      logVodSeekRemote({
+        event: 'remote-fell-through',
+        ...remoteFields,
+        eventConsumedBy: 'hidden-focus-sentinel',
+      });
+      return;
+    }
+
+    if (controlsVisibleNow) {
+      if (direction != null) {
+        logVodSeekRemote({
+          event: 'remote-fell-through',
+          ...remoteFields,
+          eventConsumedBy: 'visible-controls',
+        });
       }
-      lastActivateAtRef.current = Date.now();
-      onTogglePlayRef.current();
       return;
     }
 
-    if (isDpadEvent) {
-      onRevealControlsRef.current();
+    if (wakeConsumedRef.current) {
+      return;
+    }
+
+    if (action === 'generic-reveal' || isDpadEvent) {
+      if (direction != null) {
+        logVodSeekRemote({
+          event: 'generic-controls-reveal',
+          ...remoteFields,
+          eventConsumedBy: 'generic-controls-reveal',
+        });
+      }
+      onRevealControlsRef.current('generic-dpad');
+      return;
+    }
+
+    if (direction != null) {
+      logVodSeekRemote({
+        event: 'remote-fell-through',
+        ...remoteFields,
+        eventConsumedBy: 'fell-through',
+      });
     }
   };
 

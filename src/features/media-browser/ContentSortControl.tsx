@@ -3,11 +3,11 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, 
 import { BackHandler, findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
 import {
-  CONTENT_SORT_OPTIONS,
   contentSortLabel,
   getVisibleSortOptions,
   type ContentSortOption,
@@ -23,10 +23,12 @@ type ContentSortControlProps = {
   onChange: (value: ContentSortOption) => void;
   showRating?: boolean;
   nextFocusLeft?: number;
+  /** Native focusable for D-pad — e.g. false while a detail popup/modal is open. */
+  focusable?: boolean;
 };
 
 export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSortControlProps>(function ContentSortControl(
-  { value, onChange, showRating = true, nextFocusLeft },
+  { value, onChange, showRating = true, nextFocusLeft, focusable = true },
   ref,
 ) {
   const { theme } = useAppTheme();
@@ -60,10 +62,20 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
     const frame = requestAnimationFrame(() => {
       setOptionHandles(optionRefs.current.map((instance) => findNodeHandle(instance)));
     });
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      close();
-      return true;
-    });
+    const subscription = BackHandler.addEventListener(
+      'hardwareBackPress',
+      wrapOnnMoviesBackHandler(
+        'sort-menu',
+        () => {
+          close();
+          return true;
+        },
+        () => ({
+          screen: 'ContentSortControl',
+          open,
+        }),
+      ),
+    );
     return () => {
       cancelAnimationFrame(frame);
       subscription.remove();
@@ -76,11 +88,20 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
     }
   }, [onChange, showRating, value]);
 
+  // Defensive: if this control becomes non-focusable (e.g. a detail popup opened)
+  // while the menu happens to be open, close it rather than leaving a dangling menu.
+  useEffect(() => {
+    if (!focusable && open) {
+      setOpen(false);
+    }
+  }, [focusable, open]);
+
   return (
     <View style={styles.root}>
       <Pressable
         ref={openerRef}
-        focusable
+        focusable={focusable}
+        disabled={!focusable}
         accessibilityRole="button"
         accessibilityLabel={`Sort: ${contentSortLabel(value)}`}
         {...(nextFocusLeft ? { nextFocusLeft } : null)}
@@ -110,7 +131,7 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
               {...(optionHandles[index - 1] || (index === 0 && optionHandles[index])
                 ? { nextFocusUp: optionHandles[index - 1] ?? optionHandles[index] }
                 : null)}
-              {...(optionHandles[index + 1] || (index === CONTENT_SORT_OPTIONS.length - 1 && optionHandles[index])
+              {...(optionHandles[index + 1] || (index === visibleOptions.length - 1 && optionHandles[index])
                 ? { nextFocusDown: optionHandles[index + 1] ?? optionHandles[index] }
                 : null)}
               {...(optionHandles[index] ? { nextFocusLeft: optionHandles[index], nextFocusRight: optionHandles[index] } : null)}

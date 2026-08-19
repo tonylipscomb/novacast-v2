@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { recordEpisodeProgress } from '@/features/media-browser/mediaLibraryStore';
+import { COMPLETED_PROGRESS_PERCENT, PROGRESS_SAVE_INTERVAL_MS } from '@/features/playback/continuity/playbackContinuity';
 import type { PlaybackProgressState } from './mediaPlayerTypes';
-
-const WATCHED_THRESHOLD_PERCENT = 90;
-const PROGRESS_SAVE_INTERVAL_MS = 5000;
 
 function computeProgress(positionMs: number, durationMs: number): PlaybackProgressState {
   const progressPercent = durationMs > 0 ? Math.min(100, Math.round((positionMs / durationMs) * 100)) : 0;
@@ -12,7 +10,7 @@ function computeProgress(positionMs: number, durationMs: number): PlaybackProgre
     positionMs,
     durationMs,
     progressPercent,
-    isWatched: progressPercent >= WATCHED_THRESHOLD_PERCENT,
+    isWatched: progressPercent >= COMPLETED_PROGRESS_PERCENT,
   };
 }
 

@@ -31,15 +31,26 @@ export type TimeBudgetOptions = {
   kind?: ChunkWorkKind;
   diagnostic?: boolean;
   isCancelled?: () => boolean;
+  /** Called immediately before each buffered write batch begins. */
+  beforeFlush?: () => void | Promise<void>;
   onChunk?: (info: {
     processed: number;
     chunkMs: number;
     chunkItems: number;
     batchSize: number;
+    sqliteWriteMs?: number;
+    effectiveBusyMs?: number;
+    measuredMacrotaskLagMs?: number;
+    derivedEventLoopLagMs?: number;
+    nextBatchSize?: number;
+    pressureLagMs?: number;
+    pauseReason?: string;
     overrun: boolean;
     eventLoopLagMs?: number;
     pauseMs?: number;
   }) => void;
+  onYield?: (yieldMs: number) => void;
+  onBatchSizeChange?: (previousSize: number, nextSize: number) => void;
   pressureMode?: boolean;
 };
 
@@ -203,7 +214,11 @@ export async function processTimeBudgeted<T>(
       overrun,
     });
     adjustBatchSize(kind, chunkMs, targetMs, softMs, hardMs, minItems, maxItems, diagnostic);
+    const previousBatchSize = batchMaxItems;
     batchMaxItems = learnedBatchSizes[kind];
+    if (batchMaxItems !== previousBatchSize) {
+      options?.onBatchSizeChange?.(previousBatchSize, batchMaxItems);
+    }
     if (yieldAfter) {
       // caller awaits yieldMacrotask after finishChunk
     }
@@ -230,7 +245,9 @@ export async function processTimeBudgeted<T>(
         });
       }
       finishChunk(true);
+      const yieldStarted = nowMs();
       await yieldMacrotask();
+      options?.onYield?.(nowMs() - yieldStarted);
       chunkStart = nowMs();
       chunkItems = 0;
       yieldedBeforeChunk = true;
@@ -244,7 +261,9 @@ export async function processTimeBudgeted<T>(
 
     if (shouldYield) {
       finishChunk(true);
+      const yieldStarted = nowMs();
       await yieldMacrotask();
+      options?.onYield?.(nowMs() - yieldStarted);
       chunkStart = nowMs();
       chunkItems = 0;
       yieldedBeforeChunk = true;
@@ -311,6 +330,7 @@ export async function processStreamingBatches<T, R>(
     const batch = buffer;
     const batchLen = batch.length;
     buffer = [];
+    await options?.beforeFlush?.();
     const writeStart = nowMs();
     await flushBatch(batch);
     const writeMs = nowMs() - writeStart;
@@ -343,14 +363,20 @@ export async function processStreamingBatches<T, R>(
       adjustBatchSize(writeKind, effectiveBusyMs, targetMs, softMs, hardMs, minItems, maxItems, diagnostic);
     }
     writeBatchSize = learnedBatchSizes[writeKind];
-    const eventLoopLagMs = Math.max(effectiveBusyMs, await yieldMacrotaskMeasured());
+    const measuredMacrotaskLagMs = await yieldMacrotaskMeasured();
+    const eventLoopLagMs = Math.max(effectiveBusyMs, measuredMacrotaskLagMs);
+    const pressureLagMs = measuredMacrotaskLagMs;
     let pauseMs = 0;
-    if (eventLoopLagMs >= 1000) {
+    let pauseReason = 'none';
+    if (measuredMacrotaskLagMs >= 1000) {
       pauseMs = 150;
-    } else if (eventLoopLagMs >= 250) {
+      pauseReason = 'js-lag-1000';
+    } else if (measuredMacrotaskLagMs >= 250) {
       pauseMs = 35;
+      pauseReason = 'js-lag-250';
     } else if (effectiveBusyMs >= 100) {
       pauseMs = 12;
+      pauseReason = 'sqlite-busy-100';
     }
     if (pauseMs > 0) {
       pressurePauseCount += 1;
@@ -361,12 +387,34 @@ export async function processStreamingBatches<T, R>(
       chunkMs: effectiveBusyMs,
       chunkItems: batchLen,
       batchSize: writeBatchSize,
+      sqliteWriteMs: writeMs,
+      effectiveBusyMs,
+      measuredMacrotaskLagMs,
+      derivedEventLoopLagMs: eventLoopLagMs,
+      pressureLagMs,
+      pauseReason,
+      nextBatchSize: writeBatchSize,
       overrun: effectiveBusyMs >= softMs,
       eventLoopLagMs,
       pauseMs,
     });
     if (effectiveBusyMs >= 100) {
       await yieldMacrotaskMeasured();
+    }
+    if (diagnostic && (effectiveBusyMs >= 100 || measuredMacrotaskLagMs >= 100)) {
+      console.info('[NovaCast Catalog Pressure Audit]', {
+        kind: writeKind,
+        chunkItems: batchLen,
+        sqliteWriteMs: Math.round(writeMs),
+        effectiveBusyMs: Math.round(effectiveBusyMs),
+        measuredMacrotaskLagMs: Math.round(measuredMacrotaskLagMs),
+        derivedEventLoopLagMs: Math.round(eventLoopLagMs),
+        pressureLagMs: Math.round(pressureLagMs),
+        pauseReason,
+        pauseMs,
+        batchSize: writeBatchSize,
+        nextBatchSize: writeBatchSize,
+      });
     }
     chunkStart = nowMs();
   };

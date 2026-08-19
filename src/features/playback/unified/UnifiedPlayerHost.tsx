@@ -9,6 +9,7 @@ import {
   getUnifiedPlayerState,
   subscribeUnifiedPlayer,
 } from './unifiedPlayerStore.ts';
+import { PlaybackResumeDialog } from '../continuity/PlaybackResumeDialog.tsx';
 import { UnifiedPlayerController } from './UnifiedPlayerController.tsx';
 
 function useUnifiedPlayerHostMounted() {
@@ -51,10 +52,12 @@ export function UnifiedPlayerHost() {
   }, [item, mounted]);
 
   if (!mounted) {
-    return null;
+    return <PlaybackResumeDialog />;
   }
 
   return (
+    <>
+    <PlaybackResumeDialog />
     <Modal
       visible
       transparent
@@ -70,6 +73,7 @@ export function UnifiedPlayerHost() {
         </View>
       </View>
     </Modal>
+    </>
   );
 }
 

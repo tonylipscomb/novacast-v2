@@ -126,14 +126,19 @@ export function resolveMoviesPrimaryLoaderLabel(input: {
   primaryMode: MoviesPrimaryLoaderMode;
   categoryDisplayName: string | null | undefined;
   hasCategories: boolean;
+  catalogRepairing?: boolean;
 }): string {
   if (input.primaryMode === 'hidden') {
     return '';
   }
 
+  if (input.catalogRepairing) {
+    return 'Repairing movie library…';
+  }
+
   const name = sanitizeMoviesCategoryDisplayName(input.categoryDisplayName);
   if (!input.hasCategories) {
-    return 'Loading provider categories…';
+    return 'Preparing movie library…';
   }
   if (!name) {
     return 'Loading Movies';

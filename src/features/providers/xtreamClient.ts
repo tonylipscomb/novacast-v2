@@ -140,7 +140,7 @@ export type XtreamClientOptions = {
 };
 
 const MAX_XTREAM_RESPONSE_BYTES = 32 * 1024 * 1024;
-/** Safety cap for live/channel list responses only — not applied to VOD/series category catalogs. */
+/** Safety cap for live/channel list responses only â€” not applied to VOD/series category catalogs. */
 export const XTREAM_MAX_ITEMS_PER_RESPONSE = 10_000;
 
 function boundList<T>(value: T[] | null | undefined) {
@@ -437,6 +437,48 @@ export class XtreamClient {
     );
   }
 
+  // NOVACAST_GUIDE_V2_3_XMLTV_LOCAL_EPG_V1
+  // Bulk XMLTV source for local Guide EPG. Never log the returned URL.
+  buildXmltvUrl() {
+    return `${this.baseUrl}/xmltv.php?username=${encodeURIComponent(this.username)}&password=${encodeURIComponent(this.password)}`;
+  }
+
+  async getXmltvText(signal?: AbortSignal): Promise<string> {
+    const response = await fetch(this.buildXmltvUrl(), { signal });
+
+    if (!response.ok) {
+      throw new Error(`XMLTV request failed (${response.status})`);
+    }
+
+    return response.text();
+  }
+
+  // NOVACAST_GUIDE_V2_3C_STREAMING_XMLTV_V1
+  // Guide XMLTV uses the response body stream instead of response.text()
+  // so large provider guides are never materialized as one giant JS string.
+  async getXmltvResponse(signal?: AbortSignal) {
+    const response = await fetch(this.buildXmltvUrl(), { signal });
+
+    if (!response.ok) {
+      throw new Error(`XMLTV request failed (${response.status})`);
+    }
+
+    return response;
+  }
+
+  // NOVACAST_GUIDE_V2_3B_LOCAL_GUIDE_READ_V1
+  // Stable provider-account cache key without persisting the plaintext username/password.
+  getXmltvCacheKey() {
+    const input = `${this.baseUrl}|${this.username}`;
+    let hash = 2166136261;
+
+    for (let index = 0; index < input.length; index += 1) {
+      hash ^= input.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+
+    return `xtream:${this.baseUrl}:${(hash >>> 0).toString(16)}`;
+  }
   buildLiveStreamUrl(streamId: string | number, extension?: string) {
     const resolvedExtension = normalizePlaybackExtension(extension, 'ts');
     return `${this.baseUrl}/live/${encodeURIComponent(this.username)}/${encodeURIComponent(this.password)}/${encodeURIComponent(String(streamId).trim())}.${resolvedExtension}`;
@@ -466,3 +508,4 @@ export function normalizeXtreamAccountMetadata(response: XtreamAccountResponse |
     preferredOutputFormat: resolvePreferredOutputFormat(userInfo),
   };
 }
+

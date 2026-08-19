@@ -163,8 +163,11 @@ export function GuideCategoryRail({ categories, selectedCategoryId, onSelect, on
       persistentScrollbar={false}
       style={styles.rail}
       contentContainerStyle={styles.railContent}
-      initialNumToRender={categories.length}
-      windowSize={21}
+      // NOVACAST_GUIDE_V2_FOUNDATION_V1: do not mount hundreds of provider categories at once on Android TV.
+      initialNumToRender={16}
+      maxToRenderPerBatch={10}
+      updateCellsBatchingPeriod={50}
+      windowSize={7}
     />
   );
 }
@@ -173,18 +176,18 @@ function createStyles(theme: NovaTheme) {
   const focusText = createNovaTvFocusTextStyles(theme);
   const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
-    rail: { minHeight: 44, maxHeight: 44 },
+    rail: { minHeight: 36, maxHeight: 36 },
     railContent: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 2 },
     chipInner: {
-      minHeight: 40,
+      minHeight: 32,
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 7,
+      gap: 6,
       flexShrink: 0,
       borderRadius: 0,
       backgroundColor: 'transparent',
-      paddingHorizontal: 10,
-      paddingVertical: 6,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
       ...focusChrome.base,
     },
     chipInnerSelected: {
@@ -195,7 +198,7 @@ function createStyles(theme: NovaTheme) {
     chipName: {
       flexShrink: 0,
       color: theme.colors.textSecondary,
-      fontSize: 13,
+      fontSize: 12,
       fontWeight: '700',
     },
     chipNameSelected: {

@@ -63,7 +63,8 @@ test('5. Mounted target close uses fast focus path', () => {
   assert.equal(MOVIES_FOCUS_SUPPRESSION_RELEASE_MS, 32);
   assert.match(screen, /snapshotWasVisible && targetInPage/);
   assert.match(screen, /issueFocusRequest\(\)/);
-  assert.match(screen, /skip InteractionManager lag/i);
+  // Mounted+in-page path skips InteractionManager and calls issueFocusRequest directly.
+  assert.match(screen, /if \(snapshotWasVisible && targetInPage\) \{\s*issueFocusRequest\(\);/s);
   assert.match(lifecycle, /logMoviesRestoreTiming/);
   assert.match(screen, /logMoviesRestoreTiming/);
 });
@@ -72,13 +73,15 @@ test('6. Offscreen fallback still works', () => {
   assert.match(screen, /MOVIES_OFFSCREEN_FOCUS_MAX_FRAMES/);
   assert.match(screen, /InteractionManager\.runAfterInteractions\(issueFocusRequest\)/);
   assert.match(grid, /detail-restoration-offscreen-saved-offset/);
-  assert.match(screen, /timeout-nearest-visible-fallback/);
+  // Stage 4.2K.2: exhausted focus attempts abort to Detail — never nearest-poster retarget.
+  assert.match(screen, /abortDetailCloseTransaction|focus-attempts-exhausted/);
+  assert.doesNotMatch(screen, /timeout-nearest-visible-fallback/);
 });
 
 test('7. Viewport lock behavior remains unchanged', () => {
   assert.match(screen, /stage3d1-movies-viewport-lock-v2/);
-  assert.match(screen, /Always re-assert the saved offset/);
   assert.match(screen, /Never transfer poster focus until the saved offset is stable/);
+  assert.match(screen, /setViewportRestoreCommand/);
   assert.match(grid, /scrollToOffset\(\{ offset, animated: false \}\)/);
   assert.doesNotMatch(grid, /viewPosition\s*:/);
   assert.doesNotMatch(grid, /scrollToIndex/);

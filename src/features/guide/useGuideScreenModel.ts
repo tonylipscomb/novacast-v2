@@ -4,9 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getLiveTvMemory } from '@/features/live/liveTvMemory';
 import { getLiveFavoriteEntries, usePersonalizationStore } from '@/features/personalization/personalizationStore';
 import {
-  fetchGuideRowsForChannels,
   XTREAM_GUIDE_CHANNEL_PAGE_SIZE,
-  XTREAM_GUIDE_EPG_LIMIT,
   XTREAM_GUIDE_MAX_LOADED_CHANNELS,
   type ProviderGuideRow,
   type ProviderLiveCategory,
@@ -14,6 +12,7 @@ import {
 } from '@/features/providers/providerRepositories';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 import type { ProviderRepositoryBundle } from '@/features/providers/providerBundle';
+import { beginCatalogGuidePriority, endCatalogGuidePriority } from '@/features/providers/catalogSyncGuidePriority';
 
 import { applyGuideCategoryResult, GUIDE_FAVORITES_CATEGORY_ID, statusForRows, type GuideLoadStatus } from './guideLogic';
 import { getGuideMemory, rememberGuideMemory } from './guideMemory';
@@ -49,8 +48,9 @@ function isAbortError(error: unknown) {
 }
 
 /**
- * Resolve favorite channels via the shared live-stream cache (one catalog download),
- * then fetch EPG once for that list — not N full-catalog downloads.
+ * Resolve favorite channels via the shared live-stream cache without starting
+ * any interactive EPG network work. Guide schedule data will come from a
+ * separate bulk/local-cache pipeline.
  */
 async function loadFavoriteGuideRows(bundle: ProviderRepositoryBundle, signal?: AbortSignal): Promise<ProviderGuideRow[]> {
   const entries = await getLiveFavoriteEntries(bundle.providerId);
@@ -68,11 +68,14 @@ async function loadFavoriteGuideRows(bundle: ProviderRepositoryBundle, signal?: 
   }
 
   // Cap favorites so a huge favorites list cannot flood the Guide grid.
+  // NOVACAST_GUIDE_V2_FOUNDATION_V1: return channels immediately; EPG hydrates after first paint.
   const capped = channels.slice(0, XTREAM_GUIDE_MAX_LOADED_CHANNELS);
-  return fetchGuideRowsForChannels(bundle.live, capped, XTREAM_GUIDE_EPG_LIMIT, signal);
+  return capped.map((channel) => ({ channel, programs: [] }));
 }
 
 export function useGuideScreenModel() {
+  // NOVACAST_GUIDE_V2_1_POLISH_V1: prior progressive short-EPG experiment.
+  // NOVACAST_GUIDE_V2_2_STABILITY_V1: Guide is channels-first and performs no per-channel EPG network calls.
   const { bundle } = useActiveProviderBundle();
   const providerId = bundle?.providerId ?? 'no-provider';
   const { state: personalizationState } = usePersonalizationStore(providerId);
@@ -155,12 +158,17 @@ export function useGuideScreenModel() {
     [favoritesAvailable, providerId],
   );
 
+
   const loadCategoryPage = useCallback(
     async (categoryId: string, offset: number, requestId: number, append: boolean, signal: AbortSignal) => {
       if (!bundle) {
         return;
       }
 
+      // Claim Guide priority before resolving live channels or reading the local
+      // XMLTV cache. The catalog writer observes this immediately before each
+      // SQLite batch, allowing only an already-running tiny batch to finish.
+      beginCatalogGuidePriority();
       try {
         if (categoryId === GUIDE_FAVORITES_CATEGORY_ID) {
           if (offset > 0) {
@@ -221,6 +229,8 @@ export function useGuideScreenModel() {
         } else if (!append) {
           setIsRefreshing(false);
         }
+      } finally {
+        endCatalogGuidePriority();
       }
     },
     [applyResult, bundle, providerId],
@@ -283,6 +293,7 @@ export function useGuideScreenModel() {
     setCategoriesStatus('loading');
     setIsRefreshing(false);
     try {
+      beginCatalogGuidePriority();
       const nextCategories = await bundle.live.getCategories(signal);
       if (requestId !== requestRef.current || signal.aborted) {
         return;
@@ -316,6 +327,8 @@ export function useGuideScreenModel() {
       setCategoriesStatus('error');
       setStatus('error');
       setErrorMessage('Unable to load guide categories from your provider.');
+    } finally {
+      endCatalogGuidePriority();
     }
   }, [beginCategoryLoad, bundle, favoritesAvailable, selectCategory]);
 

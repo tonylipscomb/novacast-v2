@@ -12,18 +12,30 @@ import {
 
 type UnifiedPlayerErrorStateProps = {
   message: string;
+  detail?: string | null;
+  title?: string;
+  canRetry?: boolean;
   onRetry: () => void;
   onBack: () => void;
 };
 
-export function UnifiedPlayerErrorState({ message, onRetry, onBack }: UnifiedPlayerErrorStateProps) {
-  const [focusedControl, setFocusedControl] = useState<'retry' | 'back' | null>('retry');
+export function UnifiedPlayerErrorState({
+  message,
+  detail,
+  title = 'Playback issue',
+  canRetry = true,
+  onRetry,
+  onBack,
+}: UnifiedPlayerErrorStateProps) {
+  const [focusedControl, setFocusedControl] = useState<'retry' | 'back' | null>(canRetry ? 'retry' : 'back');
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Playback issue</Text>
+      <Text style={styles.title}>{title}</Text>
       <Text style={styles.message}>{message}</Text>
+      {detail ? <Text style={styles.detail}>{detail}</Text> : null}
       <View style={styles.actions}>
+        {canRetry ? (
         <Pressable
           focusable
           hasTVPreferredFocus
@@ -47,8 +59,10 @@ export function UnifiedPlayerErrorState({ message, onRetry, onBack }: UnifiedPla
           style={[styles.primaryButton, novaTvFocus.base, focusedControl === 'retry' && novaTvFocus.active]}>
           <Text style={styles.primaryText}>Retry</Text>
         </Pressable>
+        ) : null}
         <Pressable
           focusable
+          hasTVPreferredFocus={!canRetry}
           onFocus={() => {
             setFocusedControl('back');
             setUnifiedRemoteFocusedControl('error-back');
@@ -94,6 +108,14 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'center',
     lineHeight: 20,
+  },
+  detail: {
+    color: novaTheme.colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '500',
+    textAlign: 'center',
+    lineHeight: 18,
+    opacity: 0.88,
   },
   actions: {
     flexDirection: 'row',

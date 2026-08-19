@@ -31,6 +31,11 @@ import {
   traceOnnMoviesScrollSample,
 } from '@/features/diagnostics/onnMoviesTrace';
 import { shouldSkipZeroDeltaInitialRestore } from '../moviesDetailFocusLifecycle';
+import {
+  applyMoviesBrowseListHostNativeFocus,
+  resolveMoviesBrowseListHostProps,
+} from '../moviesBrowseListHostFocus';
+import { logMoviesDetailV2FocusOwnership } from '../moviesDetailPopupV2';
 
 type MoviePosterGridProps = {
   movies: MovieSummary[];
@@ -169,6 +174,10 @@ export function MoviePosterGrid({
 
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
+  const hostProps = resolveMoviesBrowseListHostProps({
+    hostEnabled: postersFocusable,
+    lockScroll: lockScrollForFocusRestore,
+  });
 
   onFocusMovieRef.current = onFocusMovie;
   onSelectMovieRef.current = onSelectMovie;
@@ -200,6 +209,10 @@ export function MoviePosterGrid({
     );
     previousMoviesDataRef.current = movies;
   }, [columns, movies]);
+
+  useEffect(() => {
+    applyMoviesBrowseListHostNativeFocus(listRef.current, hostProps.hostFocusable);
+  }, [hostProps.hostFocusable, postersFocusable]);
 
   useEffect(() => {
     const instanceId = nextOnnMoviesGridInstanceId();
@@ -662,12 +675,29 @@ export function MoviePosterGrid({
       ) : (
         <View style={styles.listStage}>
           <FlatList
-            ref={listRef}
+            ref={(instance) => {
+              listRef.current = instance;
+              applyMoviesBrowseListHostNativeFocus(instance, hostProps.hostFocusable);
+            }}
             data={movies}
             key={columns}
             numColumns={columns}
             keyExtractor={keyExtractor}
-            scrollEnabled={!lockScrollForFocusRestore}
+            focusable={hostProps.hostFocusable}
+            accessible={hostProps.hostFocusable}
+            scrollEnabled={hostProps.scrollEnabled}
+            onFocus={() => {
+              if (!postersFocusable) {
+                logMoviesDetailV2FocusOwnership({
+                  phase: 'unexpected-background-focus',
+                  detailOpen: true,
+                  focusIssued: false,
+                  focusedRegion: 'poster-list-host',
+                  categoryHostFocusable: false,
+                  posterHostFocusable: true,
+                });
+              }
+            }}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.list}
             columnWrapperStyle={columns > 1 ? styles.row : undefined}
@@ -682,6 +712,7 @@ export function MoviePosterGrid({
             onScroll={handleScroll}
             scrollEventThrottle={16}
             onViewableItemsChanged={handleViewableItemsChanged}
+            extraData={`${postersFocusable}:${sortFocusable}:${hostProps.scrollEnabled}:${closingFocusMovieId ?? ''}`}
             renderItem={renderItem}
           />
           {listOverlays}

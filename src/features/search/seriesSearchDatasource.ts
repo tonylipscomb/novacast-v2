@@ -7,6 +7,7 @@
  * so a partial index cannot return an authoritative false zero.
  */
 
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import { resolveReadableCatalogGeneration } from '../catalog/catalogRepository.ts';
 import { createSqliteSeriesDataSource } from '../series/data/SqliteSeriesDataSource.ts';
 import type { SeriesDataSource } from '../series/data/SeriesDataSource.ts';
@@ -47,7 +48,7 @@ export async function resolveSeriesSearchDatasource(input: {
       sqliteAvailable: true,
     };
 
-    console.info(
+    novacastTrace(
       '[NovaCast Series Search Datasource] ' +
         JSON.stringify({
           providerId: input.providerId,
@@ -71,7 +72,7 @@ export async function resolveSeriesSearchDatasource(input: {
     sqliteAvailable: false,
   };
 
-  console.info(
+  novacastTrace(
     '[NovaCast Series Search Datasource] ' +
       JSON.stringify({
         providerId: input.providerId,

@@ -3,6 +3,7 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { AdminDashboard } from './AdminDashboard';
 import { AdminDevices } from './AdminDevices';
 import { AdminInvitations } from './AdminInvitations';
+import { AdminProviders } from './AdminProviders';
 import { adminLogin, adminRequest } from './pairing';
 
 type Row = Record<string, unknown>;
@@ -28,6 +29,7 @@ export function AdminCloud() {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [openCreateInvite, setOpenCreateInvite] = useState(false);
+  const [openAddProvider, setOpenAddProvider] = useState(false);
 
   const load = useCallback(async (nextToken: string, quiet = false) => {
     if (!quiet) setLoading(true);
@@ -264,6 +266,7 @@ export function AdminCloud() {
             invitations={invitations}
             providers={providers}
             onNavigate={(next) => setTab(next)}
+            onAddProvider={() => { setTab('providers'); setOpenAddProvider(true); }}
             onRefresh={() => void load(token, true)}
             refreshing={refreshing}
             onCreateInvite={() => { setTab('invitations'); setOpenCreateInvite(true); }}
@@ -293,7 +296,16 @@ export function AdminCloud() {
           />
         ) : null}
 
-        {!loading && tab === 'providers' ? <ProvidersPanel providers={providers} /> : null}
+        {!loading && tab === 'providers' ? (
+          <AdminProviders
+            token={token}
+            providers={providers}
+            onRefresh={() => load(token, true)}
+            onMessage={setMessage}
+            openCreate={openAddProvider}
+            onOpenCreateHandled={() => setOpenAddProvider(false)}
+          />
+        ) : null}
         {!loading && tab === 'analytics' ? (
           <ComingSoon title="Analytics workspace" text="Playback, device, and catalog performance reporting will appear here." />
         ) : null}
@@ -324,35 +336,6 @@ function NavButton({
   );
 }
 
-function ProvidersPanel({ providers }: { providers: Row[] }) {
-  return (
-    <section className="cloudSimplePanel">
-      <header>
-        <div>
-          <span className="cloudTopEyebrow">MANAGED CONTENT</span>
-          <h2>Providers</h2>
-        </div>
-        <strong>{providers.length}</strong>
-      </header>
-      {providers.length ? (
-        <div className="cloudProviderList">
-          {providers.map((provider) => (
-            <article key={String(provider.id)}>
-              <div>
-                <strong>{String(provider.display_name ?? provider.slug ?? 'Managed provider')}</strong>
-                <small>{String(provider.status ?? 'active')}</small>
-              </div>
-              <span>{String(provider.provider_type ?? provider.type ?? 'Xtream')}</span>
-            </article>
-          ))}
-        </div>
-      ) : (
-        <p>No managed providers are available.</p>
-      )}
-    </section>
-  );
-}
-
 function ComingSoon({ title, text }: { title: string; text: string }) {
   return (
     <section className="cloudSimplePanel comingSoon">
@@ -378,7 +361,7 @@ function subtitleFor(tab: AdminTab) {
   return {
     dashboard: 'Monitor the NovaCast beta and manage platform operations.',
     devices: 'Manage and monitor all registered NovaCast devices.',
-    providers: 'Review managed provider packages and availability.',
+    providers: 'Add, validate, and activate managed IPTV providers before testers see them.',
     invitations: 'Create and track controlled beta access.',
     analytics: 'Review device and playback performance.',
     settings: 'Configure NovaCast Cloud Admin.',

@@ -102,7 +102,7 @@ export function SettingsScreen() {
       { id: 'playback' as const, icon: 'play-circle-outline' as const, title: 'Playback' },
       { id: 'appearance' as const, icon: 'palette-outline' as const, title: 'Appearance' },
       { id: 'parental' as const, icon: 'shield-lock-outline' as const, title: 'Parental Controls' },
-      { id: 'smart-categories' as const, icon: 'compass-outline' as const, title: 'Smart Categories' },
+      { id: 'smart-categories' as const, icon: 'compass-outline' as const, title: 'Discover Zone' },
       { id: 'about' as const, icon: 'information-outline' as const, title: 'About' },
     ],
     [],

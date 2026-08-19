@@ -45,6 +45,7 @@ import {
 
 export type SeriesDetailPopupV2Series = {
   id: string;
+  seriesId?: string;
   title: string;
   posterUrl?: string;
   backdropUrl?: string;
@@ -595,6 +596,26 @@ export function SeriesDetailPopupV2({
                   </Text>
                 ) : null}
 
+                <View style={styles.actionsRow}>
+                  {actions.map((action) => (
+                    <ActionButton
+                      key={action.id}
+                      action={action}
+                      preferred={action.id === initialFocusActionId}
+                      focused={focusedActionId === action.id}
+                      buttonRef={(instance) => {
+                        if (instance) {
+                          actionRefs.current.set(action.id, instance);
+                        } else {
+                          actionRefs.current.delete(action.id);
+                        }
+                      }}
+                      onFocus={() => setFocusedActionId(action.id)}
+                      onBlur={() => setFocusedActionId(null)}
+                    />
+                  ))}
+                </View>
+
                 {seasons.length > 0 ? (
                   <View style={styles.seasonsBlock}>
                     <ScrollView
@@ -645,26 +666,6 @@ export function SeriesDetailPopupV2({
                     </ScrollView>
                   </View>
                 ) : null}
-
-                <View style={styles.actionsRow}>
-                  {actions.map((action) => (
-                    <ActionButton
-                      key={action.id}
-                      action={action}
-                      preferred={action.id === initialFocusActionId}
-                      focused={focusedActionId === action.id}
-                      buttonRef={(instance) => {
-                        if (instance) {
-                          actionRefs.current.set(action.id, instance);
-                        } else {
-                          actionRefs.current.delete(action.id);
-                        }
-                      }}
-                      onFocus={() => setFocusedActionId(action.id)}
-                      onBlur={() => setFocusedActionId(null)}
-                    />
-                  ))}
-                </View>
               </View>
             </View>
           </View>
@@ -745,6 +746,7 @@ const styles = StyleSheet.create({
   copyPanel: {
     flex: 1,
     minWidth: 0,
+    minHeight: 0,
     paddingRight: 24,
     justifyContent: 'center',
     gap: 10,
@@ -776,6 +778,8 @@ const styles = StyleSheet.create({
   seasonsBlock: {
     gap: 8,
     marginTop: 2,
+    flexShrink: 1,
+    minHeight: 0,
   },
   seasonRow: {
     gap: 8,
@@ -830,6 +834,7 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 12,
     marginTop: 4,
+    flexShrink: 0,
   },
   action: {
     flexDirection: 'row',

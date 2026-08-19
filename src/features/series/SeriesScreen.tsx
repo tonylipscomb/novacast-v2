@@ -2,7 +2,7 @@ import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BackHandler, findNodeHandle, InteractionManager, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
@@ -16,7 +16,6 @@ import {
   openDetailOverlayState,
 } from '@/features/media-detail';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
-import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
 import {
   finishUnifiedPlaybackClose,
   useUnifiedPlayer,
@@ -30,7 +29,12 @@ import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import { tvPerfSetFocus, tvPerfSetScreen } from '@/features/perf/tvPerfStore';
-import { toggleMediaFavorite, toggleMediaWatchlist } from '@/features/media-browser/mediaLibraryStore';
+import { toggleMediaFavorite } from '@/features/media-browser/mediaLibraryStore';
+import {
+  isSeriesWatchlisted,
+  logSeriesWatchlist,
+  toggleCanonicalSeriesWatchlist,
+} from './seriesWatchlist';
 import { MediaCategoryRail } from '@/features/media-browser/MediaCategoryRail';
 import { buildSeriesMediaDetail, buildSeriesPreviewDetail } from '@/features/media-browser/mediaDetail';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
@@ -38,6 +42,14 @@ import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
 import { SearchOverlay } from '@/features/search/SearchOverlay';
+import { DiscoverZoneOverlay } from '@/features/personalization/DiscoverZoneOverlay';
+import {
+  DISCOVERY_ZONE_ORIGIN,
+  logDiscoverZoneDetailBack,
+  logDiscoverZoneDetailOpen,
+  shouldRestoreBrowseFocusAfterDetailClose,
+  shouldReturnToDiscoverZone,
+} from '@/features/personalization/discoverZoneNavigation';
 import { searchSeries } from '@/features/search/repositories/seriesSearchRepository';
 import type { SearchResult } from '@/features/search/searchTypes';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
@@ -48,7 +60,8 @@ import {
 import { MovieToolbar } from '@/features/movies/components/MovieToolbar';
 import { SeriesPosterGrid } from './components/SeriesPosterGrid';
 import { SeriesDetailPopupV2 } from './components/SeriesDetailPopupV2';
-import { launchSeriesEpisodePlayback } from './seriesPlayback';
+import { sortEpisodesByNumber } from '@/features/playback/continuity/playbackContinuity';
+import { formatSeriesContinuePlayLabel, launchSeriesEpisodePlayback, resolveSeriesContinuePlayTarget } from './seriesPlayback';
 import {
   SERIES_DETAIL_NOTIFICATION_ID,
   SERIES_LOAD_NOTIFICATION_ID,
@@ -58,7 +71,8 @@ import {
   resolveSeriesNotificationForStatus,
   resolveSeriesPlaybackNotification,
 } from './seriesScreenLogic';
-import { getSeriesScreenMemory } from './seriesScreenMemory';
+import { getSeriesScreenMemory, rememberSeriesScreenMemory } from './seriesScreenMemory';
+import { logWatchlistLaunch } from '@/features/hub/homeWatchlistLaunch';
 import { useSeriesScreenModel } from './useSeriesScreenModel';
 import { setOnnSeriesGridMounted } from './seriesDiagnostics';
 import { logSeriesBrowseIsolationViolation } from './seriesStartupRuntimeIsolation';
@@ -75,10 +89,9 @@ export function SeriesScreen() {
   const navigationGateRef = useRef(createTvNavigationGate());
   const { selectedProvider, selectedProviderLabel } = useProviderStore();
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
-  const catalogSyncPhase = useCatalogSyncStatus(activeProviderId);
-  const discoverStatusMessage = isDiscoverCollectionsPending(catalogSyncPhase)
-    ? 'Preparing Features collections…'
-    : null;
+  const [discoverZoneOpen, setDiscoverZoneOpen] = useState(() => Boolean(getSeriesScreenMemory(activeProviderId).openDiscoverZone));
+  const [discoverZoneRestoreItemId, setDiscoverZoneRestoreItemId] = useState<string | null>(null);
+  const detailLaunchOriginRef = useRef<'browse' | typeof DISCOVERY_ZONE_ORIGIN>('browse');
   const memory = getSeriesScreenMemory(activeProviderId);
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.series.key);
   const posterRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
@@ -121,6 +134,13 @@ export function SeriesScreen() {
     series: SeriesSummary | null;
     originItemId: string | null;
   }>({ open: false, series: null, originItemId: null });
+  useEffect(() => {
+    if (!getSeriesScreenMemory(activeProviderId).openDiscoverZone) {
+      return;
+    }
+    rememberSeriesScreenMemory(activeProviderId, { openDiscoverZone: false });
+    setDiscoverZoneOpen(true);
+  }, [activeProviderId]);
   const seriesDetailPopupOpenRef = useRef(false);
   const seriesDetailPopupCloseInFlightRef = useRef(false);
   /**
@@ -171,6 +191,7 @@ export function SeriesScreen() {
     detailError,
     loadSeriesDetail,
     continueWatching,
+    library,
     isSelectedFavorite,
     isSelectedWatchlisted,
     hasDataSource,
@@ -202,6 +223,19 @@ export function SeriesScreen() {
   useEffect(() => {
     selectedItemRef.current = selectedItem;
   }, [selectedItem]);
+
+  useEffect(() => {
+    if (!seriesDetailPopup.open || !seriesDetailPopup.series) {
+      return;
+    }
+    logSeriesWatchlist({
+      event: 'hydrate',
+      providerIdPresent: Boolean(activeProviderId && activeProviderId !== 'no-provider'),
+      seriesIdPresent: Boolean(seriesDetailPopup.series.id || seriesDetailPopup.series.seriesId),
+      canonicalIdResolved: Boolean(seriesDetailPopup.series.id || seriesDetailPopup.series.seriesId),
+      saved: isSeriesWatchlisted(library.state.watchlist, seriesDetailPopup.series),
+    });
+  }, [activeProviderId, library.state.watchlist, seriesDetailPopup.open, seriesDetailPopup.series]);
 
   const posterColumns = getSeriesPosterColumns(width);
   const selectedCategory = categories.find((category) => category.id === selectedCategoryId);
@@ -355,8 +389,17 @@ export function SeriesScreen() {
       seriesDetailPopupCloseInFlightRef.current = true;
 
       const originItemId = seriesDetailPopup.originItemId ?? seriesDetailPopup.series?.id ?? null;
+      const fromDiscoverZone = shouldReturnToDiscoverZone(detailLaunchOriginRef.current);
+      const restoreBrowseFocus = shouldRestoreBrowseFocusAfterDetailClose(detailLaunchOriginRef.current);
 
-      logSeriesDetailPopupV2Event('series_detail_popup_v2_close', { source, originItemId });
+      logSeriesDetailPopupV2Event('series_detail_popup_v2_close', { source, originItemId, fromDiscoverZone });
+      if (fromDiscoverZone) {
+        logDiscoverZoneDetailBack({
+          itemId: originItemId,
+          origin: DISCOVERY_ZONE_ORIGIN,
+          destination: DISCOVERY_ZONE_ORIGIN,
+        });
+      }
 
       // Immediate guest dismiss — browse stays mounted underneath.
       seriesDetailPopupOpenRef.current = false;
@@ -368,7 +411,7 @@ export function SeriesScreen() {
       // the origin card focusable in this SAME synchronous transition so it
       // does not depend on `postersFocusable` settling before the deferred
       // focus request below runs.
-      if (originItemId) {
+      if (originItemId && restoreBrowseFocus) {
         seriesV2CloseFocusTargetIdRef.current = originItemId;
         setRestoringBrowseFocus(true);
         setSeriesV2CloseFocusTargetId(originItemId);
@@ -385,7 +428,7 @@ export function SeriesScreen() {
         });
       }
 
-      if (originItemId) {
+      if (originItemId && restoreBrowseFocus) {
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
             requestTvFocus({
@@ -424,7 +467,7 @@ export function SeriesScreen() {
         setSeriesV2CloseFocusTargetId(null);
         setRestoringBrowseFocus(false);
         logSeriesDetailPopupV2Event('series_detail_popup_v2_origin_focus_skipped', {
-          reason: 'origin-missing',
+          reason: fromDiscoverZone ? 'discovery-zone-return' : 'origin-missing',
         });
       }
 
@@ -497,7 +540,7 @@ export function SeriesScreen() {
   );
 
   const handleSelectSeries = useCallback(
-    (series: Parameters<typeof selectSeries>[0]) => {
+    (series: Parameters<typeof selectSeries>[0], origin: 'browse' | typeof DISCOVERY_ZONE_ORIGIN = 'browse') => {
       if (seriesDetailPopup.open && seriesDetailPopup.series?.id === series.id) {
         return;
       }
@@ -509,6 +552,7 @@ export function SeriesScreen() {
         categoryId: selectedCategoryId,
         visibleItemCount: visibleItems.length,
       };
+      detailLaunchOriginRef.current = origin;
       selectSeries(series);
       void loadSeriesDetail(series);
       // Stage 4.2O.1 — SeriesDetailPopupV2's own simple state (spec §2). The
@@ -525,10 +569,36 @@ export function SeriesScreen() {
       setSeriesDetailPopup({ open: true, series, originItemId: series.id });
       logSeriesDetailPopupV2Event('series_detail_popup_v2_active', {
         seriesId: series.id,
-        origin: 'browse',
+        origin,
       });
+      if (shouldReturnToDiscoverZone(origin)) {
+        logDiscoverZoneDetailOpen({
+          mediaType: 'series',
+          itemId: series.id,
+          origin: DISCOVERY_ZONE_ORIGIN,
+        });
+      }
     },
     [loadSeriesDetail, selectSeries, selectedCategoryId, seriesDetailPopup.open, seriesDetailPopup.series?.id, visibleItems.length],
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      const pending = getSeriesScreenMemory(activeProviderId).pendingSeriesDetail;
+      if (!pending?.id) {
+        return;
+      }
+      rememberSeriesScreenMemory(activeProviderId, { pendingSeriesDetail: null, openDiscoverZone: false });
+      logWatchlistLaunch({
+        event: 'series-detail-open',
+        mediaType: 'series',
+        providerIdPresent: Boolean(activeProviderId && activeProviderId !== 'no-provider'),
+        savedIdPresent: Boolean(pending.id),
+        canonicalContentIdPresent: Boolean(pending.id),
+        providerSeriesIdPresent: Boolean(pending.seriesId),
+      });
+      handleSelectSeries(pending);
+    }, [activeProviderId, handleSelectSeries]),
   );
 
   const handleRegisterPosterRef = useCallback((seriesId: string, instance: ElementRef<typeof View> | null) => {
@@ -588,7 +658,7 @@ export function SeriesScreen() {
    * `playbackError` line — never a whole-screen error, never a route change.
    */
   const playEpisodeById = useCallback(
-    async (episodeId: string, launchSource: 'play' | 'episode' = 'episode') => {
+    async (episodeId: string, launchSource: 'play' | 'episode' = 'episode', resumePolicy?: 'silent' | 'prompt' | 'start') => {
       if (!bundle || !seriesDetail) {
         return;
       }
@@ -617,7 +687,9 @@ export function SeriesScreen() {
           episode,
           seriesTitle: seriesDetail.title,
           artworkUrl: seriesDetail.posterUrl,
+          episodes: Object.values(seriesDetail.episodesBySeason).flat(),
           launchSource,
+          resumePolicy,
           launchPlayback,
         });
         if (!launched) {
@@ -643,15 +715,39 @@ export function SeriesScreen() {
       }
 
       const allEpisodes = Object.values(seriesDetail.episodesBySeason).flat();
-      const resumeEpisodeId = !fromBeginning ? continueWatching?.episodeId : undefined;
-      const episode =
-        (resumeEpisodeId ? allEpisodes.find((item) => item.id === resumeEpisodeId) : undefined) ?? allEpisodes[0];
-      if (episode) {
-        await playEpisodeById(episode.id, 'play');
+      if (fromBeginning) {
+        const first = sortEpisodesByNumber(allEpisodes)[0];
+        if (first) {
+          await playEpisodeById(first.id, 'play', 'start');
+        }
+        return;
+      }
+
+      const target = resolveSeriesContinuePlayTarget({
+        episodes: allEpisodes,
+        continueWatching,
+      });
+      if (target.episode) {
+        await playEpisodeById(
+          target.episode.id,
+          'play',
+          target.mode === 'continue' ? undefined : 'start',
+        );
       }
     },
-    [continueWatching?.episodeId, playEpisodeById, seriesDetail],
+    [continueWatching, playEpisodeById, seriesDetail],
   );
+
+  const seriesPlayLabel = useMemo(() => {
+    if (!seriesDetail) {
+      return 'Play';
+    }
+    const target = resolveSeriesContinuePlayTarget({
+      episodes: Object.values(seriesDetail.episodesBySeason).flat(),
+      continueWatching,
+    });
+    return formatSeriesContinuePlayLabel(target);
+  }, [continueWatching, seriesDetail]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -1062,6 +1158,13 @@ useEffect(() => {
 
                   setSearchOpen(true);
                 }}
+                onDiscoverPress={() => {
+                  if (searchOpen) {
+                    closeSearch();
+                  }
+                  setDiscoverZoneOpen(true);
+                }}
+                discoverZoneOpen={discoverZoneOpen}
               />
             </View>
             <View style={styles.contentRow}>
@@ -1071,7 +1174,6 @@ useEffect(() => {
               selectedCategoryId={selectedCategoryId}
               preferredCategoryId={selectedCategoryId}
               contentType="series"
-              discoverStatusMessage={discoverStatusMessage}
               onSelectCategory={handleSelectCategory}
               onPrefetchCategoryCount={prefetchCategoryCount}
               registerItemRef={(categoryId, instance) => {
@@ -1152,9 +1254,15 @@ useEffect(() => {
         loading={detailLoading}
         error={detailError}
         playbackError={episodePlaybackError}
-        playLabel={continueWatching ? 'Resume' : 'Play'}
-        isFavorite={isSelectedFavorite}
-        isWatchlisted={isSelectedWatchlisted}
+        playLabel={seriesPlayLabel}
+        isFavorite={
+          seriesDetailPopup.series
+            ? library.isFavorite(seriesDetailPopup.series.id) || library.isFavorite(seriesDetailPopup.series.seriesId)
+            : isSelectedFavorite
+        }
+        isWatchlisted={
+          seriesDetailPopup.series ? isSeriesWatchlisted(library.state.watchlist, seriesDetailPopup.series) : isSelectedWatchlisted
+        }
         originItemId={seriesDetailPopup.originItemId}
         onClose={(source) => closeSeriesDetailPopup(source)}
         onRetry={seriesDetailPopup.series ? handleDetailRetry : undefined}
@@ -1164,19 +1272,27 @@ useEffect(() => {
             : undefined
         }
         onToggleFavorite={
-          seriesDetail && seriesDetail.seriesId === seriesDetailPopup.series?.seriesId
+          seriesDetailPopup.series
             ? () => {
-                void toggleMediaFavorite(activeProviderId, seriesDetail.seriesId, 'series', {
-                  title: seriesDetail.title,
-                  artworkUrl: seriesDetail.posterUrl,
+                const series = seriesDetailPopup.series;
+                if (!series) {
+                  return;
+                }
+                void toggleMediaFavorite(activeProviderId, series.id || series.seriesId, 'series', {
+                  title: seriesDetail?.seriesId === series.seriesId ? seriesDetail.title : series.title,
+                  artworkUrl: seriesDetail?.seriesId === series.seriesId ? seriesDetail.posterUrl : series.posterUrl,
                 });
               }
             : undefined
         }
         onToggleWatchlist={
-          seriesDetail && seriesDetail.seriesId === seriesDetailPopup.series?.seriesId
+          seriesDetailPopup.series
             ? () => {
-                void toggleMediaWatchlist(activeProviderId, seriesDetail.seriesId);
+                const series = seriesDetailPopup.series;
+                if (!series) {
+                  return;
+                }
+                void toggleCanonicalSeriesWatchlist(activeProviderId, series);
               }
             : undefined
         }
@@ -1194,6 +1310,25 @@ useEffect(() => {
         episodesFocusReturnToken={episodesFocusReturnToken}
       />
 
+      <DiscoverZoneOverlay
+        visible={discoverZoneOpen && !playbackUiActive && !seriesDetailPopup.open}
+        retainMounted={discoverZoneOpen}
+        restoreFocusItemId={discoverZoneRestoreItemId}
+        providerId={activeProviderId}
+        scope="series"
+        onClose={() => {
+          detailLaunchOriginRef.current = 'browse';
+          setDiscoverZoneRestoreItemId(null);
+          setDiscoverZoneOpen(false);
+        }}
+        onSelectItem={(item) => {
+          if (!item.canonicalSeries) {
+            return;
+          }
+          setDiscoverZoneRestoreItemId(item.id);
+          handleSelectSeries(item.canonicalSeries, DISCOVERY_ZONE_ORIGIN);
+        }}
+      />
       <SearchOverlay
         visible={searchOpen && !playbackUiActive}
         scope="series"

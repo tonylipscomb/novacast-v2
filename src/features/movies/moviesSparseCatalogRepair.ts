@@ -10,6 +10,7 @@ import {
   getCatalogGenerationLargestCategory,
   getCatalogGenerationPhysicalStats,
   getCatalogProvider,
+  getCatalogSyncState,
   resolveReadableCatalogGeneration,
 } from '../catalog/catalogRepository.ts';
 import { assessMoviesCatalogIntegrity } from '../catalog/moviesCategoryDistributionValidation.ts';
@@ -75,8 +76,16 @@ export async function assessActiveMoviesCatalogIntegrity(
   // provider pointer so a degraded-only DB can still schedule one bounded repair.
   const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'movie');
   const provider = await getCatalogProvider(providerId);
-  const generation =
-    readableGeneration > 0 ? readableGeneration : provider?.catalogGeneration ?? 0;
+  const movieSyncState = await getCatalogSyncState(providerId, 'movie');
+  const providerPointerIsMovieReady =
+    (provider?.catalogGeneration ?? 0) > 0 &&
+    movieSyncState?.generation === provider?.catalogGeneration &&
+    movieSyncState?.status === 'ready';
+  const generation = readableGeneration > 0
+    ? readableGeneration
+    : providerPointerIsMovieReady
+      ? provider?.catalogGeneration ?? 0
+      : 0;
 
   if (generation <= 0) {
     return {

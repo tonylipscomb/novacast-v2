@@ -76,3 +76,35 @@ export function shouldMoviesHostHandlePlaybackBack(input: {
 }): boolean {
   return !input.playbackActive && !input.playbackClosing;
 }
+
+export function shouldMoviesCloseDetailOnBack(input: {
+  resumeDialogOpen: boolean;
+  playbackActive: boolean;
+  playbackClosing: boolean;
+  launchingPlayback: boolean;
+  detailPopupOpen: boolean;
+  didJustClose?: boolean;
+  detailSuppressedForPlayback?: boolean;
+}): boolean {
+  if (
+    input.resumeDialogOpen ||
+    input.playbackActive ||
+    input.playbackClosing ||
+    input.launchingPlayback ||
+    input.didJustClose ||
+    input.detailSuppressedForPlayback
+  ) {
+    return false;
+  }
+  return input.detailPopupOpen;
+}
+
+export function logMoviesPlaybackReturn(fields: {
+  origin: string;
+  movieId?: string | null;
+  detailWasOpen: boolean;
+  detailRestored: boolean;
+  focusTarget?: string | null;
+}) {
+  console.info('[NovaCast Movies Playback Return]', fields);
+}

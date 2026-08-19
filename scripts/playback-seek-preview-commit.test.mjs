@@ -8,13 +8,13 @@ const source = fs.readFileSync(
 );
 
 test('seek preview does not commit native seek while scrubbing', () => {
-  const adjustStart = source.indexOf('const adjustSeekTarget');
-  const applyStart = source.indexOf('const applySeekDelta', adjustStart);
-  const adjustBlock = source.slice(adjustStart, applyStart);
+  const applyStart = source.indexOf('const applySeekDelta');
+  const applyEnd = source.indexOf('const focusControl', applyStart);
+  const applyBlock = source.slice(applyStart, applyEnd);
 
-  assert.match(adjustBlock, /setSeekTargetMs\(nextPositionMs\)/);
-  assert.doesNotMatch(adjustBlock, /onSeek\(nextPositionMs\)/);
-  assert.match(adjustBlock, /eventType: 'seek-preview'/);
+  assert.match(applyBlock, /setSeekTargetMs\(result\.previewPositionMs\)/);
+  assert.doesNotMatch(applyBlock, /onSeek\(/);
+  assert.match(applyBlock, /eventType: 'seek-preview'/);
 });
 
 test('TV seek listener synchronizes React seek focus state', () => {
@@ -30,10 +30,11 @@ test('seek key handling uses the synchronous focus ref', () => {
 });
 
 test('seek commits exactly once on Enter or OK', () => {
-  const pressStart = source.indexOf("handleControlPress('seek', 'commit-seek'");
-  const pressEnd = source.indexOf('onFocus={() => handleControlFocus', pressStart);
-  const pressBlock = source.slice(pressStart, pressEnd);
-
-  assert.equal((pressBlock.match(/onSeek\(nextPositionMs\)/g) ?? []).length, 1);
-  assert.match(pressBlock, /eventType: 'seek-commit'/);
+  assert.match(source, /handleControlPress\('seek', 'commit-seek'/);
+  assert.match(source, /commitSeekPreview\('ok'\)/);
+  const commitStart = source.indexOf('const commitSeekPreview');
+  const commitEnd = source.indexOf('const scheduleIdleCommit', commitStart);
+  const commitBlock = source.slice(commitStart, commitEnd);
+  assert.equal((commitBlock.match(/onSeekRef\.current\(nextPositionMs\)/g) ?? []).length, 1);
+  assert.match(commitBlock, /eventType: 'seek-commit'/);
 });

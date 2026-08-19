@@ -1,6 +1,7 @@
 export const corsHeaders = {
-  'Access-Control-Allow-Headers': 'authorization, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers':
+    'authorization, apikey, content-type, x-novacast-device-id, x-novacast-device-secret, x-novacast-local-test-bypass',
+  'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
   'Access-Control-Allow-Origin': Deno.env.get('PAIRING_WEB_ORIGIN') ?? '*',
   'Content-Type': 'application/json',
 };

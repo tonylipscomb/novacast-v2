@@ -145,30 +145,8 @@ export const MoviePosterCard = memo(function MoviePosterCard({
     [instanceToken, registerRef, trapFocusDown],
   );
 
-  return (
-    <Pressable
-      ref={bindRef}
-      focusable={focusable}
-      disabled={!focusable}
-      hasTVPreferredFocus={hasPreferredFocus}
-      {...(trapFocusDown && selfFocusHandle != null ? { nextFocusDown: selfFocusHandle } : null)}
-      onFocus={() => {
-        recordFocusAudit({ component: 'MoviePosterCard', action: 'focus-received', itemId: movie.id });
-        if (isOnnMoviesTraceEnabled()) {
-          traceOnnMoviesEvent('Focus', 'poster_card_on_focus', {
-            movieId: movie.id,
-            nativeHandle: nativeHandleRef.current,
-          });
-        }
-        setIsFocused(true);
-        onFocus(movie);
-      }}
-      onBlur={() => {
-        // Local native focus cleared; forceFocused may still pin chrome during correction.
-        setIsFocused(false);
-      }}
-      onPress={() => onPress?.(movie)}
-      style={styles.card}>
+  const cardBody = (
+    <>
       <View style={[styles.posterShell, showFocused && styles.posterShellFocused]}>
         <View
           style={[
@@ -223,6 +201,41 @@ export const MoviePosterCard = memo(function MoviePosterCard({
         {metaPrimary && movie.genres[0] ? <View style={styles.metaDot} /> : null}
         <Text style={styles.meta}>{movie.genres[0] ?? 'Feature'}</Text>
       </View>
+    </>
+  );
+
+  if (!focusable) {
+    return (
+      <View style={styles.card} focusable={false} accessible={false} pointerEvents="none">
+        {cardBody}
+      </View>
+    );
+  }
+
+  return (
+    <Pressable
+      ref={bindRef}
+      focusable
+      accessible
+      hasTVPreferredFocus={hasPreferredFocus}
+      {...(trapFocusDown && selfFocusHandle != null ? { nextFocusDown: selfFocusHandle } : null)}
+      onFocus={() => {
+        recordFocusAudit({ component: 'MoviePosterCard', action: 'focus-received', itemId: movie.id });
+        if (isOnnMoviesTraceEnabled()) {
+          traceOnnMoviesEvent('Focus', 'poster_card_on_focus', {
+            movieId: movie.id,
+            nativeHandle: nativeHandleRef.current,
+          });
+        }
+        setIsFocused(true);
+        onFocus(movie);
+      }}
+      onBlur={() => {
+        setIsFocused(false);
+      }}
+      onPress={() => onPress?.(movie)}
+      style={styles.card}>
+      {cardBody}
     </Pressable>
   );
 }, moviePosterCardPropsAreEqual);

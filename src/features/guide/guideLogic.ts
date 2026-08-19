@@ -5,11 +5,7 @@ export type GuideLoadStatus = 'loading' | 'ready' | 'empty' | 'no-epg' | 'no-fav
 /** Categories a channel can never belong to; used to detect the synthetic Favorites bucket everywhere. */
 export const GUIDE_FAVORITES_CATEGORY_ID = 'favorites';
 
-function hasAnyEpg(rows: NormalizedGuideRow[]) {
-  return rows.some((row) => row.programs.some((program) => program.hasValidWindow));
-}
-
-/** A single channel with no EPG must not force the whole category into a 'no-epg' state. */
+/** NOVACAST_GUIDE_V2_FOUNDATION_V1: channel rows make Guide usable even when schedule data is absent or still hydrating. */
 export function statusForRows(categoryId: string, rows: NormalizedGuideRow[], favoritesAvailable: boolean): GuideLoadStatus {
   if (categoryId === GUIDE_FAVORITES_CATEGORY_ID && !favoritesAvailable) {
     return 'no-favorites';
@@ -17,7 +13,7 @@ export function statusForRows(categoryId: string, rows: NormalizedGuideRow[], fa
   if (!rows.length) {
     return 'empty';
   }
-  return hasAnyEpg(rows) ? 'ready' : 'no-epg';
+  return 'ready';
 }
 
 /** Channels must stay unique by stable id across paged loads, regardless of provider duplication. */

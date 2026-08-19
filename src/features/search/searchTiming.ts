@@ -1,3 +1,5 @@
+import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
+
 export type SearchTimingStage =
   | 'index-scan'
   | 'index-map'
@@ -22,6 +24,9 @@ export type SearchTimingMetric = {
 };
 
 function safeLog(message: string, payload: SearchTimingMetric) {
+  if (!isNovaCastTraceLoggingEnabled()) {
+    return;
+  }
   console.info(message, payload);
 }
 

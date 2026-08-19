@@ -1,3 +1,5 @@
+import { patchLiveTvWorkload } from './liveTvWorkload';
+
 const FOCUS_IDLE_MS = 500;
 
 let lastFocusMoveAt = 0;
@@ -6,6 +8,7 @@ const idleQueue: (() => void)[] = [];
 
 export function notifyLiveTvChannelFocusMove() {
   lastFocusMoveAt = Date.now();
+  patchLiveTvWorkload({ rapidDpadActive: true }, { log: false });
   if (idleTimer) {
     clearTimeout(idleTimer);
   }
@@ -15,6 +18,7 @@ export function notifyLiveTvChannelFocusMove() {
 
 function flushFocusIdleQueue() {
   idleTimer = null;
+  patchLiveTvWorkload({ rapidDpadActive: false }, { log: false });
   const callbacks = idleQueue.splice(0);
   callbacks.forEach((callback) => callback());
 }
@@ -35,6 +39,7 @@ export function runAfterLiveTvFocusIdle(callback: () => void) {
 export function resetLiveTvFocusIdle() {
   lastFocusMoveAt = 0;
   idleQueue.length = 0;
+  patchLiveTvWorkload({ rapidDpadActive: false }, { log: false });
   if (idleTimer) {
     clearTimeout(idleTimer);
     idleTimer = null;

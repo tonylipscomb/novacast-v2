@@ -157,13 +157,13 @@ const REQUIRED_FIELDS = {
 };
 
 /**
- * Extracts every `console.info('[Marker] ' + JSON.stringify({...}))` site,
+ * Extracts every `console.info|novacastCatalogTrace|novacastTrace('[Marker] ' + JSON.stringify({...}))` site,
  * returning the marker, the stringified payload text, and the text that
  * immediately follows the payload (used to prove there is no second argument).
  */
 function collectJsonDiagnostics(text) {
   const sites = [];
-  const callPattern = /console\.info\(\s*'(\[[^']+\]) ' \+\s*JSON\.stringify\(/g;
+  const callPattern = /(?:console\.info|novacastCatalogTrace|novacastTrace)\(\s*'(\[[^']+\]) ' \+\s*JSON\.stringify\(/g;
   let match = callPattern.exec(text);
   while (match) {
     const payloadStart = callPattern.lastIndex;
@@ -245,7 +245,7 @@ test('listed diagnostics are emitted as exactly one string argument', () => {
     assert.match(
       site.tail,
       /^\s*,?\s*\)/,
-      `${site.marker} in ${site.file} must close console.info right after JSON.stringify`,
+      `${site.marker} in ${site.file} must close the log call right after JSON.stringify`,
     );
   }
 });

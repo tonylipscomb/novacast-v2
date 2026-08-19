@@ -12,7 +12,11 @@ import {
 } from './providerRepositories.ts';
 import { XtreamClient, normalizeXtreamAccountMetadata } from './xtreamClient.ts';
 import { cancelProviderCatalogSync } from './providerCatalogSync.ts';
-import { invalidateCatalogSyncForProvider } from '../catalog/catalogSyncCoordinator.ts';
+import { invalidateCatalogSyncForProvider, isCatalogSyncRunning } from '../catalog/catalogSyncCoordinator.ts';
+import {
+  shouldResumeInterruptedCatalogSync,
+  shouldSkipBootstrapBecauseSyncing,
+} from '../catalog/catalogReadableGenerationRestore.ts';
 
 /** Stage 4.2O.2 — Series SQLite Parity. Mirrors Movies' build-time kill switch. */
 const SERIES_SQLITE_READS_ENABLED = process.env.EXPO_PUBLIC_SERIES_SQLITE_READS === 'true';
@@ -25,7 +29,7 @@ export type ProviderRepositoryBundle = ProviderRepositories & {
   createdAt: number;
   accountMetadata: ProviderAccountMetadata | null;
   seriesDataSource: SeriesDataSource;
-  syncCatalog: () => Promise<void>;
+  syncCatalog: (requestSource?: string) => Promise<void>;
   ready: Promise<void>;
   invalidate(): void;
 };
@@ -33,8 +37,111 @@ export type ProviderRepositoryBundle = ProviderRepositories & {
 let activeBundle: ProviderRepositoryBundle | null = null;
 let bundleGeneration = 0;
 const listeners = new Set<() => void>();
+const catalogBootstrapRequested = new WeakSet<ProviderRepositoryBundle>();
 let repositoryBundleFactoryOverride: ((provider: ProviderRecord, credentials?: ProviderCredentialRecord) => ProviderRepositoryBundle) | null = null;
 let activationObserverForTests: ((bundle: ProviderRepositoryBundle) => void) | null = null;
+
+function logFreshProviderBootstrap(phase: string, fields: Record<string, unknown> = {}) {
+  console.info('[NovaCast Fresh Provider Bootstrap]', JSON.stringify({ phase, ...fields }));
+}
+
+function logCatalogBootstrapDispatch(phase: string, fields: Record<string, unknown> = {}) {
+  console.info('[NovaCast Catalog Bootstrap Dispatch]', JSON.stringify({ phase, ...fields }));
+}
+
+async function requestCatalogBootstrap(bundle: ProviderRepositoryBundle) {
+  const { getCatalogBootstrapState } = await import('../catalog/catalogRepository.ts');
+  const state = await getCatalogBootstrapState(bundle.providerId, 'movie');
+  logFreshProviderBootstrap('durable-state-read', {
+    providerId: bundle.providerId,
+    providerCatalogGeneration: state.providerCatalogGeneration,
+    currentAttemptGeneration: state.currentAttemptGeneration,
+    currentStatus: state.currentStatus,
+    durableReadyGeneration: state.durableReadyGeneration,
+    decisionReason: state.durableReadyLifecycleState === 'ready' ? 'ready-generation-present' : null,
+  });
+
+  const coordinatorInFlight = isCatalogSyncRunning(bundle.providerId, 'movie');
+  if (shouldSkipBootstrapBecauseSyncing({
+    currentStatus: state.currentStatus,
+    coordinatorInFlight,
+  })) {
+    logFreshProviderBootstrap('bootstrap-skipped-syncing', {
+      providerId: bundle.providerId,
+      providerCatalogGeneration: state.providerCatalogGeneration,
+      currentAttemptGeneration: state.currentAttemptGeneration,
+      currentStatus: state.currentStatus,
+      durableReadyGeneration: state.durableReadyGeneration,
+      decisionReason: 'current-movie-sync-already-in-progress',
+    });
+    return;
+  }
+
+  const interruptedSync = shouldResumeInterruptedCatalogSync({
+    currentStatus: state.currentStatus,
+    coordinatorInFlight,
+  });
+  if (interruptedSync) {
+    logFreshProviderBootstrap('bootstrap-resume-interrupted-sync', {
+      providerId: bundle.providerId,
+      providerCatalogGeneration: state.providerCatalogGeneration,
+      currentAttemptGeneration: state.currentAttemptGeneration,
+      currentStatus: state.currentStatus,
+      durableReadyGeneration: state.durableReadyGeneration,
+      priorReadyRestoredOnBoot: state.durableReadyGeneration > 0 && state.durableReadyLifecycleState === 'ready',
+      decisionReason: 'sqlite-syncing-without-live-writer',
+    });
+  }
+
+  if (!interruptedSync && state.durableReadyGeneration > 0 && state.durableReadyLifecycleState === 'ready') {
+    const { shouldRequestSortMetadataUpgrade } = await import('../catalog/catalogSortMetadataUpgrade.ts');
+    const movieUpgrade = await shouldRequestSortMetadataUpgrade(bundle.providerId, 'movie');
+    const seriesUpgrade = await shouldRequestSortMetadataUpgrade(bundle.providerId, 'series');
+    if (!movieUpgrade && !seriesUpgrade) {
+      logFreshProviderBootstrap('bootstrap-skipped-ready', {
+        providerId: bundle.providerId,
+        providerCatalogGeneration: state.providerCatalogGeneration,
+        currentAttemptGeneration: state.currentAttemptGeneration,
+        currentStatus: state.currentStatus,
+        durableReadyGeneration: state.durableReadyGeneration,
+        decisionReason: 'durable-movie-ready-generation-present',
+      });
+      return;
+    }
+    logFreshProviderBootstrap('sort-metadata-upgrade-requested', {
+      providerId: bundle.providerId,
+      providerCatalogGeneration: state.providerCatalogGeneration,
+      movieUpgrade,
+      seriesUpgrade,
+      decisionReason: 'v4-sort-metadata-missing-on-ready-generation',
+    });
+  }
+
+  logFreshProviderBootstrap('bootstrap-required', {
+    providerId: bundle.providerId,
+    providerCatalogGeneration: state.providerCatalogGeneration,
+    currentAttemptGeneration: state.currentAttemptGeneration,
+    currentStatus: state.currentStatus,
+    durableReadyGeneration: state.durableReadyGeneration,
+    decisionReason: 'no-ready-movie-generation-and-no-syncing-attempt',
+  });
+  logFreshProviderBootstrap('catalog-bootstrap-request', {
+    providerId: bundle.providerId,
+    providerBundleGeneration: bundle.generation,
+    requestSource: 'provider-bundle-activation',
+  });
+  logFreshProviderBootstrap('movie-sync-requested', { providerId: bundle.providerId });
+  logFreshProviderBootstrap('series-sync-requested', { providerId: bundle.providerId });
+  logCatalogBootstrapDispatch('dispatch-requested', {
+    providerId: bundle.providerId,
+    providerBundleGeneration: bundle.generation,
+    coordinatorState: 'not-started',
+    pendingInputPresent: false,
+    currentAttemptGeneration: state.currentAttemptGeneration,
+    currentStatus: state.currentStatus,
+  });
+  await bundle.syncCatalog('provider-bundle-activation');
+}
 
 function notify() {
   listeners.forEach((listener) => listener());
@@ -42,7 +149,7 @@ function notify() {
 
 function buildRepositories(provider: ProviderRecord, credentials?: ProviderCredentialRecord): ProviderRepositories & {
   seriesDataSource: SeriesDataSource;
-  syncCatalog: () => Promise<void>;
+  syncCatalog: (requestSource?: string) => Promise<void>;
 } {
   const base =
     provider.connection?.type === 'xtream'
@@ -71,17 +178,47 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
 
   return {
     ...bundleBase,
-    syncCatalog: () =>
-      import('./providerCatalogSync.ts').then(({ scheduleProviderCatalogSync }) =>
-        scheduleProviderCatalogSync({
+    syncCatalog: async (requestSource = 'provider-bundle-activation') => {
+      logCatalogBootstrapDispatch('bundle-syncCatalog-enter', {
+        providerId: provider.id,
+        requestSource,
+        coordinatorState: 'importing-provider-sync',
+        pendingInputPresent: false,
+      });
+      try {
+        const { scheduleProviderCatalogSync } = await import('./providerCatalogSync.ts');
+        logCatalogBootstrapDispatch('coordinator-enter', {
+          providerId: provider.id,
+          requestSource,
+          coordinatorState: 'module-ready',
+          pendingInputPresent: false,
+        });
+        await scheduleProviderCatalogSync({
           providerId: provider.id,
           providerType: provider.connection?.type ?? 'unknown',
           displayName: provider.name,
+          requestSource,
           movies: base.movies,
           series: base.series,
           live: base.live,
-        }),
-      ),
+        });
+        logCatalogBootstrapDispatch('bundle-syncCatalog-return', {
+          providerId: provider.id,
+          requestSource,
+          coordinatorState: 'resolved',
+          pendingInputPresent: false,
+        });
+      } catch (error) {
+        logCatalogBootstrapDispatch('dispatch-failed', {
+          providerId: provider.id,
+          requestSource,
+          coordinatorState: 'rejected',
+          pendingInputPresent: false,
+          skipReason: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    },
   };
 }
 
@@ -148,9 +285,20 @@ export function setRepositoryBundleActivationObserverForTests(observer: ((bundle
 export function activateRepositoryBundle(bundle: ProviderRepositoryBundle) {
   activationObserverForTests?.(bundle);
   const previousBundle = activeBundle;
+  logCatalogBootstrapDispatch('activation-enter', {
+    providerId: bundle.providerId,
+    providerBundleGeneration: bundle.generation,
+    previousProviderBundleGeneration: previousBundle?.generation ?? null,
+    previousProviderId: previousBundle?.providerId ?? null,
+    sameProviderActivation: previousBundle?.providerId === bundle.providerId,
+    coordinatorState: 'activation',
+    pendingInputPresent: false,
+  });
   if (previousBundle && previousBundle !== bundle) {
-    cancelProviderCatalogSync(previousBundle.providerId);
-    invalidateCatalogSyncForProvider(previousBundle.providerId);
+    if (previousBundle.providerId !== bundle.providerId) {
+      cancelProviderCatalogSync(previousBundle.providerId);
+      invalidateCatalogSyncForProvider(previousBundle.providerId);
+    }
     previousBundle.invalidate();
   }
 
@@ -158,13 +306,37 @@ export function activateRepositoryBundle(bundle: ProviderRepositoryBundle) {
   bundleGeneration = bundle.generation;
   notify();
 
+  logFreshProviderBootstrap('provider-ready', {
+    providerId: bundle.providerId,
+    providerBundleGeneration: bundle.generation,
+  });
+
+  if (!catalogBootstrapRequested.has(bundle)) {
+    catalogBootstrapRequested.add(bundle);
+    void requestCatalogBootstrap(bundle).catch((error) => {
+      logFreshProviderBootstrap('catalog-bootstrap-failed', {
+        providerId: bundle.providerId,
+        errorCode: error instanceof Error ? error.message : 'catalog_bootstrap_failed',
+      });
+    });
+  } else {
+    logFreshProviderBootstrap('catalog-bootstrap-skipped', {
+      providerId: bundle.providerId,
+      reason: 'bundle-already-requested',
+    });
+  }
+
   void import('./providerCatalogSync.ts').then(({ hydrateProviderLibraryCaches }) => {
-    void hydrateProviderLibraryCaches(bundle.providerId).then(() => {
-      if (activeBundle !== bundle || bundleGeneration !== bundle.generation) {
-        return;
-      }
-      // Keep catalog sync off the first usable Home focus path.
-      void bundle.syncCatalog();
+    void hydrateProviderLibraryCaches(bundle.providerId).catch((error) => {
+      logFreshProviderBootstrap('cache-hydration-failed', {
+        providerId: bundle.providerId,
+        errorCode: error instanceof Error ? error.message : 'cache_hydration_failed',
+      });
+    });
+  }).catch((error) => {
+    logFreshProviderBootstrap('catalog-module-load-failed', {
+      providerId: bundle.providerId,
+      errorCode: error instanceof Error ? error.message : 'catalog_module_load_failed',
     });
   });
 }

@@ -9,12 +9,15 @@ import {
   catalogItemsTable,
   catalogCategoriesTable,
   clearProviderCatalog,
+  clearMoviesReadableGenerationCacheForTests,
   completeCatalogSync,
   failCatalogSync,
   getCatalogCategoryCounts,
   getCatalogDatabase,
   getCatalogGenerationPhysicalStats,
   getCatalogItemsPage,
+  getCatalogMovieItem,
+  getCatalogSeriesItem,
   getCatalogSchemaVersion,
   getCatalogTotalCount,
   initializeCatalogDatabase,
@@ -35,8 +38,36 @@ const grid = fs.readFileSync('src/features/movies/components/MoviePosterGrid.tsx
 async function setup() {
   await resetCatalogDatabaseForTests();
   resetMovieFragmentRecoveryForTests();
+  clearMoviesReadableGenerationCacheForTests();
   setCatalogDatabaseOpenerForTests(createNodeSqliteCatalogOpener());
   await initializeCatalogDatabase(':memory:');
+}
+
+/** 3 categories / 3 items — enough to pass Movies sparse-partial-dump and activate. */
+async function seedReadyMovieCatalog(providerId, contentId, title) {
+  const generation = await beginCatalogSync(providerId, 'movie');
+  await writeCatalogCategoriesBatch(
+    [1, 2, 3].map((n) => ({
+      providerId,
+      mediaType: 'movie',
+      categoryId: `c${n}`,
+      categoryName: `Cat ${n}`,
+      syncGeneration: generation,
+    })),
+    { mediaType: 'movie' },
+  );
+  await writeCatalogItemsBatch(
+    [1, 2, 3].map((n) => ({
+      providerId,
+      mediaType: 'movie',
+      contentId: n === 1 ? contentId : `${contentId}-${n}`,
+      categoryId: `c${n}`,
+      title: n === 1 ? title : `${title} ${n}`,
+      syncGeneration: generation,
+    })),
+  );
+  await completeCatalogSync(providerId, 'movie', generation, { processedCount: 3 });
+  return generation;
 }
 
 test.beforeEach(async () => {
@@ -50,8 +81,8 @@ test.afterEach(async () => {
 });
 
 test('Stage 3C schema marker and v2 tables exist', async () => {
-  assert.equal(CATALOG_SCHEMA_VERSION, 2);
-  assert.equal(await getCatalogSchemaVersion(), 2);
+  assert.equal(CATALOG_SCHEMA_VERSION, 4);
+  assert.equal(await getCatalogSchemaVersion(), 4);
   assert.equal(STAGE3C_GENERATION_SAFE_MARKER, 'stage3c-generation-safe-catalog-v2');
   assert.equal(catalogItemsTable('movie'), 'catalog_items_v2');
   assert.equal(catalogCategoriesTable('movie'), 'catalog_categories_v2');
@@ -147,15 +178,7 @@ test('writing generation N does not alter generation P', async () => {
 
 test('failed generation deletion does not affect completed generation', async () => {
   await upsertCatalogProvider({ providerId: 'p1', providerType: 'xtream', displayName: 'P' });
-  const ready = await beginCatalogSync('p1', 'movie');
-  await writeCatalogCategoriesBatch(
-    [{ providerId: 'p1', mediaType: 'movie', categoryId: 'c1', categoryName: 'X', syncGeneration: ready }],
-    { mediaType: 'movie' },
-  );
-  await writeCatalogItemsBatch([
-    { providerId: 'p1', mediaType: 'movie', contentId: 'm1', categoryId: 'c1', title: 'M', syncGeneration: ready },
-  ]);
-  await completeCatalogSync('p1', 'movie', ready, { processedCount: 1 });
+  const ready = await seedReadyMovieCatalog('p1', 'm1', 'M');
 
   const failed = await beginCatalogSync('p1', 'movie');
   await writeCatalogItemsBatch([
@@ -164,7 +187,7 @@ test('failed generation deletion does not affect completed generation', async ()
   await failCatalogSync('p1', 'movie', 'sync_failed');
 
   const stillReady = await getCatalogGenerationPhysicalStats('p1', 'movie', ready);
-  assert.equal(stillReady.itemRows, 1);
+  assert.equal(stillReady.itemRows, 3);
   assert.equal(await resolveReadableCatalogGeneration('p1', 'movie'), ready);
 });
 
@@ -332,14 +355,28 @@ test('ghost generation with zero rows cannot become readable', async () => {
     `UPDATE catalog_providers SET catalog_generation = 48, sync_status = 'error' WHERE provider_id = 'p1'`,
   );
 
-  // Seed a physically valid older generation in v2.
+  // Seed a physically valid older generation in v2 (3 categories so recovery
+  // does not treat it as a sparse partial dump).
   await writeCatalogCategoriesBatch(
-    [{ providerId: 'p1', mediaType: 'movie', categoryId: 'c1', categoryName: 'A', syncGeneration: 36 }],
+    [1, 2, 3].map((n) => ({
+      providerId: 'p1',
+      mediaType: 'movie',
+      categoryId: `c${n}`,
+      categoryName: `A${n}`,
+      syncGeneration: 36,
+    })),
     { mediaType: 'movie' },
   );
-  await writeCatalogItemsBatch([
-    { providerId: 'p1', mediaType: 'movie', contentId: 'm1', categoryId: 'c1', title: 'M', syncGeneration: 36 },
-  ]);
+  await writeCatalogItemsBatch(
+    [1, 2, 3].map((n) => ({
+      providerId: 'p1',
+      mediaType: 'movie',
+      contentId: `m${n}`,
+      categoryId: `c${n}`,
+      title: `M${n}`,
+      syncGeneration: 36,
+    })),
+  );
 
   const resolved = await resolveReadableCatalogGeneration('p1', 'movie');
   assert.equal(resolved, 36);
@@ -363,15 +400,7 @@ test('catalog_generation updates only after physical validation', async () => {
 
 test('previous generation remains readable throughout sync', async () => {
   await upsertCatalogProvider({ providerId: 'p1', providerType: 'xtream', displayName: 'P' });
-  const ready = await beginCatalogSync('p1', 'movie');
-  await writeCatalogCategoriesBatch(
-    [{ providerId: 'p1', mediaType: 'movie', categoryId: 'c1', categoryName: 'A', syncGeneration: ready }],
-    { mediaType: 'movie' },
-  );
-  await writeCatalogItemsBatch([
-    { providerId: 'p1', mediaType: 'movie', contentId: 'm1', categoryId: 'c1', title: 'Ready', syncGeneration: ready },
-  ]);
-  await completeCatalogSync('p1', 'movie', ready, { processedCount: 1 });
+  const ready = await seedReadyMovieCatalog('p1', 'm1', 'Ready');
 
   const next = await beginCatalogSync('p1', 'movie');
   assert.notEqual(next, ready);
@@ -382,7 +411,61 @@ test('previous generation remains readable throughout sync', async () => {
     generation: ready,
     limit: 10,
   });
-  assert.equal(page.totalCount, 1);
+  assert.equal(page.totalCount, 3);
+});
+
+test('zeroed provider pointer still restores last ready movie generation while a new sync runs', async () => {
+  await upsertCatalogProvider({ providerId: 'p1', providerType: 'xtream', displayName: 'P' });
+  const ready = await seedReadyMovieCatalog('p1', 'm1', 'Ready');
+
+  const db = await getCatalogDatabase();
+  await db.run(`UPDATE catalog_providers SET catalog_generation = 0 WHERE provider_id = ?`, ['p1']);
+  clearMoviesReadableGenerationCacheForTests();
+
+  const next = await beginCatalogSync('p1', 'movie');
+  assert.notEqual(next, ready);
+  assert.equal(await resolveReadableCatalogGeneration('p1', 'movie'), ready);
+  const item = await getCatalogMovieItem('p1', 'm1');
+  assert.equal(item?.title, 'Ready');
+});
+
+test('leftover sqlite syncing after restart still restores the last ready movie generation', async () => {
+  await upsertCatalogProvider({ providerId: 'p1', providerType: 'xtream', displayName: 'P' });
+  const ready = await seedReadyMovieCatalog('p1', 'm1', 'Ready');
+
+  const db = await getCatalogDatabase();
+  await db.run(
+    `UPDATE catalog_sync_state
+     SET status = 'syncing', generation = ?, completed_at = NULL, error_code = NULL
+     WHERE provider_id = ? AND media_type = 'movie'`,
+    [ready + 1, 'p1'],
+  );
+  clearMoviesReadableGenerationCacheForTests();
+
+  assert.equal(await resolveReadableCatalogGeneration('p1', 'movie'), ready);
+  const item = await getCatalogMovieItem('p1', 'm1');
+  assert.equal(item?.title, 'Ready');
+});
+
+test('zeroed provider pointer still restores last ready series generation while a new sync runs', async () => {
+  await upsertCatalogProvider({ providerId: 'p1', providerType: 'xtream', displayName: 'P' });
+  const ready = await beginCatalogSync('p1', 'series');
+  await writeCatalogCategoriesBatch(
+    [{ providerId: 'p1', mediaType: 'series', categoryId: 'c1', categoryName: 'A', syncGeneration: ready }],
+    { mediaType: 'series' },
+  );
+  await writeCatalogItemsBatch([
+    { providerId: 'p1', mediaType: 'series', contentId: 's1', categoryId: 'c1', title: 'Ready Show', syncGeneration: ready },
+  ]);
+  await completeCatalogSync('p1', 'series', ready, { processedCount: 1 });
+
+  const db = await getCatalogDatabase();
+  await db.run(`UPDATE catalog_providers SET catalog_generation = 0 WHERE provider_id = ?`, ['p1']);
+  const next = await beginCatalogSync('p1', 'series');
+  assert.notEqual(next, ready);
+  assert.equal(await resolveReadableCatalogGeneration('p1', 'series'), ready);
+  const item = await getCatalogSeriesItem('p1', 's1');
+  assert.equal(item?.title, 'Ready Show');
 });
 
 test('Stage 3C catalog work remains separate from Movies focus coordinator', () => {

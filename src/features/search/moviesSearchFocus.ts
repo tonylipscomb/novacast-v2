@@ -2,6 +2,7 @@
  * Stage 3G — deterministic Search input → result-grid focus handoff.
  */
 
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import type { RefObject } from 'react';
 import type { View } from 'react-native';
 
@@ -44,7 +45,7 @@ export function logMoviesSearchFocus(payload: {
   searchInputFocused: boolean;
   retryCount: number;
 }) {
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Focus] ' +
       JSON.stringify({
         ...payload,

@@ -1,16 +1,18 @@
+import { novacastCatalogTrace } from '../diagnostics/novacastLogPolicy.ts';
 import {
   beginCatalogForegroundRead,
   getCatalogDatabase,
   getCatalogReadDatabase,
+  logCatalogWalAudit,
   withCatalogTransaction,
+  type CatalogTransactionDiagnostics,
 } from './catalogDatabase.ts';
-import type { CatalogSqlParams } from './catalogDatabaseDriver.ts';
+import type { CatalogDatabaseHandle, CatalogSqlParams } from './catalogDatabaseDriver.ts';
 import {
   CATALOG_DEFAULT_PAGE_SIZE,
   normalizeCatalogTitle,
   type CatalogCategoryRecord,
   type CatalogItemRecord,
-  type CatalogItemSort,
   type CatalogItemsPage,
   type CatalogItemsPageQuery,
   type CatalogMediaType,
@@ -19,6 +21,11 @@ import {
   type CatalogSyncStateRecord,
   type CatalogSyncStatus,
 } from './catalogTypes.ts';
+import {
+  getCatalogSortMetadataCoverage,
+  markSortMetadataUpgradeSatisfied,
+} from './catalogSortMetadataUpgrade.ts';
+import { orderByClauseCompatible, resolveContentSortEffectivePrimary } from './catalogSortOrder.ts';
 import { recordCatalogWritePhase } from './catalogWritePhaseAudit.ts';
 import { nowMs as perfNowMs } from './jsChunkBudget.ts';
 import {
@@ -29,6 +36,49 @@ import {
   recordColdCategorySubPhase,
   timedColdCategorySubPhase,
 } from './coldCategorySpikeAudit.ts';
+
+function logMovieCompletionPhase(phase: string, generation: number, startedAt: number) {
+  novacastCatalogTrace('[NovaCast Movie Completion Phase]', {
+    phase,
+    generation,
+    durationMs: Math.round(perfNowMs() - startedAt),
+  });
+}
+
+function logMovieCompletionTailAudit(input: {
+  phase: string;
+  generation: number;
+  connection: string;
+  queryType: string;
+  querySignature: string;
+  callCount: number;
+  durationMs: number;
+  reusedCachedResult: boolean;
+  rowsOrGenerationsInspected?: number;
+  fallbackScanPerformed?: boolean;
+  fallbackCandidateCount?: number;
+  pointerRepairPerformed?: boolean;
+  avoidedAggregateQuery?: string | boolean;
+  avoidedCategoryRowCountQuery?: boolean;
+  currentGeneration?: number;
+  readableGeneration?: number;
+}) {
+  novacastCatalogTrace('[NovaCast Movie Completion Tail Audit]', input);
+}
+
+function logMovieActiveReadyResolverFastPath(input: Record<string, unknown>) {
+  novacastCatalogTrace('[NovaCast Movie Active Ready Resolver Fast Path]', input);
+}
+
+export type CatalogCompletionStatsSnapshot = {
+  providerId: string;
+  mediaType: 'movie';
+  generation: number;
+  itemRows: number;
+  distinctContentIds: number;
+  distinctItemCategoryIds: number;
+  categoryRows: number;
+};
 import {
   STAGE3C_GENERATION_SAFE_MARKER,
   catalogCategoriesConflictTarget,
@@ -55,6 +105,13 @@ import {
   setCachedMoviesReadableGeneration,
 } from './moviesReadableGenerationCache.ts';
 import { getMoviesDetailOpenForDiagnostics } from '../movies/moviesDiagnosticsState.ts';
+import { isCatalogSyncRunning } from './catalogSyncCoordinator.ts';
+import {
+  CATALOG_READABLE_RESTORE_LOG,
+  incompleteGenerationToExclude,
+  resolveMoviePointerCandidate,
+  shouldExcludeSyncingGenerationFromRecovery,
+} from './catalogReadableGenerationRestore.ts';
 
 
 function nowMs() {
@@ -121,6 +178,8 @@ function mapItem(row: Record<string, unknown>): CatalogItemRecord {
     releaseDate: asNullableString(row.release_date),
     releaseYear: asNullableNumber(row.release_year),
     rating: asNullableNumber(row.rating),
+    addedAt: asNullableNumber(row.added_at),
+    popularity: asNullableNumber(row.popularity),
     description: asNullableString(row.description),
     streamExtension: asNullableString(row.stream_extension),
     providerSortOrder: asNullableNumber(row.provider_sort_order),
@@ -160,44 +219,50 @@ function mapSyncState(row: Record<string, unknown>): CatalogSyncStateRecord {
   };
 }
 
-function orderByClause(sort: CatalogItemSort | undefined) {
-  switch (sort) {
-    case 'newest':
-      return 'release_year DESC NULLS LAST, normalized_title ASC, content_id ASC';
-    case 'oldest':
-      return 'release_year ASC NULLS LAST, normalized_title ASC, content_id ASC';
-    case 'title-desc':
-      return 'normalized_title DESC, content_id ASC';
-    case 'rating':
-      return 'rating DESC NULLS LAST, normalized_title ASC, content_id ASC';
-    case 'provider':
-      return 'provider_sort_order ASC NULLS LAST, normalized_title ASC, content_id ASC';
-    case 'title':
-    default:
-      return 'normalized_title ASC, content_id ASC';
-  }
+let movieProviderPointerAuditOrder = 0;
+
+async function logMovieProviderGenerationPointer(input: {
+  event: string;
+  providerId: string;
+  database?: CatalogDatabaseHandle;
+  requestedProviderCatalogGeneration?: number | null;
+  sourceFunction: string;
+  sourcePhase: string;
+  pointerReason: string;
+}): Promise<void> {
+  const database = input.database ?? (await getCatalogDatabase());
+  const [provider, syncState] = await Promise.all([
+    getCatalogProvider(input.providerId, database),
+    getCatalogSyncState(input.providerId, 'movie', database),
+  ]);
+  const lifecycleGeneration = syncState?.generation ?? 0;
+  const lifecycle = lifecycleGeneration > 0
+    ? await database.getFirst<{ sync_generation: number | string; status: string }>(
+        `SELECT sync_generation, status
+         FROM catalog_generation_state
+         WHERE provider_id = ? AND media_type = 'movie'
+           AND sync_generation = ?`,
+        [input.providerId, lifecycleGeneration],
+      )
+    : null;
+  novacastCatalogTrace('[NovaCast Movie Provider Generation Pointer]', {
+    event: input.event,
+    providerId: input.providerId,
+    currentAttemptGeneration: syncState?.generation ?? 0,
+    currentSyncStatus: syncState?.status ?? null,
+    lifecycleGeneration: lifecycle ? asNumber(lifecycle.sync_generation) : 0,
+    lifecycleStatus: lifecycle?.status ?? null,
+    previousProviderCatalogGeneration: provider?.catalogGeneration ?? 0,
+    requestedProviderCatalogGeneration: input.requestedProviderCatalogGeneration ?? null,
+    resultingProviderCatalogGeneration: provider?.catalogGeneration ?? 0,
+    sourceFunction: input.sourceFunction,
+    sourcePhase: input.sourcePhase,
+    pointerReason: input.pointerReason,
+    order: ++movieProviderPointerAuditOrder,
+    timestamp: new Date().toISOString(),
+  });
 }
 
-/** SQLite before 3.30 may not support NULLS LAST; use IS NULL / CASE for broader compatibility. */
-function orderByClauseCompatible(sort: CatalogItemSort | undefined) {
-  switch (sort) {
-    case 'newest':
-      return '(release_year IS NULL) ASC, release_year DESC, normalized_title ASC, content_id ASC';
-    case 'oldest':
-      return '(release_year IS NULL) ASC, release_year ASC, normalized_title ASC, content_id ASC';
-    case 'title-desc':
-      return 'normalized_title DESC, content_id ASC';
-    case 'rating':
-      return '(rating IS NULL) ASC, rating DESC, normalized_title ASC, content_id ASC';
-    case 'provider':
-      return '(provider_sort_order IS NULL) ASC, provider_sort_order ASC, normalized_title ASC, content_id ASC';
-    case 'title':
-    default:
-      return 'normalized_title ASC, content_id ASC';
-  }
-}
-
-void orderByClause;
 
 export async function upsertCatalogProvider(input: {
   providerId: string;
@@ -205,6 +270,15 @@ export async function upsertCatalogProvider(input: {
   displayName?: string | null;
 }): Promise<void> {
   const db = await getCatalogDatabase();
+  await logMovieProviderGenerationPointer({
+    event: 'before-provider-upsert',
+    providerId: input.providerId,
+    database: db,
+    requestedProviderCatalogGeneration: 0,
+    sourceFunction: 'upsertCatalogProvider',
+    sourcePhase: 'provider-metadata',
+    pointerReason: 'provider-upsert-default-only',
+  });
   await db.run(
     `INSERT INTO catalog_providers (
       provider_id, provider_type, display_name, catalog_generation, sync_status
@@ -214,6 +288,15 @@ export async function upsertCatalogProvider(input: {
       display_name = excluded.display_name`,
     [input.providerId, input.providerType, input.displayName ?? null],
   );
+  await logMovieProviderGenerationPointer({
+    event: 'after-provider-upsert',
+    providerId: input.providerId,
+    database: db,
+    requestedProviderCatalogGeneration: 0,
+    sourceFunction: 'upsertCatalogProvider',
+    sourcePhase: 'provider-metadata',
+    pointerReason: 'provider-upsert-default-only',
+  });
 }
 
 async function resolveNextSyncGeneration(providerId: string, mediaType: CatalogMediaType) {
@@ -236,6 +319,8 @@ async function resolveNextSyncGeneration(providerId: string, mediaType: CatalogM
        SELECT COALESCE(MAX(sync_generation), 0) AS g FROM catalog_items WHERE provider_id = ? AND media_type = ?
        UNION ALL
        SELECT COALESCE(MAX(sync_generation), 0) AS g FROM catalog_categories WHERE provider_id = ? AND media_type = ?
+       UNION ALL
+       SELECT COALESCE(MAX(sync_generation), 0) AS g FROM catalog_generation_state WHERE provider_id = ? AND media_type = ?
      )`,
     [
       providerId,
@@ -246,6 +331,8 @@ async function resolveNextSyncGeneration(providerId: string, mediaType: CatalogM
       providerId,
       mediaType,
       providerId,
+      providerId,
+      mediaType,
       providerId,
       mediaType,
       providerId,
@@ -267,7 +354,7 @@ function logCatalogV2Generation(payload: {
   ready: boolean;
   activated: boolean;
 }) {
-  console.info('[NovaCast Catalog V2 Generation] ' + JSON.stringify(payload));
+  novacastCatalogTrace('[NovaCast Catalog V2 Generation] ' + JSON.stringify(payload));
 }
 
 /**
@@ -283,6 +370,18 @@ export async function beginCatalogSync(
     const db = await getCatalogDatabase();
     const generation = await resolveNextSyncGeneration(providerId, mediaType);
     const startedAt = nowMs();
+
+    if (mediaType === 'movie') {
+      await logMovieProviderGenerationPointer({
+        event: 'sync-begin-pointer-snapshot',
+        providerId,
+        database: db,
+        requestedProviderCatalogGeneration: null,
+        sourceFunction: 'beginCatalogSync',
+        sourcePhase: 'before-sync-state-writes',
+        pointerReason: 'sync-begin-snapshot',
+      });
+    }
 
     await db.run(
       `INSERT INTO catalog_providers (
@@ -319,6 +418,35 @@ export async function beginCatalogSync(
         startedAt,
       ],
     );
+
+    await db.run(
+      `INSERT INTO catalog_generation_state (
+         provider_id, media_type, sync_generation, status, phase,
+         processed_count, started_at, completed_at, error_code
+       ) VALUES (?, ?, ?, 'syncing', ?, 0, ?, NULL, NULL)
+       ON CONFLICT(provider_id, media_type, sync_generation) DO UPDATE SET
+         status = 'syncing',
+         phase = excluded.phase,
+         processed_count = 0,
+         started_at = excluded.started_at,
+         completed_at = NULL,
+         error_code = NULL,
+         activation_total_items = NULL,
+         activation_nonzero_category_count = NULL`,
+      [providerId, mediaType, generation, options?.phase ?? 'categories', startedAt],
+    );
+
+    if (mediaType === 'movie') {
+      await logMovieProviderGenerationPointer({
+        event: 'sync-begin-pointer-snapshot-after',
+        providerId,
+        database: db,
+        requestedProviderCatalogGeneration: null,
+        sourceFunction: 'beginCatalogSync',
+        sourcePhase: 'after-sync-state-writes',
+        pointerReason: 'sync-begin-snapshot',
+      });
+    }
 
     return generation;
   });
@@ -462,7 +590,7 @@ export async function writeCatalogCategoriesBatch(
     markCategoryBatchFinished(mediaType);
     const totalMs = perfNowMs() - batchStart;
     if (cold || totalMs >= 100) {
-      console.info('[NovaCast ColdCategorySpike]', {
+      novacastCatalogTrace('[NovaCast ColdCategorySpike]', {
         phase: 'batchBreakdown',
         mediaType,
         batchIndex,
@@ -490,6 +618,17 @@ export async function writeCatalogItemsBatch(
     return 0;
   }
 
+  const ITEM_PARAMS_PER_ROW = 21;
+  const CONSERVATIVE_SQLITE_VARIABLE_LIMIT = 999;
+  const maxItemsPerStatement = Math.floor(CONSERVATIVE_SQLITE_VARIABLE_LIMIT / ITEM_PARAMS_PER_ROW);
+  if (items.length > maxItemsPerStatement) {
+    let written = 0;
+    for (let offset = 0; offset < items.length; offset += maxItemsPerStatement) {
+      written += await writeCatalogItemsBatch(items.slice(offset, offset + maxItemsPerStatement));
+    }
+    return written;
+  }
+
   const db = await getCatalogDatabase();
   const mediaType = (items[0]?.mediaType ?? 'movie') as CatalogMediaType;
   const itemsTable = catalogItemsTable(mediaType);
@@ -503,6 +642,8 @@ export async function writeCatalogItemsBatch(
       release_date = excluded.release_date,
       release_year = excluded.release_year,
       rating = excluded.rating,
+      added_at = excluded.added_at,
+      popularity = excluded.popularity,
       description = excluded.description,
       stream_extension = excluded.stream_extension,
       provider_sort_order = excluded.provider_sort_order,
@@ -518,6 +659,8 @@ export async function writeCatalogItemsBatch(
       release_date = excluded.release_date,
       release_year = excluded.release_year,
       rating = excluded.rating,
+      added_at = excluded.added_at,
+      popularity = excluded.popularity,
       description = excluded.description,
       stream_extension = excluded.stream_extension,
       provider_sort_order = excluded.provider_sort_order,
@@ -526,30 +669,46 @@ export async function writeCatalogItemsBatch(
       episode_number = excluded.episode_number,
       sync_generation = excluded.sync_generation,
       updated_at = excluded.updated_at`;
+  const valuePlaceholders = items
+    .map(() => `(${Array.from({ length: ITEM_PARAMS_PER_ROW }, () => '?').join(', ')})`)
+    .join(',\n      ');
   const sql = `INSERT INTO ${itemsTable} (
       provider_id, media_type, content_id, category_id, title, normalized_title,
-      artwork_url, backdrop_url, release_date, release_year, rating, description,
+      artwork_url, backdrop_url, release_date, release_year, rating, added_at, popularity, description,
       stream_extension, provider_sort_order, series_id, season_number, episode_number,
       sync_generation, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES ${valuePlaceholders}
     ON CONFLICT(${itemConflict}) DO UPDATE SET
       ${itemConflictUpdate}`;
 
+  const totalWriteStart = perfNowMs();
   const prepareStart = perfNowMs();
   const statement = await db.prepare(sql);
+  const prepareMs = perfNowMs() - prepareStart;
   recordCatalogWritePhase('item.prepare', {
-    wallMs: perfNowMs() - prepareStart,
+    wallMs: prepareMs,
     itemCount: items.length,
   });
 
+  const transactionDiagnostics: CatalogTransactionDiagnostics = {
+    providerId: items[0]?.providerId,
+    mediaType,
+    generation: items[0]?.syncGeneration,
+    writeType: 'item',
+  };
+  let statementExecuteTotalMs = 0;
+  let maxStatementExecuteMs = 0;
+  let statementExecuteCount = 0;
+  let finalized = false;
+
   try {
-    return await withCatalogTransaction(async () => {
-      let written = 0;
+    const result = await withCatalogTransaction(async () => {
       const writeStart = perfNowMs();
+      const parameters: CatalogSqlParams = [];
       for (const item of items) {
         const updatedAt = item.updatedAt ?? nowMs();
         const normalizedTitle = item.normalizedTitle ?? normalizeCatalogTitle(item.title);
-        await statement.execute([
+        parameters.push(
           item.providerId,
           item.mediaType,
           item.contentId,
@@ -561,6 +720,8 @@ export async function writeCatalogItemsBatch(
           item.releaseDate ?? null,
           item.releaseYear ?? null,
           item.rating ?? null,
+          item.addedAt ?? null,
+          item.popularity ?? null,
           item.description ?? null,
           item.streamExtension ?? null,
           item.providerSortOrder ?? null,
@@ -569,17 +730,68 @@ export async function writeCatalogItemsBatch(
           item.episodeNumber ?? null,
           item.syncGeneration,
           updatedAt,
-        ]);
-        written += 1;
+        );
       }
+      const executeStart = perfNowMs();
+      await statement.execute(parameters);
+      const executeMs = perfNowMs() - executeStart;
+      statementExecuteTotalMs = executeMs;
+      maxStatementExecuteMs = executeMs;
+      statementExecuteCount = 1;
       recordCatalogWritePhase('item.write', {
         wallMs: perfNowMs() - writeStart,
-        itemCount: written,
+        itemCount: items.length,
       });
-      return written;
-    });
-  } finally {
+      return items.length;
+    }, transactionDiagnostics);
+    const finalizeStart = perfNowMs();
     await statement.finalize();
+    finalized = true;
+    const finalizeMs = perfNowMs() - finalizeStart;
+    const totalWriteCallMs = perfNowMs() - totalWriteStart;
+    const queueWaitMs = transactionDiagnostics.queueWaitMs ?? 0;
+    const transactionBodyMs = transactionDiagnostics.transactionBodyMs ?? 0;
+    if (
+      totalWriteCallMs >= 250 ||
+      queueWaitMs >= 100 ||
+      transactionBodyMs >= 150 ||
+      maxStatementExecuteMs >= 50
+    ) {
+      novacastCatalogTrace('[NovaCast Catalog Write Breakdown]', {
+        timestamp: new Date().toISOString(),
+        providerId: items[0]?.providerId,
+        mediaType,
+        generation: items[0]?.syncGeneration,
+        writeMode: 'multi-row',
+        prepareMs: Math.round(prepareMs),
+        queueWaitMs: Math.round(queueWaitMs),
+        transactionBodyMs: Math.round(transactionBodyMs),
+        statementExecuteTotalMs: Math.round(statementExecuteTotalMs),
+        maxStatementExecuteMs: Math.round(maxStatementExecuteMs),
+        statementExecuteCount,
+        parameterCount: items.length * ITEM_PARAMS_PER_ROW,
+        rowCount: items.length,
+        finalizeMs: Math.round(finalizeMs),
+        totalWriteCallMs: Math.round(totalWriteCallMs),
+        slowWrite: totalWriteCallMs >= 500,
+      });
+      if (statementExecuteTotalMs >= 500) {
+        void logCatalogWalAudit(db, {
+          reason: 'slow-write',
+          providerId: items[0]?.providerId,
+          mediaType,
+          generation: items[0]?.syncGeneration,
+          writeMode: 'multi-row',
+          rowCount: items.length,
+          statementExecuteMs: Math.round(statementExecuteTotalMs),
+        });
+      }
+    }
+    return result;
+  } finally {
+    if (!finalized) {
+      await statement.finalize();
+    }
   }
 }
 
@@ -653,6 +865,9 @@ export async function recomputeCategoryCounts(
     wallMs: perfNowMs() - aggregateStart,
     itemCount: aggregates.length,
   });
+  if (mediaType === 'movie') {
+    logMovieCompletionPhase('recompute-category-counts-aggregate', generation, aggregateStart);
+  }
 
   const updatedAt = nowMs();
   const updateStart = perfNowMs();
@@ -693,6 +908,9 @@ export async function recomputeCategoryCounts(
     itemCount: aggregates.length,
     meta: { totalItems },
   });
+  if (mediaType === 'movie') {
+    logMovieCompletionPhase('recompute-category-counts-update', generation, updateStart);
+  }
 
   return { categoryCount: aggregates.length, totalItems };
 }
@@ -739,8 +957,9 @@ export async function deleteStaleCatalogGeneration(
 }
 
 /**
- * Movies v2 cleanup: retain the listed generations (current + previous completed)
- * and delete only other incomplete/failed v2 generations. Never touches legacy tables.
+ * Movies v2 cleanup: retain newly active + immediately previous validated
+ * generations (current + previous completed) and delete only other
+ * incomplete/failed v2 generations. Never touches legacy tables.
  */
 export async function cleanupIncompleteCatalogGenerationsV2(
   providerId: string,
@@ -751,45 +970,107 @@ export async function cleanupIncompleteCatalogGenerationsV2(
     return;
   }
   const keep = [...new Set(keepGenerations.filter((generation) => generation > 0))];
+  const batchSize = 2000;
   const db = await getCatalogDatabase();
-  const start = perfNowMs();
+  const generationRows = await db.getAll<{ sync_generation: number | string }>(
+    `SELECT sync_generation FROM catalog_items_v2
+     WHERE provider_id = ? AND media_type = ?
+     GROUP BY sync_generation ORDER BY sync_generation ASC`,
+    [providerId, mediaType],
+  );
+  const targets = generationRows
+    .map((row) => asNumber(row.sync_generation))
+    .filter((generation) => generation > 0 && !keep.includes(generation));
+  let batchNumber = 0;
+  let cumulativeRowsDeleted = 0;
 
-  if (!keep.length) {
+  const protectCurrentGenerations = async () => {
+    const provider = await getCatalogProvider(providerId, db);
+    const state = await getCatalogSyncState(providerId, mediaType, db);
+    const readable = await resolveReadableCatalogGeneration(providerId, mediaType);
+    return new Set([provider?.catalogGeneration ?? 0, state?.generation ?? 0, readable, ...keep]);
+  };
+
+  for (const targetGeneration of targets) {
+    for (const table of ['catalog_items_v2', 'catalog_categories_v2', 'catalog_seasons_v2']) {
+      while (true) {
+        const protectedGenerations = await protectCurrentGenerations();
+        if (protectedGenerations.has(targetGeneration)) {
+          novacastCatalogTrace('[NovaCast Movie Post Activation Cleanup]', {
+            event: 'aborted',
+            providerId,
+            mediaType,
+            targetGeneration,
+            reason: 'generation-state-changed',
+            retainedGenerations: [...protectedGenerations],
+          });
+          return;
+        }
+        const batchStarted = perfNowMs();
+        let batchRowsDeleted = 0;
+        const transactionStarted = perfNowMs();
+        await withCatalogTransaction(async () => {
+          const batch = await db.run(
+            `DELETE FROM ${table}
+             WHERE rowid IN (
+               SELECT rowid FROM ${table}
+               WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
+               LIMIT ?
+             )`,
+            [providerId, mediaType, targetGeneration, batchSize],
+          );
+          batchRowsDeleted = Number(batch.changes ?? 0);
+        });
+        const transactionMs = perfNowMs() - transactionStarted;
+        cumulativeRowsDeleted += batchRowsDeleted;
+        batchNumber += 1;
+        const yieldStarted = perfNowMs();
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        const yieldMs = perfNowMs() - yieldStarted;
+        novacastCatalogTrace('[NovaCast Movie Cleanup Audit]', {
+          cleanupMode: 'post-activation',
+          batchNumber,
+          table,
+          targetGeneration,
+          batchRowsDeleted,
+          cumulativeRowsDeleted,
+          batchDeleteMs: Math.round(perfNowMs() - batchStarted),
+          transactionMs: Math.round(transactionMs),
+          yieldMs: Math.round(yieldMs),
+          retainedGenerations: [...protectedGenerations],
+          activeGenerationAtBatch: [...protectedGenerations][0] ?? 0,
+          readableGenerationAtBatch: [...protectedGenerations][2] ?? 0,
+          cleanupCompleted: batchRowsDeleted === 0,
+          indexUsed: table === 'catalog_items_v2'
+            ? 'idx_catalog_items_v2_provider_media_gen'
+            : table === 'catalog_categories_v2'
+              ? 'idx_catalog_categories_v2_provider_media_gen'
+              : 'idx_catalog_seasons_v2_provider_media_gen',
+        });
+        if (batchRowsDeleted === 0 || batchRowsDeleted < batchSize) {
+          break;
+        }
+      }
+    }
     await db.run(
-      `DELETE FROM catalog_items_v2 WHERE provider_id = ? AND media_type = ?`,
-      [providerId, mediaType],
-    );
-    await db.run(
-      `DELETE FROM catalog_categories_v2 WHERE provider_id = ? AND media_type = ?`,
-      [providerId, mediaType],
-    );
-    await db.run(
-      `DELETE FROM catalog_seasons_v2 WHERE provider_id = ? AND media_type = ?`,
-      [providerId, mediaType],
-    );
-  } else {
-    const placeholders = keep.map(() => '?').join(', ');
-    const params: CatalogSqlParams = [providerId, mediaType, ...keep];
-    await db.run(
-      `DELETE FROM catalog_items_v2
-       WHERE provider_id = ? AND media_type = ? AND sync_generation NOT IN (${placeholders})`,
-      params,
-    );
-    await db.run(
-      `DELETE FROM catalog_categories_v2
-       WHERE provider_id = ? AND media_type = ? AND sync_generation NOT IN (${placeholders})`,
-      params,
-    );
-    await db.run(
-      `DELETE FROM catalog_seasons_v2
-       WHERE provider_id = ? AND media_type = ? AND sync_generation NOT IN (${placeholders})`,
-      params,
+      `UPDATE catalog_generation_state
+       SET activation_total_items = NULL,
+           activation_nonzero_category_count = NULL
+       WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+      [providerId, mediaType, targetGeneration],
     );
   }
-
+  novacastCatalogTrace('[NovaCast Movie Post Activation Cleanup]', {
+    event: 'completed',
+    providerId,
+    mediaType,
+    batchNumber,
+    cumulativeRowsDeleted,
+    retainedGenerations: keep,
+  });
   recordCatalogWritePhase('stale.delete', {
-    wallMs: perfNowMs() - start,
-    itemCount: 1,
+    wallMs: 0,
+    itemCount: cumulativeRowsDeleted,
     meta: { providerId, mediaType, keepGenerations: keep, marker: STAGE3C_GENERATION_SAFE_MARKER },
   });
 }
@@ -818,19 +1099,28 @@ export async function deleteCatalogGenerationV2(
      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
     [providerId, mediaType, generation],
   );
+  await db.run(
+    `UPDATE catalog_generation_state
+     SET activation_total_items = NULL,
+         activation_nonzero_category_count = NULL
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+    [providerId, mediaType, generation],
+  );
 }
 
 export async function getCatalogGenerationPhysicalStats(
   providerId: string,
   mediaType: CatalogMediaType,
   generation: number,
+  database?: CatalogDatabaseHandle,
 ): Promise<{
   itemRows: number;
   distinctContentIds: number;
   categoryRows: number;
   distinctItemCategoryIds: number;
 }> {
-  const db = await getCatalogDatabase();
+  const started = perfNowMs();
+  const db = database ?? (await getCatalogDatabase());
   const itemsTable = catalogItemsTable(mediaType);
   const categoriesTable = catalogCategoriesTable(mediaType);
   const itemStats = await db.getFirst<{ total: number | string; distinct_total: number | string; distinct_categories: number | string }>(
@@ -847,12 +1137,26 @@ export async function getCatalogGenerationPhysicalStats(
      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
     [providerId, mediaType, generation],
   );
-  return {
+  const result = {
     itemRows: asNumber(itemStats?.total),
     distinctContentIds: asNumber(itemStats?.distinct_total),
     categoryRows: asNumber(categoryStats?.total),
     distinctItemCategoryIds: asNumber(itemStats?.distinct_categories),
   };
+  if (mediaType === 'movie') {
+    logMovieCompletionTailAudit({
+      phase: 'physical-stats-query',
+      generation,
+      connection: database ? 'catalog-read' : 'catalog-primary',
+      queryType: 'aggregate-read',
+      querySignature: 'item-count-distinct-content-distinct-category+category-count',
+      callCount: 2,
+      durationMs: Math.round(perfNowMs() - started),
+      reusedCachedResult: false,
+      rowsOrGenerationsInspected: result.itemRows + result.categoryRows,
+    });
+  }
+  return result;
 }
 
 /** Stage 3C.2: largest category share from item rows (pre-activation). */
@@ -860,9 +1164,15 @@ export async function getCatalogGenerationLargestCategory(
   providerId: string,
   mediaType: CatalogMediaType,
   generation: number,
+  database?: CatalogDatabaseHandle,
+  consumerPhase = 'unspecified',
 ): Promise<{ categoryId: string | null; itemCount: number; nonzeroCategoryCount: number }> {
-  const db = await getCatalogDatabase();
+  const totalStarted = perfNowMs();
+  const connectionStarted = perfNowMs();
+  const db = database ?? (await getCatalogDatabase());
+  const connectionAcquireMs = perfNowMs() - connectionStarted;
   const itemsTable = catalogItemsTable(mediaType);
+  const sqlStarted = perfNowMs();
   const rows = await db.getAll<{ category_id: string; item_count: number | string }>(
     `SELECT category_id, COUNT(*) AS item_count
      FROM ${itemsTable}
@@ -871,12 +1181,49 @@ export async function getCatalogGenerationLargestCategory(
      ORDER BY item_count DESC`,
     [providerId, mediaType, generation],
   );
+  const sqlMs = perfNowMs() - sqlStarted;
   const top = rows[0];
-  return {
+  const result = {
     categoryId: top ? asString(top.category_id) : null,
     itemCount: top ? asNumber(top.item_count) : 0,
     nonzeroCategoryCount: rows.filter((row) => asNumber(row.item_count) > 0).length,
   };
+  if (mediaType === 'movie') {
+    const totalMs = perfNowMs() - totalStarted;
+    const rowPopulation = rows.reduce((sum, row) => sum + asNumber(row.item_count), 0);
+    novacastCatalogTrace('[NovaCast Movie Largest Category Timing]', {
+      generation,
+      consumerPhase,
+      connection: database ? 'catalog-read' : 'catalog-primary',
+      sqlSignature: 'category-count-group-by-order-by',
+      tableScanned: itemsTable,
+      rowPopulation,
+      distinctCategoryCount: rows.length,
+      connectionAcquireMs: Math.round(connectionAcquireMs),
+      queueWaitMs: 0,
+      sqlMs: Math.round(sqlMs),
+      totalMs: Math.round(totalMs),
+      indexUsed: 'idx_catalog_items_v2_provider_media_gen_category (static candidate)',
+      tempBtreeUsed: true,
+      queryPlan: 'EXPLAIN QUERY PLAN not executed; static index analysis only',
+      resultCategoryId: result.categoryId,
+      resultCount: result.itemCount,
+      source: 'sqlite-group-by-count-order-by',
+      callCount: 1,
+    });
+    logMovieCompletionTailAudit({
+      phase: 'largest-category-query',
+      generation,
+      connection: database ? 'catalog-read' : 'catalog-primary',
+      queryType: 'aggregate-read',
+      querySignature: 'category-count-group-by-order-by',
+      callCount: 1,
+      durationMs: Math.round(totalMs),
+      reusedCachedResult: false,
+      rowsOrGenerationsInspected: rows.length,
+    });
+  }
+  return result;
 }
 
 export async function completeCatalogSync(
@@ -885,12 +1232,20 @@ export async function completeCatalogSync(
   generation: number,
   options?: {
     processedCount?: number;
+    completionStats?: CatalogCompletionStatsSnapshot;
     categories?: Array<Omit<CatalogCategoryRecord, 'itemCount' | 'updatedAt'> & {
       itemCount?: number;
       updatedAt?: number;
     }>;
   },
 ): Promise<boolean> {
+  const completionTailStarted = perfNowMs();
+  let categoryRecomputeMs = 0;
+  let physicalStatsMs = 0;
+  let previousGenerationStatsMs = 0;
+  let distributionValidationMs = 0;
+  let pointerPromotionMs = 0;
+  let previousCompletedGenerationForCleanup = 0;
   const publishedCategoryCount = options?.categories?.length ?? 0;
   const categoriesTable = catalogCategoriesTable(mediaType);
   const categoryConflict = catalogCategoriesConflictTarget(mediaType);
@@ -912,13 +1267,16 @@ export async function completeCatalogSync(
     categoryRows: 0,
     distinctItemCategoryIds: 0,
   };
+  let validatedMovieNonzeroCategoryCount: number | null = null;
 
   await withCatalogTransaction(async () => {
     const db = await getCatalogDatabase();
     const provider = await getCatalogProvider(providerId);
     const previousCompletedGeneration = provider?.catalogGeneration ?? 0;
+    previousCompletedGenerationForCleanup = previousCompletedGeneration;
 
     if (options?.categories?.length) {
+      const categoryUpsertStarted = perfNowMs();
       const statement = await db.prepare(`
         INSERT INTO ${categoriesTable} (
           provider_id, media_type, category_id, category_name, sort_order,
@@ -943,20 +1301,177 @@ export async function completeCatalogSync(
       } finally {
         await statement.finalize();
       }
+      if (mediaType === 'movie') {
+        logMovieCompletionPhase('category-upsert', generation, categoryUpsertStarted);
+      }
     }
 
+    const recomputeStarted = perfNowMs();
     await recomputeCategoryCounts(providerId, mediaType, generation);
-    physical = await getCatalogGenerationPhysicalStats(providerId, mediaType, generation);
+    categoryRecomputeMs = perfNowMs() - recomputeStarted;
+    if (mediaType === 'movie') {
+      logMovieCompletionTailAudit({
+        phase: 'category-recompute',
+        generation,
+        connection: 'catalog-primary',
+        queryType: 'aggregate-and-update',
+        querySignature: 'recompute-category-counts',
+        callCount: 1,
+        durationMs: Math.round(categoryRecomputeMs),
+        reusedCachedResult: false,
+      });
+    }
+    if (mediaType === 'movie') {
+      logMovieCompletionPhase('recompute-category-counts', generation, recomputeStarted);
+    }
+    const physicalStarted = perfNowMs();
+    const reusableSnapshot =
+      mediaType === 'movie' &&
+      options?.completionStats?.providerId === providerId &&
+      options.completionStats.mediaType === 'movie' &&
+      options.completionStats.generation === generation
+        ? options.completionStats
+        : null;
+    if (reusableSnapshot) {
+      const categoryRows = await db.getFirst<{ total: number | string }>(
+        `SELECT COUNT(*) AS total
+         FROM ${categoriesTable}
+         WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+        [providerId, mediaType, generation],
+      );
+      physical = {
+        itemRows: reusableSnapshot.itemRows,
+        distinctContentIds: reusableSnapshot.distinctContentIds,
+        categoryRows: asNumber(categoryRows?.total),
+        distinctItemCategoryIds: reusableSnapshot.distinctItemCategoryIds,
+      };
+      physicalStatsMs = perfNowMs() - physicalStarted;
+      logMovieCompletionTailAudit({
+        phase: 'activation-physical-stats',
+        generation,
+        connection: 'catalog-primary',
+        queryType: 'category-metadata-refresh',
+        querySignature: 'category-row-count-after-upsert-recompute',
+        callCount: 1,
+        durationMs: Math.round(physicalStatsMs),
+        reusedCachedResult: true,
+        avoidedAggregateQuery: 'item-count-distinct-content-distinct-category',
+      });
+      novacastCatalogTrace('[NovaCast Movie Completion Stats Reuse]', {
+        generation,
+        snapshotCreated: true,
+        sourcePhase: 'writer-drain-completion-barrier',
+        itemRows: reusableSnapshot.itemRows,
+        distinctContentIds: reusableSnapshot.distinctContentIds,
+        distinctItemCategoryIds: reusableSnapshot.distinctItemCategoryIds,
+        categoryRows: physical.categoryRows,
+        reusedItemStats: true,
+        refreshedCategoryRows: true,
+        invalidated: false,
+        invalidationReason: null,
+        avoidedAggregateQuery: true,
+        estimatedRowsAvoided: reusableSnapshot.itemRows,
+      });
+    } else {
+      physical = await getCatalogGenerationPhysicalStats(providerId, mediaType, generation);
+      physicalStatsMs = perfNowMs() - physicalStarted;
+      if (mediaType === 'movie') {
+        novacastCatalogTrace('[NovaCast Movie Completion Stats Reuse]', {
+          generation,
+          snapshotCreated: false,
+          sourcePhase: 'activation-fallback',
+          itemRows: physical.itemRows,
+          distinctContentIds: physical.distinctContentIds,
+          distinctItemCategoryIds: physical.distinctItemCategoryIds,
+          categoryRows: physical.categoryRows,
+          reusedItemStats: false,
+          refreshedCategoryRows: false,
+          invalidated: true,
+          invalidationReason: 'missing-or-mismatched-completion-snapshot',
+          avoidedAggregateQuery: false,
+          estimatedRowsAvoided: 0,
+        });
+      }
+    }
+    if (mediaType === 'movie') {
+      logMovieCompletionPhase('get-physical-stats', generation, physicalStarted);
+    }
 
     let previousItemRows = 0;
+    let previousPhysicalMs = 0;
+    let previousLargestMs = 0;
+    let previousLifecycleState: string | null = null;
+    let previousBaseline: MovieActivationBaseline | null = null;
+    let previousBaselineValid = false;
+    let baselineLookupMs = 0;
     if (
       usesGenerationSafeCatalog(mediaType) &&
       previousCompletedGeneration > 0 &&
       previousCompletedGeneration !== generation
     ) {
-      previousItemRows = (
-        await getCatalogGenerationPhysicalStats(providerId, mediaType, previousCompletedGeneration)
-      ).itemRows;
+      const previousGenerationStarted = perfNowMs();
+      if (mediaType === 'movie') {
+        const baselineLookupStarted = perfNowMs();
+        previousBaseline = await getMovieActivationBaseline(
+          providerId,
+          previousCompletedGeneration,
+          db,
+        );
+        baselineLookupMs = perfNowMs() - baselineLookupStarted;
+        previousLifecycleState = previousBaseline.lifecycleState;
+        previousBaselineValid =
+          previousBaseline.lifecycleState === 'ready' &&
+          previousBaseline.totalItems != null &&
+          previousBaseline.nonzeroCategoryCount != null &&
+          Number.isFinite(previousBaseline.totalItems) &&
+          Number.isFinite(previousBaseline.nonzeroCategoryCount) &&
+          previousBaseline.totalItems >= 0 &&
+            previousBaseline.nonzeroCategoryCount >= 0;
+      } else {
+        previousLifecycleState = await getCatalogGenerationLifecycleState(
+          providerId,
+          mediaType,
+          previousCompletedGeneration,
+          db,
+        );
+      }
+      if (mediaType !== 'movie' || !previousBaselineValid) {
+        const previousPhysicalStarted = perfNowMs();
+        previousItemRows = (
+          await getCatalogGenerationPhysicalStats(providerId, mediaType, previousCompletedGeneration)
+        ).itemRows;
+        previousPhysicalMs = perfNowMs() - previousPhysicalStarted;
+      } else {
+        previousItemRows = previousBaseline?.totalItems ?? 0;
+      }
+      previousGenerationStatsMs = perfNowMs() - previousGenerationStarted;
+      if (mediaType === 'movie') {
+        logMovieCompletionTailAudit({
+          phase: 'previous-generation-stats',
+          generation,
+          connection: previousBaselineValid ? 'catalog-primary' : 'catalog-primary',
+          queryType: previousBaselineValid ? 'completion-baseline-reuse' : 'aggregate-read',
+          querySignature: previousBaselineValid
+            ? 'previous-ready-baseline'
+            : 'previous-generation-physical-stats',
+          callCount: 1,
+          durationMs: Math.round(previousGenerationStatsMs),
+          reusedCachedResult: previousBaselineValid,
+          avoidedAggregateQuery: previousBaselineValid
+            ? 'previous-item-count-distinct-content-distinct-category'
+            : false,
+          readableGeneration: previousCompletedGeneration,
+        });
+      }
+      if (mediaType === 'movie') {
+        if (!previousBaselineValid) {
+          logMovieCompletionPhase(
+            'previous-generation-physical-stats',
+            generation,
+            previousGenerationStarted,
+          );
+        }
+      }
     }
 
     // Ghost-completion guard: never publish an empty or inconsistent generation.
@@ -968,17 +1483,57 @@ export async function completeCatalogSync(
       (mediaType !== 'movie' || physical.categoryRows > 0);
 
     if (validationPassed && mediaType === 'movie') {
-      const largest = await getCatalogGenerationLargestCategory(providerId, mediaType, generation);
+      const distributionStarted = perfNowMs();
+      const largestStarted = perfNowMs();
+      const largest = await getCatalogGenerationLargestCategory(
+        providerId,
+        mediaType,
+        generation,
+        undefined,
+        'completion-validation',
+      );
+      logMovieCompletionPhase('get-largest-category', generation, largestStarted);
       let previousTotalItems: number | null = null;
       let previousNonzero: number | null = null;
       if (previousCompletedGeneration > 0 && previousCompletedGeneration !== generation) {
         previousTotalItems = previousItemRows;
-        const prevLargest = await getCatalogGenerationLargestCategory(
-          providerId,
-          mediaType,
-          previousCompletedGeneration,
-        );
-        previousNonzero = prevLargest.nonzeroCategoryCount;
+        if (previousBaselineValid && previousBaseline) {
+          previousNonzero = previousBaseline.nonzeroCategoryCount;
+        } else {
+          const previousLargestStarted = perfNowMs();
+          const prevLargest = await getCatalogGenerationLargestCategory(
+            providerId,
+            mediaType,
+            previousCompletedGeneration,
+            undefined,
+            'previous-generation-validation',
+          );
+          previousLargestMs = perfNowMs() - previousLargestStarted;
+          logMovieCompletionPhase('previous-generation-largest-category', generation, previousLargestStarted);
+          previousNonzero = prevLargest.nonzeroCategoryCount;
+        }
+        novacastCatalogTrace('[NovaCast Movie Previous Ready Baseline Reuse]', {
+          currentGeneration: generation,
+          previousGeneration: previousCompletedGeneration,
+          previousLifecycleState,
+          baselineFound: previousBaseline?.lifecycleState != null,
+          baselineValid: previousBaselineValid,
+          baselineSource: previousBaselineValid ? 'catalog_generation_state' : null,
+          previousTotalItems,
+          previousNonzeroCategoryCount: previousNonzero,
+          reusedPreviousTotalItems: previousBaselineValid,
+          reusedPreviousNonzeroCategoryCount: previousBaselineValid,
+          avoidedPreviousPhysicalStatsQuery: previousBaselineValid,
+          avoidedPreviousLargestCategoryQuery: previousBaselineValid,
+          fallbackUsed: !previousBaselineValid,
+          fallbackReason: previousBaselineValid ? null : 'missing-or-invalid-ready-baseline',
+          baselineLookupMs: Math.round(baselineLookupMs),
+          physicalStatsMs: Math.round(previousPhysicalMs),
+          largestCategoryMs: Math.round(previousLargestMs),
+          totalBaselineMs: Math.round(previousPhysicalMs + previousLargestMs),
+          sourcePhase: 'activation-validation',
+          consumerPhase: 'completeCatalogSync',
+        });
       }
       const distribution = validateMoviesCategoryDistribution({
         generation,
@@ -996,7 +1551,7 @@ export async function completeCatalogSync(
       if (!distribution.validationPassed) {
         validationPassed = false;
         rejectionCode = distribution.rejectionReason ?? 'category_distribution_failed';
-        console.info(
+        novacastCatalogTrace(
           '[NovaCast Movies Generation Activation] ' +
             JSON.stringify({
               event: 'movies_generation_activation_rejected',
@@ -1012,7 +1567,8 @@ export async function completeCatalogSync(
             }),
         );
       } else {
-        console.info(
+        validatedMovieNonzeroCategoryCount = largest.nonzeroCategoryCount;
+        novacastCatalogTrace(
           '[NovaCast Movies Generation Activation] ' +
             JSON.stringify({
               event: 'movies_generation_activation_passed',
@@ -1028,6 +1584,7 @@ export async function completeCatalogSync(
             }),
         );
       }
+      distributionValidationMs = perfNowMs() - distributionStarted;
     }
 
     // Stage 4.2Q: Series previously had no equivalent sparse-distribution
@@ -1067,7 +1624,7 @@ export async function completeCatalogSync(
       if (!distribution.validationPassed) {
         validationPassed = false;
         rejectionCode = distribution.rejectionReason ?? 'category_distribution_failed';
-        console.info(
+        novacastCatalogTrace(
           '[NovaCast Series Generation Activation] ' +
             JSON.stringify({
               event: 'series_generation_activation_rejected',
@@ -1083,7 +1640,7 @@ export async function completeCatalogSync(
             }),
         );
       } else {
-        console.info(
+        novacastCatalogTrace(
           '[NovaCast Series Generation Activation] ' +
             JSON.stringify({
               event: 'series_generation_activation_passed',
@@ -1129,28 +1686,63 @@ export async function completeCatalogSync(
           mediaType,
         ],
       );
+      await db.run(
+        `UPDATE catalog_generation_state
+         SET status = 'error', phase = 'complete-rejected', completed_at = ?, error_code = ?,
+             activation_total_items = NULL,
+             activation_nonzero_category_count = NULL
+         WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+        [nowMs(), rejectionCode, providerId, mediaType, generation],
+      );
       // Keep provider.catalogGeneration unchanged; do not delete older candidates.
       return;
     }
 
-    if (usesGenerationSafeCatalog(mediaType)) {
-      // Stage 4.2I: retain newly active + immediately previous validated generation only.
-      const keep = [generation];
-      if (previousCompletedGeneration > 0 && previousCompletedGeneration !== generation) {
-        const previousStats = await getCatalogGenerationPhysicalStats(
-          providerId,
-          mediaType,
-          previousCompletedGeneration,
-        );
-        if (previousStats.itemRows > 0) {
-          keep.push(previousCompletedGeneration);
-        }
-      }
-      await cleanupIncompleteCatalogGenerationsV2(providerId, mediaType, keep);
-    } else {
+    // Stale-generation cleanup is scheduled after this activation transaction
+    // commits. It must never hold the publication transaction open.
+    if (!usesGenerationSafeCatalog(mediaType)) {
       await deleteStaleCatalogGeneration(providerId, mediaType, generation);
     }
 
+    let movieBaselinePersistStarted = 0;
+    if (mediaType === 'movie') {
+      movieBaselinePersistStarted = perfNowMs();
+      const lifecycleBefore = await getCatalogGenerationLifecycleState(
+        providerId,
+        mediaType,
+        generation,
+        db,
+      );
+      novacastCatalogTrace('[NovaCast Movie Activation Baseline Persist]', {
+        event: 'before',
+        generation,
+        totalItems: physical.itemRows,
+        nonzeroCategoryCount: validatedMovieNonzeroCategoryCount,
+        validationPassed,
+        lifecycleStatusBefore: lifecycleBefore,
+        transactionScoped: true,
+      });
+      if (validatedMovieNonzeroCategoryCount == null) {
+        throw new Error('movie_activation_baseline_missing');
+      }
+      const baselineWrite = await db.run(
+        `UPDATE catalog_generation_state
+         SET activation_total_items = ?,
+             activation_nonzero_category_count = ?
+         WHERE provider_id = ? AND media_type = 'movie' AND sync_generation = ?`,
+        [
+          physical.itemRows,
+          validatedMovieNonzeroCategoryCount,
+          providerId,
+          generation,
+        ],
+      );
+      if (Number(baselineWrite.changes ?? 0) !== 1) {
+        throw new Error('movie_activation_baseline_persist_failed');
+      }
+    }
+
+    const promotionStarted = perfNowMs();
     const completedAt = nowMs();
     await db.run(
       `UPDATE catalog_sync_state
@@ -1165,6 +1757,17 @@ export async function completeCatalogSync(
     );
 
     // catalog_generation updates only after physical validation passed above.
+    if (mediaType === 'movie') {
+      await logMovieProviderGenerationPointer({
+        event: 'before-provider-generation-write',
+        providerId,
+        database: db,
+        requestedProviderCatalogGeneration: generation,
+        sourceFunction: 'completeCatalogSync',
+        sourcePhase: 'activation-promotion',
+        pointerReason: 'validated-generation-activation',
+      });
+    }
     await db.run(
       `UPDATE catalog_providers
        SET catalog_generation = ?,
@@ -1174,6 +1777,42 @@ export async function completeCatalogSync(
        WHERE provider_id = ?`,
       [generation, completedAt, providerId],
     );
+    if (mediaType === 'movie') {
+      await logMovieProviderGenerationPointer({
+        event: 'after-provider-generation-write',
+        providerId,
+        database: db,
+        requestedProviderCatalogGeneration: generation,
+        sourceFunction: 'completeCatalogSync',
+        sourcePhase: 'activation-promotion',
+        pointerReason: 'validated-generation-activation',
+      });
+    }
+    await db.run(
+      `UPDATE catalog_generation_state
+       SET status = 'ready', phase = 'complete', completed_at = ?, error_code = NULL,
+           processed_count = COALESCE(?, processed_count)
+       WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+      [completedAt, options?.processedCount ?? null, providerId, mediaType, generation],
+    );
+    if (mediaType === 'movie') {
+      novacastCatalogTrace('[NovaCast Movie Activation Baseline Persist]', {
+        event: 'after',
+        generation,
+        totalItems: physical.itemRows,
+        nonzeroCategoryCount: validatedMovieNonzeroCategoryCount,
+        validationPassed: true,
+        lifecycleStatusBefore: 'syncing',
+        lifecycleStatusAfter: 'ready',
+        persisted: true,
+        transactionScoped: true,
+        totalPersistMs: Math.round(perfNowMs() - movieBaselinePersistStarted),
+      });
+    }
+    if (mediaType === 'movie') {
+      logMovieCompletionPhase('promotion-pointer-update', generation, promotionStarted);
+      pointerPromotionMs = perfNowMs() - promotionStarted;
+    }
     activated = true;
   });
 
@@ -1189,8 +1828,33 @@ export async function completeCatalogSync(
   if (!activated) {
     return false;
   }
+  void markSortMetadataUpgradeSatisfied(providerId, mediaType).catch(() => undefined);
+  if (usesGenerationSafeCatalog(mediaType)) {
+    const keep = [generation];
+    if (previousCompletedGenerationForCleanup > 0 && previousCompletedGenerationForCleanup !== generation) {
+      keep.push(previousCompletedGenerationForCleanup);
+    }
+    if (mediaType === 'movie') {
+      novacastCatalogTrace('[NovaCast Movie Post Activation Cleanup]', {
+        event: 'scheduled',
+        providerId,
+        mediaType,
+        generation,
+        retainedGenerations: keep,
+      });
+    }
+    void cleanupIncompleteCatalogGenerationsV2(providerId, mediaType, keep).catch((error) => {
+      novacastCatalogTrace('[NovaCast Movie Post Activation Cleanup]', {
+        event: 'failed',
+        providerId,
+        mediaType,
+        generation,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
   if (mediaType === 'movie') {
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Movies Generation Activation] ' +
         JSON.stringify({
           event: 'movies_generation_swap_committed',
@@ -1206,7 +1870,7 @@ export async function completeCatalogSync(
     );
   }
   if (mediaType === 'series') {
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Series Generation Activation] ' +
         JSON.stringify({
           event: 'series_generation_swap_committed',
@@ -1221,12 +1885,29 @@ export async function completeCatalogSync(
         }),
     );
   }
-  console.info('[Catalog Categories Published]', {
+  novacastCatalogTrace('[Catalog Categories Published]', {
     providerId,
     mediaType,
     generation,
     categoryCount: publishedCategoryCount,
   });
+  if (mediaType === 'movie') {
+    novacastCatalogTrace('[NovaCast Movie Completion Tail Summary]', {
+      generation,
+      totalTimeMs: Math.round(perfNowMs() - completionTailStarted),
+      barrierStatsMs: null,
+      recoveryMs: null,
+      distributionValidationMs: Math.round(distributionValidationMs),
+      physicalStatsMs: Math.round(physicalStatsMs),
+      previousGenerationStatsMs: Math.round(previousGenerationStatsMs),
+      categoryRecomputeMs: Math.round(categoryRecomputeMs),
+      activationValidationMs: Math.round(distributionValidationMs),
+      pointerPromotionMs: Math.round(pointerPromotionMs),
+      transactionOverheadMs: null,
+      otherMs: null,
+      note: 'repository-activation-tail-only; outer barrier/recovery timings are emitted by the writer',
+    });
+  }
   return true;
 }
 
@@ -1302,11 +1983,26 @@ export async function getCatalogGenerationItemStats(
   mediaType: CatalogMediaType,
   generation: number,
 ): Promise<{ rowCount: number; distinctContentCount: number }> {
+  const started = perfNowMs();
   const stats = await getCatalogGenerationPhysicalStats(providerId, mediaType, generation);
-  return {
+  const result = {
     rowCount: stats.itemRows,
     distinctContentCount: stats.distinctContentIds,
   };
+  if (mediaType === 'movie') {
+    logMovieCompletionTailAudit({
+      phase: 'item-stats-wrapper',
+      generation,
+      connection: 'catalog-primary',
+      queryType: 'aggregate-read-wrapper',
+      querySignature: 'getCatalogGenerationItemStats->getCatalogGenerationPhysicalStats',
+      callCount: 1,
+      durationMs: Math.round(perfNowMs() - started),
+      reusedCachedResult: false,
+      rowsOrGenerationsInspected: result.rowCount,
+    });
+  }
+  return result;
 }
 
 export async function failCatalogSync(
@@ -1329,6 +2025,17 @@ export async function failCatalogSync(
     [errorCode, failedAt, providerId, mediaType],
   );
 
+  if (failedGeneration > 0) {
+    await db.run(
+      `UPDATE catalog_generation_state
+       SET status = 'error', phase = 'failed', completed_at = ?, error_code = ?,
+           activation_total_items = NULL,
+           activation_nonzero_category_count = NULL
+       WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+      [failedAt, errorCode, providerId, mediaType, failedGeneration],
+    );
+  }
+
   // Never leave a failed empty generation as lastCompletedGeneration.
   let clearGhostCompletion = false;
   if (
@@ -1340,14 +2047,46 @@ export async function failCatalogSync(
   }
 
   if (clearGhostCompletion) {
+    const restoredReady = await db.getFirst<{ g: number | string | null }>(
+      `SELECT MAX(sync_generation) AS g
+       FROM catalog_generation_state
+       WHERE provider_id = ? AND media_type = ? AND status = 'ready'
+         AND (? = 0 OR sync_generation != ?)`,
+      [providerId, mediaType, failedGeneration, failedGeneration],
+    );
+    const restoredGeneration = asNumber(restoredReady?.g);
+    if (mediaType === 'movie') {
+      await logMovieProviderGenerationPointer({
+        event: 'before-provider-generation-write',
+        providerId,
+        database: db,
+        requestedProviderCatalogGeneration: restoredGeneration,
+        sourceFunction: 'failCatalogSync',
+        sourcePhase: 'failure-ghost-clear',
+        pointerReason:
+          restoredGeneration > 0 ? 'restore-prior-ready-generation' : 'clear-empty-failed-generation',
+      });
+    }
     await db.run(
       `UPDATE catalog_providers
-       SET catalog_generation = 0,
+       SET catalog_generation = ?,
            sync_status = 'error',
            sync_error_code = ?
        WHERE provider_id = ?`,
-      [errorCode, providerId],
+      [restoredGeneration, errorCode, providerId],
     );
+    if (mediaType === 'movie') {
+      await logMovieProviderGenerationPointer({
+        event: 'after-provider-generation-write',
+        providerId,
+        database: db,
+        requestedProviderCatalogGeneration: restoredGeneration,
+        sourceFunction: 'failCatalogSync',
+        sourcePhase: 'failure-ghost-clear',
+        pointerReason:
+          restoredGeneration > 0 ? 'restore-prior-ready-generation' : 'clear-empty-failed-generation',
+      });
+    }
   } else {
     await db.run(
       `UPDATE catalog_providers
@@ -1375,8 +2114,9 @@ export async function failCatalogSync(
 export async function getCatalogSyncState(
   providerId: string,
   mediaType: CatalogMediaType,
+  database?: CatalogDatabaseHandle,
 ): Promise<CatalogSyncStateRecord | null> {
-  const db = await getCatalogDatabase();
+  const db = database ?? (await getCatalogDatabase());
   const row = await db.getFirst(
     `SELECT * FROM catalog_sync_state WHERE provider_id = ? AND media_type = ?`,
     [providerId, mediaType],
@@ -1384,8 +2124,108 @@ export async function getCatalogSyncState(
   return row ? mapSyncState(row) : null;
 }
 
-export async function getCatalogProvider(providerId: string): Promise<CatalogProviderRecord | null> {
+export type CatalogBootstrapState = {
+  providerCatalogGeneration: number;
+  currentAttemptGeneration: number;
+  currentStatus: CatalogSyncStatus | null;
+  durableReadyGeneration: number;
+  durableReadyLifecycleState: string | null;
+};
+
+/** Read-only durable gate used before provider activation requests a bootstrap. */
+export async function getCatalogBootstrapState(
+  providerId: string,
+  mediaType: CatalogMediaType,
+): Promise<CatalogBootstrapState> {
   const db = await getCatalogDatabase();
+  const [provider, current, ready] = await Promise.all([
+    db.getFirst<{ catalog_generation: number | string | null }>(
+      `SELECT catalog_generation FROM catalog_providers WHERE provider_id = ?`,
+      [providerId],
+    ),
+    db.getFirst<{ generation: number | string | null; status: string | null }>(
+      `SELECT generation, status
+       FROM catalog_sync_state
+       WHERE provider_id = ? AND media_type = ?`,
+      [providerId, mediaType],
+    ),
+    db.getFirst<{ sync_generation: number | string | null; status: string | null }>(
+      `SELECT sync_generation, status
+       FROM catalog_generation_state
+       WHERE provider_id = ? AND media_type = ? AND status = 'ready'
+       ORDER BY sync_generation DESC
+       LIMIT 1`,
+      [providerId, mediaType],
+    ),
+  ]);
+  return {
+    providerCatalogGeneration: asNumber(provider?.catalog_generation),
+    currentAttemptGeneration: asNumber(current?.generation),
+    currentStatus: (current?.status as CatalogSyncStatus | null | undefined) ?? null,
+    durableReadyGeneration: asNumber(ready?.sync_generation),
+    durableReadyLifecycleState: ready?.status ?? null,
+  };
+}
+
+export async function getCatalogGenerationLifecycleState(
+  providerId: string,
+  mediaType: CatalogMediaType,
+  generation: number,
+  database?: CatalogDatabaseHandle,
+): Promise<string | null> {
+  if (generation <= 0) {
+    return null;
+  }
+  const db = database ?? (await getCatalogDatabase());
+  const row = await db.getFirst<{ status: string }>(
+    `SELECT status
+     FROM catalog_generation_state
+     WHERE provider_id = ? AND media_type = ? AND sync_generation = ?`,
+    [providerId, mediaType, generation],
+  );
+  return row?.status ?? null;
+}
+
+export type MovieActivationBaseline = {
+  lifecycleState: string | null;
+  totalItems: number | null;
+  nonzeroCategoryCount: number | null;
+};
+
+export async function getMovieActivationBaseline(
+  providerId: string,
+  generation: number,
+  database?: CatalogDatabaseHandle,
+): Promise<MovieActivationBaseline> {
+  if (generation <= 0) {
+    return { lifecycleState: null, totalItems: null, nonzeroCategoryCount: null };
+  }
+  const db = database ?? (await getCatalogDatabase());
+  const row = await db.getFirst<{
+    status: string;
+    activation_total_items: number | string | null;
+    activation_nonzero_category_count: number | string | null;
+  }>(
+    `SELECT status, activation_total_items, activation_nonzero_category_count
+     FROM catalog_generation_state
+     WHERE provider_id = ? AND media_type = 'movie' AND sync_generation = ?`,
+    [providerId, generation],
+  );
+  return {
+    lifecycleState: row?.status ?? null,
+    totalItems: row?.activation_total_items == null ? null : asNumber(row.activation_total_items),
+    nonzeroCategoryCount:
+      row?.activation_nonzero_category_count == null
+        ? null
+        : asNumber(row.activation_nonzero_category_count),
+  };
+}
+
+export async function getCatalogProvider(
+  providerId: string,
+  database?: CatalogDatabaseHandle,
+): Promise<CatalogProviderRecord | null> {
+  const db = database ?? (await getCatalogDatabase());
   const row = await db.getFirst(`SELECT * FROM catalog_providers WHERE provider_id = ?`, [providerId]);
   return row ? mapProvider(row) : null;
 }
@@ -1509,7 +2349,7 @@ export async function logCatalogGenerationInventoryOnce(
         };
       });
 
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Catalog Generation Inventory] ' +
         JSON.stringify({
           providerId,
@@ -1552,7 +2392,7 @@ export async function logCatalogGenerationInventoryOnce(
         }),
     );
   } catch (error) {
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Catalog Generation Inventory] ' +
         JSON.stringify({
           providerId,
@@ -1579,8 +2419,20 @@ export async function resolveReadableCatalogGeneration(
   const provider = await getCatalogProvider(providerId);
   const currentAttemptGeneration = state?.generation ?? 0;
   let lastCompletedGeneration = provider?.catalogGeneration ?? 0;
-  const lastFailedGeneration =
-    state?.status === 'syncing' || state?.status === 'error' ? currentAttemptGeneration : 0;
+  if (lastCompletedGeneration <= 0) {
+    const readyLifecycle = await db.getFirst<{ g: number | string | null }>(
+      `SELECT MAX(sync_generation) AS g
+       FROM catalog_generation_state
+       WHERE provider_id = ? AND media_type = ? AND status = 'ready'`,
+      [providerId, mediaType],
+    );
+    lastCompletedGeneration = asNumber(readyLifecycle?.g);
+  }
+  const lastFailedGeneration = incompleteGenerationToExclude({
+    currentAttemptGeneration,
+    currentStatus: state?.status ?? null,
+    lastCompletedGeneration,
+  });
   let resolvedReadableGeneration = 0;
   let reason:
     | 'current-ready'
@@ -1677,20 +2529,36 @@ export async function resolveReadableCatalogGeneration(
       : reason === 'ghost-completion-ignored'
         ? 'no-readable-generation'
         : reason;
-  console.info(
+  novacastCatalogTrace(
     '[Catalog Read Generation] ' +
       JSON.stringify({
         providerId,
         mediaType,
         currentAttemptGeneration,
         currentStatus: state?.status ?? null,
-        lastCompletedGeneration: provider?.catalogGeneration ?? 0,
+        lastCompletedGeneration,
         resolvedReadableGeneration,
         readableRowCount,
         reason: resolvedReason,
         marker: usesGenerationSafeCatalog(mediaType) ? STAGE3C_GENERATION_SAFE_MARKER : null,
       }),
   );
+  novacastCatalogTrace(CATALOG_READABLE_RESTORE_LOG, {
+    providerId,
+    mediaType,
+    physicalRowCount: readableRowCount,
+    activeGeneration: provider?.catalogGeneration ?? 0,
+    lastCompletedGeneration,
+    readableGeneration: resolvedReadableGeneration,
+    lifecycleState: state?.status ?? null,
+    currentAttemptGeneration,
+    currentStatus: state?.status ?? null,
+    priorReadyRestoredOnBoot:
+      lastCompletedGeneration > 0 && lastCompletedGeneration !== (provider?.catalogGeneration ?? 0),
+    canonicalResolutionEligible: resolvedReadableGeneration > 0,
+    coordinatorInFlight: isCatalogSyncRunning(providerId, mediaType),
+    reason: resolvedReason,
+  });
 
   // Diagnostics only ΓÇö never changes the resolved generation above.
   void logCatalogGenerationInventoryOnce(providerId, mediaType, {
@@ -1713,29 +2581,53 @@ export async function resolveReadableCatalogGeneration(
 async function loadMoviesGenerationPhysicalSnapshot(
   providerId: string,
   generation: number,
-): Promise<MoviesGenerationPhysicalSnapshot> {
-  const [physical, largest] = await Promise.all([
-    getCatalogGenerationPhysicalStats(providerId, 'movie', generation),
-    getCatalogGenerationLargestCategory(providerId, 'movie', generation),
+  database: CatalogDatabaseHandle,
+): Promise<{
+  snapshot: MoviesGenerationPhysicalSnapshot;
+  physicalStatsMs: number;
+  largestCategoryMs: number;
+}> {
+  const physicalStarted = perfNowMs();
+  const physicalPromise = getCatalogGenerationPhysicalStats(
+    providerId,
+    'movie',
+    generation,
+    database,
+  ).then((value) => ({ value, durationMs: perfNowMs() - physicalStarted }));
+  const largestStarted = perfNowMs();
+  const largestPromise = getCatalogGenerationLargestCategory(
+    providerId,
+    'movie',
+    generation,
+    database,
+    'readable-recovery-candidate',
+  ).then((value) => ({ value, durationMs: perfNowMs() - largestStarted }));
+  const [{ value: physical, durationMs: physicalStatsMs }, { value: largest, durationMs: largestCategoryMs }] = await Promise.all([
+    physicalPromise,
+    largestPromise,
   ]);
   return {
-    generation,
-    itemRows: physical.itemRows,
-    distinctContentIds: physical.distinctContentIds,
-    categoryRows: physical.categoryRows,
-    distinctItemCategoryIds: physical.distinctItemCategoryIds,
-    nonzeroCategoryCount: largest.nonzeroCategoryCount,
-    largestCategoryId: largest.categoryId,
-    largestCategoryCount: largest.itemCount,
+    snapshot: {
+      generation,
+      itemRows: physical.itemRows,
+      distinctContentIds: physical.distinctContentIds,
+      categoryRows: physical.categoryRows,
+      distinctItemCategoryIds: physical.distinctItemCategoryIds,
+      nonzeroCategoryCount: largest.nonzeroCategoryCount,
+      largestCategoryId: largest.categoryId,
+      largestCategoryCount: largest.itemCount,
+    },
+    physicalStatsMs,
+    largestCategoryMs,
   };
 }
 
 async function listMoviesGenerationCandidateNumbers(
   providerId: string,
   excludeIncompleteSyncingGeneration: number,
+  database: CatalogDatabaseHandle,
 ): Promise<number[]> {
-  const db = await getCatalogDatabase();
-  const rows = await db.getAll<{ sync_generation: number | string }>(
+  const rows = await database.getAll<{ sync_generation: number | string }>(
     `SELECT sync_generation
      FROM catalog_items_v2
      WHERE provider_id = ? AND media_type = 'movie'
@@ -1748,21 +2640,139 @@ async function listMoviesGenerationCandidateNumbers(
   return rows.map((row) => asNumber(row.sync_generation)).filter((generation) => generation > 0);
 }
 
+async function findDurableReadyMovieRecoveryGeneration(
+  providerId: string,
+  currentAttemptGeneration: number,
+  currentStatus: string | null,
+  providerCatalogGeneration: number,
+  database: CatalogDatabaseHandle,
+): Promise<number> {
+  const started = perfNowMs();
+  let durableReadyGeneration = 0;
+  let durableReadyLifecycleState: string | null = null;
+  let retainedEligibility = false;
+  let fallbackReason: string | null = null;
+
+  const lifecycle = await database.getFirst<{
+    sync_generation: number | string;
+    status: string;
+  }>(
+    `SELECT sync_generation, status
+     FROM catalog_generation_state
+     WHERE provider_id = ? AND media_type = 'movie'
+       AND status = 'ready'
+       AND (
+         ? = 0
+         OR sync_generation != ?
+         OR ? != 'syncing'
+       )
+     ORDER BY sync_generation DESC
+     LIMIT 1`,
+    [providerId, currentAttemptGeneration, currentAttemptGeneration, currentStatus ?? ''],
+  );
+  durableReadyGeneration = asNumber(lifecycle?.sync_generation);
+  durableReadyLifecycleState = lifecycle?.status ?? null;
+
+  if (durableReadyGeneration > 0 && durableReadyLifecycleState === 'ready') {
+    const [itemExists, categoryExists] = await Promise.all([
+      database.getFirst<{ present: number }>(
+        `SELECT 1 AS present
+         FROM catalog_items_v2
+         WHERE provider_id = ? AND media_type = 'movie' AND sync_generation = ?
+         LIMIT 1`,
+        [providerId, durableReadyGeneration],
+      ),
+      database.getFirst<{ present: number }>(
+        `SELECT 1 AS present
+         FROM catalog_categories_v2
+         WHERE provider_id = ? AND media_type = 'movie' AND sync_generation = ?
+         LIMIT 1`,
+        [providerId, durableReadyGeneration],
+      ),
+    ]);
+    retainedEligibility = Boolean(itemExists?.present && categoryExists?.present);
+    if (!retainedEligibility) {
+      fallbackReason = 'durable-ready-generation-has-no-retained-rows';
+    }
+  } else {
+    fallbackReason = 'no-prior-durable-ready-movie-generation';
+  }
+
+  const fastPathEligible = retainedEligibility;
+  const totalFastPathMs = perfNowMs() - started;
+  novacastCatalogTrace('[NovaCast Movie Durable Ready Recovery]', {
+    currentAttemptGeneration,
+    currentStatus,
+    providerCatalogGeneration,
+    durableReadyGeneration,
+    durableReadyLifecycleState,
+    durableReadyFound: durableReadyGeneration > 0,
+    retainedEligibility,
+    fastPathEligible,
+    fastPathUsed: fastPathEligible,
+    fallbackReason,
+    selectedGeneration: fastPathEligible ? durableReadyGeneration : 0,
+    avoidedHistoricalEnumeration: fastPathEligible,
+    avoidedPhysicalStatsQuery: fastPathEligible,
+    avoidedLargestCategoryQuery: fastPathEligible,
+    avoidedDistributionValidation: fastPathEligible,
+    totalFastPathMs: Math.round(totalFastPathMs),
+  });
+  return fastPathEligible ? durableReadyGeneration : 0;
+}
+
 async function assessMoviesGenerationCandidate(
   providerId: string,
   generation: number,
+  database: CatalogDatabaseHandle,
   previousValidated: {
     generation: number;
     totalItems: number;
     nonzeroCategoryCount: number;
   } | null,
+  context: {
+    generationState: { status: string; errorCode: string | null } | undefined;
+    candidateSource: string;
+    wasAlreadyKnownReadable: boolean;
+    wasProviderCatalogGeneration: boolean;
+    wasLastReadyGeneration: boolean;
+  },
 ): Promise<MoviesGenerationIntegrityAssessment> {
-  const snapshot = await loadMoviesGenerationPhysicalSnapshot(providerId, generation);
+  const candidateStarted = perfNowMs();
+  const stateLookupStarted = perfNowMs();
+  const generationState = context.generationState;
+  const stateLookupMs = perfNowMs() - stateLookupStarted;
+  const loaded = await loadMoviesGenerationPhysicalSnapshot(providerId, generation, database);
+  const validationStarted = perfNowMs();
   const assessment = assessMoviesGenerationSnapshotIntegrity({
-    snapshot,
+    snapshot: loaded.snapshot,
     previousValidated,
   });
-  console.info(
+  const categoryDistributionValidationMs = perfNowMs() - validationStarted;
+  const totalCandidateMs = perfNowMs() - candidateStarted;
+  novacastCatalogTrace('[NovaCast Movie Recovery Timing]', {
+    phase: 'candidate',
+    generation,
+    generationState: generationState?.status ?? null,
+    markedReady: generationState?.status === 'ready',
+    markedFailed: generationState?.status === 'error',
+    candidateSource: context.candidateSource,
+    physicalStatsMs: Math.round(loaded.physicalStatsMs),
+    largestCategoryMs: Math.round(loaded.largestCategoryMs),
+    categoryDistributionValidationMs: Math.round(categoryDistributionValidationMs),
+    stateLookupMs: Math.round(stateLookupMs),
+    totalCandidateMs: Math.round(totalCandidateMs),
+    itemRows: assessment.itemRows,
+    categoryRows: assessment.categoryRows,
+    distinctItemCategoryIds: assessment.distinctItemCategoryIds,
+    integrityDecision: assessment.healthy ? 'passed' : 'rejected',
+    rejectionReason: assessment.healthy ? null : assessment.reason,
+    resultUsed: false,
+    wasAlreadyKnownReadable: context.wasAlreadyKnownReadable,
+    wasProviderCatalogGeneration: context.wasProviderCatalogGeneration,
+    wasLastReadyGeneration: context.wasLastReadyGeneration,
+  });
+  novacastCatalogTrace(
     '[NovaCast Movies Readable Recovery] ' +
       JSON.stringify({
         event: 'movies_readable_candidate_assessed',
@@ -1772,12 +2782,27 @@ async function assessMoviesGenerationCandidate(
         categoryRows: assessment.categoryRows,
         distinctItemCategoryIds: assessment.distinctItemCategoryIds,
         nonzeroCategoryCount: assessment.nonzeroCategoryCount,
+        coverageRatio: assessment.distribution?.coverageRatio ?? null,
+        totalItems: assessment.itemRows,
         integrityDecision: assessment.healthy ? 'passed' : 'rejected',
         reason: assessment.reason,
+        recoveryComparedWithPrevious: false,
         marker: MOVIES_FOCUS_STAGE4I_MARKER,
       }),
   );
   return assessment;
+}
+
+async function getMovieGenerationLifecycleStates(providerId: string, database: CatalogDatabaseHandle) {
+  const rows = await database.getAll<{ sync_generation: number | string; status: string; error_code: string | null }>(
+    `SELECT sync_generation, status, error_code
+     FROM catalog_generation_state
+     WHERE provider_id = ? AND media_type = 'movie'`,
+    [providerId],
+  );
+  return new Map(
+    rows.map((row) => [asNumber(row.sync_generation), { status: row.status, errorCode: row.error_code }]),
+  );
 }
 
 /** Bounded transactional pointer repair ΓÇö credentials/activation untouched. */
@@ -1796,14 +2821,32 @@ export async function repairMoviesProviderCatalogGenerationPointer(
       return;
     }
     const previous = provider.catalogGeneration;
+    await logMovieProviderGenerationPointer({
+      event: 'before-provider-generation-write',
+      providerId,
+      database: db,
+      requestedProviderCatalogGeneration: recoveredGeneration,
+      sourceFunction: 'repairMoviesProviderCatalogGenerationPointer',
+      sourcePhase: 'readable-recovery-pointer-repair',
+      pointerReason: 'recovered-validated-generation',
+    });
     await db.run(
       `UPDATE catalog_providers
        SET catalog_generation = ?
        WHERE provider_id = ?`,
       [recoveredGeneration, providerId],
     );
+    await logMovieProviderGenerationPointer({
+      event: 'after-provider-generation-write',
+      providerId,
+      database: db,
+      requestedProviderCatalogGeneration: recoveredGeneration,
+      sourceFunction: 'repairMoviesProviderCatalogGenerationPointer',
+      sourcePhase: 'readable-recovery-pointer-repair',
+      pointerReason: 'recovered-validated-generation',
+    });
     repaired = true;
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Movies Readable Recovery] ' +
         JSON.stringify({
           event: 'movies_provider_generation_repaired',
@@ -1849,21 +2892,401 @@ async function resolveMoviesReadableCatalogGeneration(providerId: string): Promi
 }
 
 async function resolveMoviesReadableCatalogGenerationUncached(providerId: string): Promise<number> {
-  const state = await getCatalogSyncState(providerId, 'movie');
-  const provider = await getCatalogProvider(providerId);
+  const recoveryStarted = perfNowMs();
+  const stateStarted = perfNowMs();
+  const readDb = await getCatalogDatabase();
+  const lifecycleStates = await getMovieGenerationLifecycleStates(providerId, readDb);
+  const state = await getCatalogSyncState(providerId, 'movie', readDb);
+  const provider = await getCatalogProvider(providerId, readDb);
+  const stateLookupMs = perfNowMs() - stateStarted;
   const currentAttemptGeneration = state?.generation ?? 0;
   const syncStatus = state?.status ?? null;
   const activeGeneration = provider?.catalogGeneration ?? 0;
+  const knownReadableGeneration = getCachedMoviesReadableGeneration(providerId)?.generation ?? 0;
+  const lastReadyMovieGeneration = [...lifecycleStates.entries()]
+    .filter(([, value]) => value.status === 'ready')
+    .reduce((max, [generation]) => Math.max(max, generation), 0);
+  const physicalMovieRow = await readDb.getFirst<{ row_count: number | string }>(
+    `SELECT COUNT(*) AS row_count
+     FROM catalog_items_v2
+     WHERE provider_id = ? AND media_type = 'movie'`,
+    [providerId],
+  );
+  const physicalMovieRowCount = asNumber(physicalMovieRow?.row_count);
+  const pointerCandidate = resolveMoviePointerCandidate({
+    providerCatalogGeneration: activeGeneration,
+    providerPointerLifecycleStatus: lifecycleStates.get(activeGeneration)?.status ?? null,
+    lastReadyMovieGeneration,
+  });
+  const logReadableRestore = (input: {
+    readableGeneration: number;
+    readableRowCount: number;
+    reason: string;
+    lifecycleState: string | null;
+  }) => {
+    novacastCatalogTrace(CATALOG_READABLE_RESTORE_LOG, {
+      providerId,
+      mediaType: 'movie',
+      physicalRowCount: physicalMovieRowCount,
+      activeGeneration,
+      lastCompletedGeneration: lastReadyMovieGeneration,
+      readableGeneration: input.readableGeneration,
+      lifecycleState: input.lifecycleState,
+      currentAttemptGeneration,
+      currentStatus: syncStatus,
+      priorReadyRestoredOnBoot:
+        pointerCandidate.restoredPriorReady ||
+        (lastReadyMovieGeneration > 0 && lastReadyMovieGeneration !== activeGeneration),
+      canonicalResolutionEligible: input.readableGeneration > 0,
+      coordinatorInFlight: isCatalogSyncRunning(providerId, 'movie'),
+      reason: input.reason,
+    });
+  };
+  const pointerGeneration = pointerCandidate.pointerGeneration;
   const excludeSyncing =
-    syncStatus === 'syncing' && currentAttemptGeneration > 0 ? currentAttemptGeneration : 0;
+    syncStatus === 'syncing' &&
+    currentAttemptGeneration > 0 &&
+    lastReadyMovieGeneration > 0
+      ? currentAttemptGeneration
+      : 0;
 
-  const candidateNumbers = await listMoviesGenerationCandidateNumbers(providerId, excludeSyncing);
+  const pointerLifecycleState = lifecycleStates.get(pointerGeneration);
+  const pointerIsExcludedSyncingGeneration =
+    pointerGeneration > 0 &&
+    (pointerLifecycleState?.status === 'syncing' ||
+      (excludeSyncing > 0 && pointerGeneration === excludeSyncing));
+  const activeLifecycleState = pointerLifecycleState;
+  const pointerMediaEligibility = pointerLifecycleState?.status === 'ready';
+  const pointerEligibilityReason =
+    pointerLifecycleState?.status === 'ready'
+      ? 'movie-lifecycle-ready'
+      : pointerLifecycleState?.status === 'syncing'
+        ? 'movie-lifecycle-syncing'
+        : pointerLifecycleState?.status === 'error'
+          ? 'movie-lifecycle-failed'
+          : pointerGeneration > 0
+            ? 'movie-lifecycle-record-missing'
+            : 'movie-lifecycle-record-missing';
+  let activeAssessment: MoviesGenerationIntegrityAssessment | null = null;
+
+  novacastCatalogTrace('[NovaCast Movie Provider Generation Pointer]', {
+    event: 'movie-pointer-candidate-evaluation',
+    providerCatalogGeneration: activeGeneration,
+    lifecycleGeneration: pointerGeneration,
+    movieLifecycleStateForPointer: pointerLifecycleState?.status ?? null,
+    pointerMediaEligibility,
+    pointerEligibilityReason,
+    pointerAcceptedAsMovieCandidate: pointerMediaEligibility,
+    pointerSource: pointerCandidate.source,
+    restoredPriorReady: pointerCandidate.restoredPriorReady,
+  });
+
+  await logMovieProviderGenerationPointer({
+    event: 'pre-recovery-pointer-snapshot',
+    providerId,
+    database: readDb,
+    requestedProviderCatalogGeneration: null,
+    sourceFunction: 'resolveMoviesReadableCatalogGenerationUncached',
+    sourcePhase: 'before-recovery-assessment',
+    pointerReason: 'recovery-start-snapshot',
+  });
+
+  if (pointerIsExcludedSyncingGeneration) {
+    novacastCatalogTrace('[NovaCast Movie Recovery Eligibility]', {
+      generation: pointerGeneration,
+      generationState: pointerLifecycleState?.status ?? 'syncing',
+      markedReady: false,
+      markedFailed: false,
+      eligibilityDecision: 'excluded',
+      eligibilityReason: 'explicit-syncing-generation-not-readable',
+    });
+  }
+
+  let activeBaselineFound = false;
+  let activeBaselineValid = false;
+  let activeBaselineTotalItems: number | null = null;
+  let activeBaselineNonzeroCategoryCount: number | null = null;
+  let retainedItemSanityPassed = false;
+  let retainedCategorySanityPassed = false;
+  let fastPathEligible = false;
+  let fastPathUsed = false;
+  let fallbackReason: string | null = null;
+  let baselineLookupMs = 0;
+  let sanityCheckMs = 0;
+
+  if (pointerGeneration <= 0) {
+    fallbackReason = 'no-provider-pointer-candidate';
+  } else if (!pointerMediaEligibility) {
+    fallbackReason = pointerLifecycleState?.status === 'syncing'
+      ? 'movie-pointer-generation-syncing'
+      : pointerLifecycleState?.status === 'error'
+        ? 'movie-pointer-generation-failed'
+        : 'movie-pointer-lifecycle-record-missing';
+  } else if (pointerIsExcludedSyncingGeneration) {
+    fallbackReason = 'movie-pointer-generation-excluded-syncing';
+  } else {
+    const baselineStarted = perfNowMs();
+    const baseline = await getMovieActivationBaseline(providerId, pointerGeneration, readDb);
+    baselineLookupMs = perfNowMs() - baselineStarted;
+    activeBaselineFound = baseline.lifecycleState != null;
+    activeBaselineTotalItems = baseline.totalItems;
+    activeBaselineNonzeroCategoryCount = baseline.nonzeroCategoryCount;
+    activeBaselineValid =
+      baseline.lifecycleState === 'ready' &&
+      baseline.totalItems != null &&
+      baseline.nonzeroCategoryCount != null &&
+      Number.isFinite(baseline.totalItems) &&
+      Number.isFinite(baseline.nonzeroCategoryCount) &&
+      baseline.totalItems > 0 &&
+      baseline.nonzeroCategoryCount > 0;
+    const sanityStarted = perfNowMs();
+    const [itemExists, categoryExists] = await Promise.all([
+      readDb.getFirst<{ present: number }>(
+        `SELECT 1 AS present
+         FROM catalog_items_v2
+         WHERE provider_id = ? AND media_type = 'movie' AND sync_generation = ?
+         LIMIT 1`,
+        [providerId, pointerGeneration],
+      ),
+      readDb.getFirst<{ present: number }>(
+        `SELECT 1 AS present
+         FROM catalog_categories_v2
+         WHERE provider_id = ? AND media_type = 'movie' AND sync_generation = ?
+         LIMIT 1`,
+        [providerId, pointerGeneration],
+      ),
+    ]);
+    sanityCheckMs = perfNowMs() - sanityStarted;
+    retainedItemSanityPassed = Boolean(itemExists?.present);
+    retainedCategorySanityPassed = Boolean(categoryExists?.present);
+    // A previously completed generation stays readable even if activation
+    // baseline columns were never persisted. Do not re-run sparse integrity.
+    fastPathEligible = retainedItemSanityPassed && retainedCategorySanityPassed;
+    if (!fastPathEligible) {
+      fallbackReason = !retainedItemSanityPassed
+        ? 'retained-movie-items-missing'
+        : 'retained-movie-categories-missing';
+    } else if (!activeBaselineValid) {
+      fallbackReason = null;
+    }
+  }
+
+  if (fastPathEligible) {
+    fastPathUsed = true;
+    logMovieActiveReadyResolverFastPath({
+      providerId,
+      candidateGeneration: pointerGeneration,
+      providerCatalogGeneration: activeGeneration,
+      movieLifecycleGeneration: pointerGeneration,
+      movieLifecycleState: activeLifecycleState?.status ?? null,
+      pointerMediaEligibility,
+      baselineFound: activeBaselineFound,
+      baselineValid: activeBaselineValid,
+      activationTotalItems: activeBaselineTotalItems,
+      activationNonzeroCategoryCount: activeBaselineNonzeroCategoryCount,
+      retainedItemSanityPassed,
+      retainedCategorySanityPassed,
+      fastPathEligible,
+      fastPathUsed,
+      fallbackUsed: false,
+      fallbackReason: null,
+      avoidedPhysicalStatsQuery: true,
+      avoidedLargestCategoryQuery: true,
+      avoidedDistributionValidation: true,
+      avoidedHistoricalEnumeration: true,
+      baselineLookupMs: Math.round(baselineLookupMs),
+      sanityCheckMs: Math.round(sanityCheckMs),
+      totalFastPathMs: Math.round(perfNowMs() - recoveryStarted),
+      sourceFunction: 'resolveMoviesReadableCatalogGenerationUncached',
+      sourcePhase: 'active-ready-baseline-short-circuit',
+    });
+    await logMovieProviderGenerationPointer({
+      event: 'post-recovery-pointer-snapshot',
+      providerId,
+      database: readDb,
+      requestedProviderCatalogGeneration: pointerGeneration,
+      sourceFunction: 'resolveMoviesReadableCatalogGenerationUncached',
+      sourcePhase: 'active-ready-baseline-short-circuit',
+      pointerReason: pointerCandidate.restoredPriorReady
+        ? 'restored-prior-ready-generation'
+        : 'active-ready-baseline-fast-path',
+    });
+    if (pointerCandidate.restoredPriorReady) {
+      void repairMoviesProviderCatalogGenerationPointer(providerId, pointerGeneration);
+    }
+    logReadableRestore({
+      readableGeneration: pointerGeneration,
+      readableRowCount: activeBaselineTotalItems ?? physicalMovieRowCount,
+      reason: pointerCandidate.restoredPriorReady ? 'restored-prior-ready-generation' : 'active-ready-baseline-fast-path',
+      lifecycleState: pointerLifecycleState?.status ?? null,
+    });
+    return pointerGeneration;
+  }
+
+  logMovieActiveReadyResolverFastPath({
+    providerId,
+    candidateGeneration: pointerGeneration,
+    providerCatalogGeneration: activeGeneration,
+    movieLifecycleGeneration: pointerGeneration,
+    movieLifecycleState: activeLifecycleState?.status ?? null,
+    pointerMediaEligibility,
+    baselineFound: activeBaselineFound,
+    baselineValid: activeBaselineValid,
+    activationTotalItems: activeBaselineTotalItems,
+    activationNonzeroCategoryCount: activeBaselineNonzeroCategoryCount,
+    retainedItemSanityPassed,
+    retainedCategorySanityPassed,
+    fastPathEligible,
+    fastPathUsed,
+    fallbackUsed: true,
+    fallbackReason: fallbackReason ?? 'active-ready-fast-path-not-eligible',
+    avoidedPhysicalStatsQuery: false,
+    avoidedLargestCategoryQuery: false,
+    avoidedDistributionValidation: false,
+    avoidedHistoricalEnumeration: false,
+    baselineLookupMs: Math.round(baselineLookupMs),
+    sanityCheckMs: Math.round(sanityCheckMs),
+    totalFastPathMs: Math.round(perfNowMs() - recoveryStarted),
+    sourceFunction: 'resolveMoviesReadableCatalogGenerationUncached',
+    sourcePhase: 'active-ready-baseline-fallback',
+  });
+
+  if (
+    pointerGeneration > 0 &&
+    pointerMediaEligibility &&
+    !pointerIsExcludedSyncingGeneration
+  ) {
+    activeAssessment = await assessMoviesGenerationCandidate(providerId, pointerGeneration, readDb, null, {
+      generationState: lifecycleStates.get(pointerGeneration),
+      candidateSource: pointerCandidate.source === 'durable-ready' ? 'durable-ready-generation' : 'provider-catalog-generation',
+      wasAlreadyKnownReadable: knownReadableGeneration === pointerGeneration,
+      wasProviderCatalogGeneration: activeGeneration === pointerGeneration,
+      wasLastReadyGeneration: pointerLifecycleState?.status === 'ready',
+    });
+    if (pointerLifecycleState?.status === 'error') {
+      activeAssessment = {
+        ...activeAssessment,
+        healthy: false,
+        degraded: true,
+        reason: 'explicit-failed-generation',
+      };
+      novacastCatalogTrace('[NovaCast Movie Recovery Eligibility]', {
+        providerId,
+        generation: pointerGeneration,
+        activeIntegrityPassed: activeAssessment.healthy,
+        eligible: false,
+        reason: 'explicit-failed-generation',
+        errorCode: pointerLifecycleState.errorCode,
+      });
+    } else if (activeAssessment.healthy) {
+      setCachedMoviesReadableGeneration({
+        providerId,
+        generation: pointerGeneration,
+        resolvedAt: Date.now(),
+        itemRows: activeAssessment.itemRows,
+        categoryRows: activeAssessment.categoryRows,
+        distinctItemCategoryIds: activeAssessment.distinctItemCategoryIds,
+      });
+      novacastCatalogTrace('[NovaCast Movies Readable Recovery Optimization]', {
+        activeGeneration,
+        activeIntegrityPassed: true,
+        fallbackScanPerformed: false,
+        fallbackCandidateCount: 0,
+        selectedGeneration: pointerGeneration,
+        reason: 'active-integrity-passed-short-circuit',
+        readConnection: 'catalog-read',
+      });
+      novacastCatalogTrace('[NovaCast Movie Recovery Timing]', {
+        phase: 'overall',
+        currentAttemptGeneration,
+        currentStatus: syncStatus,
+        providerCatalogGeneration: activeGeneration,
+        knownReadableGeneration,
+        candidateCount: 1,
+        fallbackScanPerformed: false,
+        selectedGeneration: pointerGeneration,
+        selectedReason: 'active-integrity-passed-short-circuit',
+        totalMs: Math.round(perfNowMs() - recoveryStarted),
+      });
+      await logMovieProviderGenerationPointer({
+        event: 'post-recovery-pointer-snapshot',
+        providerId,
+        database: readDb,
+        requestedProviderCatalogGeneration: pointerGeneration,
+        sourceFunction: 'resolveMoviesReadableCatalogGenerationUncached',
+        sourcePhase: 'active-generation-short-circuit',
+        pointerReason: 'active-integrity-passed-short-circuit',
+      });
+      logReadableRestore({
+        readableGeneration: pointerGeneration,
+        readableRowCount: activeAssessment.itemRows,
+        reason: 'active-integrity-passed-short-circuit',
+        lifecycleState: pointerLifecycleState?.status ?? null,
+      });
+      return pointerGeneration;
+    }
+  }
+
+  const durableReadyRecoveryGeneration = await findDurableReadyMovieRecoveryGeneration(
+    providerId,
+    currentAttemptGeneration,
+    syncStatus,
+    activeGeneration,
+    readDb,
+  );
+  if (durableReadyRecoveryGeneration > 0) {
+    if (durableReadyRecoveryGeneration !== activeGeneration) {
+      void repairMoviesProviderCatalogGenerationPointer(providerId, durableReadyRecoveryGeneration);
+    }
+    logReadableRestore({
+      readableGeneration: durableReadyRecoveryGeneration,
+      readableRowCount: physicalMovieRowCount,
+      reason: 'durable-ready-generation',
+      lifecycleState: lifecycleStates.get(durableReadyRecoveryGeneration)?.status ?? 'ready',
+    });
+    return durableReadyRecoveryGeneration;
+  }
+
+  const candidateListStarted = perfNowMs();
+  const enumeratedCandidateNumbers = await listMoviesGenerationCandidateNumbers(
+    providerId,
+    excludeSyncing,
+    readDb,
+  );
+  const candidateEnumerationMs = perfNowMs() - candidateListStarted;
+  const failedFilteringStarted = perfNowMs();
+  const candidateNumbers = enumeratedCandidateNumbers.filter(
+    (generation) => {
+      const generationState = lifecycleStates.get(generation);
+      const excluded = shouldExcludeSyncingGenerationFromRecovery({
+        generationLifecycleStatus: generationState?.status,
+        hasReadyGeneration: lastReadyMovieGeneration > 0,
+      });
+      if (excluded) {
+        novacastCatalogTrace('[NovaCast Movie Recovery Eligibility]', {
+          generation,
+          generationState: generationState?.status ?? null,
+          markedReady: generationState?.status === 'ready',
+          markedFailed: generationState?.status === 'error',
+          eligibilityDecision: 'excluded',
+          eligibilityReason:
+            generationState?.status === 'syncing'
+              ? 'explicit-syncing-generation-not-readable'
+              : 'explicit-failed-generation-never-eligible',
+        });
+      }
+      return !excluded;
+    },
+  );
+  const failedFilteringMs = perfNowMs() - failedFilteringStarted;
   // Always consider the active pointer even if it equals an excluded syncing gen
   // that somehow completed with rows (ready path). When syncing, exclude incomplete.
   if (
     activeGeneration > 0 &&
     !candidateNumbers.includes(activeGeneration) &&
-    !(excludeSyncing > 0 && activeGeneration === excludeSyncing)
+    !(excludeSyncing > 0 && activeGeneration === excludeSyncing) &&
+    lifecycleStates.get(activeGeneration)?.status !== 'error' &&
+    lifecycleStates.get(activeGeneration)?.status !== 'syncing'
   ) {
     candidateNumbers.unshift(activeGeneration);
   }
@@ -1872,8 +3295,43 @@ async function resolveMoviesReadableCatalogGenerationUncached(providerId: string
   // at activation time; recovery must still reopen a prior validated snapshot.
   const assessments: MoviesGenerationIntegrityAssessment[] = [];
   for (const generation of candidateNumbers) {
-    assessments.push(await assessMoviesGenerationCandidate(providerId, generation, null));
+    assessments.push(
+      generation === activeAssessment?.generation && activeAssessment
+        ? activeAssessment
+        : await assessMoviesGenerationCandidate(providerId, generation, readDb, null, {
+            generationState: lifecycleStates.get(generation),
+            candidateSource: 'historical-candidate-enumeration',
+            wasAlreadyKnownReadable: knownReadableGeneration === generation,
+            wasProviderCatalogGeneration: activeGeneration === generation,
+            wasLastReadyGeneration: lifecycleStates.get(generation)?.status === 'ready',
+          }),
+    );
   }
+
+  novacastCatalogTrace('[NovaCast Movie Recovery Timing]', {
+    phase: 'candidate-list-and-filtering',
+    currentAttemptGeneration,
+    currentStatus: syncStatus,
+    providerCatalogGeneration: activeGeneration,
+    knownReadableGeneration,
+    candidateCount: candidateNumbers.length,
+    fallbackScanPerformed: true,
+    candidateEnumerationMs: Math.round(candidateEnumerationMs),
+    failedFilteringMs: Math.round(failedFilteringMs),
+    stateLookupMs: Math.round(stateLookupMs),
+    totalMs: Math.round(perfNowMs() - recoveryStarted),
+  });
+
+  novacastCatalogTrace('[NovaCast Movie Recovery Eligibility]', {
+    providerId,
+    activeGeneration,
+    syncingGeneration: currentAttemptGeneration,
+    excludedFailedGenerations: [...lifecycleStates.entries()]
+      .filter(([, stateValue]) => stateValue.status === 'error')
+      .map(([generation]) => generation),
+    candidateCount: candidateNumbers.length,
+    rule: 'explicit-failed-generation-never-eligible',
+  });
 
   const decision = selectMoviesReadableRecoveryGeneration({
     activeGeneration,
@@ -1882,9 +3340,19 @@ async function resolveMoviesReadableCatalogGenerationUncached(providerId: string
     candidates: assessments,
   });
 
+  for (const assessment of assessments) {
+    novacastCatalogTrace('[NovaCast Movie Recovery Timing]', {
+      phase: 'candidate-result',
+      generation: assessment.generation,
+      resultUsed: assessment.generation === decision.readableGeneration,
+      selectedGeneration: decision.readableGeneration,
+      selectedReason: decision.reason,
+    });
+  }
+
   if (decision.rejectedActiveGeneration != null) {
     const rejected = assessments.find((a) => a.generation === decision.rejectedActiveGeneration);
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Movies Readable Recovery] ' +
         JSON.stringify({
           event: 'movies_degraded_active_rejected',
@@ -1902,7 +3370,7 @@ async function resolveMoviesReadableCatalogGenerationUncached(providerId: string
 
   if (decision.readableGeneration > 0) {
     const selected = assessments.find((a) => a.generation === decision.readableGeneration);
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Movies Readable Recovery] ' +
         JSON.stringify({
           event: 'movies_recovery_generation_selected',
@@ -1916,9 +3384,12 @@ async function resolveMoviesReadableCatalogGenerationUncached(providerId: string
           marker: MOVIES_FOCUS_STAGE4I_MARKER,
         }),
     );
+    const pointerRepairStarted = perfNowMs();
     if (decision.pointerRepairNeeded) {
       await repairMoviesProviderCatalogGenerationPointer(providerId, decision.readableGeneration);
     }
+    const pointerRepairMs = perfNowMs() - pointerRepairStarted;
+    const publicationStarted = perfNowMs();
     setCachedMoviesReadableGeneration({
       providerId,
       generation: decision.readableGeneration,
@@ -1927,8 +3398,45 @@ async function resolveMoviesReadableCatalogGenerationUncached(providerId: string
       categoryRows: selected?.categoryRows ?? 0,
       distinctItemCategoryIds: selected?.distinctItemCategoryIds ?? 0,
     });
+    novacastCatalogTrace('[NovaCast Movie Recovery Timing]', {
+      phase: 'final-selected-generation-publication',
+      generation: decision.readableGeneration,
+      totalMs: Math.round(perfNowMs() - publicationStarted),
+      selectedGeneration: decision.readableGeneration,
+    });
+    novacastCatalogTrace('[NovaCast Movies Readable Recovery Optimization]', {
+      activeGeneration,
+      activeIntegrityPassed: activeAssessment?.healthy === true,
+      fallbackScanPerformed: true,
+      fallbackCandidateCount: candidateNumbers.length,
+      selectedGeneration: decision.readableGeneration,
+      reason: 'fallback-selected',
+      readConnection: 'catalog-read',
+    });
+    novacastCatalogTrace('[NovaCast Movie Recovery Timing]', {
+      phase: 'overall',
+      currentAttemptGeneration,
+      currentStatus: syncStatus,
+      providerCatalogGeneration: activeGeneration,
+      knownReadableGeneration,
+      candidateCount: candidateNumbers.length,
+      fallbackScanPerformed: true,
+      selectedGeneration: decision.readableGeneration,
+      selectedReason: decision.reason,
+      pointerRepairMs: Math.round(pointerRepairMs),
+      totalMs: Math.round(perfNowMs() - recoveryStarted),
+    });
+    await logMovieProviderGenerationPointer({
+      event: 'post-recovery-pointer-snapshot',
+      providerId,
+      database: readDb,
+      requestedProviderCatalogGeneration: decision.readableGeneration,
+      sourceFunction: 'resolveMoviesReadableCatalogGenerationUncached',
+      sourcePhase: 'recovery-selected-generation',
+      pointerReason: decision.reason,
+    });
   } else {
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Movies Readable Recovery] ' +
         JSON.stringify({
           event: 'movies_no_valid_snapshot',
@@ -1939,9 +3447,40 @@ async function resolveMoviesReadableCatalogGenerationUncached(providerId: string
           distinctItemCategoryIds: 0,
           integrityDecision: 'none',
           reason: decision.reason,
-          marker: MOVIES_FOCUS_STAGE4I_MARKER,
+         marker: MOVIES_FOCUS_STAGE4I_MARKER,
         }),
     );
+    novacastCatalogTrace('[NovaCast Movies Readable Recovery Optimization]', {
+      activeGeneration,
+      activeIntegrityPassed: activeAssessment?.healthy === true,
+      fallbackScanPerformed: true,
+      fallbackCandidateCount: candidateNumbers.length,
+      selectedGeneration: 0,
+      reason: 'no-valid-fallback',
+      readConnection: 'catalog-read',
+    });
+    novacastCatalogTrace('[NovaCast Movie Recovery Timing]', {
+      phase: 'overall',
+      currentAttemptGeneration,
+      currentStatus: syncStatus,
+      providerCatalogGeneration: activeGeneration,
+      knownReadableGeneration,
+      candidateCount: candidateNumbers.length,
+      fallbackScanPerformed: true,
+      selectedGeneration: 0,
+      selectedReason: 'no-valid-fallback',
+      pointerRepairMs: 0,
+      totalMs: Math.round(perfNowMs() - recoveryStarted),
+    });
+    await logMovieProviderGenerationPointer({
+      event: 'post-recovery-pointer-snapshot',
+      providerId,
+      database: readDb,
+      requestedProviderCatalogGeneration: 0,
+      sourceFunction: 'resolveMoviesReadableCatalogGenerationUncached',
+      sourcePhase: 'recovery-no-valid-generation',
+      pointerReason: 'no-valid-fallback',
+    });
   }
 
   const readableRowCount =
@@ -1949,20 +3488,29 @@ async function resolveMoviesReadableCatalogGenerationUncached(providerId: string
       ? (assessments.find((a) => a.generation === decision.readableGeneration)?.itemRows ?? 0)
       : 0;
 
-  console.info(
+  novacastCatalogTrace(
     '[Catalog Read Generation] ' +
       JSON.stringify({
         providerId,
         mediaType: 'movie',
         currentAttemptGeneration,
         currentStatus: syncStatus,
-        lastCompletedGeneration: activeGeneration,
+        lastCompletedGeneration: lastReadyMovieGeneration || activeGeneration,
         resolvedReadableGeneration: decision.readableGeneration,
         readableRowCount,
         reason: decision.reason,
         marker: MOVIES_FOCUS_STAGE4I_MARKER,
       }),
   );
+  logReadableRestore({
+    readableGeneration: decision.readableGeneration,
+    readableRowCount,
+    reason: decision.reason,
+    lifecycleState:
+      (decision.readableGeneration > 0
+        ? lifecycleStates.get(decision.readableGeneration)?.status
+        : pointerLifecycleState?.status) ?? null,
+  });
 
   // Stage 4.2J: defer diagnostic inventory while Detail owns the screen.
   if (!getMoviesDetailOpenForDiagnostics()) {
@@ -2058,7 +3606,7 @@ export async function resolveReadableCategoryGeneration(
     }
   }
 
-  console.info(
+  novacastCatalogTrace(
     '[NovaCast Category Read Generation] ' +
       JSON.stringify({
         providerId,
@@ -2155,7 +3703,7 @@ export async function getCatalogCategoryCounts(
       ? nonzeroCategoryCount
       : merged.length;
 
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Movies Category Counts] ' +
         JSON.stringify({
           providerId,
@@ -2263,7 +3811,7 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
 
   if (generation <= 0) {
     if (process.env.EXPO_PUBLIC_MOVIES_SQLITE_DIAGNOSTICS === 'true' && query.mediaType === 'movie') {
-      console.info('[Movies SQLite Query Diagnostic]', JSON.stringify({
+      novacastCatalogTrace('[Movies SQLite Query Diagnostic]', JSON.stringify({
         providerId: query.providerId,
         categoryId: query.categoryId ?? null,
         generation,
@@ -2314,7 +3862,7 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
         `EXPLAIN QUERY PLAN ${pageSql}`,
         [...params, limit, offset],
       );
-      console.info(
+      novacastCatalogTrace(
         '[NovaCast Movies Search Query Plan] ' +
           JSON.stringify({
             table: itemsTable,
@@ -2332,7 +3880,7 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
           }),
       );
     } catch (error) {
-      console.info(
+      novacastCatalogTrace(
         '[NovaCast Movies Search Query Plan] ' +
           JSON.stringify({
             table: itemsTable,
@@ -2358,8 +3906,38 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
   }
 
   const items = rows.map(mapItem);
+  if (!query.query?.trim() && offset === 0) {
+    try {
+      const coverage = await getCatalogSortMetadataCoverage({
+        providerId: query.providerId,
+        mediaType: query.mediaType,
+        generation,
+        categoryId: query.categoryId,
+      });
+      const { effectivePrimary, fallbackUsed } = resolveContentSortEffectivePrimary(query.sort, coverage);
+      novacastCatalogTrace(
+        '[NovaCast Content Sort Audit] ' +
+          JSON.stringify({
+            mediaType: query.mediaType,
+            sort: query.sort ?? 'title',
+            categoryId: query.categoryId ?? null,
+            rowCount: coverage.rowCount,
+            primaryMetadata: {
+              releaseDatePresentCount: coverage.releaseDatePresentCount,
+              releaseYearPresentCount: coverage.releaseYearPresentCount,
+              addedAtPresentCount: coverage.addedAtPresentCount,
+              popularityPresentCount: coverage.popularityPresentCount,
+            },
+            effectivePrimary,
+            fallbackUsed,
+          }),
+      );
+    } catch {
+      // Audit must never fail a page read.
+    }
+  }
   if (query.mediaType === 'movie') {
-    console.info(
+    novacastCatalogTrace(
       '[NovaCast Movies Read Contract] ' +
         JSON.stringify({
           providerId: query.providerId,
@@ -2377,7 +3955,7 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
     );
   }
   if (process.env.EXPO_PUBLIC_MOVIES_SQLITE_DIAGNOSTICS === 'true' && query.mediaType === 'movie') {
-    console.info('[Movies SQLite Query Diagnostic]', JSON.stringify({
+    novacastCatalogTrace('[Movies SQLite Query Diagnostic]', JSON.stringify({
       providerId: query.providerId,
       categoryId: query.categoryId ?? null,
       generation,
@@ -2418,6 +3996,13 @@ export async function getCatalogMovieItem(
   const generation =
     options?.generation ?? (await resolveReadableCatalogGeneration(providerId, 'movie'));
   if (generation <= 0) {
+    novacastCatalogTrace('[NovaCast Catalog Canonical Resolve]', {
+      mediaType: 'movie',
+      providerId,
+      contentId: trimmedId,
+      readableGeneration: generation,
+      canonicalRowFound: false,
+    });
     return null;
   }
 
@@ -2432,8 +4017,16 @@ export async function getCatalogMovieItem(
      LIMIT 1`,
     [providerId, 'movie', generation, trimmedId],
   );
+  const mapped = row ? mapItem(row as Record<string, unknown>) : null;
+  novacastCatalogTrace('[NovaCast Catalog Canonical Resolve]', {
+    mediaType: 'movie',
+    providerId,
+    contentId: trimmedId,
+    readableGeneration: generation,
+    canonicalRowFound: Boolean(mapped),
+  });
 
-  return row ? mapItem(row as Record<string, unknown>) : null;
+  return mapped;
 }
 
 /**
@@ -2454,6 +4047,13 @@ export async function getCatalogSeriesItem(
   const generation =
     options?.generation ?? (await resolveReadableCatalogGeneration(providerId, 'series'));
   if (generation <= 0) {
+    novacastCatalogTrace('[NovaCast Catalog Canonical Resolve]', {
+      mediaType: 'series',
+      providerId,
+      contentId: trimmedId,
+      readableGeneration: generation,
+      canonicalRowFound: false,
+    });
     return null;
   }
 
@@ -2464,12 +4064,20 @@ export async function getCatalogSeriesItem(
      WHERE provider_id = ?
        AND media_type = ?
        AND sync_generation = ?
-       AND content_id = ?
+       AND (content_id = ? OR series_id = ?)
      LIMIT 1`,
-    [providerId, 'series', generation, trimmedId],
+    [providerId, 'series', generation, trimmedId, trimmedId],
   );
+  const mapped = row ? mapItem(row as Record<string, unknown>) : null;
+  novacastCatalogTrace('[NovaCast Catalog Canonical Resolve]', {
+    mediaType: 'series',
+    providerId,
+    contentId: trimmedId,
+    readableGeneration: generation,
+    canonicalRowFound: Boolean(mapped),
+  });
 
-  return row ? mapItem(row as Record<string, unknown>) : null;
+  return mapped;
 }
 
 export async function getCatalogDiagnosticSnapshot(

@@ -36,6 +36,13 @@ function ensureBannerAttribute(application) {
   }
 }
 
+function ensureActivityBanner(mainActivity) {
+  mainActivity.$ = mainActivity.$ ?? {};
+  if (mainActivity.$['android:banner'] !== BANNER_DRAWABLE) {
+    mainActivity.$['android:banner'] = BANNER_DRAWABLE;
+  }
+}
+
 function ensureCleartextTraffic(application) {
   application.$ = application.$ ?? {};
   if (application.$['android:usesCleartextTraffic'] !== 'true') {
@@ -49,6 +56,7 @@ function withNovacastAndroidManifest(config) {
 
     const mainActivity = AndroidConfig.Manifest.getMainActivityOrThrow(androidManifest);
     ensureLeanbackCategory(mainActivity);
+    ensureActivityBanner(mainActivity);
 
     const mainApplication = AndroidConfig.Manifest.getMainApplicationOrThrow(androidManifest);
     ensureBannerAttribute(mainApplication);
@@ -63,6 +71,8 @@ function withNovacastAndroidManifest(config) {
 // `expo prebuild --clean`. Copying them here via withDangerousMod makes them survive
 // every prebuild, sourced from the tracked assets checked into assets/images/.
 const BANNER_SOURCES = [
+  ['tv-banner-xxxhdpi.png', 'drawable-xxxhdpi'],
+  ['tv-banner-xxhdpi.png', 'drawable-xxhdpi'],
   ['tv-banner-xhdpi.png', 'drawable-xhdpi'],
   ['tv-banner-hdpi.png', 'drawable-hdpi'],
   ['tv-banner-mdpi.png', 'drawable-mdpi'],
@@ -84,6 +94,17 @@ function withNovacastTvBannerAssets(config) {
         const destDir = path.join(platformProjectRoot, 'app', 'src', 'main', 'res', densityDir);
         fs.mkdirSync(destDir, { recursive: true });
         fs.copyFileSync(sourcePath, path.join(destDir, 'banner.png'));
+      }
+
+      // Default `drawable/banner.png` so `@drawable/banner` still resolves when a
+      // density bucket is missing. Android TV / Fire TV banners are 320x180 mdpi.
+      const defaultBannerSource = ['tv-banner-mdpi.png', 'tv-banner-hdpi.png', 'tv-banner-xhdpi.png']
+        .map((file) => path.join(projectRoot, 'assets', 'images', file))
+        .find((sourcePath) => fs.existsSync(sourcePath));
+      if (defaultBannerSource) {
+        const defaultDir = path.join(platformProjectRoot, 'app', 'src', 'main', 'res', 'drawable');
+        fs.mkdirSync(defaultDir, { recursive: true });
+        fs.copyFileSync(defaultBannerSource, path.join(defaultDir, 'banner.png'));
       }
 
       return config;

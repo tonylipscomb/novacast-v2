@@ -1,6 +1,7 @@
 import { deviceAuthHeaders, deviceMetadata } from './deviceRegistration';
 import type { DeviceHeartbeatResponse, DevicePendingCommand } from './deviceTypes';
 import { applyHeartbeatAccess, checkDeviceStatus } from './deviceActivation';
+import { isLocalActivationBypassEnabled } from './deviceFeatureFlags';
 import { setContentPolicyOverride } from '@/features/content-policy/ContentPolicyService';
 import { downloadManagedProviderAssignment } from './managedProviderDownload';
 import { resetPairingKeepDevice, factoryResetNovacast } from '@/features/pairing/resetPairing';
@@ -21,6 +22,7 @@ async function executeRemoteCommand(command: DevicePendingCommand): Promise<Comm
         if (bundle) {
           await scheduleProviderCatalogSync({
             providerId: bundle.providerId,
+            requestSource: 'device-heartbeat-refresh-library',
             movies: bundle.movies,
             series: bundle.series,
             live: bundle.live,
@@ -109,7 +111,11 @@ export async function sendDeviceHeartbeat(options?: {
   reportNetworkOutcome(true);
   applyHeartbeatAccess(payload);
 
-  if (payload.deviceActive === false || payload.activationStatus === 'revoked' || payload.activationStatus === 'suspended') {
+  if (
+    payload.activationStatus === 'revoked' ||
+    payload.activationStatus === 'suspended' ||
+    (payload.deviceActive === false && !isLocalActivationBypassEnabled({ log: false }))
+  ) {
     const player = getUnifiedPlayerState();
     if (isUnifiedPlaybackActive(player.machineState, player.item)) {
       closeUnifiedPlayback();
@@ -119,7 +125,7 @@ export async function sendDeviceHeartbeat(options?: {
     } catch {
       // Navigation may be unavailable during teardown.
     }
-  } else if (payload.activationStatus === 'expired') {
+  } else if (payload.activationStatus === 'expired' && !isLocalActivationBypassEnabled({ log: false })) {
     try {
       router.replace('/');
     } catch {

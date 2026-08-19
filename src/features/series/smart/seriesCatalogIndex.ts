@@ -149,12 +149,21 @@ export class SeriesCatalogIndex {
   }
 
   getEntry(id: string) {
-    return this.entries.get(id);
+    const direct = this.entries.get(id);
+    if (direct) {
+      return direct;
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.seriesId === id) {
+        return entry;
+      }
+    }
+    return undefined;
   }
 
   getSummaries(ids: string[]) {
     return ids
-      .map((id) => this.entries.get(id))
+      .map((id) => this.getEntry(id))
       .filter((entry): entry is SeriesCatalogEntry => Boolean(entry))
       .map(entryToSeriesSummary);
   }

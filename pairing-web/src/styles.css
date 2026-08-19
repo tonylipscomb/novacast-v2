@@ -552,3 +552,53 @@ a.downloadButton {
   .cloudMain { padding: 24px 18px 40px; }
   .cloudTopbar { flex-direction: column; }
 }
+
+.providersPage { display: grid; gap: 14px; }
+.providersPage .inviteFilters { grid-template-columns: minmax(250px, 1fr) auto auto; }
+.providerCardGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.providerCard {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid rgba(74, 124, 205, .24);
+  border-radius: 12px;
+  background: linear-gradient(145deg, rgba(8, 22, 43, .92), rgba(5, 14, 30, .88));
+}
+.providerCard header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.providerCard header strong { display: block; color: #f5f8ff; font-size: 18px; }
+.providerCard header small { display: block; margin-top: 4px; color: #8499b9; font-size: 11px; }
+.providerCard dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+.providerCard dl div { padding: 10px; border: 1px solid rgba(74,124,205,.18); border-radius: 8px; background: rgba(6, 20, 48, .55); }
+.providerCard dl span { display: block; color: #8ea1c1; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.providerCard dl strong { display: block; margin-top: 6px; color: #f5f8ff; font-size: 20px; }
+.providerCard > p, .providerNote { margin: 0; color: #93a7c6; font-size: 12px; }
+.providerCard footer { display: flex; flex-wrap: wrap; gap: 8px; }
+.providerCard footer button { min-height: 36px; padding: 0 12px; font-size: 11px; }
+.providerBadge { display: inline-block; width: max-content; padding: 6px 8px; border-radius: 6px; font-size: 10px; letter-spacing: .06em; }
+.badge-healthy { color: #8fffd0; background: rgba(16,185,129,.22); }
+.badge-warn { color: #ffe08a; background: rgba(217,119,6,.22); }
+.badge-fail { color: #ffb8ae; background: rgba(185,28,28,.23); }
+.badge-disabled, .badge-draft { color: #bdcce0; background: rgba(71,91,125,.34); }
+.providerCard.tone-fail { border-color: rgba(239,68,68,.35); }
+.providerCard.tone-healthy { border-color: rgba(52,211,153,.28); }
+.providerCard.tone-warn { border-color: rgba(245,158,11,.3); }
+.providerProgress, .providerDiagnostics {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(74,124,205,.22);
+  border-radius: 8px;
+  background: rgba(6, 20, 48, .6);
+}
+.providerProgress ol { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin: 0; padding: 0; list-style: none; }
+.providerProgress li { display: flex; align-items: center; gap: 8px; color: #c4d2e9; font-size: 12px; }
+.providerProgress i { width: 8px; height: 8px; border-radius: 50%; background: #18d7ff; box-shadow: 0 0 8px #18d7ff; animation: providerPulse 1.2s ease-in-out infinite; }
+.providerDiagnostics ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.providerDiagnostics li { display: grid; grid-template-columns: 18px 1fr; gap: 8px; color: #dce8fb; }
+.providerDiagnostics small { display: block; color: #8499b9; }
+.providerModal { width: min(100%, 640px); max-height: 90vh; overflow: auto; }
+@keyframes providerPulse { 50% { opacity: .35; } }
+@media (max-width: 760px) {
+  .providerCard dl { grid-template-columns: 1fr; }
+  .providersPage .inviteFilters { grid-template-columns: 1fr; }
+}

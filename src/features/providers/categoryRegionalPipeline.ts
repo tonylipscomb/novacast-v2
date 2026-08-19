@@ -354,6 +354,18 @@ export function buildCategoryRegionalProfile(input: CategoryRegionalInput): Cate
   };
 }
 
+/**
+ * Resolve only the numeric region priority. Movie/Series ranking does not
+ * need the display-name/profile work used by category navigation, so keep
+ * that hot path separate while sharing the exact group-resolution semantics.
+ */
+function resolveCategoryRegionPriority(input: CategoryRegionalInput): number {
+  const labels = collectCategoryLabels(input);
+  const scriptProfile = analyzeCategoryScriptProfile(labels);
+  const regionGroup = resolveCategoryRegionGroup(labels, scriptProfile, input.countryCode);
+  return CATEGORY_REGION_SORT_PRIORITY[regionGroup];
+}
+
 export function compareCategoryRegionalProfiles(left: CategoryRegionalProfile, right: CategoryRegionalProfile) {
   if (left.sortPriority !== right.sortPriority) {
     return left.sortPriority - right.sortPriority;
@@ -428,12 +440,10 @@ export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
 }
 
 export function categoryRegionalSortRank(input: CategorySortLabel, contentType?: ProviderCategoryContentType) {
-  return buildCategoryRegionalProfile({
-    name: input.name,
-    rawName: input.rawName,
-    countryCode: input.countryCode,
-    contentType,
-  }).sortPriority;
+  // The numeric priority is independent of content type. Keep the argument
+  // for the public API while avoiding full display-profile construction.
+  void contentType;
+  return resolveCategoryRegionPriority(input);
 }
 
 export function isUsAmericanLiveLabel(

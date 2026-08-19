@@ -4,6 +4,7 @@ export type MoviesScreenMemory = {
   selectedCategoryId: string;
   focusedMovieId: string | null;
   selectedMovieId: string | null;
+  openDiscoverZone?: boolean;
 };
 
 const DEFAULT_MEMORY: MoviesScreenMemory = {

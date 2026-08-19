@@ -2,14 +2,24 @@ import type { ComponentProps } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform, StyleSheet, useWindowDimensions, View } from 'react-native';
 
+import { isNovaCastTraceLoggingEnabled } from '../../diagnostics/novacastLogPolicy.ts';
 import { NovaStreamSurface } from '@/features/playback/NovaStreamPlayer';
 import type { VideoPlayer } from 'expo-video';
 
+import { PlaybackUpNextOverlay } from '../continuity/PlaybackUpNextOverlay';
 import { UnifiedPlayerControls } from './UnifiedPlayerControls';
 import { UnifiedPlayerErrorState } from './UnifiedPlayerErrorState';
 import { UnifiedPlayerLoadingState } from './UnifiedPlayerLoadingState';
-import type { UnifiedPlayerState } from './types.ts';
+import type { PlaybackMediaType, UnifiedPlayerState } from './types.ts';
 import { shouldShowUnifiedErrorState, shouldShowUnifiedLoadingState } from './unifiedPlayerLogic.ts';
+import {
+  resolveMovieCompatibilityErrorCopy,
+  shouldRetryMovieUnsupportedFormat,
+} from './moviePlaybackCompatibility.ts';
+import {
+  type PlayerChromeRevealSource,
+  type VodSeekDirection,
+} from './vodSeek.ts';
 
 type NovaStreamSurfaceProps = ComponentProps<typeof NovaStreamSurface>;
 
@@ -25,14 +35,58 @@ type UnifiedPlayerOverlayProps = {
   onForward: () => void;
   onSeek: (nextPositionMs: number) => void;
   onBack: () => void;
-  onRevealControls: () => void;
+  onRevealControls: (source?: PlayerChromeRevealSource) => void;
   onRetry: () => void;
+  pendingSeekDirection?: VodSeekDirection | null;
+  onPendingSeekConsumed?: () => void;
+  onSeekPreviewActiveChange?: (active: boolean) => void;
+  onRegisterCancelSeekPreview?: (cancel: () => boolean) => void;
+  onRegisterHiddenVodSeekPreview?: (begin: (direction: 1 | -1) => boolean) => void;
+  onRegisterRequestTimelineFocus?: (request: () => void) => void;
+  onRegisterRequestDefaultFocus?: (request: () => void) => void;
+  onRegisterVodSeekQuery?: (query: {
+    isTimelineFocused: () => boolean;
+    hasTimelineHandle: () => boolean;
+  }) => void;
+  onVodDirectionalSeek?: (
+    direction: VodSeekDirection,
+    source: 'hidden-focus-sentinel',
+    eventKeyAction?: number | null,
+  ) => void;
+  upNext?: {
+    secondsLeft: number;
+    title: string;
+    seasonNumber?: string;
+    episodeNumber?: string;
+    autoplay?: boolean;
+  } | null;
+  onPlayNextEpisode?: () => void;
+  onPreviousEpisode?: () => void;
+  onNextEpisode?: () => void;
+  canGoPreviousEpisode?: boolean;
+  canGoNextEpisode?: boolean;
+  onCancelUpNext?: () => void;
 };
 
 const BUILD_MARKER = 'playback-recovery-phase1-textureview';
 const BUILD_MARKER_LOOP_FIX = 'playback-recovery-phase1b-controls-loop-fix';
+const BUILD_MARKER_VOD_SURFACE = 'rc-firetv-vod-textureview';
+
+export function resolveUnifiedPlayerSurfaceType(
+  mediaType: PlaybackMediaType | null | undefined,
+): 'textureView' | 'surfaceView' {
+  // VOD only. Live TV (and any non-Android surface) stays SurfaceView.
+  // SurfaceView is a separate hardware overlay and covers RN chrome on Fire TV.
+  if (Platform.OS === 'android' && mediaType && mediaType !== 'live') {
+    return 'textureView';
+  }
+  return 'surfaceView';
+}
 
 function logPlaybackRecovery(event: string, payload: Record<string, unknown>) {
+  if (!isNovaCastTraceLoggingEnabled()) {
+    return;
+  }
   console.info('[NovaCast Playback Recovery]', event, payload);
 }
 
@@ -50,6 +104,22 @@ export function UnifiedPlayerOverlay({
   onBack,
   onRevealControls,
   onRetry,
+  pendingSeekDirection = null,
+  onPendingSeekConsumed,
+  onSeekPreviewActiveChange,
+  onRegisterCancelSeekPreview,
+  onRegisterHiddenVodSeekPreview,
+  onRegisterRequestTimelineFocus,
+  onRegisterRequestDefaultFocus,
+  onRegisterVodSeekQuery,
+  onVodDirectionalSeek,
+  upNext,
+  onPlayNextEpisode,
+  onPreviousEpisode,
+  onNextEpisode,
+  canGoPreviousEpisode = false,
+  canGoNextEpisode = false,
+  onCancelUpNext,
 }: UnifiedPlayerOverlayProps) {
   const { width, height } = useWindowDimensions();
   const [firstFrameReady, setFirstFrameReady] = useState(false);
@@ -58,16 +128,19 @@ export function UnifiedPlayerOverlay({
   const lastRecoveryLogKeyRef = useRef<string | null>(null);
   const showError = shouldShowUnifiedErrorState(state.machineState) && Boolean(state.errorMessage);
   const showLoading = shouldShowUnifiedLoadingState(state.machineState) && !firstFrameReady;
-  // Remote OK / D-pad while chrome is hidden is owned by UnifiedPlayerRemoteHandlers.
-  // Do not mount a full-screen elevated Pressable above VideoView on Android TV.
+  const requestedSurfaceType = resolveUnifiedPlayerSurfaceType(state.item?.mediaType);
+  const effectiveSurfaceType = requestedSurfaceType;
 
   useEffect(() => {
     if (markerLoggedRef.current) {
       return;
     }
     markerLoggedRef.current = true;
-    console.info(`[NovaCast Build] ${BUILD_MARKER}`);
-    console.info(`[NovaCast Build] ${BUILD_MARKER_LOOP_FIX}`);
+    if (isNovaCastTraceLoggingEnabled()) {
+      console.info(`[NovaCast Build] ${BUILD_MARKER}`);
+      console.info(`[NovaCast Build] ${BUILD_MARKER_LOOP_FIX}`);
+      console.info(`[NovaCast Build] ${BUILD_MARKER_VOD_SURFACE}`);
+    }
   }, []);
 
   useEffect(() => {
@@ -112,6 +185,7 @@ export function UnifiedPlayerOverlay({
       state.controlsVisible,
       showLoading,
       showError,
+      requestedSurfaceType,
       layoutSizeRef.current.width,
       layoutSizeRef.current.height,
     ].join('|');
@@ -121,7 +195,7 @@ export function UnifiedPlayerOverlay({
     lastRecoveryLogKeyRef.current = logKey;
 
     logPlaybackRecovery('overlay-state', {
-      buildMarker: BUILD_MARKER,
+      buildMarker: BUILD_MARKER_VOD_SURFACE,
       mediaType: state.item?.mediaType ?? null,
       machineState: state.machineState,
       hasStreamUrl: Boolean(state.item?.streamUrl),
@@ -132,16 +206,20 @@ export function UnifiedPlayerOverlay({
       overlayHeight: height,
       playerHostWidth: layoutSizeRef.current.width,
       playerHostHeight: layoutSizeRef.current.height,
-      surfaceType: 'surfaceView',
+      requestedSurfaceType,
+      effectiveSurfaceType,
+      surfaceType: effectiveSurfaceType,
       controlsVisible: state.controlsVisible,
       showLoading,
       showError,
       interactionLayerMounted: false,
     });
   }, [
+    effectiveSurfaceType,
     firstFrameReady,
     height,
     player,
+    requestedSurfaceType,
     showError,
     showLoading,
     state.controlsVisible,
@@ -183,9 +261,13 @@ export function UnifiedPlayerOverlay({
       }}>
       <NovaStreamSurface
         player={player}
-        style={[styles.player, { width, height }]}
+        style={[
+          styles.player,
+          { width, height },
+          effectiveSurfaceType === 'textureView' ? styles.texturePlayer : null,
+        ]}
         contentFit={state.contentFit}
-        surfaceType="surfaceView"
+        surfaceType={effectiveSurfaceType}
         onFirstFrameRender={handleFirstFrameRender}
         onStatusChange={onStatusChange}
         onPlayingChange={onPlayingChange}
@@ -198,7 +280,7 @@ export function UnifiedPlayerOverlay({
         <UnifiedPlayerControls
           title={state.item?.title ?? 'Playback'}
           subtitle={state.item?.subtitle}
-          visible={state.controlsVisible}
+          visible={state.controlsVisible && !upNext}
           isPlaying={state.isPlaying}
           positionMs={state.positionMs}
           durationMs={state.durationMs}
@@ -208,12 +290,54 @@ export function UnifiedPlayerOverlay({
           onSeek={onSeek}
           onBack={onBack}
           onReveal={onRevealControls}
+          allowSeek={state.item?.mediaType !== 'live'}
+          mediaType={state.item?.mediaType}
+          contentId={state.item?.id}
+          pendingSeekDirection={pendingSeekDirection}
+          onPendingSeekConsumed={onPendingSeekConsumed}
+          onSeekPreviewActiveChange={onSeekPreviewActiveChange}
+          onRegisterCancelSeekPreview={onRegisterCancelSeekPreview}
+          onRegisterHiddenVodSeekPreview={onRegisterHiddenVodSeekPreview}
+          onRegisterRequestTimelineFocus={onRegisterRequestTimelineFocus}
+          onRegisterRequestDefaultFocus={onRegisterRequestDefaultFocus}
+          onRegisterVodSeekQuery={onRegisterVodSeekQuery}
+          onVodDirectionalSeek={onVodDirectionalSeek}
+          onPreviousEpisode={onPreviousEpisode}
+          onNextEpisode={onNextEpisode}
+          canGoPreviousEpisode={canGoPreviousEpisode}
+          canGoNextEpisode={canGoNextEpisode}
+          upNextActive={Boolean(upNext)}
         />
+      ) : null}
+
+      {upNext ? (
+      <PlaybackUpNextOverlay
+        visible
+        secondsLeft={upNext.secondsLeft}
+        title={upNext.title}
+        seasonNumber={upNext.seasonNumber}
+        episodeNumber={upNext.episodeNumber}
+        autoplay={upNext.autoplay !== false}
+        onPlayNow={() => onPlayNextEpisode?.()}
+        onCancel={() => onCancelUpNext?.()}
+      />
       ) : null}
 
       {showError ? (
         <UnifiedPlayerErrorState
-          message={state.errorMessage ?? 'Playback unavailable'}
+          title={
+            resolveMovieCompatibilityErrorCopy({
+              errorMessage: state.errorMessage,
+              errorCategory: state.errorCategory,
+            }).title
+          }
+          message={
+            resolveMovieCompatibilityErrorCopy({
+              errorMessage: state.errorMessage,
+              errorCategory: state.errorCategory,
+            }).message
+          }
+          canRetry={shouldRetryMovieUnsupportedFormat(state.errorCategory)}
           onRetry={onRetry}
           onBack={onBack}
         />
@@ -236,6 +360,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#000000',
     zIndex: 1,
     elevation: Platform.OS === 'android' ? 1 : 0,
+  },
+  texturePlayer: {
+    // TextureView composites in the RN tree. Elevation on this host would
+    // cover chrome that intentionally has zIndex only (no elevation).
+    elevation: 0,
   },
   closingCover: {
     ...StyleSheet.absoluteFillObject,

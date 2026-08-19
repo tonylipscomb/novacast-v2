@@ -31,6 +31,10 @@ type CatalogSyncJob = {
 const jobs = new Map<string, CatalogSyncJob>();
 const keyGenerations = new Map<string, number>();
 
+function logCatalogBootstrapDispatch(phase: string, fields: Record<string, unknown> = {}) {
+  console.info('[NovaCast Catalog Bootstrap Dispatch]', JSON.stringify({ phase, ...fields }));
+}
+
 function nowMs(): number {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
     return performance.now();
@@ -152,13 +156,37 @@ export function invalidateCatalogSyncForProvider(providerId: string): void {
 }
 
 async function delayMs(ms: number, key: string, runGeneration: number): Promise<boolean> {
+  logCatalogBootstrapDispatch('coordinator-delay-start', {
+    providerId: parseCatalogSyncKey(key).providerId,
+    coordinatorKey: key,
+    coordinatorEpoch: runGeneration,
+    activeCoordinatorEpoch: getGeneration(key),
+    delayMs: ms,
+    cancelled: false,
+  });
   if (ms <= 0) {
-    return getGeneration(key) === runGeneration;
+    const currentEpoch = getGeneration(key);
+    logCatalogBootstrapDispatch('coordinator-delay-complete', {
+      providerId: parseCatalogSyncKey(key).providerId,
+      coordinatorKey: key,
+      coordinatorEpoch: runGeneration,
+      activeCoordinatorEpoch: currentEpoch,
+      cancelled: currentEpoch !== runGeneration,
+    });
+    return currentEpoch === runGeneration;
   }
   await new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
-  return getGeneration(key) === runGeneration;
+  const currentEpoch = getGeneration(key);
+  logCatalogBootstrapDispatch('coordinator-delay-complete', {
+    providerId: parseCatalogSyncKey(key).providerId,
+    coordinatorKey: key,
+    coordinatorEpoch: runGeneration,
+    activeCoordinatorEpoch: currentEpoch,
+    cancelled: currentEpoch !== runGeneration,
+  });
+  return currentEpoch === runGeneration;
 }
 
 export function scheduleCatalogSync(
@@ -168,6 +196,14 @@ export function scheduleCatalogSync(
 ): Promise<void> {
   const existing = jobs.get(key);
   if (isInFlight(existing)) {
+    logCatalogBootstrapDispatch('coordinator-deduped', {
+      providerId: parseCatalogSyncKey(key).providerId,
+      coordinatorKey: key,
+      coordinatorEpoch: existing.generation,
+      activeCoordinatorEpoch: getGeneration(key),
+      cancelled: false,
+      reason: 'existing-in-flight-job',
+    });
     return existing.promise;
   }
 
@@ -185,22 +221,121 @@ export function scheduleCatalogSync(
     generation: runGeneration,
   };
   jobs.set(key, job);
+  logCatalogBootstrapDispatch('coordinator-queued', {
+    providerId: parseCatalogSyncKey(key).providerId,
+    coordinatorKey: key,
+    coordinatorEpoch: runGeneration,
+    activeCoordinatorEpoch: getGeneration(key),
+    cancelled: false,
+    pendingInputPresent: false,
+  });
 
   void (async () => {
     try {
       const shouldContinue = await delayMs(options?.delayMs ?? 0, key, runGeneration);
+      logCatalogBootstrapDispatch('coordinator-recheck', {
+        providerId: parseCatalogSyncKey(key).providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: runGeneration,
+        activeCoordinatorEpoch: getGeneration(key),
+        cancelled: !shouldContinue,
+      });
+      logCatalogBootstrapDispatch('coordinator-generation-check', {
+        providerId: parseCatalogSyncKey(key).providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: runGeneration,
+        activeCoordinatorEpoch: getGeneration(key),
+        cancelled: getGeneration(key) !== runGeneration,
+      });
       if (!shouldContinue || getGeneration(key) !== runGeneration) {
+        logCatalogBootstrapDispatch('coordinator-abort-check', {
+          providerId: parseCatalogSyncKey(key).providerId,
+          coordinatorKey: key,
+          coordinatorEpoch: runGeneration,
+          activeCoordinatorEpoch: getGeneration(key),
+          cancelled: true,
+          skipReason: 'stale-coordinator-job',
+        });
+        logCatalogBootstrapDispatch('coordinator-skip', {
+          providerId: parseCatalogSyncKey(key).providerId,
+          coordinatorKey: key,
+          coordinatorEpoch: runGeneration,
+          activeCoordinatorEpoch: getGeneration(key),
+          cancelled: true,
+          skipReason: 'stale-coordinator-job',
+        });
+        logCatalogBootstrapDispatch('coordinator-stale-return', {
+          providerId: parseCatalogSyncKey(key).providerId,
+          coordinatorKey: key,
+          coordinatorEpoch: runGeneration,
+          activeCoordinatorEpoch: getGeneration(key),
+          cancelled: true,
+          skipReason: 'coordinator-epoch-changed-during-delay',
+        });
         job.status = 'cancelled';
         resolvePromise();
         return;
       }
 
+      logCatalogBootstrapDispatch('coordinator-provider-check', {
+        providerId: parseCatalogSyncKey(key).providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: runGeneration,
+        activeCoordinatorEpoch: getGeneration(key),
+        cancelled: false,
+        providerCallbackPresent: typeof runner === 'function',
+      });
+      if (typeof runner !== 'function') {
+        logCatalogBootstrapDispatch('coordinator-callback-missing', {
+          providerId: parseCatalogSyncKey(key).providerId,
+          coordinatorKey: key,
+          coordinatorEpoch: runGeneration,
+          activeCoordinatorEpoch: getGeneration(key),
+          cancelled: false,
+          skipReason: 'provider-sync-callback-missing',
+        });
+        job.status = 'failed';
+        resolvePromise();
+        return;
+      }
+
+      logCatalogBootstrapDispatch('coordinator-state-recheck', {
+        providerId: parseCatalogSyncKey(key).providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: runGeneration,
+        activeCoordinatorEpoch: getGeneration(key),
+        cancelled: false,
+        coordinatorState: 'current',
+      });
+
       job.status = 'running';
       job.startedAt = nowMs();
+      logCatalogBootstrapDispatch('coordinator-invoke-provider-sync', {
+        providerId: parseCatalogSyncKey(key).providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: runGeneration,
+        activeCoordinatorEpoch: getGeneration(key),
+        cancelled: false,
+      });
 
       await runner();
+      logCatalogBootstrapDispatch('coordinator-provider-sync-return', {
+        providerId: parseCatalogSyncKey(key).providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: runGeneration,
+        activeCoordinatorEpoch: getGeneration(key),
+        cancelled: getGeneration(key) !== runGeneration,
+      });
 
       if (getGeneration(key) !== runGeneration) {
+        logCatalogBootstrapDispatch('coordinator-stale-return', {
+          providerId: parseCatalogSyncKey(key).providerId,
+          coordinatorKey: key,
+          coordinatorEpoch: runGeneration,
+          activeCoordinatorEpoch: getGeneration(key),
+          cancelled: true,
+          skipReason: 'coordinator-epoch-changed-after-provider-sync',
+        });
         job.status = 'cancelled';
         resolvePromise();
         return;

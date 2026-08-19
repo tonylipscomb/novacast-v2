@@ -1,8 +1,9 @@
 import type { ProviderGuideProgram, ProviderGuideRow } from '@/features/providers/providerRepositories';
 
-export const GUIDE_CHANNEL_COLUMN_WIDTH = 235;
-export const GUIDE_PIXELS_PER_MINUTE = 1.5;
-export const GUIDE_MIN_PROGRAM_WIDTH = 132;
+// NOVACAST_GUIDE_V2_FOUNDATION_V1: denser TV-first grid for 1080p / ONN-class devices.
+export const GUIDE_CHANNEL_COLUMN_WIDTH = 190;
+export const GUIDE_PIXELS_PER_MINUTE = 1.15;
+export const GUIDE_MIN_PROGRAM_WIDTH = 108;
 export const GUIDE_TIME_SLOT_MINUTES = 60;
 
 export type NormalizedGuideProgram = ProviderGuideProgram & {

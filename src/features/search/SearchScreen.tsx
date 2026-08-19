@@ -248,6 +248,19 @@ export function SearchScreen() {
       const key = searchResultKey(result);
       setFocusedResultKey(key);
 
+      // search-live-unified-direct-v2
+      // Keep Search mounted under the app-wide Unified Player. That preserves the query,
+      // result list, and native focused row so Back returns to the exact Search context.
+      if (result.type === 'live') {
+        rememberSearchScreenMemory(activeProviderId, {
+          query,
+          scope,
+          focusedResultKey: key,
+        });
+        searchMedia.startLivePlayback(result);
+        return;
+      }
+
       if (result.type === 'movie' || result.type === 'series') {
         rememberSearchScreenMemory(activeProviderId, {
           query,

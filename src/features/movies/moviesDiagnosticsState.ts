@@ -74,6 +74,12 @@ export function isMoviesBrowseUiFrozenForDetail() {
   return browseUiFrozenForDetail;
 }
 
+/** Clears module latches left behind when ErrorBoundary unmounts Movies mid-Detail. */
+export function resetMoviesBrowsePresentationLatches() {
+  browseUiFrozenForDetail = false;
+  detailOpenForDiagnostics = false;
+}
+
 export function bumpMoviesBrowseListRevision() {
   browseListRevision += 1;
   return browseListRevision;

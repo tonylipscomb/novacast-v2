@@ -25,6 +25,7 @@ export {
   getCatalogCategoryCounts,
   getCatalogItemsPage,
   getCatalogMovieItem,
+  getCatalogSeriesItem,
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
   resolveReadableCategoryGeneration,
@@ -99,6 +100,17 @@ export {
   recoverFragmentedMovieCatalogOnce,
   resetMovieFragmentRecoveryForTests,
 } from './catalogFragmentRecovery.ts';
+
+export {
+  CATALOG_READABLE_RESTORE_LOG,
+  incompleteGenerationToExclude,
+  resolveMoviePointerCandidate,
+  shouldExcludeSyncingGenerationFromRecovery,
+  shouldResumeInterruptedCatalogSync,
+  shouldSkipBootstrapBecauseSyncing,
+} from './catalogReadableGenerationRestore.ts';
+
+export { clearMoviesReadableGenerationCacheForTests } from './moviesReadableGenerationCache.ts';
 
 export type { MovieFragmentRecoveryResult } from './catalogFragmentRecovery.ts';
 

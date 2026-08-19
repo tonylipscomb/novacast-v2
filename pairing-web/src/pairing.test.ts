@@ -8,6 +8,11 @@ test('pairing form normalizes the TV code', () => {
 
 test('pairing form accepts plain http provider URLs', () => {
   assert.equal(normalizeProviderUrl('http://max8k.top/'), 'http://max8k.top');
+  assert.equal(normalizeProviderUrl('http://max8k.top/player_api.php'), 'http://max8k.top');
+});
+
+test('pairing form rejects localhost provider URLs', () => {
+  assert.throws(() => normalizeProviderUrl('http://localhost'), /unsafe_provider_target/);
 });
 
 test('pairing form rejects non-URL server values', () => {

@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 
 import { novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
@@ -16,6 +16,7 @@ type ChannelHeroCardProps = {
   categoryType: ProviderCategoryType;
   isLive?: boolean;
   preferredFocus?: boolean;
+  onFocusHandle?: (handle: number | null) => void;
   onPress: () => void;
 };
 
@@ -35,6 +36,7 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
   categoryType,
   isLive = false,
   preferredFocus = false,
+  onFocusHandle,
   onPress,
 }: ChannelHeroCardProps) {
   const { theme } = useAppTheme();
@@ -46,6 +48,8 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
   return (
     <View style={styles.wrap}>
       <Pressable
+        ref={(node) => onFocusHandle?.(node ? findNodeHandle(node) : null)}
+        collapsable={false}
         focusable
         hasTVPreferredFocus={preferredFocus}
         onFocus={() => setFocused(true)}

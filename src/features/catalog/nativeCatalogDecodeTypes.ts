@@ -8,7 +8,10 @@ export type NativeCatalogRecord = {
   artworkUrl?: string | null;
   backdropUrl?: string | null;
   rating?: string | number | null;
+  addedAt?: number | null;
+  popularity?: number | null;
   releaseDate?: string | null;
+  releaseYear?: number | null;
   streamExtension?: string | null;
   providerSortOrder?: number | null;
   seriesId?: string | null;
@@ -25,6 +28,11 @@ export type CatalogDecodeBatchStats = {
   maxBatchSize?: number;
   batchSize?: number;
   mediaType?: string;
+  responseTopLevelType?: string;
+  responseKeys?: string[];
+  arrayLength?: number;
+  errorReason?: string;
+  sanitizerRepairCount?: number;
 };
 
 /** Panels that ignore category_id= return nearly the full dump for every category request. */
@@ -51,6 +59,11 @@ export type StreamXtreamCategoryDecodeInput = {
   timeoutMs?: number;
   isCancelled?: () => boolean;
   onBatch: (records: NativeCatalogRecord[]) => Promise<void>;
+  generation?: number;
+  categoryIndex?: number;
+  categoryPosition?: number;
+  totalCategoryCount?: number;
+  requestAttempt?: number;
 };
 
 export type StreamXtreamCategoryDecodeResult = {

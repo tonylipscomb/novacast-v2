@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { isContinueWatchingEligible } from '../../playback/continuity/playbackContinuity.ts';
+
 const STORAGE_KEY = '@novacast/movie-library';
 
 export type WatchHistoryEntry = {
@@ -11,6 +13,10 @@ export type WatchHistoryEntry = {
   watchedAt: number;
   progressPercent?: number;
   durationMs?: number;
+  positionMs?: number;
+  completed?: boolean;
+  /** Optional. Older rows omit this; Home CW self-heals from catalog. */
+  containerExtension?: string;
 };
 
 export type ProviderLibraryState = {
@@ -38,6 +44,10 @@ function normalizeProviderState(value: Partial<ProviderLibraryState> | undefined
             ...entry,
             artworkUrl: typeof entry.artworkUrl === 'string' ? entry.artworkUrl : undefined,
             categoryId: typeof entry.categoryId === 'string' ? entry.categoryId : undefined,
+            containerExtension:
+              typeof entry.containerExtension === 'string' && entry.containerExtension.trim()
+                ? entry.containerExtension.trim()
+                : undefined,
           }))
       : [],
     watchlist: Array.isArray(value?.watchlist) ? value.watchlist.filter((id) => typeof id === 'string') : [],
@@ -152,7 +162,11 @@ export async function recordWatch(
 export async function getContinueWatchingIds(providerId: string) {
   const { watchHistory } = await getMovieLibraryState(providerId);
   return watchHistory
-    .filter((entry) => (entry.progressPercent ?? 100) < 90)
+    .filter((entry) => {
+      const durationMs = entry.durationMs ?? 0;
+      const positionMs = entry.positionMs ?? (durationMs > 0 ? (durationMs * (entry.progressPercent ?? 0)) / 100 : 0);
+      return isContinueWatchingEligible(positionMs, durationMs);
+    })
     .sort((left, right) => right.watchedAt - left.watchedAt)
     .map((entry) => entry.movieId);
 }
@@ -188,7 +202,9 @@ export async function removeContinueWatching(providerId: string, movieId: string
     [providerId]: {
       ...current,
       watchHistory: current.watchHistory.map((entry) =>
-        entry.movieId === movieId ? { ...entry, progressPercent: 100, watchedAt: Date.now() } : entry,
+        entry.movieId === movieId
+          ? { ...entry, progressPercent: 100, positionMs: entry.durationMs ?? entry.positionMs ?? 0, completed: true, watchedAt: Date.now() }
+          : entry,
       ),
     },
   });
@@ -202,7 +218,9 @@ export async function resetMovieProgress(providerId: string, movieId: string) {
     [providerId]: {
       ...current,
       watchHistory: current.watchHistory.map((entry) =>
-        entry.movieId === movieId ? { ...entry, progressPercent: 0, watchedAt: Date.now() } : entry,
+        entry.movieId === movieId
+          ? { ...entry, progressPercent: 0, positionMs: 0, completed: false, watchedAt: Date.now() }
+          : entry,
       ),
     },
   });

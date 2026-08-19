@@ -10,12 +10,14 @@ import {
   getCatalogItemsPage,
   getCatalogMovieItem,
   getCatalogProvider,
+  getCatalogSyncState,
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
 } from '../../catalog/catalogRepository.ts';
 import { recoverFragmentedMovieCatalogOnce } from '../../catalog/catalogFragmentRecovery.ts';
-import type { CatalogItemRecord, CatalogItemSort } from '../../catalog/catalogTypes.ts';
+import type { CatalogItemRecord } from '../../catalog/catalogTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
+import { mapContentSortToCatalogSort } from '../../media-browser/contentSortMapping.ts';
 import type { MediaDetail } from '../../media-browser/mediaTypes.ts';
 import { getActiveRepositoryBundle } from '../../providers/providerBundle.ts';
 import {
@@ -25,7 +27,8 @@ import {
 import {
   isOnnMoviesTraceEnabled,
   traceOnnMoviesEvent,
-} from '@/features/diagnostics/onnMoviesTrace';
+} from '../../diagnostics/onnMoviesTrace.ts';
+import { novacastTrace } from '../../diagnostics/novacastLogPolicy.ts';
 import { getMoviesDetailOpenForDiagnostics } from '../moviesDiagnosticsState.ts';
 
 import type { MovieDataSource } from './MovieDataSource.ts';
@@ -85,12 +88,12 @@ async function logSqliteMovieDiagnostic(providerId: string, phase: string) {
 
   try {
     const snapshot = await getCatalogDiagnosticSnapshot(providerId, 'movie');
-    console.info(
+    novacastTrace(
       '[Movies SQLite Diagnostic]',
       JSON.stringify({ phase, ...snapshot }),
     );
   } catch (error) {
-    console.info(
+    novacastTrace(
       '[Movies SQLite Diagnostic]',
       JSON.stringify({
         phase,
@@ -100,25 +103,8 @@ async function logSqliteMovieDiagnostic(providerId: string, phase: string) {
   }
 }
 
-function mapSort(sort: ContentSortOption | undefined): CatalogItemSort {
-  switch (sort) {
-    case 'oldest':
-      return 'oldest';
-    case 'title-desc':
-      return 'title-desc';
-    case 'rating-desc':
-      return 'rating';
-    case 'popularity-desc':
-    case 'recently-added':
-      // SQLite schema does not yet retain popularity or provider-added timestamps.
-      // Preserve deterministic provider ordering until those fields are added.
-      return 'provider';
-    case 'title-asc':
-      return 'title';
-    case 'newest':
-    default:
-      return 'newest';
-  }
+function mapSort(sort: ContentSortOption | undefined) {
+  return mapContentSortToCatalogSort(sort);
 }
 
 function mapCatalogItemToMovie(item: CatalogItemRecord): MovieSummary {
@@ -129,6 +115,8 @@ function mapCatalogItemToMovie(item: CatalogItemRecord): MovieSummary {
     year: item.releaseYear ?? undefined,
     releaseDate: item.releaseDate ?? undefined,
     rating: item.rating == null ? undefined : String(item.rating),
+    addedAt: item.addedAt ?? undefined,
+    popularity: item.popularity ?? undefined,
     genres: ['Movies'],
     description: item.description ?? undefined,
     score: item.rating ?? undefined,
@@ -194,7 +182,7 @@ function emitMoviesStartupTrace(
     marker: MOVIES_FOCUS_STAGE4L_MARKER,
     ...payload,
   };
-  console.info('[NovaCast Movies Startup] ' + JSON.stringify(body));
+  novacastTrace('[NovaCast Movies Startup] ' + JSON.stringify(body));
   if (isOnnMoviesTraceEnabled()) {
     traceOnnMoviesEvent('Startup', event, body);
   }
@@ -561,7 +549,12 @@ export function createSqliteMovieDataSource(
         if (peekGeneration <= 0) {
           const provider = await getCatalogProvider(providerId);
           const activeGeneration = provider?.catalogGeneration ?? 0;
-          if (activeGeneration > 0) {
+          const movieSyncState = await getCatalogSyncState(providerId, 'movie');
+          const activePointerIsMovieReady =
+            activeGeneration > 0 &&
+            movieSyncState?.generation === activeGeneration &&
+            movieSyncState.status === 'ready';
+          if (activePointerIsMovieReady) {
             const rows = await getCatalogGenerationRowCount(
               providerId,
               'movie',
@@ -668,7 +661,7 @@ export function createSqliteMovieDataSource(
           if (!bundle || bundle.providerId !== pid) {
             return;
           }
-          void bundle.syncCatalog();
+          void bundle.syncCatalog('movies-sparse-repair');
         });
         if (repairStatus === 'repairing') {
           const preserved =
@@ -677,7 +670,7 @@ export function createSqliteMovieDataSource(
             previous.categories.length > 0
               ? filterInteractiveMovieCategories(previous.categories)
               : null;
-          console.info(
+          novacastTrace(
             '[NovaCast Movies Readable Recovery] ' +
               JSON.stringify({
                 event: 'movies_snapshot_preserved_during_repair',
@@ -692,7 +685,7 @@ export function createSqliteMovieDataSource(
               }),
           );
           if (preserved && preserved.length > 0) {
-            console.info(
+            novacastTrace(
               '[NovaCast Movies Category Contract] ' +
                 JSON.stringify({
                   providerId,
@@ -724,7 +717,7 @@ export function createSqliteMovieDataSource(
       // Fresh install / no readable item generation: do not expose in-progress
       // category metadata as a usable rail (Stage 4.2A readiness barrier).
       if (readiness.decision === 'waiting-fresh-sync') {
-        console.info(
+        novacastTrace(
           '[NovaCast Movies Category Contract] ' +
             JSON.stringify({
               providerId,
@@ -740,7 +733,7 @@ export function createSqliteMovieDataSource(
               reason: 'waiting-fresh-sync-categories-pending',
             }),
         );
-        console.info(
+        novacastTrace(
           '[NovaCast Movies Read Contract] ' +
             JSON.stringify({
               providerId,
@@ -781,7 +774,7 @@ export function createSqliteMovieDataSource(
                 totalMovieCount: previous.totalCount,
               });
         logMoviesCatalogReadSnapshot(preservedSnapshot, 'preserving-completed-generation');
-        console.info(
+        novacastTrace(
           '[NovaCast Movies Category Contract] ' +
             JSON.stringify({
               providerId,
@@ -846,7 +839,7 @@ export function createSqliteMovieDataSource(
 
       // Empty/collapse rejection only applies once item rows are readable.
       if (itemsGeneration > 0 && (refreshLooksEmpty || refreshLooksCollapsed) && previous) {
-        console.info(
+        novacastTrace(
           '[NovaCast Movies Category Counts Applied] ' +
             JSON.stringify({
               readableGeneration: itemsGeneration,
@@ -865,7 +858,7 @@ export function createSqliteMovieDataSource(
               previousTotalCount: previous.totalCount,
             }),
         );
-        console.info(
+        novacastTrace(
           '[NovaCast Movies Category Refresh Rejected] ' +
             JSON.stringify({
               readableGeneration: itemsGeneration,
@@ -887,7 +880,7 @@ export function createSqliteMovieDataSource(
         if (previous && previous.categories.length > 0 && previous.totalCount > 0) {
           return filterInteractiveMovieCategories(previous.categories);
         }
-        console.info(
+        novacastTrace(
           '[NovaCast Movies Category Contract] ' +
             JSON.stringify({
               providerId,
@@ -903,7 +896,7 @@ export function createSqliteMovieDataSource(
               reason: 'no-readable-category-generation',
             }),
         );
-        console.info(
+        novacastTrace(
           '[NovaCast Movies Read Contract] ' +
             JSON.stringify({
               providerId,
@@ -930,7 +923,7 @@ export function createSqliteMovieDataSource(
         seenIds.set(id, occurrence);
         const renderKey = occurrence === 1 ? id : `${id}::${occurrence}`;
         if (occurrence > 1) {
-          console.info(
+          novacastTrace(
             '[NovaCast Movies Category Duplicate] ' +
               JSON.stringify({
                 providerId,
@@ -980,7 +973,7 @@ export function createSqliteMovieDataSource(
         totalMovieCount: totalCount,
       });
       if (!snapshot.generationAligned) {
-        console.info(
+        novacastTrace(
           '[NovaCast Movies Read Snapshot] ' +
             JSON.stringify({
               providerId,
@@ -1011,7 +1004,7 @@ export function createSqliteMovieDataSource(
       );
 
       logMoviesCatalogReadSnapshot(snapshot, 'provider-categories-applied');
-      console.info(
+      novacastTrace(
         '[NovaCast Movies Category Contract] ' +
           JSON.stringify({
             providerId,
@@ -1029,7 +1022,7 @@ export function createSqliteMovieDataSource(
             generationAligned: true,
           }),
       );
-      console.info(
+      novacastTrace(
         '[NovaCast Movies Read Contract] ' +
           JSON.stringify({
             providerId,
@@ -1046,7 +1039,7 @@ export function createSqliteMovieDataSource(
             generationAligned: true,
           }),
       );
-      console.info(
+      novacastTrace(
         '[NovaCast Movies Category Counts Applied] ' +
           JSON.stringify({
             readableGeneration: itemsGeneration,
@@ -1163,7 +1156,7 @@ export function createSqliteMovieDataSource(
           marker: MOVIES_FOCUS_STAGE4L1_MARKER,
           queryMode: 'pinned-generation-sql',
         });
-        console.info('[Movies SQLite] first-page', {
+        novacastTrace('[Movies SQLite] first-page', {
           providerId,
           categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
           offset: page.offset,
@@ -1207,7 +1200,7 @@ export function createSqliteMovieDataSource(
       if (input.offset === 0) {
         await logSqliteMovieDiagnostic(providerId, 'first-page-after-query');
       }
-      console.info('[Movies SQLite] first-page', {
+      novacastTrace('[Movies SQLite] first-page', {
         providerId,
         categoryId: categoryId ?? SQLITE_MOVIES_DISCOVER_ID,
         offset: page.offset,
@@ -1264,7 +1257,7 @@ export function createSqliteMovieDataSource(
       const mappingMs = Date.now() - mappingStartedAt;
       const hasMore = page.items.length >= input.limit;
 
-      console.info('[Movies SQLite] search', {
+      novacastTrace('[Movies SQLite] search', {
         providerId,
         queryLength: input.query.trim().length,
         offset: page.offset,

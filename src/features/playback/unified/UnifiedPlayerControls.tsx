@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
 import {
   Animated,
-  InteractionManager,
   findNodeHandle,
   Platform,
   Pressable,
@@ -21,8 +20,6 @@ import { novaTheme } from '@/theme';
 import {
   UNIFIED_CONTROL_ACTIVATE_DEBOUNCE_MS,
   resolveUnifiedControlFocusMove,
-  resolveUnifiedSeekDelta,
-  resolveUnifiedSeekPosition,
   shouldAssignUnifiedPlayerInitialFocus,
   shouldHandleUnifiedSeekRemoteEvent,
   type UnifiedControlFocusId,
@@ -32,6 +29,37 @@ import {
   logUnifiedRemoteEvent,
   setUnifiedRemoteFocusedControl,
 } from './unifiedRemoteDebug.ts';
+import { UnifiedPlayerVodFocusRouter } from './UnifiedPlayerHiddenChromeCapture';
+import {
+  VOD_SEEK_IDLE_COMMIT_MS,
+  VOD_SEEK_STEP_MS,
+  applyVodSeekPreviewStep,
+  beginVodSeekCommit,
+  canEnterVodSeek,
+  completeVodSeekCommit,
+  createVodSeekCommitGate,
+  createVodSeekSessionId,
+  formatVodSeekClock,
+  formatVodSeekDelta,
+  isVodSeekMediaType,
+  logPlayerFocus,
+  logTvInputRaw,
+  logVodFocusSeek,
+  logVodSeek,
+  logVodSeekRemote,
+  resolveVodSeekDirection,
+  resolveVodSeekRepeatCount,
+  resolveVodSeekStepMs,
+  shouldActivateVodFocusRouter,
+  type PlayerChromeRevealSource,
+  type VodSeekCommitGate,
+  type VodSeekDirection,
+} from './vodSeek.ts';
+import {
+  getPlayerChromeDefaultFocusControl,
+  logPlayerChromeFocus,
+  type PlayerChromeWakeKey,
+} from './playerChromeWake.ts';
 
 type UnifiedPlayerControlsProps = {
   title: string;
@@ -40,40 +68,39 @@ type UnifiedPlayerControlsProps = {
   isPlaying: boolean;
   positionMs: number;
   durationMs: number;
+  mediaType?: string | null;
+  contentId?: string | null;
   onTogglePlay: () => void;
   onRewind: () => void;
   onForward: () => void;
   onSeek: (nextPositionMs: number) => void;
   onBack: () => void;
-  onReveal: () => void;
+  onReveal: (source?: PlayerChromeRevealSource) => void;
+  allowSeek?: boolean;
+  pendingSeekDirection?: VodSeekDirection | null;
+  onPendingSeekConsumed?: () => void;
+  onSeekPreviewActiveChange?: (active: boolean) => void;
+  onRegisterCancelSeekPreview?: (cancel: () => boolean) => void;
+  onRegisterHiddenVodSeekPreview?: (begin: (direction: 1 | -1) => boolean) => void;
+  onRegisterRequestTimelineFocus?: (request: () => void) => void;
+  onRegisterRequestDefaultFocus?: (request: () => void) => void;
+  onRegisterVodSeekQuery?: (query: {
+    isTimelineFocused: () => boolean;
+    hasTimelineHandle: () => boolean;
+  }) => void;
+  onVodDirectionalSeek?: (direction: VodSeekDirection, source: 'hidden-focus-sentinel') => void;
+  onPreviousEpisode?: () => void;
+  onNextEpisode?: () => void;
+  canGoPreviousEpisode?: boolean;
+  canGoNextEpisode?: boolean;
+  upNextActive?: boolean;
 };
-
-function formatTime(ms: number) {
-  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-  }
-  return `${minutes}:${String(seconds).padStart(2, '0')}`;
-}
-
-function resolveSeekDeltaFromNativeKeyEvent(nativeEvent: {
-  key?: string;
-  code?: string;
-  keyCode?: number | null;
-  eventType?: string;
-}) {
-  const eventType = nativeEvent.key ?? nativeEvent.code ?? nativeEvent.eventType ?? (
-    nativeEvent.keyCode === 21 ? 'ArrowLeft' : nativeEvent.keyCode === 22 ? 'ArrowRight' : null
-  );
-  return resolveUnifiedSeekDelta(eventType);
-}
 
 type TvEventPayload = {
   eventType?: string;
   eventKeyAction?: number;
+  keyCode?: number;
+  key?: string;
 };
 
 function noopUseTVEventHandler(_handler: (event: TvEventPayload) => void) {
@@ -114,6 +141,15 @@ function UnifiedPlayerSeekRemoteListener({
 
   const handleTvEvent = useCallback(
     (event: TvEventPayload) => {
+      logTvInputRaw({
+        source: 'timeline-listener',
+        rawEventType: event.eventType ?? event.key ?? 'unknown',
+        eventKeyAction: event.eventKeyAction ?? null,
+        keyCode: event.keyCode ?? null,
+        controlsVisible: enabled,
+        focusedControl: isSeekFocused() ? 'seek' : null,
+        mediaType: null,
+      });
       if (!enabled) {
         return;
       }
@@ -128,13 +164,17 @@ function UnifiedPlayerSeekRemoteListener({
         return;
       }
 
-      const deltaMs = resolveUnifiedSeekDelta(event.eventType);
+      const deltaMs = resolveVodSeekDirection({
+        eventType: event.eventType,
+        eventKeyAction: event.eventKeyAction,
+        keyCode: event.keyCode,
+      });
       if (deltaMs == null) {
         return;
       }
 
       onFocusSeekRef.current();
-      onSeekDeltaRef.current(deltaMs);
+      onSeekDeltaRef.current(deltaMs * VOD_SEEK_STEP_MS);
     },
     [durationMs, enabled, isSeekFocused],
   );
@@ -162,17 +202,29 @@ function UnifiedPlayerSeekRemoteListener({
 function buildAndroidControlFocusProps(
   controlId: UnifiedControlFocusId,
   handles: Partial<Record<UnifiedControlFocusId, number>>,
+  sentinelHandles?: { left?: number | null; right?: number | null },
 ) {
   const rewind = handles.rewind;
   const play = handles.play;
   const forward = handles.forward;
   const seek = handles.seek;
+  const previousEpisode = handles.previousEpisode;
+  const nextEpisode = handles.nextEpisode;
+  const leftSentinel = sentinelHandles?.left ?? null;
+  const rightSentinel = sentinelHandles?.right ?? null;
 
   switch (controlId) {
     case 'back':
       return seek != null ? { nextFocusDown: seek } : null;
+    case 'previousEpisode':
+      return {
+        ...(rewind != null ? { nextFocusRight: rewind } : {}),
+        ...(seek != null ? { nextFocusUp: seek } : {}),
+        ...(seek != null ? { nextFocusDown: seek } : {}),
+      };
     case 'rewind':
       return {
+        ...(previousEpisode != null ? { nextFocusLeft: previousEpisode } : {}),
         ...(play != null ? { nextFocusRight: play } : {}),
         ...(seek != null ? { nextFocusUp: seek } : {}),
         ...(seek != null ? { nextFocusDown: seek } : {}),
@@ -187,12 +239,20 @@ function buildAndroidControlFocusProps(
     case 'forward':
       return {
         ...(play != null ? { nextFocusLeft: play } : {}),
+        ...(nextEpisode != null ? { nextFocusRight: nextEpisode } : {}),
+        ...(seek != null ? { nextFocusUp: seek } : {}),
+        ...(seek != null ? { nextFocusDown: seek } : {}),
+      };
+    case 'nextEpisode':
+      return {
+        ...(forward != null ? { nextFocusLeft: forward } : {}),
         ...(seek != null ? { nextFocusUp: seek } : {}),
         ...(seek != null ? { nextFocusDown: seek } : {}),
       };
     case 'seek':
       return {
-        ...(seek != null ? { nextFocusLeft: seek, nextFocusRight: seek } : {}),
+        ...(leftSentinel != null ? { nextFocusLeft: leftSentinel } : seek != null ? { nextFocusLeft: seek } : {}),
+        ...(rightSentinel != null ? { nextFocusRight: rightSentinel } : seek != null ? { nextFocusRight: seek } : {}),
         ...(play != null ? { nextFocusUp: play } : {}),
         ...(rewind != null ? { nextFocusDown: rewind } : {}),
       };
@@ -214,10 +274,25 @@ export function UnifiedPlayerControls({
   onSeek,
   onBack,
   onReveal,
+  allowSeek = true,
+  mediaType = null,
+  contentId = null,
+  pendingSeekDirection = null,
+  onPendingSeekConsumed,
+  onSeekPreviewActiveChange,
+  onRegisterCancelSeekPreview,
+  onRegisterHiddenVodSeekPreview,
+  onRegisterRequestTimelineFocus,
+  onRegisterRequestDefaultFocus,
+  onRegisterVodSeekQuery,
+  onVodDirectionalSeek,
+  onPreviousEpisode,
+  onNextEpisode,
+  canGoPreviousEpisode = false,
+  canGoNextEpisode = false,
+  upNextActive = false,
 }: UnifiedPlayerControlsProps) {
   const progress = durationMs > 0 ? Math.min(1, positionMs / durationMs) : 0;
-  const elapsed = formatTime(positionMs);
-  const durationLabel = formatTime(Math.max(0, durationMs));
   const displayTitle = displayStreamTitle(title);
   const displaySubtitle = subtitle ? displayStreamTitle(subtitle) : undefined;
   const [opacity] = useState(() => new Animated.Value(visible ? 1 : 0));
@@ -236,28 +311,116 @@ export function UnifiedPlayerControls({
     play: null,
     forward: null,
     seek: null,
+    previousEpisode: null,
+    nextEpisode: null,
   });
   const [androidFocusHandles, setAndroidFocusHandles] = useState<Partial<Record<UnifiedControlFocusId, number>>>({});
+  const [sentinelHandles, setSentinelHandles] = useState<{ left: number | null; right: number | null }>({
+    left: null,
+    right: null,
+  });
   const [focusedControl, setFocusedControl] = useState<UnifiedControlFocusId | null>(null);
   const focusedControlRef = useRef<UnifiedControlFocusId | null>(null);
   const [seekTargetMs, setSeekTargetMs] = useState<number | null>(null);
   const lastKeyActivateAtRef = useRef(0);
-  const lastSeekInputRef = useRef<{ deltaMs: number; at: number } | null>(null);
+  const lastSeekInputRef = useRef<{
+    direction: VodSeekDirection;
+    at: number;
+    repeatCount: number;
+    stepMs: number;
+  } | null>(null);
   const initialPlayerFocusAssignedRef = useRef(false);
+  const defaultFocusPendingRef = useRef(false);
+  const defaultFocusRequestedLogRef = useRef(false);
+  const visibleRef = useRef(visible);
   const previousVisibleRef = useRef(visible);
+  const previousContentIdRef = useRef(contentId);
   const seekTargetMsRef = useRef<number | null>(null);
+  const seekSessionIdRef = useRef<string | null>(null);
+  const seekCommitGateRef = useRef<VodSeekCommitGate | null>(null);
+  const seekWasPlayingRef = useRef(isPlaying);
+  const idleCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onSeekRef = useRef(onSeek);
+  const onRevealRef = useRef(onReveal);
+  const onSeekPreviewActiveChangeRef = useRef(onSeekPreviewActiveChange);
+  const onPendingSeekConsumedRef = useRef(onPendingSeekConsumed);
   const activeSeekPositionMs = seekTargetMs ?? positionMs;
-  const seekProgress = seekTargetMs != null && durationMs > 0 ? Math.min(1, activeSeekPositionMs / durationMs) : progress;
+  const seekProgress =
+    seekTargetMs != null && durationMs > 0 ? Math.min(1, activeSeekPositionMs / durationMs) : progress;
+  const elapsed = formatVodSeekClock(activeSeekPositionMs, durationMs);
+  const durationLabel = formatVodSeekClock(Math.max(0, durationMs), durationMs);
+  const previewDeltaLabel =
+    seekTargetMs != null ? formatVodSeekDelta(activeSeekPositionMs - positionMs) : null;
+
+  useEffect(() => {
+    onSeekRef.current = onSeek;
+  }, [onSeek]);
+  useEffect(() => {
+    onRevealRef.current = onReveal;
+  }, [onReveal]);
+  useEffect(() => {
+    onSeekPreviewActiveChangeRef.current = onSeekPreviewActiveChange;
+  }, [onSeekPreviewActiveChange]);
+  useEffect(() => {
+    onPendingSeekConsumedRef.current = onPendingSeekConsumed;
+  }, [onPendingSeekConsumed]);
+  useEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
+
+  const clearIdleCommitTimer = useCallback(() => {
+    if (idleCommitTimerRef.current) {
+      clearTimeout(idleCommitTimerRef.current);
+      idleCommitTimerRef.current = null;
+    }
+  }, []);
+
+  const resetSeekAcceleration = useCallback(() => {
+    lastSeekInputRef.current = null;
+  }, []);
+
+  const clearSeekPreviewState = useCallback(() => {
+    seekTargetMsRef.current = null;
+    seekSessionIdRef.current = null;
+    seekCommitGateRef.current = null;
+    setSeekTargetMs(null);
+    resetSeekAcceleration();
+    onSeekPreviewActiveChangeRef.current?.(false);
+  }, [resetSeekAcceleration]);
 
   const handleControlFocus = useCallback(
     (controlId: UnifiedControlFocusId) => {
+      const previousControl = focusedControlRef.current;
       focusedControlRef.current = controlId;
       setFocusedControl(controlId);
       setUnifiedRemoteFocusedControl(controlId);
+      logPlayerFocus({
+        event: 'focus-received',
+        control: controlId,
+        previousControl,
+        controlsVisible: visible,
+        seekPreviewActive: seekSessionIdRef.current != null,
+      });
+      if (controlId === getPlayerChromeDefaultFocusControl() && defaultFocusPendingRef.current) {
+        defaultFocusPendingRef.current = false;
+        logPlayerChromeFocus({
+          event: 'default-focused',
+          mediaType,
+          focusedControl: controlId,
+        });
+      }
+      const revealSource = controlId === 'seek' ? 'timeline-focus' : 'controls-focus';
       if (controlId === 'seek') {
-        const initialTargetMs = positionMs;
-        seekTargetMsRef.current = initialTargetMs;
-        setSeekTargetMs(initialTargetMs);
+        logVodSeekRemote({
+          event: 'timeline-focus-confirmed',
+          mediaType,
+          controlsVisible: visible,
+          allowSeek,
+          timelineFocused: true,
+          seekPreviewActive: seekSessionIdRef.current != null,
+          nativeTimelineHandlePresent: controlRefs.current.seek != null,
+          eventConsumedBy: 'timeline-focus',
+        });
       }
       if (isUnifiedRemoteDebugEnabled()) {
         logUnifiedRemoteEvent({
@@ -268,64 +431,282 @@ export function UnifiedPlayerControls({
           controlId,
         });
       }
-      onReveal();
+      // Native onFocus is not a LEFT/RIGHT direction. Hidden chrome parks on the
+      // seek anchor; sentinels own directional preview. Do not resurrect chrome
+      // from rewind/seek focus while hidden.
+      if (visible) {
+        onReveal(revealSource);
+      }
     },
-    [onReveal, positionMs],
+    [allowSeek, mediaType, onReveal, visible],
   );
 
   const handleControlBlur = useCallback((controlId: UnifiedControlFocusId) => {
+    logPlayerFocus({
+      event: 'focus-lost',
+      control: controlId,
+      previousControl: focusedControlRef.current,
+      controlsVisible: visible,
+      seekPreviewActive: seekSessionIdRef.current != null,
+    });
     if (focusedControlRef.current === controlId) {
       focusedControlRef.current = null;
     }
     setFocusedControl((current) => (current === controlId ? null : current));
-    if (controlId === 'seek') {
-      seekTargetMsRef.current = null;
-      setSeekTargetMs(null);
-    }
-  }, []);
+  }, [visible]);
 
-  const clampSeekPosition = useCallback(
-    (nextPositionMs: number) => Math.max(0, Math.min(nextPositionMs, durationMs || nextPositionMs)),
-    [durationMs],
-  );
+  const commitSeekPreview = useCallback(
+    (reason: 'ok' | 'idle') => {
+      const sessionId = seekSessionIdRef.current;
+      const gate = seekCommitGateRef.current;
+      const previewActive = sessionId != null && gate != null;
 
-  const adjustSeekTarget = useCallback(
-    (deltaMs: number) => {
-      const baseMs = seekTargetMsRef.current ?? positionMs;
-      const nextPositionMs = resolveUnifiedSeekPosition(baseMs, durationMs, deltaMs);
-      if (nextPositionMs == null) {
+      if (previewActive && !beginVodSeekCommit(gate, sessionId)) {
         return;
       }
 
-      seekTargetMsRef.current = nextPositionMs;
-      setSeekTargetMs(nextPositionMs);
+      const commitTargetMs = seekTargetMsRef.current ?? positionMs;
+      const nextPositionMs = Number.isFinite(commitTargetMs)
+        ? Math.max(0, durationMs > 0 ? Math.min(commitTargetMs, durationMs) : commitTargetMs)
+        : positionMs;
+
+      if (previewActive) {
+        logVodSeek({
+          event: 'seek-commit-requested',
+          mediaType,
+          contentId,
+          actualPositionMs: positionMs,
+          previewPositionMs: seekTargetMsRef.current,
+          durationMs,
+          commitReason: reason,
+          wasPlaying: seekWasPlayingRef.current,
+          seekSessionId: sessionId,
+        });
+      }
+
+      clearIdleCommitTimer();
+      onSeekRef.current(nextPositionMs);
+      completeVodSeekCommit(gate);
+
+      if (previewActive) {
+        logVodSeek({
+          event: 'seek-committed',
+          mediaType,
+          contentId,
+          actualPositionMs: positionMs,
+          previewPositionMs: nextPositionMs,
+          durationMs,
+          commitReason: reason,
+          wasPlaying: seekWasPlayingRef.current,
+          seekSessionId: sessionId,
+        });
+      }
+
+      if (isUnifiedRemoteDebugEnabled() || reason === 'ok') {
+        logUnifiedRemoteEvent({
+          source: 'controls-onPress',
+          eventType: 'seek-commit',
+          disposition: 'accepted',
+          actionTaken: `seek-commit nextPositionMs=${nextPositionMs}`,
+          controlId: 'seek',
+        });
+      }
+
+      clearSeekPreviewState();
+      onRevealRef.current('timeline-focus');
+    },
+    [clearIdleCommitTimer, clearSeekPreviewState, contentId, durationMs, mediaType, positionMs],
+  );
+
+  const scheduleIdleCommit = useCallback(
+    (sessionId: string) => {
+      clearIdleCommitTimer();
+      idleCommitTimerRef.current = setTimeout(() => {
+        idleCommitTimerRef.current = null;
+        if (seekSessionIdRef.current !== sessionId) {
+          return;
+        }
+        commitSeekPreview('idle');
+      }, VOD_SEEK_IDLE_COMMIT_MS);
+    },
+    [clearIdleCommitTimer, commitSeekPreview],
+  );
+
+  const cancelSeekPreview = useCallback(() => {
+    const sessionId = seekSessionIdRef.current;
+    const gate = seekCommitGateRef.current;
+    if (!sessionId || !gate || gate.commitStarted || gate.commitCompleted) {
+      return false;
+    }
+
+    logVodSeek({
+      event: 'seek-cancelled',
+      mediaType,
+      contentId,
+      actualPositionMs: positionMs,
+      previewPositionMs: seekTargetMsRef.current,
+      durationMs,
+      wasPlaying: seekWasPlayingRef.current,
+      seekSessionId: sessionId,
+    });
+
+    clearIdleCommitTimer();
+    clearSeekPreviewState();
+    onRevealRef.current('timeline-focus');
+    return true;
+  }, [clearIdleCommitTimer, clearSeekPreviewState, contentId, durationMs, mediaType, positionMs]);
+
+  const applySeekDelta = useCallback(
+    (deltaMs: number) => {
+      if (!allowSeek || !isVodSeekMediaType(mediaType)) {
+        logVodSeek({
+          event: 'seek-ignored',
+          mediaType,
+          contentId,
+          actualPositionMs: positionMs,
+          durationMs,
+          reason: allowSeek ? 'unsupported-media' : 'seek-disabled',
+          seekSessionId: seekSessionIdRef.current,
+        });
+        return;
+      }
+      if (!canEnterVodSeek(durationMs)) {
+        logVodSeek({
+          event: 'seek-ignored',
+          mediaType,
+          contentId,
+          actualPositionMs: positionMs,
+          durationMs,
+          reason: 'unknown-duration',
+          seekSessionId: seekSessionIdRef.current,
+        });
+        return;
+      }
+
+      const direction: VodSeekDirection = deltaMs < 0 ? -1 : 1;
+      const now = Date.now();
+      const lastInput = lastSeekInputRef.current;
+      // Same-frame double-fire only. Sentinel repeats must each count.
+      if (lastInput && lastInput.direction === direction && now - lastInput.at < 16) {
+        return;
+      }
+
+      const repeatCount = resolveVodSeekRepeatCount({
+        previousDirection: lastInput?.direction ?? null,
+        nextDirection: direction,
+        previousRepeatCount: lastInput?.repeatCount ?? 0,
+      });
+      const stepMs = resolveVodSeekStepMs(repeatCount);
+      if (lastInput && lastInput.stepMs !== stepMs) {
+        logVodSeek({
+          event: 'seek-acceleration-change',
+          mediaType,
+          contentId,
+          actualPositionMs: positionMs,
+          previewPositionMs: seekTargetMsRef.current,
+          durationMs,
+          direction,
+          stepMs,
+          repeatCount,
+          wasPlaying: seekWasPlayingRef.current,
+          seekSessionId: seekSessionIdRef.current,
+        });
+      }
+
+      const started = seekSessionIdRef.current == null;
+      if (started) {
+        const seekSessionId = createVodSeekSessionId();
+        seekSessionIdRef.current = seekSessionId;
+        seekCommitGateRef.current = createVodSeekCommitGate(seekSessionId);
+        seekWasPlayingRef.current = isPlaying;
+        onSeekPreviewActiveChangeRef.current?.(true);
+      }
+
+      const result = applyVodSeekPreviewStep({
+        actualPositionMs: positionMs,
+        previewPositionMs: seekTargetMsRef.current,
+        durationMs,
+        direction,
+        repeatCount,
+      });
+
+      if (result.ignored || result.previewPositionMs == null) {
+        logVodSeek({
+          event: 'seek-ignored',
+          mediaType,
+          contentId,
+          actualPositionMs: positionMs,
+          durationMs,
+          direction,
+          stepMs: result.stepMs,
+          repeatCount,
+          reason: result.ignoreReason ?? 'invalid-target',
+          seekSessionId: seekSessionIdRef.current,
+        });
+        return;
+      }
+
+      lastSeekInputRef.current = { direction, at: now, repeatCount, stepMs };
+      seekTargetMsRef.current = result.previewPositionMs;
+      setSeekTargetMs(result.previewPositionMs);
+
+      if (result.clamped) {
+        logVodSeek({
+          event: 'seek-clamped',
+          mediaType,
+          contentId,
+          actualPositionMs: positionMs,
+          previewPositionMs: result.previewPositionMs,
+          durationMs,
+          direction,
+          stepMs: result.stepMs,
+          repeatCount,
+          reason: result.clampReason,
+          wasPlaying: seekWasPlayingRef.current,
+          seekSessionId: seekSessionIdRef.current,
+        });
+      }
+
+      logVodSeek({
+        event: started ? 'seek-preview-start' : 'seek-preview-step',
+        mediaType,
+        contentId,
+        actualPositionMs: positionMs,
+        previewPositionMs: result.previewPositionMs,
+        durationMs,
+        direction,
+        stepMs: result.stepMs,
+        repeatCount,
+        wasPlaying: seekWasPlayingRef.current,
+        seekSessionId: seekSessionIdRef.current,
+      });
 
       if (isUnifiedRemoteDebugEnabled()) {
         logUnifiedRemoteEvent({
           source: 'controls-control-key',
           eventType: 'seek-preview',
           disposition: 'accepted',
-          actionTaken: `seek-preview nextPositionMs=${nextPositionMs} deltaMs=${deltaMs}`,
+          actionTaken: `seek-preview nextPositionMs=${result.previewPositionMs} deltaMs=${result.stepMs}`,
           controlId: 'seek',
         });
       }
 
-      onReveal();
-    },
-    [durationMs, onReveal, positionMs],
-  );
-
-  const applySeekDelta = useCallback(
-    (deltaMs: number) => {
-      const now = Date.now();
-      const lastInput = lastSeekInputRef.current;
-      if (lastInput && lastInput.deltaMs === deltaMs && now - lastInput.at < 80) {
-        return;
+      const sessionId = seekSessionIdRef.current;
+      if (sessionId) {
+        scheduleIdleCommit(sessionId);
       }
-      lastSeekInputRef.current = { deltaMs, at: now };
-      adjustSeekTarget(deltaMs);
+      onReveal('timeline-focus');
     },
-    [adjustSeekTarget],
+    [
+      allowSeek,
+      contentId,
+      durationMs,
+      isPlaying,
+      mediaType,
+      onReveal,
+      positionMs,
+      scheduleIdleCommit,
+    ],
   );
 
   const focusControl = useCallback(
@@ -352,10 +733,6 @@ export function UnifiedPlayerControls({
         preventDefault?: () => void;
         stopPropagation?: () => void;
       }) => {
-        if (!visible) {
-          return;
-        }
-
         if (isUnifiedRemoteDebugEnabled()) {
           logUnifiedRemoteEvent({
             source: 'controls-control-key',
@@ -368,28 +745,41 @@ export function UnifiedPlayerControls({
           });
         }
 
-        if (controlId === 'seek') {
-          const deltaMs = resolveSeekDeltaFromNativeKeyEvent(event.nativeEvent);
-          if (deltaMs != null) {
-            // Android can deliver the key to the newly focused native view before
-            // React has committed its onFocus state update. Trust the event target
-            // for scrubbing, then bring the React focus mirror up to date.
-            if (focusedControlRef.current !== 'seek') {
-              handleControlFocus('seek');
-            }
-            event.preventDefault?.();
-            event.stopPropagation?.();
-            applySeekDelta(deltaMs);
-            return;
-          }
+        logTvInputRaw({
+          source: controlId === 'seek' ? 'timeline-listener' : 'controls-listener',
+          rawEventType: event.nativeEvent.key ?? event.nativeEvent.code ?? event.nativeEvent.eventType ?? 'unknown',
+          eventKeyAction: 0,
+          keyCode: event.nativeEvent.keyCode ?? null,
+          controlsVisible: visible,
+          focusedControl: controlId,
+          mediaType,
+        });
+
+        const direction = resolveVodSeekDirection({
+          eventType: event.nativeEvent.key ?? event.nativeEvent.code ?? event.nativeEvent.eventType,
+          keyCode: event.nativeEvent.keyCode,
+          key: event.nativeEvent.key,
+        });
+
+        if (!visible) {
+          return;
+        }
+
+        if (controlId === 'seek' && direction != null) {
+          // Native nextFocusLeft/Right → seek sentinels own this press.
+          return;
         }
 
         if (focusedControl !== controlId) {
           return;
         }
 
-        const nextControl = resolveUnifiedControlFocusMove(controlId, event.nativeEvent);
-        if (!nextControl || nextControl === controlId) {
+        const nextControl = resolveUnifiedControlFocusMove(controlId, event.nativeEvent, {
+          episodeButtonsVisible: mediaType === 'episode',
+          canGoPreviousEpisode,
+          canGoNextEpisode,
+        });
+        if (!nextControl || nextControl === controlId || !controlRefs.current[nextControl]) {
           return;
         }
 
@@ -397,7 +787,7 @@ export function UnifiedPlayerControls({
         event.stopPropagation?.();
         focusControl(nextControl);
       },
-    [applySeekDelta, focusControl, handleControlFocus, visible],
+    [canGoNextEpisode, canGoPreviousEpisode, focusControl, focusedControl, mediaType, visible],
   );
 
   const handleControlPress = useCallback(
@@ -429,9 +819,202 @@ export function UnifiedPlayerControls({
   }, [opacity, visible]);
 
   useEffect(() => {
+    onRegisterCancelSeekPreview?.(cancelSeekPreview);
+  }, [cancelSeekPreview, onRegisterCancelSeekPreview]);
+
+  const beginVodDirectionalPreview = useCallback(
+    (direction: VodSeekDirection) => {
+      logVodSeekRemote({
+        event: 'preview-entry-request',
+        mediaType,
+        controlsVisible: visible,
+        allowSeek,
+        timelineFocused: focusedControlRef.current === 'seek',
+        seekPreviewActive: seekSessionIdRef.current != null,
+        vodEligible: isVodSeekMediaType(mediaType) && canEnterVodSeek(durationMs),
+        hiddenVodSeekEligible: !visible && isVodSeekMediaType(mediaType) && canEnterVodSeek(durationMs),
+        nativeTimelineHandlePresent: controlRefs.current.seek != null,
+        direction,
+      });
+      applySeekDelta(direction * VOD_SEEK_STEP_MS);
+      const started = seekSessionIdRef.current != null;
+      if (started) {
+        logVodSeekRemote({
+          event: 'preview-entry-confirmed',
+          mediaType,
+          controlsVisible: visible,
+          allowSeek,
+          timelineFocused: focusedControlRef.current === 'seek',
+          seekPreviewActive: true,
+          nativeTimelineHandlePresent: controlRefs.current.seek != null,
+          direction,
+          eventConsumedBy: 'hidden-vod-seek',
+        });
+      }
+      return started;
+    },
+    [allowSeek, applySeekDelta, durationMs, mediaType, visible],
+  );
+
+  const requestTimelineFocus = useCallback(() => {
+    logVodSeekRemote({
+      event: 'timeline-focus-request',
+      mediaType,
+      controlsVisible: visible,
+      allowSeek,
+      timelineFocused: focusedControlRef.current === 'seek',
+      seekPreviewActive: seekSessionIdRef.current != null,
+      nativeTimelineHandlePresent: controlRefs.current.seek != null,
+    });
+    logVodFocusSeek({
+      event: 'timeline-return-request',
+      mediaType,
+      contentId,
+      controlsVisible: visible,
+      timelineFocused: focusedControlRef.current === 'seek',
+      seekPreviewActive: seekSessionIdRef.current != null,
+      actualPositionMs: positionMs,
+      previewPositionMs: seekTargetMsRef.current,
+      seekSessionId: seekSessionIdRef.current,
+    });
+    handleControlFocus('seek');
+    focusControl('seek');
+    logVodFocusSeek({
+      event: 'timeline-return-confirmed',
+      mediaType,
+      contentId,
+      controlsVisible: true,
+      timelineFocused: true,
+      seekPreviewActive: seekSessionIdRef.current != null,
+      actualPositionMs: positionMs,
+      previewPositionMs: seekTargetMsRef.current,
+      seekSessionId: seekSessionIdRef.current,
+    });
+  }, [allowSeek, contentId, focusControl, handleControlFocus, mediaType, positionMs, visible]);
+
+  const handleSentinelFocus = useCallback(
+    (direction: VodSeekDirection) => {
+      if (!visible) {
+        return;
+      }
+      if (!allowSeek || !isVodSeekMediaType(mediaType)) {
+        return;
+      }
+      if (onVodDirectionalSeek) {
+        onVodDirectionalSeek(direction, 'hidden-focus-sentinel');
+      } else {
+        beginVodDirectionalPreview(direction);
+      }
+      requestTimelineFocus();
+    },
+    [allowSeek, beginVodDirectionalPreview, mediaType, onVodDirectionalSeek, requestTimelineFocus, visible],
+  );
+
+  const requestDefaultChromeFocus = useCallback(() => {
+    const defaultControl = getPlayerChromeDefaultFocusControl();
+    if (focusedControlRef.current === defaultControl && initialPlayerFocusAssignedRef.current) {
+      return;
+    }
+    defaultFocusPendingRef.current = true;
+    if (!defaultFocusRequestedLogRef.current) {
+      defaultFocusRequestedLogRef.current = true;
+      logPlayerChromeFocus({
+        event: 'default-focus-requested',
+        mediaType,
+        focusedControl: defaultControl,
+      });
+    }
+    let retried = false;
+    const attempt = () => {
+      const target = controlRefs.current[defaultControl] as { focus?: () => void } | null;
+      if (visibleRef.current && target && typeof target.focus === 'function') {
+        try {
+          target.focus();
+        } catch {
+          // Native focus is best-effort; visual state still tracks Play/Pause.
+        }
+        initialPlayerFocusAssignedRef.current = true;
+        return;
+      }
+      if (!retried) {
+        retried = true;
+        requestAnimationFrame(attempt);
+      }
+    };
+    requestAnimationFrame(attempt);
+  }, [mediaType]);
+
+  const handleHiddenChromeWake = useCallback(
+    (key: PlayerChromeWakeKey) => {
+      if (visible || upNextActive) {
+        return;
+      }
+      logPlayerChromeFocus({
+        event: 'wake-input',
+        key,
+        mediaType,
+        focusedControl: null,
+      });
+      logPlayerChromeFocus({
+        event: 'wake-consumed',
+        key,
+        mediaType,
+        focusedControl: null,
+      });
+      onReveal('hidden-focus-sentinel');
+      requestDefaultChromeFocus();
+    },
+    [mediaType, onReveal, requestDefaultChromeFocus, upNextActive, visible],
+  );
+
+  useEffect(() => {
+    onRegisterHiddenVodSeekPreview?.(beginVodDirectionalPreview);
+  }, [beginVodDirectionalPreview, onRegisterHiddenVodSeekPreview]);
+
+  useEffect(() => {
+    onRegisterRequestTimelineFocus?.(requestTimelineFocus);
+  }, [onRegisterRequestTimelineFocus, requestTimelineFocus]);
+
+  useEffect(() => {
+    onRegisterRequestDefaultFocus?.(requestDefaultChromeFocus);
+  }, [onRegisterRequestDefaultFocus, requestDefaultChromeFocus]);
+
+  useEffect(() => {
+    onRegisterVodSeekQuery?.({
+      isTimelineFocused: () => focusedControlRef.current === 'seek',
+      hasTimelineHandle: () => controlRefs.current.seek != null,
+    });
+  }, [onRegisterVodSeekQuery]);
+
+  useEffect(() => {
+    return () => {
+      clearIdleCommitTimer();
+    };
+  }, [clearIdleCommitTimer]);
+
+  useEffect(() => {
+    if (previousContentIdRef.current !== contentId) {
+      previousContentIdRef.current = contentId;
+      initialPlayerFocusAssignedRef.current = false;
+      defaultFocusPendingRef.current = false;
+      focusedControlRef.current = null;
+      setFocusedControl(null);
+      logPlayerChromeFocus({
+        event: 'stale-focus-cleared',
+        mediaType,
+        focusedControl: null,
+      });
+    }
+
     if (!visible) {
       initialPlayerFocusAssignedRef.current = false;
+      defaultFocusRequestedLogRef.current = false;
       previousVisibleRef.current = false;
+      return;
+    }
+
+    if (pendingSeekDirection != null) {
+      previousVisibleRef.current = visible;
       return;
     }
 
@@ -444,44 +1027,42 @@ export function UnifiedPlayerControls({
       return;
     }
 
-    let cancelled = false;
-    let focusCleanup: (() => void) | undefined;
-    initialPlayerFocusAssignedRef.current = true;
     previousVisibleRef.current = visible;
+    requestDefaultChromeFocus();
+  }, [contentId, mediaType, pendingSeekDirection, requestDefaultChromeFocus, visible]);
 
-    const task = InteractionManager.runAfterInteractions(() => {
-      if (cancelled) {
-        return;
-      }
+  const pendingSeekConsumedRef = useRef<VodSeekDirection | null>(null);
+  useEffect(() => {
+    if (pendingSeekDirection == null) {
+      pendingSeekConsumedRef.current = null;
+    }
+  }, [pendingSeekDirection]);
 
-      if (isUnifiedRemoteDebugEnabled()) {
-        logUnifiedRemoteEvent({
-          source: 'controls-onFocus',
-          eventType: 'focus',
-          disposition: 'accepted',
-          actionTaken: 'initial-player-focus-requested',
-          controlId: 'play',
-        });
-      }
-
-      focusCleanup = focusNativeViewWhenReady(
-        () => controlRefs.current.play,
-        () => {
-          if (cancelled) {
-            return;
-          }
-          setUnifiedRemoteFocusedControl('play');
-        },
-        8,
-      );
+  useEffect(() => {
+    if (!visible || pendingSeekDirection == null || !allowSeek) {
+      return;
+    }
+    if (pendingSeekConsumedRef.current === pendingSeekDirection) {
+      return;
+    }
+    pendingSeekConsumedRef.current = pendingSeekDirection;
+    logVodSeekRemote({
+      event: 'timeline-focus-request',
+      mediaType,
+      controlsVisible: true,
+      allowSeek,
+      timelineFocused: focusedControlRef.current === 'seek',
+      seekPreviewActive: seekSessionIdRef.current != null,
+      nativeTimelineHandlePresent: controlRefs.current.seek != null,
+      direction: pendingSeekDirection,
     });
-
-    return () => {
-      cancelled = true;
-      task.cancel();
-      focusCleanup?.();
-    };
-  }, [visible]);
+    handleControlFocus('seek');
+    focusControl('seek');
+    if (seekSessionIdRef.current == null) {
+      applySeekDelta(pendingSeekDirection * VOD_SEEK_STEP_MS);
+    }
+    onPendingSeekConsumedRef.current?.();
+  }, [allowSeek, applySeekDelta, focusControl, handleControlFocus, mediaType, pendingSeekDirection, visible]);
 
   // Stable ref callbacks are required on Android: a new function each render makes
   // React detach/re-attach Pressable refs, which updates androidFocusHandles and
@@ -540,18 +1121,50 @@ export function UnifiedPlayerControls({
     },
     [updateAndroidFocusHandle],
   );
-  const backFocusProps = Platform.OS === 'android' ? buildAndroidControlFocusProps('back', androidFocusHandles) : null;
+  const assignPreviousEpisodeRef = useCallback(
+    (instance: ElementRef<typeof Pressable> | null) => {
+      controlRefs.current.previousEpisode = instance;
+      updateAndroidFocusHandle('previousEpisode', instance);
+    },
+    [updateAndroidFocusHandle],
+  );
+  const assignNextEpisodeRef = useCallback(
+    (instance: ElementRef<typeof Pressable> | null) => {
+      controlRefs.current.nextEpisode = instance;
+      updateAndroidFocusHandle('nextEpisode', instance);
+    },
+    [updateAndroidFocusHandle],
+  );
+  const showEpisodeButtons = mediaType === 'episode';
+  const episodeFocusHandles = {
+    ...androidFocusHandles,
+    previousEpisode: showEpisodeButtons && canGoPreviousEpisode ? androidFocusHandles.previousEpisode : undefined,
+    nextEpisode: showEpisodeButtons && canGoNextEpisode ? androidFocusHandles.nextEpisode : undefined,
+  };
+  const backFocusProps = Platform.OS === 'android' ? buildAndroidControlFocusProps('back', episodeFocusHandles) : null;
   const rewindFocusProps =
-    Platform.OS === 'android' ? buildAndroidControlFocusProps('rewind', androidFocusHandles) : null;
-  const playFocusProps = Platform.OS === 'android' ? buildAndroidControlFocusProps('play', androidFocusHandles) : null;
+    Platform.OS === 'android' ? buildAndroidControlFocusProps('rewind', episodeFocusHandles) : null;
+  const playFocusProps = Platform.OS === 'android' ? buildAndroidControlFocusProps('play', episodeFocusHandles) : null;
   const forwardFocusProps =
-    Platform.OS === 'android' ? buildAndroidControlFocusProps('forward', androidFocusHandles) : null;
-  const seekFocusProps = Platform.OS === 'android' ? buildAndroidControlFocusProps('seek', androidFocusHandles) : null;
+    Platform.OS === 'android' ? buildAndroidControlFocusProps('forward', episodeFocusHandles) : null;
+  const seekFocusProps =
+    Platform.OS === 'android'
+      ? buildAndroidControlFocusProps('seek', episodeFocusHandles, sentinelHandles)
+      : null;
+  const previousEpisodeFocusProps =
+    Platform.OS === 'android' ? buildAndroidControlFocusProps('previousEpisode', episodeFocusHandles) : null;
+  const nextEpisodeFocusProps =
+    Platform.OS === 'android' ? buildAndroidControlFocusProps('nextEpisode', episodeFocusHandles) : null;
+  const vodFocusRouterEnabled = shouldActivateVodFocusRouter({
+    mediaType,
+    upNextActive,
+    platformOs: Platform.OS,
+  });
 
   return (
     <View style={styles.host} pointerEvents="box-none">
       <UnifiedPlayerSeekRemoteListener
-        enabled={visible}
+        enabled={false}
         durationMs={durationMs}
         isSeekFocused={() => focusedControlRef.current === 'seek'}
         onSeekDelta={applySeekDelta}
@@ -586,39 +1199,25 @@ export function UnifiedPlayerControls({
                 </Text>
               ) : null}
             </View>
-            <Text style={styles.timeBadge}>{`${elapsed} / ${durationLabel}`}</Text>
+            <View style={styles.timeBadgeWrap}>
+              <Text style={styles.timeBadge}>{`${elapsed} / ${durationLabel}`}</Text>
+              {previewDeltaLabel ? <Text style={styles.seekDeltaLabel}>{previewDeltaLabel}</Text> : null}
+            </View>
           </View>
 
           <SeekFocusGuideView
-            {...(Platform.OS === 'android' && reactNative.TVFocusGuideView ? { trapFocusLeft: true, trapFocusRight: true } : {})}
             style={styles.seekGuide}>
             <Pressable
               ref={assignSeekRef}
-              focusable={visible}
+              focusable={visible && allowSeek}
               accessibilityRole="button"
               accessibilityLabel="Seek"
               {...(seekFocusProps ?? {})}
               {...({ onKeyDown: handleControlKeyDown('seek') } as any)}
               onPress={() => {
-                const commitTargetMs = seekTargetMsRef.current ?? activeSeekPositionMs;
-                const nextPositionMs = clampSeekPosition(commitTargetMs);
-
                 handleControlPress('seek', 'commit-seek', () => {
-                  onSeek(nextPositionMs);
-
-                  if (isUnifiedRemoteDebugEnabled()) {
-                    logUnifiedRemoteEvent({
-                      source: 'controls-onPress',
-                      eventType: 'seek-commit',
-                      disposition: 'accepted',
-                      actionTaken: `seek-commit nextPositionMs=${nextPositionMs}`,
-                      controlId: 'seek',
-                    });
-                  }
+                  commitSeekPreview('ok');
                 });
-
-                seekTargetMsRef.current = null;
-                setSeekTargetMs(null);
               }}
               onFocus={() => handleControlFocus('seek')}
               onBlur={() => handleControlBlur('seek')}
@@ -635,6 +1234,32 @@ export function UnifiedPlayerControls({
           </SeekFocusGuideView>
 
           <View style={styles.controls}>
+            {showEpisodeButtons ? (
+              <Pressable
+                ref={assignPreviousEpisodeRef}
+                focusable={visible && canGoPreviousEpisode}
+                accessibilityRole="button"
+                accessibilityLabel="Previous Episode"
+                accessibilityState={{ disabled: !canGoPreviousEpisode }}
+                {...(previousEpisodeFocusProps ?? {})}
+                {...({ onKeyDown: handleControlKeyDown('previousEpisode') } as any)}
+                onPress={() => {
+                  if (!canGoPreviousEpisode) {
+                    return;
+                  }
+                  handleControlPress('previousEpisode', 'previous-episode', () => onPreviousEpisode?.());
+                }}
+                onFocus={() => handleControlFocus('previousEpisode')}
+                onBlur={() => handleControlBlur('previousEpisode')}
+                style={[
+                  styles.controlButton,
+                  novaTvFocus.base,
+                  !canGoPreviousEpisode && styles.controlButtonDisabled,
+                  focusedControl === 'previousEpisode' && novaTvFocus.active,
+                ]}>
+                <MaterialCommunityIcons name="skip-previous" size={20} color={novaTheme.colors.textPrimary} />
+              </Pressable>
+            ) : null}
             <Pressable
               ref={assignRewindRef}
               focusable={visible}
@@ -679,9 +1304,57 @@ export function UnifiedPlayerControls({
               style={[styles.controlButton, novaTvFocus.base, focusedControl === 'forward' && novaTvFocus.active]}>
               <MaterialCommunityIcons name="fast-forward" size={20} color={novaTheme.colors.textPrimary} />
             </Pressable>
+            {showEpisodeButtons ? (
+              <Pressable
+                ref={assignNextEpisodeRef}
+                focusable={visible && canGoNextEpisode}
+                accessibilityRole="button"
+                accessibilityLabel="Next Episode"
+                accessibilityState={{ disabled: !canGoNextEpisode }}
+                {...(nextEpisodeFocusProps ?? {})}
+                {...({ onKeyDown: handleControlKeyDown('nextEpisode') } as any)}
+                onPress={() => {
+                  if (!canGoNextEpisode) {
+                    return;
+                  }
+                  handleControlPress('nextEpisode', 'next-episode', () => onNextEpisode?.());
+                }}
+                onFocus={() => handleControlFocus('nextEpisode')}
+                onBlur={() => handleControlBlur('nextEpisode')}
+                style={[
+                  styles.controlButton,
+                  novaTvFocus.base,
+                  !canGoNextEpisode && styles.controlButtonDisabled,
+                  focusedControl === 'nextEpisode' && novaTvFocus.active,
+                ]}>
+                <MaterialCommunityIcons name="skip-next" size={20} color={novaTheme.colors.textPrimary} />
+              </Pressable>
+            ) : null}
           </View>
         </View>
       </Animated.View>
+      <UnifiedPlayerVodFocusRouter
+        enabled={vodFocusRouterEnabled && allowSeek}
+        chromeVisible={visible}
+        mediaType={mediaType}
+        contentId={contentId}
+        timelineFocused={focusedControl === 'seek'}
+        seekPreviewActive={seekTargetMs != null}
+        actualPositionMs={positionMs}
+        previewPositionMs={seekTargetMs}
+        seekSessionId={null}
+        seekHandle={androidFocusHandles.seek ?? null}
+        onSentinelFocus={handleSentinelFocus}
+        onHiddenChromeWake={handleHiddenChromeWake}
+        onHandlesChange={(next) => {
+          setSentinelHandles((current) => {
+            if (current.left === next.left && current.right === next.right) {
+              return current;
+            }
+            return { left: next.left, right: next.right };
+          });
+        }}
+      />
     </View>
   );
 }
@@ -726,11 +1399,21 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
   },
+  timeBadgeWrap: {
+    alignItems: 'flex-end',
+    minWidth: 88,
+    gap: 1,
+  },
   timeBadge: {
     color: novaTheme.colors.textMuted,
     fontSize: 11,
     fontWeight: '700',
-    minWidth: 88,
+    textAlign: 'right',
+  },
+  seekDeltaLabel: {
+    color: novaTheme.colors.focusRing,
+    fontSize: 12,
+    fontWeight: '800',
     textAlign: 'right',
   },
   backButton: {
@@ -801,5 +1484,8 @@ const styles = StyleSheet.create({
     minHeight: 44,
     backgroundColor: novaTheme.colors.accent,
     borderColor: novaTheme.colors.accent,
+  },
+  controlButtonDisabled: {
+    opacity: 0.35,
   },
 });

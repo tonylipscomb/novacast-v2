@@ -3,6 +3,7 @@
  * Enabled when EXPO_PUBLIC_MOVIES_SEARCH_PERF_PROBE=true.
  */
 
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import type { MovieDataSource } from '../movies/data/MovieDataSource.ts';
 
 import {
@@ -38,7 +39,7 @@ export async function runMoviesSearchPerfProbeOnce(input: {
   }
   probedProviders.add(input.providerId);
 
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Probe] ' +
       JSON.stringify({
         providerId: input.providerId,
@@ -65,7 +66,7 @@ export async function runMoviesSearchPerfProbeOnce(input: {
       });
       markMoviesSearchQueryFinished(requestId, page.totalCount);
       markMoviesSearchStateApplied(requestId, page.items.length);
-      console.info(
+      novacastTrace(
         '[NovaCast Movies Search Probe Result] ' +
           JSON.stringify({
             requestId,
@@ -77,7 +78,7 @@ export async function runMoviesSearchPerfProbeOnce(input: {
           }),
       );
     } catch (error) {
-      console.info(
+      novacastTrace(
         '[NovaCast Movies Search Probe Result] ' +
           JSON.stringify({
             requestId,

@@ -1,10 +1,12 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ImageBackground as ReactNativeImageBackground, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { findNodeHandle, ImageBackground as ReactNativeImageBackground, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import * as ReactNative from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 
 import { NovaLogo, NovaTvShell } from '@/components/nova';
+import type { NovaNavigationFocusHandles, NovaNavigationId } from '@/components/nova';
 import { novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { ChannelHeroCard } from '@/features/hub/ChannelHeroCard';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
@@ -19,7 +21,27 @@ import type { ProviderLiveChannel } from '@/features/providers/providerRepositor
 import { rememberLiveTvMemory } from '@/features/live/liveTvMemory';
 import { rememberMoviesScreenMemory } from '@/features/movies/moviesScreenMemory';
 import { rememberSeriesScreenMemory } from '@/features/series/seriesScreenMemory';
-import { buildLiveChannelPlaybackUrl, buildMoviePlaybackUrl } from '@/features/providers/providerPlayback';
+import { buildLiveChannelPlaybackUrl, buildMoviePlaybackUrlResolved } from '@/features/providers/providerPlayback';
+import { getCatalogMovieItem } from '@/features/catalog/catalogRepository';
+import {
+  armHomeContinueWatchingFallbackRecovery,
+  decideHomeContinueWatchingLaunch,
+  describeHomeContinueWatchingShape,
+  disarmHomeContinueWatchingFallbackRecovery,
+  logHomeContinueWatchingCanonicalization,
+  logHomeContinueWatchingLaunch,
+  shouldHomeContinueWatchingOpenMovies,
+} from '@/features/hub/homeContinueWatchingLaunch';
+import {
+  decideHomeWatchlistSeriesLaunch,
+  logWatchlistLaunch,
+} from '@/features/hub/homeWatchlistLaunch';
+import {
+  logHomeNavbarFocusRetained,
+  logHomeNavbarRightAttempt,
+  resolveHomeNavbarRightTarget,
+  shouldRetainNavbarFocus,
+} from '@/features/hub/homeNavbarFocus';
 import { requestLaunchOverlayExit } from '@/features/startup/launchOverlay';
 import { useUnifiedPlayer } from '@/features/playback/unified';
 import { launchSeriesEpisodePlayback } from '@/features/series/seriesPlayback';
@@ -39,6 +61,7 @@ import { markCatalogAuditFocus, markCatalogAuditRender } from '@/features/diagno
 import { noteFocusLatencyFocus } from '@/features/diagnostics/focusLatencyAudit';
 import { waitOutCatalogWriteQuietPeriod } from '@/features/catalog/catalogWriteQuietPeriod';
 import { processTimeBudgeted } from '@/features/catalog/jsChunkBudget';
+import { showNotification } from '@/features/notifications/notificationStore';
 
 /**
  * Resolves a channel's category type for accent-color purposes. Prefers an
@@ -74,27 +97,88 @@ export function MainMenuScreen() {
   const [personalization, setPersonalization] = useState<HomePersonalizationSnapshot>(() => ({
     providerId: '',
     continueWatching: [] as HomeContinueWatchingItem[],
+    watchlistMovies: [] as MovieSummary[],
+    watchlistSeries: [] as SeriesSummary[],
     favoriteChannels: [],
     favoriteMovies: [] as MovieSummary[],
     favoriteSeries: [] as SeriesSummary[],
     recentlyWatched: [] as RecentItemRecord[],
   }));
-  const recentlyWatchedItems =
-    personalization.providerId === activeProviderId ? personalization.recentlyWatched.slice(0, 6) : [];
+  const watchlistItems = personalization.providerId === activeProviderId
+    ? [
+        ...personalization.watchlistMovies.map((item) => ({ kind: 'movie' as const, item })),
+        ...personalization.watchlistSeries.map((item) => ({ kind: 'series' as const, item })),
+      ]
+    : [];
+  const favoriteItems = personalization.providerId === activeProviderId
+    ? [
+        ...personalization.favoriteMovies.map((item) => ({ kind: 'movie' as const, item })),
+        ...personalization.favoriteSeries.map((item) => ({ kind: 'series' as const, item })),
+      ]
+    : [];
   const firstHomeFocusId =
     guide.visible
       ? null
-      : recentlyWatchedItems.length
-        ? `recent-${recentlyWatchedItems[0].mediaType}-${recentlyWatchedItems[0].contentId}`
-        : personalization.providerId === activeProviderId && personalization.continueWatching.length
-          ? `continue-${personalization.continueWatching[0].contentId}`
+      : personalization.providerId === activeProviderId && personalization.continueWatching.length
+        ? `continue-${personalization.continueWatching[0].contentId}`
+        : watchlistItems.length
+          ? `watchlist-${watchlistItems[0].kind}-${watchlistItems[0].item.id}`
           : personalization.providerId === activeProviderId && personalization.favoriteChannels.length
             ? `favorite-channel-${personalization.favoriteChannels[0].id}`
-            : personalization.providerId === activeProviderId && personalization.favoriteMovies.length
-              ? `favorite-movie-${personalization.favoriteMovies[0].id}`
-              : personalization.providerId === activeProviderId && personalization.favoriteSeries.length
-                ? `favorite-series-${personalization.favoriteSeries[0].id}`
-                : null;
+            : favoriteItems.length
+              ? `favorite-${favoriteItems[0].kind}-${favoriteItems[0].item.id}`
+              : null;
+
+  const [navFocusHandles, setNavFocusHandles] = useState<NovaNavigationFocusHandles>({});
+  const [homeContentHandle, setHomeContentHandle] = useState<number | null>(null);
+  const [navbarFocusedId, setNavbarFocusedId] = useState<NovaNavigationId | null>(null);
+  const homeFocusDecision = useMemo(
+    () =>
+      resolveHomeNavbarRightTarget({
+        firstVisibleHomeTargetId: firstHomeFocusId,
+        contentHandle: homeContentHandle,
+        walkthroughVisible: guide.visible,
+      }),
+    [firstHomeFocusId, guide.visible, homeContentHandle],
+  );
+  const navigationContentFocusHandle =
+    homeFocusDecision.nextFocusMode === 'content' ? (homeContentHandle ?? undefined) : undefined;
+  const navigationNextFocusRight =
+    homeFocusDecision.nextFocusMode === 'retain-navbar' && Object.keys(navFocusHandles).length > 0
+      ? navFocusHandles
+      : undefined;
+
+  const registerHomeFocusHandle = (targetId: string, handle: number | null) => {
+    if (targetId !== firstHomeFocusId) {
+      return;
+    }
+    setHomeContentHandle(handle);
+  };
+
+  const reactNativeTv = ReactNative as typeof ReactNative & {
+    useTVEventHandler?: (handler: (event: { eventType?: string }) => void) => void;
+  };
+  const useTVEventHandler = reactNativeTv.useTVEventHandler ?? ((_handler: (event: { eventType?: string }) => void) => {});
+  useTVEventHandler((event: { eventType?: string }) => {
+    if (event.eventType !== 'right' && event.eventType !== 'swipeRight') {
+      return;
+    }
+    if (!navbarFocusedId) {
+      return;
+    }
+    logHomeNavbarRightAttempt({
+      navbarItem: navbarFocusedId,
+      targetAvailable: homeFocusDecision.targetAvailable,
+      targetId: homeFocusDecision.targetId,
+    });
+    if (shouldRetainNavbarFocus(homeFocusDecision)) {
+      logHomeNavbarFocusRetained('no-visible-home-target');
+    }
+  });
+
+  useEffect(() => {
+    setHomeContentHandle(null);
+  }, [firstHomeFocusId]);
 
   useEffect(() => {
     if (!bundle || !selectedProvider) {
@@ -241,53 +325,206 @@ export function MainMenuScreen() {
   };
 
   const openContinueItem = async (item: HomeContinueWatchingItem) => {
-    if (!bundle) {
-      return;
-    }
+    const memoryCatalogMovie = getMovieCatalogIndex(activeProviderId).getEntry(item.contentId);
+    logHomeContinueWatchingCanonicalization({
+      event: 'lookup-start',
+      movieId: item.contentId,
+      lookupKeyType: 'content-id',
+      savedExtensionPresent: Boolean(item.containerExtension),
+      canonicalFound: Boolean(memoryCatalogMovie),
+      canonicalExtensionPresent: Boolean(memoryCatalogMovie?.containerExtension),
+    });
 
-    if (item.mediaType === 'movie') {
-      const indexedMovie =
-        getMovieCatalogIndex(activeProviderId).getSummaries([item.contentId])[0] ??
-        ({
-          id: item.contentId,
-          categoryId: '',
-          title: item.title,
-          genres: ['Movies'],
-          posterStyleKey: 'midnight',
-          posterUrl: item.artworkUrl,
-        } satisfies MovieSummary);
-      const streamUrl = indexedMovie
-        ? buildMoviePlaybackUrl(bundle, indexedMovie.id, indexedMovie.containerExtension ?? 'mp4')
-        : null;
-      if (streamUrl) {
-        await launchPlayback(
-          {
-            id: indexedMovie.id,
-            mediaType: 'movie',
-            title: indexedMovie.title,
-            streamUrl,
-            artworkUrl: indexedMovie.posterUrl,
-            isLive: false,
-            providerId: activeProviderId,
-            resumePositionMs: item.positionMs,
-          },
-          { launchSource: 'play', contentFit: 'contain' },
-        );
+    let sqliteCatalogMovie: {
+      id: string;
+      title: string;
+      posterUrl?: string;
+      containerExtension?: string;
+    } | null = null;
+    if (item.mediaType === 'movie' || (!item.parentSeriesId && !item.episodeId)) {
+      if (!memoryCatalogMovie?.containerExtension) {
+        const row = await getCatalogMovieItem(activeProviderId, item.contentId).catch(() => null);
+        if (row) {
+          sqliteCatalogMovie = {
+            id: row.contentId,
+            title: row.title,
+            posterUrl: row.artworkUrl ?? undefined,
+            containerExtension: row.streamExtension ?? undefined,
+          };
+        }
       }
+      if (!memoryCatalogMovie?.containerExtension && !sqliteCatalogMovie?.containerExtension && bundle?.movies.getMovieInfo) {
+        const local = await bundle.movies.getMovieInfo(item.contentId).catch(() => null);
+        if (local) {
+          sqliteCatalogMovie = {
+            id: local.id,
+            title: local.title,
+            posterUrl: local.posterUrl,
+            containerExtension: local.containerExtension,
+          };
+        }
+      }
+    }
+
+    const catalogMovie = memoryCatalogMovie
+      ? {
+          id: memoryCatalogMovie.id,
+          title: memoryCatalogMovie.title,
+          posterUrl: memoryCatalogMovie.posterUrl,
+          containerExtension: memoryCatalogMovie.containerExtension,
+        }
+      : null;
+    const decision = decideHomeContinueWatchingLaunch({
+      item,
+      catalogMovie,
+      sqliteCatalogMovie,
+    });
+    const canonicalFound = Boolean(sqliteCatalogMovie || catalogMovie);
+    logHomeContinueWatchingCanonicalization({
+      event: canonicalFound ? 'lookup-hit' : 'lookup-miss',
+      movieId: item.contentId,
+      lookupKeyType: 'content-id',
+      canonicalFound,
+      savedExtensionPresent: Boolean(item.containerExtension),
+      canonicalExtensionPresent: Boolean(
+        sqliteCatalogMovie?.containerExtension || catalogMovie?.containerExtension,
+      ),
+      resolvedExtensionPresent: decision.kind === 'launch-movie' && Boolean(decision.containerExtension),
+    });
+    if (decision.kind === 'launch-movie') {
+      logHomeContinueWatchingCanonicalization({
+        event: 'canonical-merged',
+        movieId: decision.movieId,
+        lookupKeyType: 'content-id',
+        canonicalFound,
+        savedExtensionPresent: Boolean(item.containerExtension),
+        canonicalExtensionPresent: Boolean(
+          sqliteCatalogMovie?.containerExtension || catalogMovie?.containerExtension,
+        ),
+        resolvedExtensionPresent: Boolean(decision.containerExtension),
+      });
+    }
+    const shape = describeHomeContinueWatchingShape(item, {
+      canonicalMovieFound: canonicalFound,
+      canonicalContainerExtensionPresent: Boolean(
+        sqliteCatalogMovie?.containerExtension || catalogMovie?.containerExtension,
+      ),
+      resolvedContainerExtensionPresent: decision.kind === 'launch-movie' && Boolean(decision.containerExtension),
+      extensionSource: decision.kind === 'launch-movie' ? decision.extensionSource : undefined,
+      decision: decision.kind,
+    });
+    logHomeContinueWatchingLaunch({
+      ...shape,
+      sourceResolvable: decision.sourceResolvable,
+      origin: 'home-continue-watching',
+      decision: decision.kind,
+    });
+
+    if (shouldHomeContinueWatchingOpenMovies() || decision.kind === 'error') {
+      showNotification({
+        type: 'error',
+        title: 'Unable to resume',
+        message: 'This title is no longer available.',
+        duration: 6000,
+        scope: 'home',
+      });
       return;
     }
 
-    if (!item.parentSeriesId) {
+    if (!bundle) {
+      showNotification({
+        type: 'error',
+        title: 'Unable to resume',
+        message: 'This title is no longer available.',
+        duration: 6000,
+        scope: 'home',
+      });
       return;
     }
 
-    const detail = await bundle.seriesDataSource.getSeriesInfo(item.parentSeriesId);
+    if (decision.kind === 'launch-movie') {
+      const streamUrl = buildMoviePlaybackUrlResolved(
+        bundle,
+        decision.movieId,
+        decision.containerExtension,
+        decision.containerExtension,
+      );
+      if (!streamUrl) {
+        showNotification({
+          type: 'error',
+          title: 'Unable to resume',
+          message: 'This title is no longer available.',
+          duration: 6000,
+          scope: 'home',
+        });
+        return;
+      }
+      if (decision.extensionSource === 'fallback') {
+        armHomeContinueWatchingFallbackRecovery({
+          movieId: decision.movieId,
+          extensionSource: 'fallback',
+          attemptedExtension: decision.containerExtension ?? 'mp4',
+          recover: async () => {
+            const row = await getCatalogMovieItem(activeProviderId, decision.movieId).catch(() => null);
+            const recoveredExtension = row?.streamExtension?.trim();
+            if (!recoveredExtension) {
+              return null;
+            }
+            const recoveredUrl = buildMoviePlaybackUrlResolved(
+              bundle,
+              decision.movieId,
+              recoveredExtension,
+              recoveredExtension,
+            );
+            return recoveredUrl ? { streamUrl: recoveredUrl, containerExtension: recoveredExtension } : null;
+          },
+        });
+      } else {
+        disarmHomeContinueWatchingFallbackRecovery();
+      }
+      logHomeContinueWatchingCanonicalization({
+        event: 'launch',
+        movieId: decision.movieId,
+        lookupKeyType: 'content-id',
+        canonicalFound,
+        savedExtensionPresent: Boolean(item.containerExtension),
+        canonicalExtensionPresent: Boolean(
+          sqliteCatalogMovie?.containerExtension || catalogMovie?.containerExtension,
+        ),
+        resolvedExtensionPresent: Boolean(decision.containerExtension),
+      });
+      await launchPlayback(
+        {
+          id: decision.movieId,
+          mediaType: 'movie',
+          title: decision.title,
+          streamUrl,
+          artworkUrl: decision.artworkUrl,
+          isLive: false,
+          providerId: activeProviderId,
+          resumePositionMs: decision.positionMs,
+          containerExtension: decision.containerExtension,
+          extensionSource: decision.extensionSource,
+        },
+        { launchSource: 'play', contentFit: 'contain', resumePolicy: 'silent' },
+      );
+      return;
+    }
+
+    const detail = await bundle.seriesDataSource.getSeriesInfo(decision.seriesId);
     const episode = detail
       ? Object.values(detail.episodesBySeason)
           .flat()
-          .find((candidate) => candidate.id === item.episodeId || candidate.id === item.contentId)
+          .find((candidate) => candidate.id === decision.episodeId || candidate.id === decision.contentId)
       : null;
     if (!episode) {
+      showNotification({
+        type: 'error',
+        title: 'Unable to resume',
+        message: 'This episode is no longer available.',
+        duration: 6000,
+        scope: 'home',
+      });
       return;
     }
 
@@ -297,9 +534,11 @@ export function MainMenuScreen() {
       episode,
       seriesTitle: detail?.title,
       artworkUrl: detail?.posterUrl,
-      resumePositionMs: item.positionMs,
+      resumePositionMs: decision.positionMs,
+      episodes: detail ? Object.values(detail.episodesBySeason).flat() : undefined,
       launchSource: 'episode',
-      launchPlayback,
+      launchPlayback: (playbackItem, options) =>
+        launchPlayback(playbackItem, { ...options, resumePolicy: 'silent' }),
     });
   };
 
@@ -348,6 +587,10 @@ export function MainMenuScreen() {
           title="Home"
           subtitle="Your entertainment. One place."
           preferActiveNavigationFocus={!firstHomeFocusId}
+          onNavigationFocusHandles={setNavFocusHandles}
+          onNavigationItemFocus={setNavbarFocusedId}
+          navigationContentFocusHandle={navigationContentFocusHandle}
+          navigationNextFocusRight={navigationNextFocusRight}
         >
           <ScrollView
             style={styles.screenScroll}
@@ -373,22 +616,6 @@ export function MainMenuScreen() {
         </View>
 
         <View style={styles.rows}>
-          {recentlyWatchedItems.length ? (
-            <HomeRow title="Recently Watched" compact>
-              {recentlyWatchedItems.map((item) => (
-                <HomeMediaCard
-                  key={`${item.mediaType}-${item.contentId}`}
-                  title={item.title}
-                  subtitle={item.mediaType === 'live' ? 'Live channel' : 'Recently watched'}
-                  artworkUrl={item.artworkUrl}
-                  icon={item.mediaType === 'live' ? 'television' : 'history'}
-                  preferredFocus={firstHomeFocusId === `recent-${item.mediaType}-${item.contentId}`}
-                  onPress={() => void openRecentItem(item)}
-                />
-              ))}
-            </HomeRow>
-          ) : null}
-
           {personalization.providerId === activeProviderId && personalization.continueWatching.length ? (
             <HomeRow title="Continue Watching">
               {personalization.continueWatching.map((item) => (
@@ -399,8 +626,74 @@ export function MainMenuScreen() {
                   artworkUrl={item.artworkUrl}
                   progress={item.progressPercent}
                   preferredFocus={firstHomeFocusId === `continue-${item.contentId}`}
+                  onFocusHandle={
+                    firstHomeFocusId === `continue-${item.contentId}`
+                      ? (handle) => registerHomeFocusHandle(`continue-${item.contentId}`, handle)
+                      : undefined
+                  }
                   onPress={() => void openContinueItem(item)}
                   onRemove={() => void removeContinueWatchingItem(activeProviderId, item.mediaType, item.contentId)}
+                />
+              ))}
+            </HomeRow>
+          ) : null}
+
+          {watchlistItems.length ? (
+            <HomeRow title="My Watchlist">
+              {watchlistItems.map((entry) => (
+                <HomeMediaCard
+                  key={`watchlist-${entry.kind}-${entry.item.id}`}
+                  title={entry.item.title}
+                  subtitle={entry.kind === 'movie' ? 'Movie watchlist' : 'Series watchlist'}
+                  artworkUrl={entry.item.posterUrl}
+                  preferredFocus={firstHomeFocusId === `watchlist-${entry.kind}-${entry.item.id}`}
+                  onFocusHandle={
+                    firstHomeFocusId === `watchlist-${entry.kind}-${entry.item.id}`
+                      ? (handle) => registerHomeFocusHandle(`watchlist-${entry.kind}-${entry.item.id}`, handle)
+                      : undefined
+                  }
+                  onPress={() => {
+                    if (entry.kind === 'movie') {
+                      rememberMoviesScreenMemory(activeProviderId, { openDiscoverZone: true, selectedMovieId: entry.item.id });
+                      navigateTo('/movies');
+                      return;
+                    }
+                    const decision = decideHomeWatchlistSeriesLaunch(entry.item);
+                    logWatchlistLaunch({
+                      event: 'press',
+                      mediaType: 'series',
+                      providerIdPresent: Boolean(activeProviderId),
+                      savedIdPresent: Boolean(entry.item.id),
+                      canonicalContentIdPresent: Boolean(entry.item.id),
+                      providerSeriesIdPresent: Boolean(entry.item.seriesId),
+                    });
+                    if (decision.kind !== 'open-series-detail') {
+                      logWatchlistLaunch({
+                        event: 'resolution-failed',
+                        mediaType: 'series',
+                        providerIdPresent: Boolean(activeProviderId),
+                        savedIdPresent: Boolean(entry.item.id),
+                        canonicalContentIdPresent: false,
+                        providerSeriesIdPresent: Boolean(entry.item.seriesId),
+                      });
+                      return;
+                    }
+                    logWatchlistLaunch({
+                      event: 'canonical-resolved',
+                      mediaType: 'series',
+                      providerIdPresent: Boolean(activeProviderId),
+                      savedIdPresent: true,
+                      canonicalContentIdPresent: Boolean(decision.series.id),
+                      providerSeriesIdPresent: Boolean(decision.series.seriesId),
+                    });
+                    rememberSeriesScreenMemory(activeProviderId, {
+                      pendingSeriesDetail: decision.series,
+                      selectedSeriesId: decision.series.id,
+                      focusedSeriesId: decision.series.id,
+                      openDiscoverZone: false,
+                    });
+                    navigateTo('/series');
+                  }}
                 />
               ))}
             </HomeRow>
@@ -417,49 +710,38 @@ export function MainMenuScreen() {
                   categoryType={resolveChannelCategoryType({ categoryId: item.categoryId, name: item.title }, categoryTypeById)}
                   isLive
                   preferredFocus={firstHomeFocusId === `favorite-channel-${item.id}`}
+                  onFocusHandle={
+                    firstHomeFocusId === `favorite-channel-${item.id}`
+                      ? (handle) => registerHomeFocusHandle(`favorite-channel-${item.id}`, handle)
+                      : undefined
+                  }
                   onPress={() => void openRecentItem({ providerId: activeProviderId, mediaType: 'live', contentId: item.id, title: item.title, artworkUrl: item.artworkUrl, lastOpenedAt: Date.now() })}
                 />
               ))}
             </HomeRow>
           ) : null}
 
-          {personalization.providerId === activeProviderId && personalization.favoriteMovies.length ? (
-            <HomeRow title="Favorite Movies">
-              {personalization.favoriteMovies.map((item) => (
+          {favoriteItems.length ? (
+            <HomeRow title="My Favorites">
+              {favoriteItems.map((entry) => (
                 <HomeMediaCard
-                  key={item.id}
-                  title={item.title}
-                  subtitle="Favorite movie"
-                  artworkUrl={item.posterUrl}
-                  preferredFocus={firstHomeFocusId === `favorite-movie-${item.id}`}
+                  key={`favorite-${entry.kind}-${entry.item.id}`}
+                  title={entry.item.title}
+                  subtitle={entry.kind === 'movie' ? 'Favorite movie' : 'Favorite series'}
+                  artworkUrl={entry.item.posterUrl}
+                  preferredFocus={firstHomeFocusId === `favorite-${entry.kind}-${entry.item.id}`}
+                  onFocusHandle={
+                    firstHomeFocusId === `favorite-${entry.kind}-${entry.item.id}`
+                      ? (handle) => registerHomeFocusHandle(`favorite-${entry.kind}-${entry.item.id}`, handle)
+                      : undefined
+                  }
                   onPress={() => {
-                    rememberMoviesScreenMemory(activeProviderId, {
-                      selectedCategoryId: 'smart:your-favorites',
-                      focusedMovieId: item.id,
-                      selectedMovieId: item.id,
-                    });
-                    navigateTo('/movies');
-                  }}
-                />
-              ))}
-            </HomeRow>
-          ) : null}
-
-          {personalization.providerId === activeProviderId && personalization.favoriteSeries.length ? (
-            <HomeRow title="Favorite Series">
-              {personalization.favoriteSeries.map((item) => (
-                <HomeMediaCard
-                  key={item.id}
-                  title={item.title}
-                  subtitle="Favorite series"
-                  artworkUrl={item.posterUrl}
-                  preferredFocus={firstHomeFocusId === `favorite-series-${item.id}`}
-                  onPress={() => {
-                    rememberSeriesScreenMemory(activeProviderId, {
-                      selectedCategoryId: 'smart:favorites',
-                      focusedSeriesId: item.id,
-                      selectedSeriesId: item.id,
-                    });
+                    if (entry.kind === 'movie') {
+                      rememberMoviesScreenMemory(activeProviderId, { openDiscoverZone: true, selectedMovieId: entry.item.id });
+                      navigateTo('/movies');
+                      return;
+                    }
+                    rememberSeriesScreenMemory(activeProviderId, { openDiscoverZone: true, selectedSeriesId: entry.item.id });
                     navigateTo('/series');
                   }}
                 />
@@ -518,6 +800,7 @@ type HomeMediaCardProps = {
   progress?: number;
   icon?: 'television' | 'history' | 'movie-open-outline';
   preferredFocus?: boolean;
+  onFocusHandle?: (handle: number | null) => void;
   onPress: () => void;
   onRemove?: () => void;
 };
@@ -529,6 +812,7 @@ const HomeMediaCard = memo(function HomeMediaCard({
   progress,
   icon,
   preferredFocus = false,
+  onFocusHandle,
   onPress,
   onRemove,
 }: HomeMediaCardProps) {
@@ -542,6 +826,8 @@ const HomeMediaCard = memo(function HomeMediaCard({
   return (
     <View style={styles.mediaCardWrap}>
       <Pressable
+        ref={(node) => onFocusHandle?.(node ? findNodeHandle(node) : null)}
+        collapsable={false}
         focusable
         hasTVPreferredFocus={preferredFocus && !preferredFocusConsumedRef.current}
         onFocus={() => {

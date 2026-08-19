@@ -11,7 +11,15 @@ export type CatalogSyncStatus =
   | 'ready'
   | 'error';
 
-export type CatalogItemSort = 'title' | 'title-desc' | 'newest' | 'oldest' | 'rating' | 'provider';
+export type CatalogItemSort =
+  | 'title'
+  | 'title-desc'
+  | 'newest'
+  | 'oldest'
+  | 'rating'
+  | 'provider'
+  | 'recently-added'
+  | 'popularity';
 
 export type CatalogProviderRecord = {
   providerId: string;
@@ -47,6 +55,8 @@ export type CatalogItemRecord = {
   releaseDate?: string | null;
   releaseYear?: number | null;
   rating?: number | null;
+  addedAt?: number | null;
+  popularity?: number | null;
   description?: string | null;
   streamExtension?: string | null;
   providerSortOrder?: number | null;
@@ -112,7 +122,7 @@ export type CatalogItemsPage = {
 export const CATALOG_DEFAULT_PAGE_SIZE = 48;
 
 /** Stage 3C: generation-safe Movies v2 tables. */
-export const CATALOG_SCHEMA_VERSION = 2;
+export const CATALOG_SCHEMA_VERSION = 4;
 
 export const CATALOG_DATABASE_NAME = 'novacast-catalog.db';
 

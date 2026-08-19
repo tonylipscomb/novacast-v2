@@ -2,6 +2,7 @@
  * Stage 3G — choose the Movies search datasource (SQLite-first).
  */
 
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import { resolveReadableCatalogGeneration } from '../catalog/catalogRepository.ts';
 import type { MovieDataSource } from '../movies/data/MovieDataSource.ts';
 import { createSqliteMovieDataSource } from '../movies/data/SqliteMovieDataSource.ts';
@@ -47,7 +48,7 @@ export async function resolveMoviesSearchDatasource(input: {
       providerFallbackAllowed: false,
       fallbackReason: null,
     };
-    console.info('[NovaCast Movies Search Datasource] ' + JSON.stringify({
+    novacastTrace('[NovaCast Movies Search Datasource] ' + JSON.stringify({
       providerId,
       query: input.query ?? '',
       selectedDatasource: selection.selectedDatasource,
@@ -86,7 +87,7 @@ export async function resolveMoviesSearchDatasource(input: {
         ? 'using-bundle-or-browse-fallback'
         : 'no-datasource';
 
-  console.info('[NovaCast Movies Search Datasource] ' + JSON.stringify({
+  novacastTrace('[NovaCast Movies Search Datasource] ' + JSON.stringify({
     providerId,
     query: input.query ?? '',
     selectedDatasource,

@@ -135,6 +135,9 @@ test('7. Play receives initial preferred focus', () => {
   assert.equal(resolveMovieDetailPopupV2InitialFocusId([]), null);
   assert.match(popup, /resolveMovieDetailPopupV2InitialFocusId/);
   assert.match(popup, /hasTVPreferredFocus=\{preferred && focusable\}/);
+  assert.match(popup, /requestTvFocus\(/);
+  assert.match(popup, /reason: 'detail-v2-initial-cta'/);
+  assert.doesNotMatch(popup, /Platform\.isTV \? 90/);
 });
 
 // 8. Visible focused action styling exists.
@@ -148,7 +151,7 @@ test('8. Visible focused action styling exists', () => {
 // 9. Back and X call the same close function.
 test('9. Back and X call the same close function', () => {
   assert.match(screen, /onClose=\{\(source\) => closeMovieDetailPopupV2\(source\)\}/);
-  assert.match(screen, /const onPopupBackPress = \(\) => \{[\s\S]{0,200}closeMovieDetailPopupV2\('back'\)/);
+  assert.match(screen, /const onPopupBackPress = \(\) => \{[\s\S]{0,500}closeMovieDetailPopupV2\('back'\)/);
   assert.match(popup, /onPress=\{\(\) => requestClose\('x'\)\}/);
 });
 

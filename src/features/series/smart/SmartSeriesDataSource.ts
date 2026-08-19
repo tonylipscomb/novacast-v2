@@ -8,11 +8,10 @@ import {
   sortContentItems,
   type ContentSortOption,
 } from '../../media-browser/contentSorting.ts';
-import { getMediaSettings } from '../../media-browser/mediaSettingsStore.ts';
 import {
   getContinueWatchingEntries,
   getFavoriteIds,
-  getRecentlyWatchedIds,
+  getRecentlyWatchedSeriesIds,
   getWatchlistIds,
 } from '../../media-browser/mediaLibraryStore.ts';
 import { getCategoryCountFromIndex } from '../../providers/categoryCountIndexStore.ts';
@@ -27,7 +26,6 @@ import { logSmartCategoryCatalogAudit } from '../../providers/catalogSyncAudit.t
 import { entryToSeriesSummary, getSeriesCatalogIndex } from './seriesCatalogIndex.ts';
 import {
   buildSmartSeriesCategoryContext,
-  getActiveSmartSeriesCategoryDefinitions,
   querySmartSeriesCategoryOnIndex,
   resolveSmartSeriesCategoryDefinition,
 } from './smartSeriesCategoryDefinitions.ts';
@@ -149,7 +147,7 @@ async function buildLibraryContext(providerId: string) {
     getFavoriteIds(providerId),
     getWatchlistIds(providerId),
     getContinueWatchingEntries(providerId, 'episode'),
-    getRecentlyWatchedIds(providerId),
+    getRecentlyWatchedSeriesIds(providerId),
   ]);
 
   return buildSmartSeriesCategoryContext({
@@ -187,59 +185,16 @@ export async function refreshSmartSeriesCategoryCounts(providerId: string, categ
 export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: string): SeriesDataSource {
   async function buildSmartCategories(providerCategories: MediaCategory[]) {
     const sortedProviderCategories = sortProviderCategoriesUsFirst(providerCategories, 'series');
-    const settings = await getMediaSettings();
-    if (settings.hideSmartCategories) {
-      return appendFallbackCategory(sortedProviderCategories.map((category) => ({
+    return appendFallbackCategory(
+      sortedProviderCategories.map((category) => ({
         ...category,
         kind: 'provider' as const,
         section: 'provider' as const,
         count: getCategoryCountFromIndex(providerId, 'series', category.id) ?? category.count,
         countKnown: getCategoryCountFromIndex(providerId, 'series', category.id) !== undefined || category.countKnown !== false,
-      })), providerId);
-    }
-
-    const definitions = getActiveSmartSeriesCategoryDefinitions();
-    const smartCache = getSmartCategoryCacheSync(providerId, 'series');
-
-    const smartCategories: MediaCategory[] = definitions.map((definition) => ({
-      id: `${MEDIA_SMART_CATEGORY_PREFIX}${definition.key}`,
-      renderKey: `${MEDIA_SMART_CATEGORY_PREFIX}${definition.key}`,
-      name: `${definition.icon} ${definition.name}`,
-      icon: definition.icon,
-      smartKey: definition.key,
-      kind: 'smart' as const,
-      section: 'discover' as const,
-      count: smartCache.entries[definition.key]?.count ?? getSmartCategoryCountSync(providerId, 'series', definition.key),
-      countKnown: smartCache.entries[definition.key] !== undefined,
-    }));
-
-    const discoverSection: MediaCategory = {
-      id: SECTION_DISCOVER_ID,
-      renderKey: SECTION_DISCOVER_ID,
-      name: 'Discover',
-      count: 0,
-      kind: 'section',
-      section: 'discover',
-    };
-    const providerSection: MediaCategory = {
-      id: SECTION_PROVIDER_ID,
-      renderKey: SECTION_PROVIDER_ID,
-      name: 'Your Provider',
-      count: 0,
-      kind: 'section',
-      section: 'provider',
-    };
-
-    const normalizedProvider = sortedProviderCategories.map((category) => ({
-      ...category,
-      kind: 'provider' as const,
-      section: 'provider' as const,
-      count: getCategoryCountFromIndex(providerId, 'series', category.id) ?? category.count,
-      countKnown: getCategoryCountFromIndex(providerId, 'series', category.id) !== undefined || category.countKnown !== false,
-    }));
-    const providerWithFallback = appendFallbackCategory(normalizedProvider, providerId);
-
-    return [discoverSection, ...smartCategories, providerSection, ...providerWithFallback];
+      })),
+      providerId,
+    );
   }
 
   async function loadAllSmartSeriesSummaries(definition: NonNullable<ReturnType<typeof resolveSmartSeriesCategoryDefinition>>) {

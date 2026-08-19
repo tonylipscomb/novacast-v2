@@ -34,7 +34,6 @@ import {
 import { getMoviesSettings } from './moviesSettingsStore.ts';
 import {
   buildSmartCategoryContext,
-  getActiveSmartCategoryDefinitions,
   querySmartCategoryOnIndex,
   resolveSmartCategoryDefinition,
 } from './smartCategoryDefinitions.ts';
@@ -202,68 +201,15 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
   const usesSqliteReads = base.sourceKind === 'sqlite';
   async function buildSmartCategories(providerCategories: MovieCategory[]) {
     const sortedProviderCategories = sortProviderCategoriesUsFirst(providerCategories, 'movie');
-    const settings = await getMoviesSettings();
-    if (settings.hideSmartCategories) {
-      return appendFallbackCategory(sortedProviderCategories.map((category) => ({
+    return appendFallbackCategory(
+      sortedProviderCategories.map((category) => ({
         ...category,
         kind: 'provider' as const,
         section: 'provider' as const,
         ...resolveProviderCategoryCount(category, providerId, usesSqliteReads),
-      })), providerId);
-    }
-
-    const definitions = getActiveSmartCategoryDefinitions();
-    const smartCache = await readSmartCategoryCache(providerId, 'movie');
-
-    const smartCategories: MovieCategory[] = definitions.map((definition) => {
-      const syncCount =
-        smartCache.entries[definition.key]?.count ?? getSmartCategoryCountSync(providerId, 'movie', definition.key);
-      const cacheEntryExists =
-        smartCache.entries[definition.key] !== undefined ||
-        getSmartCategoryEntrySync(providerId, 'movie', definition.key) !== undefined;
-
-      return {
-        id: `${SMART_CATEGORY_PREFIX}${definition.key}`,
-        renderKey: `${SMART_CATEGORY_PREFIX}${definition.key}`,
-        // Keep icon on its own field — embedding emoji in `name` produced mojibake in logs/TV text.
-        name: definition.name,
-        icon: definition.icon,
-        smartKey: definition.key,
-        kind: 'smart' as const,
-        section: 'discover' as const,
-        count: syncCount,
-        countKnown: resolveSmartCategoryCountKnown({ cacheEntryExists, syncCount }),
-      };
-    });
-
-    const providerWithKind: MovieCategory[] = sortedProviderCategories.map((category) => ({
-      ...category,
-      kind: 'provider' as const,
-      section: 'provider' as const,
-      ...resolveProviderCategoryCount(category, providerId, usesSqliteReads),
-    }));
-    const providerWithFallback = appendFallbackCategory(providerWithKind, providerId);
-
-    return [
-      {
-        id: SECTION_DISCOVER_ID,
-        renderKey: SECTION_DISCOVER_ID,
-        name: 'Discover',
-        count: 0,
-        kind: 'section' as const,
-        section: 'discover' as const,
-      },
-      ...smartCategories,
-      {
-        id: SECTION_PROVIDER_ID,
-        renderKey: SECTION_PROVIDER_ID,
-        name: 'From Your Provider',
-        count: 0,
-        kind: 'section' as const,
-        section: 'provider' as const,
-      },
-      ...providerWithFallback,
-    ];
+      })),
+      providerId,
+    );
   }
 
   async function loadAllSmartMovieSummaries(definition: NonNullable<ReturnType<typeof resolveSmartCategoryDefinition>>) {

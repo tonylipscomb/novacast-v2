@@ -12,21 +12,50 @@
  */
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ComponentProps, ComponentType, ElementRef, ReactNode } from 'react';
-import { Component, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
-import { Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { findNodeHandle, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { BlurView } from 'expo-blur';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
 import { MediaArtworkFallback } from '@/features/media-browser/MediaArtworkFallback';
 import type { MediaDetail } from '@/features/media-browser/mediaTypes';
+import { isValidTvFocusableTarget, requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
 import {
   computeMovieDetailPopupV2Layout,
   logMovieDetailPopupV2Event,
+  logMovieDetailRenderLoopAudit,
+  logMoviesDetailV2FocusOwnership,
   resolveMovieDetailPopupV2InitialFocusId,
+  shouldConfirmMovieDetailInitialFocus,
+  shouldPublishMovieDetailDestinations,
+  shouldReArmMovieDetailPreferredFocus,
+  shouldRequestMovieDetailPopupV2InitialFocus,
+  shouldUpdateMovieDetailFocusedActionId,
   type MovieDetailPopupV2Action,
 } from '../moviesDetailPopupV2';
+
+type TvFocusablePressable = ElementRef<typeof Pressable> & {
+  setNativeProps?: (props: Record<string, number>) => void;
+};
+
+const NOOP_ACTION_BUTTON_REF = (_instance: TvFocusablePressable | null) => undefined;
+
+function pinDetailCtaLeftEdge(instance: TvFocusablePressable | null) {
+  if (!instance) {
+    return;
+  }
+  const handle = findNodeHandle(instance);
+  if (handle == null) {
+    return;
+  }
+  try {
+    instance.setNativeProps?.({ nextFocusLeft: handle });
+  } catch {
+    // Directional pinning must never crash Detail.
+  }
+}
 
 export type MovieDetailPopupV2Movie = {
   id: string;
@@ -201,8 +230,32 @@ export function MovieDetailPopupV2({
   const [focusedActionId, setFocusedActionId] = useState<string | null>(null);
   const [closeFocused, setCloseFocused] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
+  const [guideDestinations, setGuideDestinations] = useState<TvFocusablePressable[]>([]);
   const closeGuardRef = useRef(0);
   const wasVisibleRef = useRef(false);
+  const visibleRef = useRef(visible);
+  const movieIdRef = useRef(movie?.id ?? null);
+  const initialFocusActionIdRef = useRef<string | null>(null);
+  const initialFocusIssuedForMovieRef = useRef<string | null>(null);
+  const initialFocusConfirmedRef = useRef(false);
+  const cancelInitialFocusRef = useRef<(() => void) | null>(null);
+  const destinationsPublishedRef = useRef(false);
+  const renderCountRef = useRef(0);
+  const openSession = visible && movie?.id ? movie.id : null;
+  const [ctaFocusSession, setCtaFocusSession] = useState<string | null>(null);
+  const [ctaFocusConsumed, setCtaFocusConsumed] = useState(false);
+  if (shouldReArmMovieDetailPreferredFocus({ openSession, previousSession: ctaFocusSession })) {
+    setCtaFocusSession(openSession);
+    setCtaFocusConsumed(false);
+    setPosterFailed(false);
+    setCloseFocused(false);
+    setFocusedActionId(null);
+    setGuideDestinations((current) => (current.length === 0 ? current : []));
+  } else if (openSession == null && ctaFocusSession != null) {
+    setCtaFocusSession(null);
+    setGuideDestinations((current) => (current.length === 0 ? current : []));
+  }
+  const preferInitialCta = Boolean(openSession) && !ctaFocusConsumed;
 
   const title = movie?.title ?? detail?.title ?? '';
   const posterUrl = detail?.posterUrl ?? movie?.posterUrl;
@@ -274,51 +327,235 @@ export function MovieDetailPopupV2({
     [actions],
   );
 
+  const claimInitialCtaFocus = useCallback((
+    actionId: string,
+    instance: TvFocusablePressable | null,
+    movieId: string | null,
+    isVisible: boolean,
+    focusActionId: string | null,
+  ) => {
+    visibleRef.current = isVisible;
+    movieIdRef.current = movieId;
+    initialFocusActionIdRef.current = focusActionId;
+    if (!isVisible || !movieId || !instance) {
+      return;
+    }
+    if (actionId !== focusActionId) {
+      return;
+    }
+    if (initialFocusIssuedForMovieRef.current === movieId) {
+      return;
+    }
+    if (!isValidTvFocusableTarget(instance)) {
+      return;
+    }
+    if (
+      !shouldRequestMovieDetailPopupV2InitialFocus({
+        detailOpen: true,
+        hasPrimaryAction: true,
+        alreadyIssued: false,
+      })
+    ) {
+      return;
+    }
+
+    logMoviesDetailV2FocusOwnership({
+      phase: 'cta-ref-ready',
+      movieId,
+      detailOpen: true,
+      focusIssued: false,
+      detailCtaHandlePresent: true,
+      focusedRegion: 'detail-cta',
+      categoryHostFocusable: false,
+      posterHostFocusable: false,
+    });
+
+    initialFocusIssuedForMovieRef.current = movieId;
+    logMovieDetailRenderLoopAudit({
+      event: 'initial-request',
+      movieId,
+      actionId,
+      nativeHandlePresent: true,
+      sameHandle: false,
+      preferredFocus: true,
+      initialRequestLatched: true,
+    });
+    logMoviesDetailV2FocusOwnership({
+      phase: 'initial-focus-requested',
+      movieId,
+      detailOpen: true,
+      focusIssued: true,
+      detailCtaHandlePresent: true,
+      focusedRegion: 'detail-cta',
+      categoryHostFocusable: false,
+      posterHostFocusable: false,
+    });
+
+    cancelInitialFocusRef.current?.();
+    cancelInitialFocusRef.current = requestTvFocus({
+      screen: 'movies',
+      source: 'MovieDetailPopupV2',
+      region: 'detail-cta',
+      itemId: movieId,
+      reason: 'detail-v2-initial-cta',
+      maxFrames: 3,
+      isActive: () => visibleRef.current && movieIdRef.current === movieId,
+      getTarget: () => {
+        const current = actionRefs.current.get(actionId);
+        return isValidTvFocusableTarget(current) ? current : null;
+      },
+    });
+  }, []);
+
+  const registerActionNode = useCallback((
+    actionId: string,
+    instance: TvFocusablePressable | null,
+    context?: { movieId: string | null; visible: boolean; initialFocusActionId: string | null },
+  ) => {
+    if (context) {
+      if (movieIdRef.current !== context.movieId) {
+        destinationsPublishedRef.current = false;
+        initialFocusConfirmedRef.current = false;
+      }
+      visibleRef.current = context.visible;
+      movieIdRef.current = context.movieId;
+      initialFocusActionIdRef.current = context.initialFocusActionId;
+    }
+    const previous = (actionRefs.current.get(actionId) as TvFocusablePressable | undefined) ?? null;
+    const sameHandle = previous === instance;
+    logMovieDetailRenderLoopAudit({
+      event: instance ? 'ref-attach' : 'ref-detach',
+      movieId: movieIdRef.current,
+      actionId,
+      nativeHandlePresent: Boolean(instance),
+      sameHandle,
+      initialRequestLatched: initialFocusIssuedForMovieRef.current === movieIdRef.current,
+    });
+    if (sameHandle) {
+      return;
+    }
+    if (instance) {
+      actionRefs.current.set(actionId, instance);
+    } else {
+      actionRefs.current.delete(actionId);
+      return;
+    }
+
+    const focusActionId = initialFocusActionIdRef.current;
+    if (actionId === focusActionId) {
+      pinDetailCtaLeftEdge(instance);
+    }
+    claimInitialCtaFocus(
+      actionId,
+      instance,
+      movieIdRef.current,
+      visibleRef.current,
+      focusActionId,
+    );
+
+    if (
+      shouldPublishMovieDetailDestinations({
+        alreadyPublished: destinationsPublishedRef.current,
+        actionId,
+        initialFocusActionId: focusActionId,
+        instancePresent: true,
+        sameHandle: false,
+      })
+    ) {
+      destinationsPublishedRef.current = true;
+      const next = Array.from(actionRefs.current.values()) as TvFocusablePressable[];
+      setGuideDestinations(next);
+      logMovieDetailRenderLoopAudit({
+        event: 'destinations-change',
+        movieId: movieIdRef.current,
+        actionId,
+        nativeHandlePresent: true,
+        sameHandle: false,
+      });
+    }
+  }, [claimInitialCtaFocus]);
+
+  const actionIdsKey = actions.map((action) => action.id).join('|');
+  // Stable per-action ref callbacks. The nested functions only run after commit.
+  // eslint-disable-next-line react-hooks/refs -- registerActionNode is a ref callback, not render
+  const actionButtonRefs = useMemo(() => {
+    const next = new Map<string, (instance: TvFocusablePressable | null) => void>();
+    const movieId = movie?.id ?? null;
+    for (const actionId of actionIdsKey.length > 0 ? actionIdsKey.split('|') : []) {
+      next.set(actionId, (instance) => {
+        registerActionNode(actionId, instance, {
+          movieId,
+          visible: true,
+          initialFocusActionId,
+        });
+      });
+    }
+    return next;
+  }, [actionIdsKey, initialFocusActionId, movie?.id, registerActionNode]);
+
+  const getActionButtonRef = (actionId: string) =>
+    actionButtonRefs.get(actionId) ?? NOOP_ACTION_BUTTON_REF;
+
   useEffect(() => {
+    renderCountRef.current += 1;
+    if (renderCountRef.current <= 4) {
+      logMovieDetailRenderLoopAudit({
+        event: 'render',
+        movieId: movie?.id ?? null,
+        renderCount: renderCountRef.current,
+        focusedActionId,
+        preferredFocus: preferInitialCta,
+        initialRequestLatched: initialFocusIssuedForMovieRef.current === movie?.id,
+      });
+    }
+  });
+
+  useEffect(() => {
+    visibleRef.current = visible;
+    movieIdRef.current = movie?.id ?? null;
+    initialFocusActionIdRef.current = initialFocusActionId;
     if (!visible) {
       wasVisibleRef.current = false;
+      initialFocusIssuedForMovieRef.current = null;
+      initialFocusConfirmedRef.current = false;
+      destinationsPublishedRef.current = false;
+      cancelInitialFocusRef.current?.();
+      cancelInitialFocusRef.current = null;
       return;
     }
     const opening = !wasVisibleRef.current;
     wasVisibleRef.current = true;
-    setPosterFailed(false);
     if (opening) {
-      // Reset stale focus-ring state from a prior open/close cycle. Android
-      // doesn't reliably fire onBlur on the close button when its host view
-      // unmounts mid-focus (e.g. closing via X), so without this the X
-      // button can keep rendering its focused style on the next open even
-      // though real TV focus correctly moved to Play/first action.
-      setCloseFocused(false);
-      setFocusedActionId(null);
+      destinationsPublishedRef.current = false;
       logMovieDetailPopupV2Event('movie_detail_popup_v2_active', {
         movieId: movie?.id ?? null,
       });
+      logMoviesDetailV2FocusOwnership({
+        phase: 'detail-open',
+        movieId: movie?.id ?? null,
+        detailOpen: true,
+        focusIssued: false,
+        detailCtaHandlePresent: Boolean(
+          initialFocusActionId && actionRefs.current.get(initialFocusActionId),
+        ),
+        focusedRegion: 'detail',
+        categoryHostFocusable: false,
+        posterHostFocusable: false,
+      });
     }
-  }, [movie?.id, visible]);
+  }, [initialFocusActionId, movie?.id, visible]);
 
-  // Initial focus: Play/Resume preferred, else the first enabled action.
   useEffect(() => {
     if (!visible || !initialFocusActionId) {
       return;
     }
-    let cancelled = false;
-    const timer = setTimeout(
-      () => {
-        if (cancelled) return;
-        const target = actionRefs.current.get(initialFocusActionId);
-        try {
-          target?.focus?.();
-        } catch {
-          // Never crash the popup for focus.
-        }
-      },
-      Platform.isTV ? 90 : 0,
-    );
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [initialFocusActionId, movie?.id, visible]);
+    const target = actionRefs.current.get(initialFocusActionId) as TvFocusablePressable | undefined;
+    if (!target) {
+      return;
+    }
+    pinDetailCtaLeftEdge(target);
+    claimInitialCtaFocus(initialFocusActionId, target, movie?.id ?? null, visible, initialFocusActionId);
+  }, [claimInitialCtaFocus, initialFocusActionId, movie?.id, visible]);
 
   const requestClose = (source: 'back' | 'x') => {
     const now = Date.now();
@@ -343,6 +580,7 @@ export function MovieDetailPopupV2({
     trapFocusRight?: boolean;
     trapFocusUp?: boolean;
     trapFocusDown?: boolean;
+    destinations?: unknown[];
   }>;
 
   return (
@@ -364,7 +602,14 @@ export function MovieDetailPopupV2({
         style={styles.centerWrap}
         pointerEvents="box-none"
         {...(Platform.OS === 'android'
-          ? { autoFocus: true, trapFocusLeft: true, trapFocusRight: true, trapFocusUp: true, trapFocusDown: true }
+          ? {
+              autoFocus: true,
+              trapFocusLeft: true,
+              trapFocusRight: true,
+              trapFocusUp: true,
+              trapFocusDown: true,
+              destinations: guideDestinations,
+            }
           : {})}>
         <View style={[styles.shadowWrap, { width: layout.popupWidth, height: layout.popupHeight }]}>
           {/*
@@ -438,17 +683,61 @@ export function MovieDetailPopupV2({
                     <ActionButton
                       key={action.id}
                       action={action}
-                      preferred={action.id === initialFocusActionId}
+                      preferred={preferInitialCta && action.id === initialFocusActionId}
                       focused={focusedActionId === action.id}
-                      buttonRef={(instance) => {
-                        if (instance) {
-                          actionRefs.current.set(action.id, instance);
-                        } else {
-                          actionRefs.current.delete(action.id);
+                      buttonRef={getActionButtonRef(action.id)}
+                      onFocus={() => {
+                        logMovieDetailRenderLoopAudit({
+                          event: 'focus',
+                          movieId: movieIdRef.current,
+                          actionId: action.id,
+                          focusedActionId: action.id,
+                          preferredFocus: preferInitialCta,
+                          initialRequestLatched:
+                            initialFocusIssuedForMovieRef.current === movieIdRef.current,
+                        });
+                        setFocusedActionId((current) =>
+                          shouldUpdateMovieDetailFocusedActionId(current, action.id)
+                            ? action.id
+                            : current,
+                        );
+                        if (
+                          shouldConfirmMovieDetailInitialFocus({
+                            actionId: action.id,
+                            initialFocusActionId: initialFocusActionIdRef.current,
+                            alreadyConfirmed: initialFocusConfirmedRef.current,
+                            visible: visibleRef.current,
+                          })
+                        ) {
+                          initialFocusConfirmedRef.current = true;
+                          setCtaFocusConsumed(true);
+                          logMovieDetailRenderLoopAudit({
+                            event: 'preferred-focus-change',
+                            movieId: movieIdRef.current,
+                            actionId: action.id,
+                            preferredFocus: false,
+                            initialRequestLatched: true,
+                          });
+                          logMoviesDetailV2FocusOwnership({
+                            phase: 'initial-focus-confirmed',
+                            movieId: movieIdRef.current,
+                            detailOpen: true,
+                            focusIssued: true,
+                            detailCtaHandlePresent: true,
+                            focusedRegion: 'detail-cta',
+                            categoryHostFocusable: false,
+                            posterHostFocusable: false,
+                          });
                         }
                       }}
-                      onFocus={() => setFocusedActionId(action.id)}
-                      onBlur={() => setFocusedActionId(null)}
+                      onBlur={() => {
+                        setFocusedActionId((current) =>
+                          shouldUpdateMovieDetailFocusedActionId(current, null) &&
+                          current === action.id
+                            ? null
+                            : current,
+                        );
+                      }}
                     />
                   ))}
                 </View>

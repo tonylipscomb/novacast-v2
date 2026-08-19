@@ -1,21 +1,26 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { buildMoviePreviewDetail, buildSeriesMediaDetail, buildSeriesPreviewDetail as buildSeriesOverlayPreview } from '@/features/media-browser/mediaDetail';
 import type { MediaDetail, SeriesDetail, SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { toggleMediaFavorite, toggleMediaWatchlist, useMediaLibraryStore } from '@/features/media-browser/mediaLibraryStore';
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import { toggleFavorite, toggleWatchlist, useMovieLibraryStore } from '@/features/movies/smart/movieLibraryStore';
+import { recordRecentItem } from '@/features/personalization/personalizationStore';
 import {
   finishUnifiedPlaybackClose,
   useUnifiedPlayer,
 } from '@/features/playback/unified';
 import type { ProviderRepositoryBundle } from '@/features/providers/providerBundle';
-import { buildMoviePlaybackUrl } from '@/features/providers/providerPlayback';
+import { buildLiveChannelPlaybackUrl, buildMoviePlaybackUrl } from '@/features/providers/providerPlayback';
 import { buildSeriesPreviewDetail } from '@/features/series/data/ProviderSeriesDataSource';
-import { launchSeriesEpisodePlayback } from '@/features/series/seriesPlayback';
+import { launchSeriesEpisodePlayback, formatSeriesContinuePlayLabel, resolveSeriesContinuePlayTarget } from '@/features/series/seriesPlayback';
+import { resolveContinueWatchingLabel } from '@/features/movies/movieDetailOverlayModel';
+import {
+  sortEpisodesByNumber,
+} from '@/features/playback/continuity/playbackContinuity';
 
 import { movieSearchResultToSummary, seriesSearchResultToSummary } from './searchMediaDetail';
-import type { MovieSearchResult, SearchResult, SeriesSearchResult } from './searchTypes';
+import type { LiveSearchResult, MovieSearchResult, SearchResult, SeriesSearchResult } from './searchTypes';
 
 type SearchMediaKind = 'movie' | 'series';
 
@@ -155,6 +160,59 @@ export function useSearchMediaDetail(providerId: string, bundle: ProviderReposit
     }
   }, [loadMovieDetail, loadSeriesDetail, selection]);
 
+  // search-live-unified-direct-v2
+  const startLivePlayback = useCallback(
+    (result: LiveSearchResult) => {
+      if (!bundle || playbackActive || playbackClosing) {
+        return false;
+      }
+
+      const now = Date.now();
+      if (now - lastPlaybackLaunchAtRef.current < 800) {
+        return false;
+      }
+
+      // Search results already carry the provider stream id. Build the normal Xtream Live URL
+      // directly from that id so Search does not need to mount Live TV, load a category, or wait
+      // for preview playback before entering fullscreen.
+      const streamUrl = buildLiveChannelPlaybackUrl(bundle, { id: result.id });
+      if (!streamUrl) {
+        return false;
+      }
+
+      lastPlaybackLaunchAtRef.current = now;
+      // A Live result must return to Search itself, never reopen a stale movie/series detail.
+      reopenDetailAfterPlaybackRef.current = false;
+
+      void recordRecentItem({
+        providerId,
+        mediaType: 'live',
+        contentId: result.id,
+        title: result.title,
+        artworkUrl: result.logoUrl,
+        categoryId: result.categoryId,
+      });
+
+      void launchPlayback(
+        {
+          id: result.id,
+          mediaType: 'live',
+          title: result.title,
+          subtitle: result.currentProgram ?? result.subtitle,
+          streamUrl,
+          artworkUrl: result.logoUrl,
+          channelNumber: result.channelNumber != null ? String(result.channelNumber) : undefined,
+          isLive: true,
+          providerId,
+        },
+        { launchSource: 'channel', contentFit: 'contain' },
+      );
+
+      return true;
+    },
+    [bundle, launchPlayback, playbackActive, playbackClosing, providerId],
+  );
+
   const startMoviePlayback = useCallback(() => {
     if (!bundle || selection?.kind !== 'movie' || !selection.movie || playbackActive || playbackClosing) {
       return;
@@ -189,7 +247,7 @@ export function useSearchMediaDetail(providerId: string, bundle: ProviderReposit
   }, [bundle, launchPlayback, playbackActive, playbackClosing, providerId, selection]);
 
   const playEpisodeById = useCallback(
-    async (episodeId: string, launchSource: 'play' | 'episode' = 'episode') => {
+    async (episodeId: string, launchSource: 'play' | 'episode' = 'episode', resumePolicy?: 'silent' | 'prompt' | 'start') => {
       if (!bundle || !seriesDetail) {
         return;
       }
@@ -209,7 +267,9 @@ export function useSearchMediaDetail(providerId: string, bundle: ProviderReposit
         episode,
         seriesTitle: seriesDetail.title,
         artworkUrl: seriesDetail.posterUrl,
+        episodes: Object.values(seriesDetail.episodesBySeason).flat(),
         launchSource,
+        resumePolicy,
         launchPlayback,
       });
     },
@@ -223,13 +283,47 @@ export function useSearchMediaDetail(providerId: string, bundle: ProviderReposit
       }
 
       const allEpisodes = Object.values(seriesDetail.episodesBySeason).flat();
-      const episode = allEpisodes[0];
-      if (episode) {
-        await playEpisodeById(episode.id, fromBeginning ? 'play' : 'play');
+      if (fromBeginning) {
+        const first = sortEpisodesByNumber(allEpisodes)[0];
+        if (first) {
+          await playEpisodeById(first.id, 'play', 'start');
+        }
+        return;
+      }
+
+      const continueWatching = seriesLibrary.seriesContinueWatching(seriesDetail.seriesId);
+      const target = resolveSeriesContinuePlayTarget({
+        episodes: allEpisodes,
+        continueWatching,
+      });
+      if (target.episode) {
+        await playEpisodeById(
+          target.episode.id,
+          'play',
+          target.mode === 'continue' ? undefined : 'start',
+        );
       }
     },
-    [playEpisodeById, seriesDetail],
+    [playEpisodeById, seriesDetail, seriesLibrary],
   );
+
+  const continueWatchingLabel = useMemo(() => {
+    if (selection?.kind === 'movie' && selection.movie) {
+      const entry = movieLibrary.state.watchHistory.find((item) => item.movieId === selection.movie?.id);
+      return resolveContinueWatchingLabel(entry?.progressPercent, entry?.positionMs, entry?.durationMs);
+    }
+
+    if (selection?.kind === 'series' && selection.series) {
+      const continueWatching = seriesLibrary.seriesContinueWatching(selection.series.seriesId);
+      const target = resolveSeriesContinuePlayTarget({
+        episodes: seriesDetail ? Object.values(seriesDetail.episodesBySeason).flat() : [],
+        continueWatching,
+      });
+      return formatSeriesContinuePlayLabel(target);
+    }
+
+    return 'Play';
+  }, [movieLibrary.state.watchHistory, selection, seriesDetail, seriesLibrary]);
 
   const handlePlaybackClosed = useCallback(() => {
     if (reopenDetailAfterPlaybackRef.current && selection) {
@@ -268,7 +362,9 @@ export function useSearchMediaDetail(providerId: string, bundle: ProviderReposit
     closeDetail,
     closePlayback,
     retryDetail,
+    startLivePlayback,
     startMoviePlayback,
+    continueWatchingLabel,
     playFirstEpisode,
     playEpisodeById,
     setSelectedSeasonId,

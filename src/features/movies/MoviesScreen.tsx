@@ -1,7 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import type { ElementRef } from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import ReactNative, {
   AppState,
   BackHandler,
@@ -19,7 +19,6 @@ import ReactNative, {
 import { BlurView } from 'expo-blur';
 import { getSeriesPosterColumns, NovaTvShell } from '@/components/nova';
 import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
-import { isDiscoverCollectionsPending, useCatalogSyncStatus } from '@/features/hub/useCatalogSyncStatus';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
 import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
@@ -29,6 +28,13 @@ import {
   finishUnifiedPlaybackClose,
   useUnifiedPlayer,
 } from '@/features/playback/unified';
+import {
+  areMoviesBackgroundFocusablesEnabled,
+  logResumeFocus,
+  logResumeInputAudit,
+  shouldIgnoreMoviesRemoteInput,
+} from '@/features/playback/continuity/playbackResumeFocus';
+import { isPlaybackResumePromptOpen, subscribePlaybackResumePrompt } from '@/features/playback/continuity/playbackResumeGate';
 import {
   isUnifiedRemoteDebugEnabled,
   logUnifiedRemoteEvent,
@@ -66,7 +72,9 @@ import {
   createMoviesDetailPlaybackReturnTarget,
   createMoviesSearchDetailPlaybackReturnTarget,
   isMoviesPlaybackReturnToDetail,
+  logMoviesPlaybackReturn,
   MOVIES_FOCUS_STAGE4G_MARKER,
+  shouldMoviesCloseDetailOnBack,
   shouldMoviesHostHandlePlaybackBack,
   type MoviesPlaybackReturnTarget,
 } from './moviesPlaybackReturnTarget';
@@ -136,6 +144,7 @@ import {
 import {
   logMovieDetailLegacyClosePathViolation,
   logMovieDetailPopupV2Event,
+  logMoviesDetailV2FocusOwnership,
 } from './moviesDetailPopupV2';
 import { normalizePlaybackFailure } from '@/features/analytics/playbackAnalytics';
 import type { RequestTvFocusResult } from '@/features/navigation/tvFocusDiagnostics';
@@ -161,8 +170,16 @@ import {
   traceOnnMoviesScrollSample,
   wrapOnnMoviesBackHandler,
 } from '@/features/diagnostics/onnMoviesTrace';
+import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import { PLAYBACK_NOTIFICATION_DURATION_MS, PLAYBACK_NOTIFICATION_ID } from '@/features/playback/unified/unifiedPlayerLogic';
 import { SearchOverlay } from '@/features/search/SearchOverlay';
+import { DiscoverZoneOverlay } from '@/features/personalization/DiscoverZoneOverlay';
+import {
+  DISCOVERY_ZONE_ORIGIN,
+  logDiscoverZoneDetailBack,
+  logDiscoverZoneDetailOpen,
+  shouldReturnToDiscoverZone,
+} from '@/features/personalization/discoverZoneNavigation';
 import { searchMovies } from '@/features/search/repositories/movieSearchRepository';
 import { resolveMoviesSearchDatasource } from '@/features/search/moviesSearchDatasource';
 import { runMoviesSearchPerfProbeOnce } from '@/features/search/moviesSearchPerfProbe';
@@ -187,6 +204,7 @@ import type { SearchResult } from '@/features/search/searchTypes';
 import {
   getMoviesBrowseListRevision,
   getMoviesOnnTraceSnapshot,
+  resetMoviesBrowsePresentationLatches,
   setMoviesBrowseUiFrozenForDetail,
   setMoviesDetailOpenForDiagnostics,
   setMoviesOnnTraceSnapshot,
@@ -281,7 +299,9 @@ type MoviesTvEventPayload = {
 
 function noopUseMoviesTvEventHandler(_handler: (event: MoviesTvEventPayload) => void) {}
 
-console.info('[NovaCast Movies Diagnostics Build] ' + JSON.stringify({ version: 'movies-detail-focus-lifecycle-v1' }));
+if (isNovaCastTraceLoggingEnabled()) {
+  console.info('[NovaCast Movies Diagnostics Build] ' + JSON.stringify({ version: 'movies-detail-focus-lifecycle-v1' }));
+}
 
 export function MoviesScreen() {
   const router = useRouter();
@@ -292,12 +312,18 @@ export function MoviesScreen() {
   const { selectedProvider, selectedProviderLabel } = useProviderStore();
   const { bundle } = useActiveProviderBundle();
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
-  const catalogSyncPhase = useCatalogSyncStatus(activeProviderId);
-  const discoverStatusMessage = isDiscoverCollectionsPending(catalogSyncPhase)
-    ? 'Preparing Features collections…'
-    : null;
+  const [discoverZoneOpen, setDiscoverZoneOpen] = useState(() => Boolean(getMoviesScreenMemory(activeProviderId).openDiscoverZone));
+  const [discoverZoneRestoreItemId, setDiscoverZoneRestoreItemId] = useState<string | null>(null);
+  const detailLaunchOriginRef = useRef<'browse' | 'search' | typeof DISCOVERY_ZONE_ORIGIN>('browse');
   const moviesMemory = getMoviesScreenMemory(activeProviderId);
   const library = useMovieLibraryStore(activeProviderId);
+  useEffect(() => {
+    if (!getMoviesScreenMemory(activeProviderId).openDiscoverZone) {
+      return;
+    }
+    rememberMoviesScreenMemory(activeProviderId, { openDiscoverZone: false });
+    setDiscoverZoneOpen(true);
+  }, [activeProviderId]);
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.movies.key);
   const posterRefs = useRef<
     Map<string, { instance: ElementRef<typeof View>; contentId: string; instanceToken: string; renderedIndex: number }>
@@ -473,7 +499,14 @@ export function MoviesScreen() {
   const [preserveXCloseFocus, setPreserveXCloseFocus] = useState(false);
   const [xCloseActivationLocked, setXCloseActivationLocked] = useState(false);
   const gridGateOpenRef = useRef<boolean | null>(null);
-  const playbackUiActive = playbackActive || playbackClosing || launchingPlayback;
+  const resumeBackgroundFocusLoggedRef = useRef(false);
+  const resumePromptOpen = useSyncExternalStore(
+    subscribePlaybackResumePrompt,
+    isPlaybackResumePromptOpen,
+    isPlaybackResumePromptOpen,
+  );
+  const playbackUiActive = playbackActive || playbackClosing || launchingPlayback || resumePromptOpen;
+  const backgroundTvFocusEnabled = areMoviesBackgroundFocusablesEnabled(resumePromptOpen);
   // Stage 4.2M: guest overlay — no multi-phase closing / isolation handoff.
   const detailClosing = MOVIES_SIMPLE_DETAIL_OVERLAY_ENABLED
     ? false
@@ -524,7 +557,8 @@ export function MoviesScreen() {
     areMoviesChromeNormallyFocusable(detailFocusPhase) &&
     !detailOpen &&
     !playbackUiActive &&
-    !postRestoreActive;
+    !postRestoreActive &&
+    backgroundTvFocusEnabled;
   const toolbarSearchPreferredAllowed = shouldAllowMoviesToolbarSearchPreferredFocus({
     detailPhase: detailFocusPhase,
     detailOpen,
@@ -1182,6 +1216,18 @@ export function MoviesScreen() {
   };
   const useTVEventHandler = reactNativeTv.useTVEventHandler ?? noopUseMoviesTvEventHandler;
   useTVEventHandler((event: MoviesTvEventPayload) => {
+    const resumePromptOpenNow = isPlaybackResumePromptOpen();
+    if (shouldIgnoreMoviesRemoteInput(resumePromptOpenNow)) {
+      logResumeInputAudit({
+        eventType: event.eventType,
+        resumePromptOpen: true,
+        moviesRemoteHandlerReceived: true,
+        categoryHandlerReceived: false,
+        categoryIndexBefore: selectedCategoryId,
+        categoryIndexAfter: selectedCategoryId,
+      });
+      return;
+    }
     if (!postRestoreLatchRef.current?.postRestoreActive) {
       return;
     }
@@ -1243,6 +1289,7 @@ export function MoviesScreen() {
           releaseReason: 'unmount',
         });
       }
+      resetMoviesBrowsePresentationLatches();
     };
   }, []);
 
@@ -2004,7 +2051,7 @@ export function MoviesScreen() {
   );
 
   const handleSelectMovie = useCallback(
-    (movie: Parameters<typeof selectMovie>[0]) => {
+    (movie: Parameters<typeof selectMovie>[0], origin: 'browse' | typeof DISCOVERY_ZONE_ORIGIN = 'browse') => {
       if (
         playbackLaunchInFlightRef.current ||
         launchingPlayback ||
@@ -2040,6 +2087,7 @@ export function MoviesScreen() {
       };
       setDetailSource('browse');
       detailSourceRef.current = 'browse';
+      detailLaunchOriginRef.current = origin;
       selectMovie(movie);
       detailOpenRef.current = true;
       const detailPromise = loadMovieDetail(movie, { origin: 'browse' });
@@ -2070,8 +2118,15 @@ export function MoviesScreen() {
       setV2CloseFocusTargetId(null);
       logMovieDetailPopupV2Event('movie_detail_popup_v2_active', {
         movieId: movie.id,
-        origin: 'browse',
+        origin,
       });
+      if (shouldReturnToDiscoverZone(origin)) {
+        logDiscoverZoneDetailOpen({
+          mediaType: 'movie',
+          itemId: movie.id,
+          origin: DISCOVERY_ZONE_ORIGIN,
+        });
+      }
       if (isOnnMoviesTraceEnabled()) {
         const snap = browseFocusSnapshotRef.current;
         traceOnnMoviesEvent('Overlay', 'detail_close_browse_frozen', {
@@ -2117,6 +2172,26 @@ export function MoviesScreen() {
         actuallyFocusedMovieId: movie.id,
         highlightVisible: true,
         overlayMounted: true,
+      });
+      logMoviesDetailV2FocusOwnership({
+        phase: 'detail-open',
+        movieId: movie.id,
+        detailOpen: true,
+        focusIssued: false,
+        detailCtaHandlePresent: false,
+        focusedRegion: 'detail',
+        categoryHostFocusable: false,
+        posterHostFocusable: false,
+      });
+      logMoviesDetailV2FocusOwnership({
+        phase: 'background-focus-disabled',
+        movieId: movie.id,
+        detailOpen: true,
+        focusIssued: false,
+        detailCtaHandlePresent: false,
+        focusedRegion: 'detail',
+        categoryHostFocusable: false,
+        posterHostFocusable: false,
       });
     },
     [
@@ -2186,26 +2261,30 @@ export function MoviesScreen() {
   const handleRegisterPosterRef = useCallback((movieId: string, instance: ElementRef<typeof View> | null, instanceToken: string, renderedIndex: number) => {
     if (instance) {
       posterRefs.current.set(movieId, { instance, contentId: movieId, instanceToken, renderedIndex });
-      console.info('[NovaCast Movie Poster Ref]', {
-        action: 'register',
-        contentId: movieId,
-        instanceToken,
-        nativeTag: findNodeHandle(instance) ?? null,
-        renderedIndex,
-      });
+      if (isNovaCastTraceLoggingEnabled()) {
+        console.info('[NovaCast Movie Poster Ref]', {
+          action: 'register',
+          contentId: movieId,
+          instanceToken,
+          nativeTag: findNodeHandle(instance) ?? null,
+          renderedIndex,
+        });
+      }
       return;
     }
 
     const stored = posterRefs.current.get(movieId);
     if (stored?.instanceToken === instanceToken) {
       posterRefs.current.delete(movieId);
-      console.info('[NovaCast Movie Poster Ref]', {
-        action: 'unregister',
-        contentId: movieId,
-        instanceToken,
-        nativeTag: stored.instance ? findNodeHandle(stored.instance) ?? null : null,
-        renderedIndex,
-      });
+      if (isNovaCastTraceLoggingEnabled()) {
+        console.info('[NovaCast Movie Poster Ref]', {
+          action: 'unregister',
+          contentId: movieId,
+          instanceToken,
+          nativeTag: stored.instance ? findNodeHandle(stored.instance) ?? null : null,
+          renderedIndex,
+        });
+      }
     }
   }, []);
 
@@ -2218,13 +2297,15 @@ export function MoviesScreen() {
         stored?.contentId === contentId &&
         currentItem?.id === contentId &&
         (targetIndex == null || stored?.renderedIndex === targetIndex);
-      console.info('[NovaCast Movie Poster Ref]', {
-        action: 'request',
-        contentId,
-        instanceToken: stored?.instanceToken ?? null,
-        nativeTag: stored?.instance ? findNodeHandle(stored.instance) ?? null : null,
-        renderedIndex: stored?.renderedIndex ?? targetIndex ?? null,
-      });
+      if (isNovaCastTraceLoggingEnabled()) {
+        console.info('[NovaCast Movie Poster Ref]', {
+          action: 'request',
+          contentId,
+          instanceToken: stored?.instanceToken ?? null,
+          nativeTag: stored?.instance ? findNodeHandle(stored.instance) ?? null : null,
+          renderedIndex: stored?.renderedIndex ?? targetIndex ?? null,
+        });
+      }
       return valid ? stored!.instance : null;
     },
     [visibleMovies],
@@ -2267,6 +2348,20 @@ export function MoviesScreen() {
       });
     })();
   }, [activeProviderId, bundle?.movies, playbackUiActive]);
+
+  useEffect(() => {
+    if (resumePromptOpen) {
+      if (!resumeBackgroundFocusLoggedRef.current) {
+        resumeBackgroundFocusLoggedRef.current = true;
+        logResumeFocus('background-focus-disabled', { dialogOpen: true });
+      }
+      return;
+    }
+    if (resumeBackgroundFocusLoggedRef.current) {
+      resumeBackgroundFocusLoggedRef.current = false;
+      logResumeFocus('background-focus-restored', { dialogOpen: false });
+    }
+  }, [resumePromptOpen]);
 
   useEffect(() => {
     if (playbackActive) {
@@ -3079,11 +3174,29 @@ export function MoviesScreen() {
 
       const originItemId = detailPopup.originItemId ?? detailPopup.movie?.id ?? null;
       const fromSearch = detailSourceRef.current === 'search';
+      const fromDiscoverZone = shouldReturnToDiscoverZone(detailLaunchOriginRef.current);
 
       logMovieDetailPopupV2Event('movie_detail_popup_v2_close', {
         source,
         originItemId,
         fromSearch,
+        fromDiscoverZone,
+      });
+      if (fromDiscoverZone) {
+        logDiscoverZoneDetailBack({
+          itemId: originItemId,
+          origin: DISCOVERY_ZONE_ORIGIN,
+          destination: DISCOVERY_ZONE_ORIGIN,
+        });
+      }
+      logMoviesDetailV2FocusOwnership({
+        phase: 'detail-close',
+        movieId: originItemId,
+        detailOpen: false,
+        focusIssued: false,
+        focusedRegion: 'browse',
+        categoryHostFocusable: true,
+        posterHostFocusable: true,
       });
 
       // Immediate guest dismiss — browse stays mounted underneath.
@@ -3103,7 +3216,9 @@ export function MoviesScreen() {
       // before the poster's `postersFocusable`-gated native prop actually
       // lands, no matter how long `.focus()` is deferred.
       if (originItemId && !fromSearch) {
-        setV2CloseFocusTargetId(originItemId);
+        if (!fromDiscoverZone) {
+          setV2CloseFocusTargetId(originItemId);
+        }
       }
 
       if (fromSearch && originItemId) {
@@ -3115,40 +3230,71 @@ export function MoviesScreen() {
         setSearchReturnPending(true);
       }
 
+      // Origin poster restore runs only after Detail has actually closed.
+      // Never request browse focus while detailPopup.open is still true.
+      if (detailPopupOpenRef.current) {
+        logMoviesDetailV2FocusOwnership({
+          phase: 'unexpected-background-focus',
+          movieId: originItemId,
+          detailOpen: true,
+          focusIssued: false,
+          focusedRegion: 'origin-restore-while-open',
+          categoryHostFocusable: false,
+          posterHostFocusable: false,
+        });
+        detailPopupCloseInFlightRef.current = false;
+        return;
+      }
+
       // At most one safe origin focus request after close. Never keep the
       // popup open waiting, never reopen, never send focus through Search.
       if (originItemId && !fromSearch) {
-        // A short double-rAF defer still gives the native bridge time to
-        // attach/mount the poster view before `.focus()` runs; the force-
-        // focusable flag above (not this defer) is what fixes the Search
-        // steal, since it makes the poster focusable from the very first
-        // post-close render instead of waiting on `postersFocusable`.
-        requestAnimationFrame(() => {
+        if (!fromDiscoverZone) {
+          // A short double-rAF defer still gives the native bridge time to
+          // attach/mount the poster view before `.focus()` runs; the force-
+          // focusable flag above (not this defer) is what fixes the Search
+          // steal, since it makes the poster focusable from the very first
+          // post-close render instead of waiting on `postersFocusable`.
           requestAnimationFrame(() => {
-            requestTvFocus({
-              screen: 'movies',
-              source: 'MoviesScreen',
-              region: 'poster-grid',
-              itemId: originItemId,
-              reason: 'stage4n-restore-origin-poster',
-              maxFrames: 3,
-              isActive: () => !detailPopupOpenRef.current,
-              getTarget: () => getValidatedPosterTarget(originItemId),
-              onResult: (result: RequestTvFocusResult) => {
-                logMovieDetailPopupV2Event('movie_detail_popup_v2_origin_focus_result', {
-                  originItemId,
-                  requested: result.requested,
-                  reason: result.reason,
-                });
-                setV2CloseFocusTargetId((current) => (current === originItemId ? null : current));
-              },
+            requestAnimationFrame(() => {
+              requestTvFocus({
+                screen: 'movies',
+                source: 'MoviesScreen',
+                region: 'poster-grid',
+                itemId: originItemId,
+                reason: 'stage4n-restore-origin-poster',
+                maxFrames: 3,
+                isActive: () => !detailPopupOpenRef.current,
+                getTarget: () => getValidatedPosterTarget(originItemId),
+                onResult: (result: RequestTvFocusResult) => {
+                  logMovieDetailPopupV2Event('movie_detail_popup_v2_origin_focus_result', {
+                    originItemId,
+                    requested: result.requested,
+                    reason: result.reason,
+                  });
+                  if (result.requested && !detailPopupOpenRef.current) {
+                    logMoviesDetailV2FocusOwnership({
+                      phase: 'origin-focus-restored',
+                      movieId: originItemId,
+                      detailOpen: false,
+                      focusIssued: true,
+                      focusedRegion: 'poster-grid',
+                      categoryHostFocusable: true,
+                      posterHostFocusable: true,
+                    });
+                  }
+                  setV2CloseFocusTargetId((current) => (current === originItemId ? null : current));
+                },
+              });
             });
           });
-        });
+        }
       } else if (!fromSearch) {
-        logMovieDetailPopupV2Event('movie_detail_popup_v2_origin_focus_skipped', {
-          reason: 'origin-missing',
-        });
+        if (!fromDiscoverZone) {
+          logMovieDetailPopupV2Event('movie_detail_popup_v2_origin_focus_skipped', {
+            reason: 'origin-missing',
+          });
+        }
       }
 
       detailPopupCloseInFlightRef.current = false;
@@ -3810,14 +3956,8 @@ export function MoviesScreen() {
     const onHardwareBackPress = wrapOnnMoviesBackHandler(
       'movies-screen',
       () => {
-        // Stage 4.2N: MovieDetailPopupV2 owns Back while it is visible. This
-        // guard is deliberately at the very top of the legacy handler (rather
-        // than relying on BackHandler listener registration order, which can
-        // flip whenever this effect's many other dependencies change after
-        // the popup opens) so the popup always wins regardless of order.
-        if (detailPopupOpenRef.current) {
-          closeMovieDetailPopupV2('back');
-          return true;
+        if (isPlaybackResumePromptOpen()) {
+          return false;
         }
 
         if (guide.visible) {
@@ -3867,9 +4007,21 @@ export function MoviesScreen() {
           return true;
         }
 
-        // Stage 4.2N: MovieDetailPopupV2's own dedicated Back handler (registered
-        // below, after this effect) consumes Back while the popup is open. This
-        // handler no longer runs any Movie Detail close path.
+        // One layer per press: resume and player must win before Detail.
+        if (
+          shouldMoviesCloseDetailOnBack({
+            resumeDialogOpen: resumePromptOpen,
+            playbackActive,
+            playbackClosing,
+            launchingPlayback,
+            detailPopupOpen: detailPopupOpenRef.current,
+            didJustClose,
+            detailSuppressedForPlayback,
+          })
+        ) {
+          closeMovieDetailPopupV2('back');
+          return true;
+        }
 
         if (searchOpen) {
           closeSearch();
@@ -3931,11 +4083,14 @@ export function MoviesScreen() {
     closePlayback,
     closeSearch,
     detailOpen,
+    detailSuppressedForPlayback,
+    didJustClose,
     guide.visible,
     launchingPlayback,
     loadStatus,
     playbackActive,
     playbackClosing,
+    resumePromptOpen,
     router,
     searchOpen,
     selectedCategoryId,
@@ -3957,6 +4112,16 @@ export function MoviesScreen() {
       return;
     }
     const onPopupBackPress = () => {
+      if (
+        isPlaybackResumePromptOpen() ||
+        playbackActive ||
+        playbackClosing ||
+        launchingPlayback ||
+        didJustClose ||
+        detailSuppressedForPlayback
+      ) {
+        return false;
+      }
       if (detailPopup.open) {
         closeMovieDetailPopupV2('back');
         return true;
@@ -3965,7 +4130,15 @@ export function MoviesScreen() {
     };
     const subscription = BackHandler.addEventListener('hardwareBackPress', onPopupBackPress);
     return () => subscription.remove();
-  }, [closeMovieDetailPopupV2, detailPopup.open]);
+  }, [
+    closeMovieDetailPopupV2,
+    detailPopup.open,
+    detailSuppressedForPlayback,
+    didJustClose,
+    launchingPlayback,
+    playbackActive,
+    playbackClosing,
+  ]);
 
   useEffect(() => {
     if (!didJustClose) {
@@ -4002,7 +4175,20 @@ export function MoviesScreen() {
       detailOpenRef.current = true;
       setDetailOpen(true);
       setDetailFocusPhaseSafe('detail-open');
+      const restoredMovie = selectedMovieRef.current;
+      if (restoredMovie && restoredMovie.id === returnTarget.movieId) {
+        detailPopupOpenRef.current = true;
+        setDetailPopup({ open: true, movie: restoredMovie, originItemId: restoredMovie.id });
+        setMoviesBrowseUiFrozenForDetail(true);
+      }
       isRestoringPlaybackFocusRef.current = false;
+      logMoviesPlaybackReturn({
+        origin: returnTarget.kind,
+        movieId: returnTarget.movieId,
+        detailWasOpen: true,
+        detailRestored: Boolean(restoredMovie && restoredMovie.id === returnTarget.movieId),
+        focusTarget: returnTarget.detailFocusTarget,
+      });
       if (returnTarget.kind === 'search-detail') {
         setSearchPhase('detail-open');
         searchPhaseRef.current = 'detail-open';
@@ -4036,6 +4222,13 @@ export function MoviesScreen() {
     }
 
     if (returnTarget?.kind === 'browse') {
+      logMoviesPlaybackReturn({
+        origin: 'browse',
+        movieId: returnTarget.movieId,
+        detailWasOpen: false,
+        detailRestored: false,
+        focusTarget: null,
+      });
       if (isOnnMoviesTraceEnabled()) {
         traceOnnMoviesEvent('Playback', 'playback_returning_to_browse', {
           movieId: returnTarget.movieId,
@@ -4379,7 +4572,7 @@ export function MoviesScreen() {
           searchQuery: searchQueryForSelectionRef.current,
           detailFocusTarget: 'play',
         });
-      } else if (detailOpenRef.current) {
+      } else if (detailOpenRef.current || detailPopupOpenRef.current) {
         playbackReturnTargetRef.current = createMoviesDetailPlaybackReturnTarget({
           movieId: currentMovie.id,
           categoryId: selectedCategoryId,
@@ -4422,6 +4615,12 @@ export function MoviesScreen() {
           artworkUrl: currentMovie.posterUrl,
           isLive: false,
           providerId: activeProviderId,
+          containerExtension:
+            matchingDetail?.containerExtension ?? currentMovie.containerExtension,
+          videoCodec: matchingDetail?.videoCodec,
+          videoWidth: matchingDetail?.videoWidth,
+          videoHeight: matchingDetail?.videoHeight,
+          directSourceUrl: matchingDetail?.directSource,
         },
         {
           launchSource: 'play',
@@ -4548,6 +4747,7 @@ export function MoviesScreen() {
 
       setDetailSource('search');
       detailSourceRef.current = 'search';
+      detailLaunchOriginRef.current = 'search';
       searchQueryForSelectionRef.current = meta.searchQuery;
       setSearchRestoreMovieId(meta.searchFocusedMovieId);
       selectMovie(movie);
@@ -4600,6 +4800,26 @@ export function MoviesScreen() {
         actuallyFocusedMovieId: movie.id,
         highlightVisible: true,
         overlayMounted: true,
+      });
+      logMoviesDetailV2FocusOwnership({
+        phase: 'detail-open',
+        movieId: movie.id,
+        detailOpen: true,
+        focusIssued: false,
+        detailCtaHandlePresent: false,
+        focusedRegion: 'detail',
+        categoryHostFocusable: false,
+        posterHostFocusable: false,
+      });
+      logMoviesDetailV2FocusOwnership({
+        phase: 'background-focus-disabled',
+        movieId: movie.id,
+        detailOpen: true,
+        focusIssued: false,
+        detailCtaHandlePresent: false,
+        focusedRegion: 'detail',
+        categoryHostFocusable: false,
+        posterHostFocusable: false,
       });
       return true;
     },
@@ -4811,6 +5031,16 @@ export function MoviesScreen() {
 
   const handleSelectCategory = useCallback(
     (categoryId: string) => {
+      if (isPlaybackResumePromptOpen()) {
+        logResumeInputAudit({
+          eventType: 'select',
+          resumePromptOpen: true,
+          categoryHandlerReceived: true,
+          categoryIndexBefore: selectedCategoryId,
+          categoryIndexAfter: selectedCategoryId,
+        });
+        return;
+      }
       moviesRetryAttemptedRef.current = false;
       categoryFocusPendingRef.current = categoryId;
       setRestoringBrowseFocus(true);
@@ -4824,7 +5054,7 @@ export function MoviesScreen() {
       });
       selectCategory(categoryId);
     },
-    [selectCategory],
+    [selectCategory, selectedCategoryId],
   );
 
 
@@ -4965,8 +5195,13 @@ useEffect(() => {
   }, [library.state.watchHistory, selectedMovie]);
 
   const continueWatchingLabel = useMemo(
-    () => resolveContinueWatchingLabel(continueWatchingEntry?.progressPercent),
-    [continueWatchingEntry?.progressPercent],
+    () =>
+      resolveContinueWatchingLabel(
+        continueWatchingEntry?.progressPercent,
+        continueWatchingEntry?.positionMs,
+        continueWatchingEntry?.durationMs,
+      ),
+    [continueWatchingEntry?.durationMs, continueWatchingEntry?.positionMs, continueWatchingEntry?.progressPercent],
   );
 
   const relatedMovies = useMemo(() => {
@@ -5189,7 +5424,10 @@ useEffect(() => {
   }
 
   const postersFocusable =
-    areMoviesPostersNormallyFocusable(detailFocusPhase) && !playbackUiActive && !searchBlocksBrowse;
+    areMoviesPostersNormallyFocusable(detailFocusPhase) &&
+    !playbackUiActive &&
+    !searchBlocksBrowse &&
+    backgroundTvFocusEnabled;
   const restoreToken = detailFocusTokenRef.current;
 
   // Stage 3E.3: single primary/pagination loader trees (absolute overlays inside listStage).
@@ -5258,7 +5496,7 @@ useEffect(() => {
           gridEmpty: visibleMovies.length === 0,
         })}
         suppressNavbarPreferredFocus={navbarPreferredSuppressed}
-        navigationFocusable={chromeFocusable && !searchBlocksBrowse}
+        navigationFocusable={chromeFocusable && !searchBlocksBrowse && backgroundTvFocusEnabled}
         compactNavigationRail>
         <View style={styles.screen}>
           <View style={styles.topBar}>
@@ -5267,7 +5505,7 @@ useEffect(() => {
               <Text style={styles.copy}>Thousands of movies. Any genre. Anytime.</Text>
             </View>
             <MovieToolbar
-              focusable={chromeFocusable && !searchBlocksBrowse}
+              focusable={chromeFocusable && !searchBlocksBrowse && backgroundTvFocusEnabled}
               hasTVPreferredFocus={false}
               onSearchFocus={() => {
                 // Stage 4.2L.2: Search may log unexpected focus but must NEVER call
@@ -5380,6 +5618,13 @@ useEffect(() => {
                   blockedReason: null,
                 });
               }}
+              onDiscoverPress={() => {
+                if (searchOpen) {
+                  closeSearch();
+                }
+                setDiscoverZoneOpen(true);
+              }}
+              discoverZoneOpen={discoverZoneOpen}
             />
           </View>
 
@@ -5395,8 +5640,7 @@ useEffect(() => {
                     : null
               }
               suppressPreferredFocus={categoryPreferredSuppressed}
-              focusable={chromeFocusable && !searchBlocksBrowse}
-              discoverStatusMessage={discoverStatusMessage}
+              focusable={chromeFocusable && !searchBlocksBrowse && backgroundTvFocusEnabled}
               railInstanceId={railInstanceIdRef.current}
               onSelectCategory={handleSelectCategory}
               onPrefetchCategoryCount={prefetchCategoryCount}
@@ -5417,7 +5661,7 @@ useEffect(() => {
               {/* Stage 3B.2 focus anchor — separate from Stage 3E/3E.1 visual loaders. */}
               {primaryLoaderMode === 'initial' ? (
                 <Pressable
-                  focusable
+                  focusable={backgroundTvFocusEnabled && !detailOpen && !playbackUiActive}
                   hasTVPreferredFocus={
                     !focusSuppressionActive &&
                     !detailClosing &&
@@ -5469,7 +5713,7 @@ useEffect(() => {
                     isDiscover={isDiscoverCategory}
                     sortFocusLeftHandle={categoryFocusLeftHandle}
                     onSortFocusHandleReady={setSortFocusRightHandle}
-                    sortFocusable={chromeFocusable && !searchBlocksBrowse}
+                    sortFocusable={chromeFocusable && !searchBlocksBrowse && backgroundTvFocusEnabled}
                     loadMore={handleLoadMore}
                     restoreMovieId={restoreToken?.snapshot.movieId ?? null}
                     restoreMovieIndex={restoreToken?.snapshot.movieIndex ?? null}
@@ -5542,6 +5786,25 @@ useEffect(() => {
       />
         </>
 
+      <DiscoverZoneOverlay
+        visible={discoverZoneOpen && !playbackUiActive && !detailPopup.open}
+        retainMounted={discoverZoneOpen}
+        restoreFocusItemId={discoverZoneRestoreItemId}
+        providerId={activeProviderId}
+        scope="movies"
+        onClose={() => {
+          detailLaunchOriginRef.current = 'browse';
+          setDiscoverZoneRestoreItemId(null);
+          setDiscoverZoneOpen(false);
+        }}
+        onSelectItem={(item) => {
+          if (!item.canonicalMovie) {
+            return;
+          }
+          setDiscoverZoneRestoreItemId(item.id);
+          handleSelectMovie(item.canonicalMovie, DISCOVERY_ZONE_ORIGIN);
+        }}
+      />
       <SearchOverlay
         visible={searchOverlayVisible && !playbackUiActive}
         // Keep Search controller/results alive across Detail + playback (no Modal while hidden).

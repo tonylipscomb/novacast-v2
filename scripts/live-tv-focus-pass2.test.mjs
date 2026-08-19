@@ -5,12 +5,17 @@ import {
   applyDebouncedPreview,
   chooseLiveChannel,
   createInitialLiveTvState,
+  createLiveTvLandingState,
   focusLiveChannel,
+  resolveLivePreview,
+  selectLiveCategory,
+  surfLiveFullscreenChannel,
 } from '../src/features/live/liveTvLogic.ts';
 import {
   LIVE_TV_PREVIEW_FOCUS_DEBOUNCE_MS,
   shouldApplyDebouncedPreviewTune,
   shouldLoadCategoryOnFocusAlone,
+  shouldSchedulePreviewOnFocus,
   shouldSkipPreviewRestart,
   shouldStartPreviewImmediatelyOnFocus,
 } from '../src/features/live/liveTvFocusPreview.ts';
@@ -51,11 +56,71 @@ const SAMPLE = {
 
 test('channel focus does not immediately start preview', () => {
   assert.equal(shouldStartPreviewImmediatelyOnFocus(), false);
+  assert.equal(shouldSchedulePreviewOnFocus(), false);
   const initial = createInitialLiveTvState('cat-1', 'chan-1');
   const focused = focusLiveChannel({ ...initial, previewStatus: 'ready' }, 'chan-2');
   assert.equal(focused.selectedChannelId, 'chan-1');
   assert.equal(focused.previewChannelId, 'chan-1');
   assert.equal(focused.previewStatus, 'ready');
+  assert.equal(focused.previewConfirmedChannelId, 'chan-1');
+});
+
+test('Live TV landing does not auto-start preview', () => {
+  const landing = createLiveTvLandingState('cat-1', 'chan-1');
+  assert.equal(landing.selectedChannelId, 'chan-1');
+  assert.equal(landing.previewChannelId, null);
+  assert.equal(landing.previewStatus, 'idle');
+  assert.equal(landing.previewConfirmedChannelId, null);
+  assert.equal(landing.previewRequestId, 0);
+});
+
+test('category selection does not start or switch preview', () => {
+  const previewing = {
+    ...createLiveTvLandingState('cat-1', 'chan-1'),
+    previewChannelId: 'chan-1',
+    previewStatus: 'ready',
+    previewConfirmedChannelId: 'chan-1',
+    previewRequestId: 3,
+  };
+  const next = selectLiveCategory(previewing, 'cat-2', 'chan-9');
+  assert.equal(next.selectedCategoryId, 'cat-2');
+  assert.equal(next.selectedChannelId, 'chan-9');
+  assert.equal(next.previewChannelId, 'chan-1');
+  assert.equal(next.previewStatus, 'ready');
+  assert.equal(next.previewConfirmedChannelId, 'chan-1');
+  assert.equal(next.previewRequestId, 3);
+});
+
+test('fullscreen channel surf keeps the player open and retunes', () => {
+  const ready = {
+    ...createLiveTvLandingState('cat-1', 'chan-1'),
+    previewChannelId: 'chan-1',
+    previewStatus: 'ready',
+    previewConfirmedChannelId: 'chan-1',
+    previewRequestId: 2,
+    fullscreenChannelId: 'chan-1',
+  };
+  const surfed = surfLiveFullscreenChannel(ready, 'chan-2');
+  assert.equal(surfed.fullscreenChannelId, 'chan-2');
+  assert.equal(surfed.previewChannelId, 'chan-2');
+  assert.equal(surfed.previewStatus, 'loading');
+  assert.equal(surfed.previewRequestId, 3);
+});
+
+test('first OK starts preview and second OK on the same ready preview enters fullscreen', () => {
+  const landing = createLiveTvLandingState('cat-1', 'chan-1');
+  const firstOk = chooseLiveChannel(landing, 'chan-1');
+  assert.equal(firstOk.previewChannelId, 'chan-1');
+  assert.equal(firstOk.previewStatus, 'loading');
+  assert.equal(firstOk.fullscreenChannelId, null);
+
+  const ready = resolveLivePreview(firstOk, firstOk.previewRequestId, 'chan-1', 'ready');
+  const focusedAway = focusLiveChannel(ready, 'chan-2');
+  assert.equal(focusedAway.previewChannelId, 'chan-1');
+  assert.equal(focusedAway.previewConfirmedChannelId, 'chan-1');
+
+  const secondOk = chooseLiveChannel(focusedAway, 'chan-1');
+  assert.equal(secondOk.fullscreenChannelId, 'chan-1');
 });
 
 test('preview debounce is 300ms and applies only while still focused', () => {

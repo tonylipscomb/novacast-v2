@@ -68,7 +68,7 @@ export function normalizeCode(value: string) {
 }
 
 export function normalizeProviderUrl(value: string) {
-  const trimmed = value.trim().replace(/\/+$/, '');
+  const trimmed = value.trim().replace(/\/+$/, '').replace(/\/(?:player|panel)_api\.php$/i, '');
   let url: URL;
   try {
     url = new URL(trimmed);
@@ -77,7 +77,7 @@ export function normalizeProviderUrl(value: string) {
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('invalid_provider_url');
   if (url.username || url.password || url.search || url.hash) throw new Error('invalid_provider_url');
-  if (['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname)) throw new Error('unsafe_provider_target');
+  if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(url.hostname.toLowerCase())) throw new Error('unsafe_provider_target');
   return url.toString().replace(/\/$/, '');
 }
 

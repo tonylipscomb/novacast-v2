@@ -85,6 +85,11 @@ export async function streamXtreamCategoryDecode(
     timeoutMs: input.timeoutMs ?? 90_000,
     providerId: input.providerId,
     expectedProviderId: input.expectedProviderId ?? input.providerId,
+    generation: input.generation,
+    categoryIndex: input.categoryIndex,
+    categoryPosition: input.categoryPosition,
+    totalCategoryCount: input.totalCategoryCount,
+    requestAttempt: input.requestAttempt ?? 1,
   });
 
   let matched = 0;
@@ -92,6 +97,7 @@ export async function streamXtreamCategoryDecode(
   let maxBatchSize = 0;
   let lastStats: CatalogDecodeBatchStats = {};
   let cancelled = false;
+  const startedAt = Date.now();
 
   try {
     while (true) {
@@ -105,6 +111,41 @@ export async function streamXtreamCategoryDecode(
       lastStats = batch.stats ?? lastStats;
 
       if (batch.error && batch.error !== 'job_missing') {
+        if (input.mediaType === 'movie') {
+          console.info('[NovaCast Movie Decode Audit]', {
+            generation: input.generation ?? null,
+            categoryIndex: input.categoryIndex ?? null,
+            categoryId: input.filterCategoryId,
+            categoryPosition: input.categoryPosition ?? null,
+            totalCategoryCount: input.totalCategoryCount ?? null,
+            requestAttempt: input.requestAttempt ?? 1,
+            responseTopLevelType: batch.stats?.responseTopLevelType ?? null,
+            arrayLength: batch.stats?.arrayLength ?? null,
+            objectKeyNames: batch.stats?.responseKeys ?? [],
+            decoderResult: batch.error,
+            errorCode: batch.error,
+            errorReason: batch.stats?.errorReason ?? null,
+            durationMs: Date.now() - startedAt,
+          });
+        } else if (input.mediaType === 'series') {
+          console.info('[NovaCast Series Decoder Audit]', {
+            event: 'decoder-failed',
+            generation: input.generation ?? null,
+            categoryIndex: input.categoryIndex ?? null,
+            categoryId: input.filterCategoryId,
+            categoryPosition: input.categoryPosition ?? null,
+            totalCategoryCount: input.totalCategoryCount ?? null,
+            requestAttempt: input.requestAttempt ?? 1,
+            decoderStage: 'native-pull-batch',
+            exceptionClass: 'NativeCatalogDecodeError',
+            exceptionMessage: batch.error,
+            sanitizerRepairCount: batch.stats?.sanitizerRepairCount ?? 0,
+            fieldName: null,
+            valueLength: null,
+            valuePreviewSanitized: null,
+            durationMs: Date.now() - startedAt,
+          });
+        }
         await mod.cancelDecodeJob(start.jobId).catch(() => undefined);
         throw new Error(batch.error);
       }

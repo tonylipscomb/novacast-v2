@@ -19,8 +19,9 @@ import {
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
 } from '../../catalog/catalogRepository.ts';
-import type { CatalogItemRecord, CatalogItemSort } from '../../catalog/catalogTypes.ts';
+import type { CatalogItemRecord } from '../../catalog/catalogTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
+import { mapContentSortToCatalogSort } from '../../media-browser/contentSortMapping.ts';
 import type { MediaCategory, SeriesDetail, SeriesSummary } from '../../media-browser/mediaTypes.ts';
 import { getOfflineSnapshot } from '../../resilience/offlineStatus.ts';
 import { emitSeriesSqliteEvent } from '../seriesDiagnostics.ts';
@@ -37,23 +38,8 @@ export class SeriesCatalogNotReadyError extends Error {
   }
 }
 
-function mapSort(sort: ContentSortOption | undefined): CatalogItemSort {
-  switch (sort) {
-    case 'oldest':
-      return 'oldest';
-    case 'title-desc':
-      return 'title-desc';
-    case 'rating-desc':
-      return 'rating';
-    case 'popularity-desc':
-    case 'recently-added':
-      return 'provider';
-    case 'title-asc':
-      return 'title';
-    case 'newest':
-    default:
-      return 'newest';
-  }
+function mapSort(sort: ContentSortOption | undefined) {
+  return mapContentSortToCatalogSort(sort);
 }
 
 function mapCatalogItemToSeries(item: CatalogItemRecord): SeriesSummary {
@@ -65,7 +51,10 @@ function mapCatalogItemToSeries(item: CatalogItemRecord): SeriesSummary {
     title: item.title,
     year: item.releaseYear != null ? String(item.releaseYear) : undefined,
     rating: item.rating != null ? String(item.rating) : undefined,
+    addedAt: item.addedAt ?? undefined,
+    popularity: item.popularity ?? undefined,
     releaseDate: item.releaseDate ?? undefined,
+    providerSortOrder: item.providerSortOrder ?? undefined,
     description: item.description ?? undefined,
     genres: [],
     posterStyleKey: 'ember',
@@ -146,7 +135,7 @@ export function createSqliteSeriesDataSource(
         if (!bundle || bundle.providerId !== pid) {
           return;
         }
-        void bundle.syncCatalog();
+        void bundle.syncCatalog('series-sparse-repair');
       });
     });
 

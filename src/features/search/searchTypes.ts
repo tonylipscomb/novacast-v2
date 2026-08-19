@@ -32,7 +32,9 @@ export type LiveSearchResult = SearchResultBase & {
   logoUrl?: string;
   tone?: string;
   categoryId?: string;
+  categoryName?: string;
   currentProgram?: string;
+  containerExtension?: string;
 };
 
 export type MovieSearchResult = SearchResultBase & {

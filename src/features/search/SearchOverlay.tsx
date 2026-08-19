@@ -1,11 +1,20 @@
 import type { ComponentType, ReactNode } from 'react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
-import { BackHandler, findNodeHandle, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { BackHandler, findNodeHandle, Keyboard, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
+import {
+  decideLiveSearchOverlayBack,
+  getLastLiveSearchBackConsumedAtMs,
+  getLiveSearchOverlayCloseSuppressedUntilMs,
+  logLiveSearchBack,
+  markLiveSearchBackConsumed,
+  suppressLiveSearchOverlayClose,
+} from '@/features/live/liveTvSearchSession';
+import { patchLiveTvWorkload } from '@/features/live/liveTvWorkload';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
 
@@ -18,6 +27,7 @@ import { SearchPosterGrid } from './SearchPosterGrid';
 import { SearchResults } from './SearchResults';
 import { TvSearchKeyboard } from './TvSearchKeyboard';
 import { logSearchEvent } from './searchDiagnostics';
+import { createSearchInputActivationGate } from './searchInputActivation';
 import {
   cancelMoviesSearchResultFocus,
   getMoviesSearchResultTargetRef,
@@ -51,6 +61,8 @@ type SearchOverlayProps = {
   retainMounted?: boolean;
   /** After returning from Detail, focus this movie result once. */
   restoreFocusMovieId?: string | null;
+  /** After returning from Live fullscreen, focus this live channel result once. */
+  restoreFocusLiveChannelId?: string | null;
   onRestoreFocusHandled?: () => void;
   scope: Exclude<SearchScope, 'all'>;
   providerId: string;
@@ -63,6 +75,7 @@ type SearchOverlayProps = {
   onSelectResult: (result: SearchResult) => void;
   onQueryCommitted?: (query: string) => void;
   pageSize?: number;
+  favoriteContentIds?: ReadonlySet<string>;
 };
 
 /** Avoid mounting search hooks while the overlay is closed — prevents idle reset loops. */
@@ -78,6 +91,7 @@ function SearchOverlayContent({
   visible,
   retainMounted = false,
   restoreFocusMovieId = null,
+  restoreFocusLiveChannelId = null,
   onRestoreFocusHandled,
   scope,
   providerId,
@@ -89,10 +103,12 @@ function SearchOverlayContent({
   onSelectResult,
   onQueryCommitted,
   pageSize = 50,
+  favoriteContentIds,
 }: SearchOverlayProps) {
   const inputRef = useRef<TextInput>(null);
   const searchShellRef = useRef<View | null>(null);
   const closeButtonRef = useRef<View | null>(null);
+  const restoreRowRef = useRef<View | null>(null);
   const focusConfirmedRef = useRef(false);
   const initialFocusRequestedRef = useRef(false);
   const closeOwnsFocusRef = useRef(false);
@@ -195,6 +211,10 @@ function SearchOverlayContent({
     if (shouldReclaimSearchFromClose(focusConfirmedRef.current)) {
       return;
     }
+    // Initial overlay landing prefers the Search field. Ignore Close stealing first native focus.
+    if (preferSearchFocusRef.current && !focusConfirmedRef.current) {
+      return;
+    }
 
     closeOwnsFocusRef.current = true;
     setCloseFocused(true);
@@ -202,8 +222,17 @@ function SearchOverlayContent({
     confirmOverlayFocus('close');
   }, [confirmOverlayFocus]);
 
+  const imeArmGateRef = useRef(createSearchInputActivationGate());
   const handleKeyboardActivate = useCallback(() => {
+    const arm = imeArmGateRef.current.tryArm();
+    if (arm === 'duplicate-suppressed') {
+      logSearchEvent('search_input_ime_armed_duplicate_suppressed', { scope });
+      return;
+    }
     imeVisibleRef.current = true;
+    if (scope === 'live') {
+      patchLiveTvWorkload({ searchImeActive: true }, { log: true, reason: 'search-ime-armed' });
+    }
     logSearchEvent('search_input_ime_armed', { scope });
   }, [scope]);
 
@@ -231,6 +260,21 @@ function SearchOverlayContent({
     executeSearch,
     onQueryCommitted,
   });
+
+  useEffect(() => {
+    if (scope !== 'live') {
+      return;
+    }
+    patchLiveTvWorkload(
+      visible
+        ? { searchOverlayVisible: true }
+        : { searchOverlayVisible: false, searchImeActive: false },
+      { log: true, reason: visible ? 'search-overlay-open' : 'search-overlay-close' },
+    );
+    if (!visible) {
+      imeArmGateRef.current.reset();
+    }
+  }, [scope, visible]);
 
   useEffect(() => {
     if (scope !== 'movie') {
@@ -333,6 +377,37 @@ function SearchOverlayContent({
   }, [onRestoreFocusHandled, restoreFocusMovieId, scope, visible]);
 
   useEffect(() => {
+    if (!visible || !restoreFocusLiveChannelId || scope !== 'live') {
+      return;
+    }
+    suppressLiveSearchOverlayClose();
+    setPreferSearchFocus(false);
+    preferSearchFocusRef.current = false;
+    setFocusedResultKey(`live:${restoreFocusLiveChannelId}`);
+    const channelId = restoreFocusLiveChannelId;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+      requestTvFocus({
+        screen: 'search-overlay',
+        source: 'SearchOverlay',
+        region: 'search-results',
+        itemId: channelId,
+        reason: 'restore-after-live-fullscreen',
+        isActive: () => visible,
+        getTarget: () => restoreRowRef.current,
+      });
+      onRestoreFocusHandled?.();
+    }, 48);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [onRestoreFocusHandled, restoreFocusLiveChannelId, scope, visible]);
+
+  useEffect(() => {
     return () => {
       cancelMoviesSearchResultFocus('overlay-unmount');
       cancelMoviesSearchInputHandoff('overlay-unmount');
@@ -359,7 +434,7 @@ function SearchOverlayContent({
     logSearchEvent('search_overlay_modal_shown', { scope, nativeTvKeyboard: useNativeTvKeyboard });
     onReady?.();
     // Stage 4.2J: Detail→Search return owns focus — never let modal-show reclaim the input.
-    if (restoreFocusMovieId) {
+    if (restoreFocusMovieId || restoreFocusLiveChannelId) {
       closeOwnsFocusRef.current = false;
       setPreferSearchFocus(false);
       preferSearchFocusRef.current = false;
@@ -369,6 +444,7 @@ function SearchOverlayContent({
         scope,
         source: 'modal-show-restore-result',
         restoreFocusMovieId,
+        restoreFocusLiveChannelId,
       });
       return;
     }
@@ -378,19 +454,99 @@ function SearchOverlayContent({
     focusConfirmedRef.current = false;
     logSearchEvent('search_input_focus_requested', { scope, source: 'modal-show' });
     focusSearchField();
-  }, [focusSearchField, onReady, restoreFocusMovieId, scope, useNativeTvKeyboard]);
+  }, [focusSearchField, onReady, restoreFocusLiveChannelId, restoreFocusMovieId, scope, useNativeTvKeyboard]);
+
+  const handleLiveSearchHardwareBack = useCallback(() => {
+    const nowMs = Date.now();
+    const lastConsumedAtMs = getLastLiveSearchBackConsumedAtMs();
+    const decision = decideLiveSearchOverlayBack({
+      keyboardActive: imeVisibleRef.current,
+      overlayVisible: visible,
+      nowMs,
+      lastConsumedAtMs,
+      suppressOverlayCloseUntilMs: getLiveSearchOverlayCloseSuppressedUntilMs(),
+    });
+    const timestampDeltaMs = lastConsumedAtMs > 0 ? nowMs - lastConsumedAtMs : null;
+    logLiveSearchBack({
+      event: 'back-received',
+      keyboardActive: imeVisibleRef.current,
+      overlayVisible: visible,
+      fullscreenActive: false,
+      searchQueryPresent: controller.query.trim().length > 0,
+      focusedRegion: focusedResultKey ? 'search-results' : 'search-overlay',
+      restoreFocusLiveChannelId,
+      timestampDeltaMs,
+      source: 'SearchOverlay',
+    });
+
+    if (decision.action === 'suppress-duplicate' || decision.action === 'ignore') {
+      logLiveSearchBack({
+        event: 'back-suppressed-duplicate',
+        keyboardActive: imeVisibleRef.current,
+        overlayVisible: visible,
+        searchQueryPresent: controller.query.trim().length > 0,
+        restoreFocusLiveChannelId,
+        timestampDeltaMs,
+        source: 'SearchOverlay',
+      });
+      return true;
+    }
+
+    if (decision.action === 'dismiss-ime') {
+      Keyboard.dismiss();
+      inputRef.current?.blur();
+      imeVisibleRef.current = false;
+      if (scope === 'live') {
+        patchLiveTvWorkload({ searchImeActive: false }, { log: true, reason: 'search-ime-dismissed' });
+      }
+      markLiveSearchBackConsumed(nowMs);
+      logLiveSearchBack({
+        event: 'ime-back-consumed',
+        keyboardActive: false,
+        overlayVisible: true,
+        searchQueryPresent: controller.query.trim().length > 0,
+        restoreFocusLiveChannelId,
+        timestampDeltaMs: 0,
+        source: 'SearchOverlay',
+      });
+      return true;
+    }
+
+    markLiveSearchBackConsumed(nowMs);
+    logLiveSearchBack({
+      event: 'overlay-back-consumed',
+      keyboardActive: false,
+      overlayVisible: true,
+      searchQueryPresent: controller.query.trim().length > 0,
+      restoreFocusLiveChannelId,
+      timestampDeltaMs: 0,
+      source: 'SearchOverlay',
+    });
+    logLiveSearchBack({
+      event: 'overlay-close-requested',
+      overlayVisible: true,
+      searchQueryPresent: controller.query.trim().length > 0,
+      restoreFocusLiveChannelId,
+      source: 'SearchOverlay',
+    });
+    onClose();
+    return true;
+  }, [controller.query, focusedResultKey, onClose, restoreFocusLiveChannelId, scope, visible]);
 
   useEffect(() => {
     if (!visible || Platform.OS !== 'android') {
       return;
     }
 
-    const handlerId = scope === 'movies' ? 'movies-search-overlay' : 'search-overlay';
+    const handlerId = scope === 'live' ? 'live-search-overlay' : 'search-overlay';
     const subscription = BackHandler.addEventListener(
       'hardwareBackPress',
       wrapOnnMoviesBackHandler(
         handlerId,
         () => {
+          if (scope === 'live') {
+            return handleLiveSearchHardwareBack();
+          }
           logSearchEvent('search_overlay_back', { scope });
           onClose();
           return true;
@@ -404,7 +560,7 @@ function SearchOverlayContent({
     );
 
     return () => subscription.remove();
-  }, [onClose, scope, visible]);
+  }, [handleLiveSearchHardwareBack, onClose, scope, visible]);
 
   const handleSelect = useCallback(
     (result: SearchResult) => {
@@ -604,6 +760,7 @@ function SearchOverlayContent({
       scope={scope}
       mode="empty"
       query={trimmedQuery}
+      message={scope === 'live' ? `No channels found for “${trimmedQuery}”` : undefined}
       // Stage 3G: movie empty state is non-focusable — keep Search focused (no retry loop).
       onClear={scope === 'movie' ? undefined : controller.clearQuery}
       focusUpHandle={scope === 'movie' ? undefined : resultsFocusUpHandle}
@@ -628,6 +785,13 @@ function SearchOverlayContent({
         onFocusResult={setFocusedResultKey}
         onSelectResult={handleSelect}
         focusUpHandle={resultsFocusUpHandle}
+        restoreResultKey={restoreFocusLiveChannelId ? `live:${restoreFocusLiveChannelId}` : null}
+        restoreRowRef={restoreRowRef}
+        favoriteContentIds={favoriteContentIds}
+        followFocusedResult={scope === 'live'}
+        onEndReached={scope === 'live' ? handleLoadMore : undefined}
+        queryLength={trimmedQuery.length}
+        overlayVisible={visible}
       />
     )
   ) : null;
@@ -643,7 +807,9 @@ function SearchOverlayContent({
       transparent
       visible={visible}
       animationType="fade"
-      onRequestClose={onClose}
+      onRequestClose={scope === 'live' ? () => {
+        handleLiveSearchHardwareBack();
+      } : onClose}
       onShow={handleModalShow}
       presentationStyle="overFullScreen"
       statusBarTranslucent
@@ -700,6 +866,9 @@ function SearchOverlayContent({
             onSubmit={() => {
               inputRef.current?.blur();
               imeVisibleRef.current = false;
+              if (scope === 'live') {
+                patchLiveTvWorkload({ searchImeActive: false }, { log: true, reason: 'search-ime-submit' });
+              }
               handleImeReturnToShell();
             }}
             showSoftKeyboard={!useOnScreenKeyboard}

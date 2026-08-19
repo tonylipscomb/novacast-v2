@@ -1,5 +1,6 @@
 import type { MediaDetail } from '@/features/media-browser/mediaTypes';
 import type { MovieSummary } from '@/features/movies/movieTypes';
+import { COMPLETED_PROGRESS_PERCENT, isResumeEligible } from '@/features/playback/continuity/playbackContinuity';
 
 export type StreamQualityBadge = {
   id: string;
@@ -164,8 +165,15 @@ export function joinMetaChips(chips: string[], separator = '  ·  '): string {
   return chips.filter((chip) => chip.trim().length > 0).join(separator);
 }
 
-export function resolveContinueWatchingLabel(progressPercent?: number | null): string {
-  if (typeof progressPercent === 'number' && progressPercent > 0 && progressPercent < 90) {
+export function resolveContinueWatchingLabel(
+  progressPercent?: number | null,
+  positionMs?: number | null,
+  durationMs?: number | null,
+): string {
+  if (typeof positionMs === 'number' && typeof durationMs === 'number' && durationMs > 0) {
+    return isResumeEligible(positionMs, durationMs) ? 'Resume' : 'Play';
+  }
+  if (typeof progressPercent === 'number' && progressPercent > 0 && progressPercent < COMPLETED_PROGRESS_PERCENT) {
     return 'Resume';
   }
   return 'Play';
@@ -175,7 +183,7 @@ export function resolveContinueWatchingProgress(progressPercent?: number | null)
   if (typeof progressPercent !== 'number' || !Number.isFinite(progressPercent)) {
     return null;
   }
-  if (progressPercent <= 0 || progressPercent >= 90) {
+  if (progressPercent <= 0 || progressPercent >= COMPLETED_PROGRESS_PERCENT) {
     return null;
   }
   return Math.max(1, Math.min(99, Math.round(progressPercent)));

@@ -992,8 +992,13 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
     detailError,
     loadSeriesDetail,
     continueWatching,
-    isSelectedFavorite: selectedItem ? library.isFavorite(selectedItem.seriesId) : false,
-    isSelectedWatchlisted: selectedItem ? library.isWatchlisted(selectedItem.seriesId) : false,
+    library,
+    isSelectedFavorite: selectedItem
+      ? library.isFavorite(selectedItem.seriesId) || library.isFavorite(selectedItem.id)
+      : false,
+    isSelectedWatchlisted: selectedItem
+      ? library.isWatchlisted(selectedItem.seriesId) || library.isWatchlisted(selectedItem.id)
+      : false,
     hasDataSource: Boolean(resolvedDataSource),
     bundle,
     activeProviderId,

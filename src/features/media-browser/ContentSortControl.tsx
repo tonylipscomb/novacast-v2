@@ -8,7 +8,6 @@ import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
 import {
-  CONTENT_SORT_OPTIONS,
   contentSortLabel,
   getVisibleSortOptions,
   type ContentSortOption,
@@ -132,7 +131,7 @@ export const ContentSortControl = forwardRef<ContentSortControlHandle, ContentSo
               {...(optionHandles[index - 1] || (index === 0 && optionHandles[index])
                 ? { nextFocusUp: optionHandles[index - 1] ?? optionHandles[index] }
                 : null)}
-              {...(optionHandles[index + 1] || (index === CONTENT_SORT_OPTIONS.length - 1 && optionHandles[index])
+              {...(optionHandles[index + 1] || (index === visibleOptions.length - 1 && optionHandles[index])
                 ? { nextFocusDown: optionHandles[index + 1] ?? optionHandles[index] }
                 : null)}
               {...(optionHandles[index] ? { nextFocusLeft: optionHandles[index], nextFocusRight: optionHandles[index] } : null)}

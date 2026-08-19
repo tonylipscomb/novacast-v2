@@ -58,6 +58,8 @@ type NovaTvShellProps = PropsWithChildren<{
   navigationFocusable?: boolean;
   /** Native focus handles for navigation items (focusable mode only). */
   onNavigationFocusHandles?: (handles: NovaNavigationFocusHandles) => void;
+  /** Fires when a navbar item gains or loses TV focus. */
+  onNavigationItemFocus?: (id: NavigationId | null) => void;
   /** When set, Right from the matching nav item jumps to this native handle. */
   navigationNextFocusRight?: Partial<Record<NavigationId, number>>;
   /** When set, Right from every nav item jumps to this native handle. */
@@ -126,6 +128,7 @@ export function NovaTvShell({
   suppressNavbarPreferredFocus = false,
   navigationFocusable = true,
   onNavigationFocusHandles,
+  onNavigationItemFocus,
   navigationNextFocusRight,
   navigationContentFocusHandle,
   showNavigationRail = true,
@@ -291,8 +294,12 @@ export function NovaTvShell({
                       markCatalogAuditFocus(`nav:${item.id}`);
                       noteFocusLatencyFocus(`nav:${item.id}`);
                       setFocusedId(item.id);
+                      onNavigationItemFocus?.(item.id);
                     }}
-                    onBlur={() => setFocusedId(null)}
+                    onBlur={() => {
+                      setFocusedId(null);
+                      onNavigationItemFocus?.(null);
+                    }}
                     {...(navigationNextFocusRight?.[item.id]
                       ? { nextFocusRight: navigationNextFocusRight[item.id] }
                       : navigationContentFocusHandle

@@ -77,6 +77,19 @@ export function normalizeAddedTimestamp(value: unknown) {
   return normalizeReleaseDate(value, { allowFuture: false });
 }
 
+export function normalizePopularity(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+
+  return 0;
+}
+
 export { isValidRating, normalizeRating } from './ratingNormalization.ts';
 
 export function normalizeTitleForSort(value: unknown) {
@@ -111,6 +124,7 @@ type SortableContent = {
   addedAt?: string | number;
   releaseDate?: string | number;
   latestEpisodeDate?: string | number;
+  providerSortOrder?: number | null;
 };
 
 function dateFor(item: SortableContent, kind: 'movie' | 'series') {
@@ -119,6 +133,53 @@ function dateFor(item: SortableContent, kind: 'movie' | 'series') {
   }
 
   return normalizeReleaseDate(item.releaseDate) || normalizeAddedTimestamp(item.addedAt) || normalizeReleaseDate(item.year);
+}
+
+function releaseMetadataFor(item: SortableContent, kind: 'movie' | 'series') {
+  if (kind === 'series') {
+    return (
+      normalizeReleaseDate(item.latestEpisodeDate) ||
+      normalizeReleaseDate(item.releaseDate) ||
+      normalizeReleaseDate(item.year)
+    );
+  }
+  return normalizeReleaseDate(item.releaseDate) || normalizeReleaseDate(item.year);
+}
+
+function compareProviderThenId(left: SortableContent, right: SortableContent) {
+  const leftOrder = typeof left.providerSortOrder === 'number' ? left.providerSortOrder : Number.POSITIVE_INFINITY;
+  const rightOrder = typeof right.providerSortOrder === 'number' ? right.providerSortOrder : Number.POSITIVE_INFINITY;
+  if (leftOrder !== rightOrder) {
+    return leftOrder - rightOrder;
+  }
+  return left.id.localeCompare(right.id, undefined, { numeric: true });
+}
+
+function compareNewest(left: SortableContent, right: SortableContent, kind: 'movie' | 'series') {
+  const release = compareMissingLast(releaseMetadataFor(left, kind), releaseMetadataFor(right, kind), true);
+  if (release !== 0) {
+    return release;
+  }
+  if (releaseMetadataFor(left, kind) || releaseMetadataFor(right, kind)) {
+    return compareProviderThenId(left, right);
+  }
+  const added = compareMissingLast(
+    normalizeAddedTimestamp(left.addedAt),
+    normalizeAddedTimestamp(right.addedAt),
+    true,
+  );
+  if (added !== 0) {
+    return added;
+  }
+  return compareProviderThenId(left, right);
+}
+
+function compareOldest(left: SortableContent, right: SortableContent, kind: 'movie' | 'series') {
+  const release = compareMissingLast(releaseMetadataFor(left, kind), releaseMetadataFor(right, kind), false);
+  if (release !== 0) {
+    return release;
+  }
+  return compareProviderThenId(left, right);
 }
 
 function compareMissingLast(left: number, right: number, descending: boolean) {
@@ -137,8 +198,7 @@ export function compareContentItems(
   let result = 0;
   switch (option) {
     case 'oldest':
-      result = compareMissingLast(dateFor(left, kind), dateFor(right, kind), false);
-      break;
+      return compareOldest(left, right, kind);
     case 'title-asc':
       result = normalizeTitleForSort(left.title).localeCompare(normalizeTitleForSort(right.title));
       break;
@@ -149,15 +209,18 @@ export function compareContentItems(
       result = compareMissingLast(normalizeRating(left.rating), normalizeRating(right.rating), true);
       break;
     case 'popularity-desc':
-      result = compareMissingLast(normalizeRating(left.popularity), normalizeRating(right.popularity), true);
+      result = compareMissingLast(normalizePopularity(left.popularity), normalizePopularity(right.popularity), true);
       break;
     case 'recently-added':
-      result = compareMissingLast(normalizeAddedTimestamp(left.addedAt), normalizeAddedTimestamp(right.addedAt), true);
-      break;
+      result = compareMissingLast(
+        normalizeAddedTimestamp(left.addedAt),
+        normalizeAddedTimestamp(right.addedAt),
+        true,
+      );
+      return result || compareProviderThenId(left, right);
     case 'newest':
     default:
-      result = compareMissingLast(dateFor(left, kind), dateFor(right, kind), true);
-      break;
+      return compareNewest(left, right, kind);
   }
 
   return result || normalizeTitleForSort(left.title).localeCompare(normalizeTitleForSort(right.title)) || left.id.localeCompare(right.id);
@@ -201,7 +264,7 @@ export function sortAuditField(item: SortableContent, option: ContentSortOption,
     case 'rating-desc':
       return normalizeRating(item.rating);
     case 'popularity-desc':
-      return normalizeRating(item.popularity);
+      return normalizePopularity(item.popularity);
     case 'recently-added':
       return normalizeAddedTimestamp(item.addedAt);
     case 'oldest':

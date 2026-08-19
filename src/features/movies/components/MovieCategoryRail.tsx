@@ -20,6 +20,11 @@ import type { ProviderCategoryContentType } from '@/features/providers/categoryN
 
 import type { MovieCategory } from '../movieTypes';
 import { formatMovieCategoryCount } from '../movieCategoryCountPolicy';
+import {
+  applyMoviesBrowseListHostNativeFocus,
+  resolveMoviesBrowseListHostProps,
+} from '../moviesBrowseListHostFocus';
+import { logMoviesDetailV2FocusOwnership } from '../moviesDetailPopupV2';
 
 const PROVIDER_SECTION_ID = 'section:provider';
 const DISCOVER_SECTION_ID = 'section:discover';
@@ -59,6 +64,8 @@ export function MovieCategoryRail({
   const [focusedCategoryId, setFocusedCategoryId] = useState<string | null>(null);
   const preferredFocusConsumedRef = useRef(false);
   const initialPreferredCategoryIdRef = useRef(preferredCategoryId);
+  const listRef = useRef<FlatList<MovieCategory> | null>(null);
+  const hostProps = resolveMoviesBrowseListHostProps({ hostEnabled: focusable });
 
   if (isOnnMoviesTraceEnabled()) {
     noteOnnMoviesRender('MovieCategoryRail');
@@ -82,6 +89,10 @@ export function MovieCategoryRail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [railInstanceId]);
 
+  useEffect(() => {
+    applyMoviesBrowseListHostNativeFocus(listRef.current, hostProps.hostFocusable);
+  }, [focusable, hostProps.hostFocusable]);
+
   return (
     <View style={styles.panel} collapsable={false}>
       <View style={styles.header}>
@@ -98,12 +109,32 @@ export function MovieCategoryRail({
       ) : null}
 
       <FlatList
+        ref={(instance) => {
+          listRef.current = instance;
+          applyMoviesBrowseListHostNativeFocus(instance, hostProps.hostFocusable);
+        }}
         data={categories}
+        extraData={`${focusable}:${hostProps.scrollEnabled}`}
+        focusable={hostProps.hostFocusable}
+        accessible={hostProps.hostFocusable}
+        scrollEnabled={hostProps.scrollEnabled}
         keyExtractor={(item) => item.renderKey}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.list}
         style={styles.listContainer}
         removeClippedSubviews={false}
+        onFocus={() => {
+          if (!focusable) {
+            logMoviesDetailV2FocusOwnership({
+              phase: 'unexpected-background-focus',
+              detailOpen: true,
+              focusIssued: false,
+              focusedRegion: 'category-list-host',
+              categoryHostFocusable: true,
+              posterHostFocusable: false,
+            });
+          }
+        }}
         initialNumToRender={Math.min(categories.length, 10)}
         maxToRenderPerBatch={6}
         windowSize={3}
@@ -138,10 +169,17 @@ export function MovieCategoryRail({
           const showMarker = isProviderCategory(item) && (Boolean(countryCode) || regionMarker === 'multi');
 
           const preferInitialFocus =
+            focusable &&
             !suppressPreferredFocus &&
             !preferredFocusConsumedRef.current &&
             Boolean(initialPreferredCategoryIdRef.current && item.id === initialPreferredCategoryIdRef.current);
           const isSmartCategory = item.kind === 'smart';
+          const rowStyle = [
+            styles.row,
+            isSmartCategory && styles.rowSmart,
+            selected && styles.rowSelected,
+            focused && styles.rowFocused,
+          ];
 
           if (preferInitialFocus) {
             recordFocusAudit({
@@ -151,11 +189,47 @@ export function MovieCategoryRail({
             });
           }
 
+          if (!focusable) {
+            return (
+              <View
+                focusable={false}
+                accessible={false}
+                pointerEvents="none"
+                style={rowStyle}>
+              {showMarker ? (
+                <ProviderCategoryMarker
+                  countryCode={countryCode}
+                  regionMarker={regionMarker}
+                  size="md"
+                />
+              ) : null}
+              <Text
+                numberOfLines={2}
+                ellipsizeMode="tail"
+                style={[
+                  styles.name,
+                  selected && styles.nameSelected,
+                  focused && styles.nameFocused,
+                ]}>
+                {displayName}
+              </Text>
+              <Text
+                style={[
+                  styles.count,
+                  selected && styles.countSelected,
+                  focused && styles.countFocused,
+                ]}>
+                {formatMovieCategoryCount(item.count, item.countKnown)}
+              </Text>
+              </View>
+            );
+          }
+
           return (
             <Pressable
               ref={(instance) => registerItemRef?.(item.id, instance)}
-              focusable={focusable}
-              disabled={!focusable}
+              focusable
+              accessible
               hasTVPreferredFocus={preferInitialFocus}
               {...(selected && nextFocusRightHandle ? { nextFocusRight: nextFocusRightHandle } : null)}
               onFocus={() => {
@@ -166,12 +240,7 @@ export function MovieCategoryRail({
               }}
               onBlur={() => setFocusedCategoryId(null)}
               onPress={() => onSelectCategory(item.id)}
-              style={[
-                styles.row,
-                isSmartCategory && styles.rowSmart,
-                selected && styles.rowSelected,
-                focused && styles.rowFocused,
-              ]}>
+              style={rowStyle}>
               {showMarker ? (
                 <ProviderCategoryMarker
                   countryCode={countryCode}

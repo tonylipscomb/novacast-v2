@@ -45,7 +45,132 @@ export function computeMovieDetailPopupV2Layout(input: {
   return { popupWidth, popupHeight, posterWidth };
 }
 
-/** Play/Resume is the preferred initial focus target; otherwise the first enabled action. */
+export function shouldMoviesBrowseListHostBeEnabled(input: {
+  detailPopupOpen: boolean;
+  playbackUiActive?: boolean;
+}): boolean {
+  return !input.detailPopupOpen && !input.playbackUiActive;
+}
+
+export function shouldRequestMovieDetailPopupV2InitialFocus(input: {
+  detailOpen: boolean;
+  hasPrimaryAction: boolean;
+  alreadyIssued: boolean;
+}): boolean {
+  return input.detailOpen && input.hasPrimaryAction && !input.alreadyIssued;
+}
+
+export function shouldPublishMovieDetailDestinations(input: {
+  alreadyPublished: boolean;
+  actionId: string;
+  initialFocusActionId: string | null;
+  instancePresent: boolean;
+  sameHandle: boolean;
+}): boolean {
+  return (
+    !input.alreadyPublished &&
+    input.instancePresent &&
+    !input.sameHandle &&
+    input.initialFocusActionId != null &&
+    input.actionId === input.initialFocusActionId
+  );
+}
+
+export function shouldUpdateMovieDetailFocusedActionId(
+  current: string | null,
+  next: string | null,
+): boolean {
+  return current !== next;
+}
+
+export function shouldConfirmMovieDetailInitialFocus(input: {
+  actionId: string;
+  initialFocusActionId: string | null;
+  alreadyConfirmed: boolean;
+  visible: boolean;
+}): boolean {
+  return (
+    input.visible &&
+    !input.alreadyConfirmed &&
+    input.initialFocusActionId != null &&
+    input.actionId === input.initialFocusActionId
+  );
+}
+
+export function shouldReArmMovieDetailPreferredFocus(input: {
+  openSession: string | null;
+  previousSession: string | null;
+}): boolean {
+  return input.openSession != null && input.openSession !== input.previousSession;
+}
+
+export function logMovieDetailRenderLoopAudit(payload: {
+  event:
+    | 'render'
+    | 'ref-attach'
+    | 'ref-detach'
+    | 'focus'
+    | 'preferred-focus-change'
+    | 'destinations-change'
+    | 'initial-request';
+  movieId?: string | null;
+  actionId?: string | null;
+  renderCount?: number;
+  nativeHandlePresent?: boolean;
+  sameHandle?: boolean;
+  focusedActionId?: string | null;
+  preferredFocus?: boolean;
+  initialRequestLatched?: boolean;
+}) {
+  console.info(
+    '[NovaCast Movie Detail Render Loop Audit] ' +
+      JSON.stringify({
+        event: payload.event,
+        movieId: payload.movieId ?? null,
+        actionId: payload.actionId ?? null,
+        renderCount: payload.renderCount ?? null,
+        nativeHandlePresent: payload.nativeHandlePresent ?? null,
+        sameHandle: payload.sameHandle ?? null,
+        focusedActionId: payload.focusedActionId ?? null,
+        preferredFocus: payload.preferredFocus ?? null,
+        initialRequestLatched: payload.initialRequestLatched ?? null,
+      }),
+  );
+}
+
+export function logMoviesDetailV2FocusOwnership(payload: {
+  phase:
+    | 'detail-open'
+    | 'cta-ref-ready'
+    | 'initial-focus-requested'
+    | 'initial-focus-confirmed'
+    | 'background-focus-disabled'
+    | 'unexpected-background-focus'
+    | 'detail-close'
+    | 'origin-focus-restored';
+  movieId?: string | null;
+  detailOpen: boolean;
+  focusIssued: boolean;
+  detailCtaHandlePresent?: boolean;
+  focusedRegion?: string;
+  categoryHostFocusable?: boolean;
+  posterHostFocusable?: boolean;
+}) {
+  console.info(
+    '[NovaCast Movies Detail Focus Lifecycle] ' +
+      JSON.stringify({
+        phase: payload.phase,
+        movieId: payload.movieId ?? null,
+        detailOpen: payload.detailOpen,
+        focusIssued: payload.focusIssued,
+        detailCtaHandlePresent: payload.detailCtaHandlePresent ?? null,
+        focusedRegion: payload.focusedRegion ?? null,
+        categoryHostFocusable: payload.categoryHostFocusable ?? null,
+        posterHostFocusable: payload.posterHostFocusable ?? null,
+      }),
+  );
+}
+
 export function resolveMovieDetailPopupV2InitialFocusId(
   actions: MovieDetailPopupV2Action[],
 ): string | null {

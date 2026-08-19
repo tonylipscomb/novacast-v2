@@ -9,6 +9,7 @@ import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
 
 import { logSearchEvent } from './searchDiagnostics';
+import { createSearchInputActivationGate } from './searchInputActivation';
 import { shouldRefocusSearchShellOnTextInputBlur } from './searchOverlayFocusPolicy';
 
 const focusText = createNovaTvFocusTextStyles(novaTheme);
@@ -84,6 +85,7 @@ export function SearchInput({
   const clearRef = useRef<View>(null);
   const resolvedFocusRef = focusRef ?? shellRef;
   const resolvedInputRef = inputRef ?? internalInputRef;
+  const activationGateRef = useRef(createSearchInputActivationGate());
   const [fieldHandle, setFieldHandle] = useState<number | undefined>(undefined);
   const [clearHandle, setClearHandle] = useState<number | undefined>(undefined);
   const hasValue = value.length > 0;
@@ -166,6 +168,14 @@ export function SearchInput({
       logSearchEvent('search_input_activate_skipped', { reason: 'soft-keyboard-disabled' });
       return;
     }
+    const arm = activationGateRef.current.tryArm();
+    if (arm === 'duplicate-suppressed') {
+      logSearchEvent('search_input_activate_duplicate_suppressed', {
+        platform: Platform.OS,
+        reason: 'press-or-click',
+      });
+      return;
+    }
     logSearchEvent('search_input_activate', { platform: Platform.OS });
     onKeyboardActivate?.();
     imeVisibleRef.current = true;
@@ -232,6 +242,15 @@ export function SearchInput({
         setShellFocused(true);
         shellFocusedRef.current = true;
         imeVisibleRef.current = true;
+        const arm = activationGateRef.current.tryArm();
+        if (arm === 'duplicate-suppressed') {
+          logSearchEvent('search_input_activate_duplicate_suppressed', {
+            platform: Platform.OS,
+            reason: 'text-input-focus',
+          });
+          return;
+        }
+        logSearchEvent('search_input_activate', { platform: Platform.OS, reason: 'text-input-focus' });
         onKeyboardActivate?.();
       }}
       onBlur={() => {

@@ -73,7 +73,7 @@ test('Xtream mapVodStream strips provider title prefixes', async () => {
   assert.equal(movies[0]?.title, 'Toy Story');
 });
 
-test('Smart movie data source prepends Discover rows and keeps provider categories intact', async () => {
+test('Smart movie data source keeps provider categories and does not inject Discover', async () => {
   clearMoviesSettingsCacheForTests();
   resetMovieCatalogIndex('demo-provider');
 
@@ -81,13 +81,10 @@ test('Smart movie data source prepends Discover rows and keeps provider categori
   const smart = createSmartMovieDataSource(base, 'demo-provider');
   const categories = await smart.getCategories();
 
-  const discoverIndex = categories.findIndex((category) => category.id === 'section:discover');
-  const providerIndex = categories.findIndex((category) => category.id === 'section:provider');
   const firstProvider = categories.find((category) => category.kind === 'provider');
 
-  assert.ok(discoverIndex >= 0);
-  assert.ok(providerIndex > discoverIndex);
-  assert.ok(categories.some((category) => category.kind === 'smart'));
+  assert.equal(categories.findIndex((category) => category.id === 'section:discover'), -1);
+  assert.equal(categories.some((category) => category.kind === 'smart'), false);
   assert.equal(firstProvider?.name, 'Action');
   assert.ok(categories.some((category) => category.kind === 'provider' && category.name === 'All Movies'));
   assert.equal(categories.filter((category) => category.kind === 'provider').length, 16);

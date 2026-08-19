@@ -1,6 +1,6 @@
 /**
- * Pure helpers for Live TV focus → debounced preview scheduling.
- * Preview may follow focus after a short debounce; OK still tunes immediately.
+ * Pure helpers for Live TV focus vs explicit preview.
+ * Focus never starts or schedules playback. OK is the only preview boundary.
  */
 
 export const LIVE_TV_PREVIEW_FOCUS_DEBOUNCE_MS = 300;
@@ -16,6 +16,11 @@ export function shouldMoveFocusToChannelsOnCategoryOk(): boolean {
 
 /** Focus must never start playback synchronously. */
 export function shouldStartPreviewImmediatelyOnFocus(): boolean {
+  return false;
+}
+
+/** Focus must never schedule a later preview either. */
+export function shouldSchedulePreviewOnFocus(): boolean {
   return false;
 }
 

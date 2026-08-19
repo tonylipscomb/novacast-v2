@@ -77,7 +77,6 @@ export function SettingsDetailPanel({
   sectionId,
   settings,
   pinConfigured,
-  hideSmartCategories,
   account,
   betaSupport,
   onAppearanceTheme,
@@ -89,7 +88,6 @@ export function SettingsDetailPanel({
   onParentalMaxRating,
   onSavePin,
   onClearPin,
-  onToggleSmartCategories,
   onReplayGuides,
   onSuppressGuides,
   onFocusHandleReady,
@@ -489,16 +487,10 @@ export function SettingsDetailPanel({
 
   const renderSmartCategories = () => (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Smart Categories</Text>
-      <Text style={styles.sectionCopy}>Discover collections like Features and New Releases.</Text>
-      {renderToggle(
-        'smart-categories',
-        'Show Discover collections',
-        hideSmartCategories ? 'Discover rails are hidden in Movies and Series' : 'Discover rails are visible in Movies and Series',
-        !hideSmartCategories,
-        onToggleSmartCategories,
-        true,
-      )}
+      <Text style={styles.sectionTitle}>Discover Zone</Text>
+      <Text style={styles.sectionCopy}>
+        Discover Zone sits next to Search on Movies, Series, and Live TV. It shows your Watchlist and Favorites. Provider categories stay in the browse list.
+      </Text>
     </View>
   );
 

@@ -2,6 +2,7 @@
  * Stage 3G.2 — SearchInput → first-result Down handoff (one token per Down press).
  */
 
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import type { RefObject } from 'react';
 
 import { requestTvFocus } from '../navigation/tvFocusDiagnostics.ts';
@@ -81,7 +82,7 @@ export function logMoviesSearchInputHandoff(payload: {
   targetConfirmed: boolean;
   blockedReason: string | null;
 }) {
-  console.info(
+  novacastTrace(
     '[NovaCast Movies Search Input Handoff] ' +
       JSON.stringify({
         ...payload,

@@ -136,18 +136,18 @@ test('progress saves and resumes for movie keys', async () => {
   assert.equal(resumeMs, 42_000);
 
   assert.equal(shouldMarkComplete(89_000, 100_000), false);
-  assert.equal(shouldMarkComplete(90_000, 100_000), true);
+  assert.equal(shouldMarkComplete(92_000, 100_000), true);
   assert.equal(computeProgressPercent(45_000, 100_000), 45);
-  assert.equal(WATCHED_THRESHOLD_PERCENT, 90);
+  assert.equal(WATCHED_THRESHOLD_PERCENT, 92);
   assert.deepEqual(key, { providerId, mediaType: 'movie', itemId });
 });
 
 test('progress save interval is periodic, not per-frame', () => {
-  assert.equal(PROGRESS_SAVE_INTERVAL_MS, 5000);
+  assert.equal(PROGRESS_SAVE_INTERVAL_MS, 12_000);
   assert.equal(shouldSaveProgress(0, 1000), false);
-  assert.equal(shouldSaveProgress(0, 5000), true);
-  assert.equal(shouldSaveProgress(4000, 8999), false);
-  assert.equal(shouldSaveProgress(4000, 9000), true);
+  assert.equal(shouldSaveProgress(0, 12_000), true);
+  assert.equal(shouldSaveProgress(4000, 15_999), false);
+  assert.equal(shouldSaveProgress(4000, 16_000), true);
 });
 
 test('movie playback activity pauses heavy catalog sync', async () => {
@@ -226,15 +226,15 @@ test('d-pad and select keys reveal hidden unified player controls', () => {
   assert.equal(shouldRevealUnifiedControlsFromKeyEvent('Backspace'), false);
 });
 
-test('hidden overlay select toggles playback and d-pad reveals controls', async () => {
+test('hidden overlay select and d-pad reveal controls without toggling playback', async () => {
   const { resolveUnifiedOverlayKeyAction } = await import(
     '../src/features/playback/unified/unifiedPlayerLogic.ts'
   );
 
-  assert.equal(resolveUnifiedOverlayKeyAction(false, false, 'Enter'), 'toggle-play');
-  assert.equal(resolveUnifiedOverlayKeyAction(false, false, 'Select'), 'toggle-play');
-  assert.equal(resolveUnifiedOverlayKeyAction(false, false, '', 23), 'toggle-play');
-  assert.equal(resolveUnifiedOverlayKeyAction(false, false, '', 85), 'toggle-play');
+  assert.equal(resolveUnifiedOverlayKeyAction(false, false, 'Enter'), 'reveal');
+  assert.equal(resolveUnifiedOverlayKeyAction(false, false, 'Select'), 'reveal');
+  assert.equal(resolveUnifiedOverlayKeyAction(false, false, '', 23), 'reveal');
+  assert.equal(resolveUnifiedOverlayKeyAction(false, false, '', 85), 'reveal');
   assert.equal(resolveUnifiedOverlayKeyAction(false, false, '', 22), 'reveal');
   assert.equal(resolveUnifiedOverlayKeyAction(true, false, 'Enter'), null);
   assert.equal(resolveUnifiedOverlayKeyAction(false, true, 'Enter'), null);

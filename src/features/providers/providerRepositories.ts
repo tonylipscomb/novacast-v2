@@ -1,3 +1,16 @@
+import {
+  getCachedXmltvPrograms,
+  getXmltvChannelIndexData,
+  getXmltvChannelNameIndex,
+  ensureXmltvChannelNameIndex,
+  normalizeXmltvChannelId,
+  normalizeXmltvDisplayName,
+  refreshXmltvEpgCache,
+} from '../guide/xmltv';
+import {
+  beginCatalogGuidePriority,
+  endCatalogGuidePriority,
+} from './catalogSyncGuidePriority.ts';
 import { logContentSortAuditPayload } from '../media-browser/contentSortAudit.ts';
 import {
   buildContentSortPageMetadata,
@@ -25,6 +38,7 @@ import {
   normalizeProviderCategoryId,
   type ProviderCategoryType,
 } from './categoryNormalization.ts';
+import { isSyntheticLiveFavoritesCategoryId } from './liveCategoryIdSafety.ts';
 import {
   partitionLiveItemsUsFirst,
   sortLiveCategoriesUsFirst,
@@ -35,6 +49,7 @@ import {
 
 import { normalizeCast, normalizeStringList, normalizeTrailerUrl } from '../media-browser/mediaDetail.ts';
 import type { MediaDetail } from '../media-browser/mediaTypes.ts';
+import { parseXtreamVodVideoMetadata } from '../playback/unified/moviePlaybackCompatibility.ts';
 import {
   addVodCategoryPhaseMs,
   getActiveVodCategoryPhaseProfile,
@@ -67,6 +82,29 @@ export const XTREAM_GUIDE_EPG_LIMIT = 12;
  * Providers can expose 10k+ live streams; paging past this stays smooth on TV.
  */
 export const XTREAM_GUIDE_MAX_LOADED_CHANNELS = 120;
+
+function guideDevLog(event: string, details: Record<string, unknown>) {
+  if (typeof __DEV__ !== 'undefined' && __DEV__) {
+    console.info('[NovaCast Guide]', event, details);
+  }
+}
+
+function guideEpgIdDiagnostics(streams: XtreamLiveStreamResponse[]) {
+  const sample = streams[0];
+  const epgIds = streams.filter((stream) => typeof stream.epg_channel_id === 'string' && Boolean(stream.epg_channel_id.trim()));
+  return {
+    streamCount: streams.length,
+    streamsWithEpgId: epgIds.length,
+    sample: sample
+      ? {
+          streamId: sample.stream_id == null ? undefined : String(sample.stream_id),
+          hasSnakeCaseEpgId: typeof sample.epg_channel_id === 'string' && Boolean(sample.epg_channel_id.trim()),
+          hasCamelCaseEpgId: Boolean((sample as XtreamLiveStreamResponse & { epgChannelId?: unknown }).epgChannelId),
+          epgIdPresent: typeof sample.epg_channel_id === 'string' && Boolean(sample.epg_channel_id.trim()),
+        }
+      : null,
+  };
+}
 
 export type ProviderLiveCategory = {
   id: string;
@@ -152,7 +190,7 @@ export type ProviderSeriesPoster = {
 
 export type ProviderSearchHit =
   | (MovieSummary & { kind: 'movie' })
-  | ({ kind: 'live'; id: string; title: string; subtitle: string; tone: string })
+  | ({ kind: 'live'; id: string; title: string; subtitle: string; tone: string; categoryId?: string })
   | ({ kind: 'series'; id: string; title: string; subtitle: string; tone: string });
 
 export type ProviderLiveCategoryAccentHint = {
@@ -547,29 +585,6 @@ async function fetchShortEpgWithFallback(
 }
 
 /**
- * Dev-only audit trail for the EPG-matching bug: logs enough context to
- * confirm whether a channel's EPG was found via `epg_channel_id`, via the raw
- * stream id fallback, or not at all. Never logs provider URLs/credentials.
- */
-function logGuideEpgAudit(entry: {
-  streamId: string;
-  epgChannelId?: string;
-  channelName: string;
-  categoryId: string;
-  rawRowCount: number;
-  normalizedRowCount: number;
-  usedEpgChannelIdFallback: boolean;
-  fallbackAttempted: boolean;
-  missingWindowCount: number;
-}) {
-  if (typeof __DEV__ === 'undefined' || !__DEV__) {
-    return;
-  }
-
-  console.log('[NovaCast GuideEpgAudit]', entry);
-}
-
-/**
  * Bounded-concurrency EPG fetch for an already-resolved channel list, shared
  * by category-scoped Guide paging and Favorites (which builds its channel
  * list from personalization data outside the provider's category system).
@@ -827,6 +842,7 @@ function buildMockSearchHits(query: string): ProviderSearchHit[] {
     .map((channel) => ({
       kind: 'live' as const,
       id: channel.id,
+      categoryId: channel.categoryId,
       title: channel.name,
       subtitle: channel.current,
       tone: channel.tone,
@@ -1144,6 +1160,7 @@ function mapVodInfo(movieId: string, response: XtreamVodInfoResponse | null, bas
   const rating = readNumber(fields, 'rating_5based', 'rating');
   const releaseDate = readText(fields, 'releaseDate', 'releasedate', 'release_date');
   const yearMatch = releaseDate?.match(/\b(19|20)\d{2}\b/) ?? title.match(/\b(19|20)\d{2}\b/);
+  const videoMetadata = parseXtreamVodVideoMetadata(fields);
 
   return {
     id: movieId,
@@ -1168,6 +1185,11 @@ function mapVodInfo(movieId: string, response: XtreamVodInfoResponse | null, bas
     contentRating: readText(fields, 'content_rating', 'mpaa', 'age_rating'),
     trailerUrl: normalizeTrailerUrl(fields.youtube_trailer),
     containerExtension: readText(fields, 'container_extension'),
+    videoCodec: videoMetadata.videoCodec,
+    videoWidth: videoMetadata.videoWidth,
+    videoHeight: videoMetadata.videoHeight,
+    videoBitrate: videoMetadata.videoBitrate,
+    directSource: videoMetadata.directSource,
     seasons: [],
     episodes: [],
   };
@@ -1212,6 +1234,77 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
   let cachedLiveStreamCount = 0;
   let cachedAllLiveStreamsUsFirst: XtreamLiveStreamResponse[] | null = null;
   let loadingAllLiveStreamsUsFirst: Promise<XtreamLiveStreamResponse[]> | null = null;
+  const liveStreamEpgIds = new Map<string, string>();
+  let guideEpgProbeStarted = false;
+  let guideProbeAllStreams: XtreamLiveStreamResponse[] = [];
+  let guidePositiveControlAudited = false;
+
+  function enrichLiveStreamsWithKnownEpgIds(streams: XtreamLiveStreamResponse[]) {
+    return streams.map((stream) => {
+      const streamId = stream.stream_id == null ? '' : String(stream.stream_id);
+      const directId = stream.epg_channel_id?.trim();
+      if (directId && streamId) liveStreamEpgIds.set(streamId, directId);
+      const knownId = directId || (streamId ? liveStreamEpgIds.get(streamId) : undefined);
+      return knownId && !directId ? { ...stream, epg_channel_id: knownId } : stream;
+    });
+  }
+
+  function startGuideEpgProbe(categoryId: string, categoryStreams: XtreamLiveStreamResponse[]) {
+    if (guideEpgProbeStarted || !categoryId || categoryId === 'all' || isSyntheticLiveFavoritesCategoryId(categoryId)) {
+      return;
+    }
+    // Full-catalog dump + sync scan of every live stream. Release Live browse must not run this.
+    if (typeof __DEV__ === 'undefined' || !__DEV__) {
+      return;
+    }
+    guideEpgProbeStarted = true;
+    void client.getLiveStreams(undefined)
+      .then((allStreams) => {
+        guideProbeAllStreams = allStreams;
+        const categoryIds = new Set(categoryStreams.map(stream => String(stream.stream_id ?? '')));
+        const matching = allStreams.filter(stream => categoryIds.has(String(stream.stream_id ?? '')));
+        for (const stream of allStreams) {
+          const streamId = stream.stream_id == null ? '' : String(stream.stream_id);
+          const epgId = stream.epg_channel_id?.trim();
+          if (streamId && epgId) liveStreamEpgIds.set(streamId, epgId);
+        }
+        console.info('[NovaCast Guide EPG Probe]', {
+          categoryStreamCount: categoryStreams.length,
+          categoryStreamsWithEpgId: categoryStreams.filter(stream => Boolean(stream.epg_channel_id?.trim())).length,
+          allLiveStreamCount: allStreams.length,
+          allLiveStreamsWithEpgId: allStreams.filter(stream => Boolean(stream.epg_channel_id?.trim())).length,
+          matchingCategoryInAllCount: matching.length,
+          matchingCategoryInAllWithEpgId: matching.filter(stream => Boolean(stream.epg_channel_id?.trim())).length,
+        });
+        const categories = new Map<string, { total: number; withEpg: number; eventLike: number }>();
+        for (const stream of allStreams) {
+          const category = String(stream.category_id ?? '').trim();
+          if (!category) continue;
+          const current = categories.get(category) ?? { total: 0, withEpg: 0, eventLike: 0 };
+          current.total += 1;
+          if (stream.epg_channel_id?.trim()) current.withEpg += 1;
+          if (/\b(ppv|pay[ -]?per[ -]?view|event|24\s*[/-]?\s*7)\b/i.test(String(stream.name ?? ''))) current.eventLike += 1;
+          categories.set(category, current);
+        }
+        const positive = Array.from(categories.entries())
+          .filter(([, value]) => value.withEpg >= 8)
+          .sort((left, right) => {
+            const scoreLeft = left[1].withEpg - left[1].eventLike;
+            const scoreRight = right[1].withEpg - right[1].eventLike;
+            return scoreRight - scoreLeft || right[1].withEpg - left[1].withEpg;
+          })[0];
+        if (positive) {
+          console.info('[NovaCast EPG Positive Control]', {
+            categoryId: positive[0],
+            categoryStreamCount: positive[1].total,
+            streamsWithEpgId: positive[1].withEpg,
+          });
+        }
+      })
+      .catch(() => {
+        // One-time diagnostics must never affect provider or Guide behavior.
+      });
+  }
 
   function invalidateLiveStreamOrderCache() {
     cachedAllLiveStreamsUsFirst = null;
@@ -1224,14 +1317,26 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
 
   async function resolveLiveCategoryStreamsRaw(categoryId: string | undefined, signal?: AbortSignal) {
     if (!categoryId || categoryId === 'all') {
-      return client.getLiveStreams(undefined, signal);
+      const streams = await client.getLiveStreams(undefined, signal);
+      const enriched = enrichLiveStreamsWithKnownEpgIds(streams);
+      guideDevLog('raw-streams', { categoryId: 'all', ...guideEpgIdDiagnostics(enriched) });
+      return enriched;
     }
 
     const serverSideCategoryId = categoryId === fallbackProviderCategoryId('live') ? undefined : categoryId;
     const allStreams = await client.getLiveStreams(serverSideCategoryId, signal);
-    return allStreams.filter(
+    startGuideEpgProbe(categoryId, allStreams);
+    const enrichedStreams = enrichLiveStreamsWithKnownEpgIds(allStreams);
+    const filtered = enrichedStreams.filter(
       (stream) => resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds) === categoryId,
     );
+    guideDevLog('raw-streams', {
+      categoryId,
+      serverStreamCount: allStreams.length,
+      serverStreamsWithEpgId: guideEpgIdDiagnostics(enrichedStreams).streamsWithEpgId,
+      ...guideEpgIdDiagnostics(filtered),
+    });
+    return filtered;
   }
 
   async function resolveLiveCategoryStreamsUsFirst(categoryId: string | undefined, signal?: AbortSignal) {
@@ -1628,6 +1733,15 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       return cachedLiveStreamCount;
     },
     async getChannels(categoryId: string, signal) {
+      if (isSyntheticLiveFavoritesCategoryId(categoryId)) {
+        console.info('[NovaCast Live Category]', {
+          event: 'selection-rejected',
+          categoryId,
+          isSynthetic: true,
+          reason: 'provider-repository-guard',
+        });
+        return [];
+      }
       const streams = await resolveLiveCategoryStreams(categoryId, signal);
       return streams
         .slice(0, XTREAM_MAX_ITEMS_PER_CATEGORY)
@@ -1713,47 +1827,175 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     },
     guide: {
       async getRows(signal, options) {
+        const guideStartedAt = Date.now();
         const categoryId = options?.categoryId;
-        const streams = await resolveLiveCategoryStreams(categoryId, signal);
         const channelOffset = Math.max(0, options?.channelOffset ?? 0);
         const channelLimit = Math.max(1, Math.min(options?.channelLimit ?? XTREAM_GUIDE_CHANNEL_PAGE_SIZE, 100));
-        const epgLimit = Math.max(1, Math.min(options?.epgLimit ?? XTREAM_GUIDE_EPG_LIMIT, 48));
+        guideDevLog('getRows-entry', { categoryId: categoryId ?? 'all', channelOffset, channelLimit });
+
+        const resolveStartedAt = Date.now();
+        const streams = await resolveLiveCategoryStreams(categoryId, signal);
+        guideDevLog('channels-resolved', {
+          categoryId: categoryId ?? 'all',
+          streamCount: streams.length,
+          streamsWithEpgId: guideEpgIdDiagnostics(streams).streamsWithEpgId,
+          durationMs: Date.now() - resolveStartedAt,
+        });
         const mappedChannels = streams
           .slice(channelOffset, channelOffset + channelLimit)
           .map((stream, index) => mapLiveStream(stream, channelOffset + index, resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds)));
+        guideDevLog('mapped-channels', {
+          channelCount: mappedChannels.length,
+          channelsWithEpgId: mappedChannels.filter((channel) => Boolean(channel.epgChannelId)).length,
+          sample: mappedChannels[0]
+            ? {
+                channelId: mappedChannels[0].id,
+                epgIdPresent: Boolean(mappedChannels[0].epgChannelId),
+              }
+            : null,
+        });
+
+        // NOVACAST_GUIDE_V2_FOUNDATION_V1: channels-first Guide. Never block first paint on per-channel EPG requests.
+        // NOVACAST_GUIDE_V2_3B_LOCAL_GUIDE_READ_V1:
+        // Read Guide schedule only from the local XMLTV cache.
+        // XMLTV network refresh runs separately and is never awaited by Guide navigation.
+        const providerEpgKey = client.getXmltvCacheKey();
+        const nameIndex = await getXmltvChannelNameIndex(providerEpgKey).catch(() => null);
+        const indexData = await getXmltvChannelIndexData(providerEpgKey).catch(() => null);
+        if (indexData && !guidePositiveControlAudited && guideProbeAllStreams.length) {
+          guidePositiveControlAudited = true;
+          const knownEpgStreams = guideProbeAllStreams.filter(stream => Boolean(stream.epg_channel_id?.trim())).slice(0, 20);
+          let epgIdsFoundInXmltv = 0;
+          let namesMatchingPrimaryDisplayName = 0;
+          let namesMatchingAnyDisplayName = 0;
+          for (const stream of knownEpgStreams) {
+            const epgId = normalizeXmltvChannelId(stream.epg_channel_id);
+            const aliases = indexData.namesByChannelId.get(epgId) ?? [];
+            const liveName = normalizeXmltvDisplayName(stripProviderStreamTitlePrefix(String(stream.name ?? '')));
+            if (aliases.length) epgIdsFoundInXmltv += 1;
+            if (aliases[0] === liveName) namesMatchingPrimaryDisplayName += 1;
+            if (aliases.includes(liveName)) namesMatchingAnyDisplayName += 1;
+          }
+          console.info('[NovaCast XMLTV Index Positive Control]', {
+            providerPositiveControlCount: knownEpgStreams.length,
+            epgIdsFoundInXmltv,
+            namesMatchingPrimaryDisplayName,
+            namesMatchingAnyDisplayName,
+            namesNotMatchingXmltvNames: knownEpgStreams.length - namesMatchingAnyDisplayName,
+          });
+          console.info('[NovaCast XMLTV Index Diagnostics]', indexData.diagnostics);
+        }
+        let exactNameMatchCount = 0;
+        let ambiguousNameCount = 0;
+        let unmatchedCount = 0;
+        const resolvedMappedChannels = mappedChannels.map((channel) => {
+          if (channel.epgChannelId?.trim()) return channel;
+          const matches = nameIndex?.get(normalizeXmltvDisplayName(channel.name)) ?? [];
+          if (matches.length === 1) {
+            exactNameMatchCount += 1;
+            return { ...channel, epgChannelId: matches[0].channelId };
+          }
+          if (matches.length > 1) ambiguousNameCount += 1;
+          else unmatchedCount += 1;
+          return channel;
+        });
+        const directEpgIdCount = mappedChannels.filter(channel => Boolean(channel.epgChannelId?.trim())).length;
+        const resolvedXmltvIdCount = resolvedMappedChannels.filter(channel => Boolean(channel.epgChannelId?.trim())).length;
+        console.info('[NovaCast XMLTV Match]', {
+          guideChannelCount: resolvedMappedChannels.length,
+          directEpgIdCount,
+          exactNameMatchCount,
+          ambiguousNameCount,
+          unmatchedCount,
+          resolvedXmltvIdCount,
+        });
+        if (!nameIndex) {
+          void ensureXmltvChannelNameIndex({ providerKey: providerEpgKey, client }).catch((error) => {
+            guideDevLog('xmltv-name-index-failed', {
+              errorName: error instanceof Error ? error.name : 'unknown',
+            });
+          });
+        }
+        const epgLimit = Math.max(1, Math.min(options?.epgLimit ?? 12, 48));
+        const now = Date.now();
+
+        const xmltvChannelIds = resolvedMappedChannels
+          .map((channel) => channel.epgChannelId?.trim())
+          .filter((value): value is string => Boolean(value));
+
+        const cacheReadStartedAt = Date.now();
+        const cachedXmltv = await getCachedXmltvPrograms(
+          providerEpgKey,
+          xmltvChannelIds,
+          now - 12 * 60 * 60 * 1000,
+          now + 72 * 60 * 60 * 1000,
+          epgLimit,
+        ).catch(() => new Map<string, never[]>());
+        guideDevLog('local-cache-read', {
+          channelIdCount: xmltvChannelIds.length,
+          cachedChannelCount: cachedXmltv.size,
+          durationMs: Date.now() - cacheReadStartedAt,
+        });
 
         const epgByChannel = new Map<string, ProviderGuideProgram[]>();
-        let nextChannelIndex = 0;
-        const workerCount = Math.min(XTREAM_GUIDE_EPG_CONCURRENCY, mappedChannels.length);
-        await Promise.all(
-          Array.from({ length: workerCount }, async () => {
-            while (nextChannelIndex < mappedChannels.length) {
-              const index = nextChannelIndex++;
-              const channel = mappedChannels[index];
-              if (signal?.aborted) return;
-              const result = await fetchShortEpgWithFallback(client, channel.id, channel.epgChannelId, epgLimit, signal);
-              epgByChannel.set(channel.id, result.programs);
 
-              if (index < 3) {
-                logGuideEpgAudit({
-                  streamId: channel.id,
-                  epgChannelId: channel.epgChannelId,
-                  channelName: channel.name,
-                  categoryId: channel.categoryId,
-                  rawRowCount: result.primaryRawCount + result.fallbackRawCount,
-                  normalizedRowCount: result.programs.length,
-                  usedEpgChannelIdFallback: result.usedEpgChannelIdFallback,
-                  fallbackAttempted: result.fallbackAttempted,
-                  missingWindowCount: result.programs.filter(
-                    (program) => program.startAt === undefined || program.endAt === undefined,
-                  ).length,
-                });
-              }
-            }
-          }),
-        );
+        for (const channel of resolvedMappedChannels) {
+          const xmltvId = normalizeXmltvChannelId(channel.epgChannelId);
 
-        return mapGuideRowsFromChannels(mappedChannels, epgByChannel);
+          if (!xmltvId) {
+            epgByChannel.set(channel.id, []);
+            continue;
+          }
+
+          const cachedPrograms = cachedXmltv.get(xmltvId) ?? [];
+
+          const programs = cachedPrograms.map((programme) => ({
+            id: `xmltv-${channel.id}-${programme.startAt}`,
+            title: programme.title,
+            meta: programme.category ?? '',
+            description: programme.description ?? '',
+            startAt: programme.startAt,
+            endAt: programme.endAt,
+          } satisfies ProviderGuideProgram));
+
+          epgByChannel.set(channel.id, programs);
+        }
+
+        // NOVACAST_GUIDE_V2_3D_CATALOG_PRIORITY_V1
+        //
+        // Fire-and-forget bulk refresh.
+        // Never block Guide channel rendering or D-pad navigation on XMLTV.
+        //
+        // While bulk XMLTV owns this priority claim, background Movies/Series
+        // catalog work pauses at its existing safe category checkpoints.
+        // NOVACAST_GUIDE_V2_3H_TARGETED_XMLTV_V1
+        //
+        // Only the current Guide page's XMLTV IDs are refreshed.
+        // Channels still render from memory/local cache immediately.
+        if (xmltvChannelIds.length) {
+          beginCatalogGuidePriority();
+
+          void refreshXmltvEpgCache({
+            providerKey: providerEpgKey,
+            client,
+            channelIds: xmltvChannelIds,
+            reason: 'guide-cache-check',
+          })
+            .catch(() => {
+              // Failed refresh preserves any previously valid local cache.
+            })
+            .finally(() => {
+              endCatalogGuidePriority();
+            });
+        }
+
+        const rows = mapGuideRowsFromChannels(resolvedMappedChannels, epgByChannel);
+        guideDevLog('getRows-ready', {
+          rowCount: rows.length,
+          xmltvChannelIdCount: xmltvChannelIds.length,
+          durationMs: Date.now() - guideStartedAt,
+        });
+        return rows;
       },
       async getChannelCount(categoryId, signal) {
         // Share the same resolver/cache as getRows so Guide does not download the live list twice.
@@ -1799,17 +2041,94 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
           .filter((movie) => matchesMovie(movie, normalized))
           .map((movie) => ({ ...movie, kind: 'movie' as const }));
 
-        const liveHits = liveStreams.slice(0, XTREAM_MAX_ITEMS_PER_CATEGORY)
+        // search-live-category-sweep-v1_1
+        // Search the entire unfiltered Live dump before limiting results. Slicing first can hide
+        // legitimate channels that appear later in the provider's ordering.
+        let liveHits = liveStreams
           .map((stream, index) => mapLiveStream(stream, index, normalizeCategoryId(stream.category_id, fallbackProviderCategoryId('live'))))
           .filter((channel) => channel.name.toLowerCase().includes(normalized) || channel.current.toLowerCase().includes(normalized))
           .slice(0, 20)
           .map((channel) => ({
             kind: 'live' as const,
             id: channel.id,
+            categoryId: channel.categoryId,
             title: channel.name,
             subtitle: channel.current,
             tone: channel.tone,
           }));
+
+        // Some Xtream panels cap get_live_streams without category at ~10k. When the global dump
+        // produces no Live match, sweep category endpoints so channels beyond that ceiling remain searchable.
+        if (liveHits.length === 0) {
+          const liveCategories = await client.getLiveCategories(signal).catch(() => []);
+          const categoryMatches: typeof liveHits = [];
+          const seenLiveIds = new Set<string>();
+
+          // search-live-category-batch-v1_2
+          // Keep provider pressure bounded while cutting wall-clock time versus one-category-at-a-time requests.
+          // Promise.all preserves category order, so result ordering remains deterministic.
+          const categoryBatchSize = 6;
+
+          for (let categoryOffset = 0; categoryOffset < liveCategories.length; categoryOffset += categoryBatchSize) {
+            if (signal?.aborted) {
+              throw new DOMException('Aborted', 'AbortError');
+            }
+
+            const categoryBatch = liveCategories.slice(categoryOffset, categoryOffset + categoryBatchSize);
+            const batchResults = await Promise.all(
+              categoryBatch.map(async (category) => {
+                const categoryId = normalizeCategoryId(category.category_id, fallbackProviderCategoryId('live'));
+                const categoryStreams = await client.getLiveStreams(categoryId, signal).catch((error) => {
+                  if (signal?.aborted) {
+                    throw error;
+                  }
+                  return [];
+                });
+                return { categoryId, categoryStreams };
+              }),
+            );
+
+            if (signal?.aborted) {
+              throw new DOMException('Aborted', 'AbortError');
+            }
+
+            for (const { categoryId, categoryStreams } of batchResults) {
+              for (let index = 0; index < categoryStreams.length; index += 1) {
+                const channel = mapLiveStream(categoryStreams[index], index, categoryId);
+                const matches =
+                  channel.name.toLowerCase().includes(normalized) ||
+                  channel.current.toLowerCase().includes(normalized);
+                if (!matches || seenLiveIds.has(channel.id)) {
+                  continue;
+                }
+
+                seenLiveIds.add(channel.id);
+                categoryMatches.push({
+                  kind: 'live' as const,
+                  id: channel.id,
+                  categoryId: channel.categoryId,
+                  title: channel.name,
+                  subtitle: channel.current,
+                  tone: channel.tone,
+                });
+
+                if (categoryMatches.length >= 20) {
+                  break;
+                }
+              }
+
+              if (categoryMatches.length >= 20) {
+                break;
+              }
+            }
+
+            if (categoryMatches.length >= 20) {
+              break;
+            }
+          }
+
+          liveHits = categoryMatches;
+        }
 
         const seriesHits = seriesStreams
           .map((stream, index) => mapSeriesPoster(stream, index, normalizeCategoryId(stream.category_id, fallbackProviderCategoryId('series')), client.baseUrl))

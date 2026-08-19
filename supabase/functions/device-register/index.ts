@@ -2,6 +2,11 @@ import { getClientAddress, jsonResponse, optionsResponse, readJson } from '../_s
 import { consumeRateLimit, getAdminClient } from '../_shared/supabase.ts';
 import { createPublicDeviceCode, hashDeviceSecret, hashInstallation, hashToken, normalizeInstallationId } from '../_shared/security.ts';
 
+function isDuplicateConstraint(error: { message?: string; code?: string } | null | undefined) {
+  const message = String(error?.message ?? '').toLowerCase();
+  return error?.code === '23505' || message.includes('duplicate') || message.includes('unique');
+}
+
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return optionsResponse();
   if (request.method !== 'POST') return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
@@ -11,7 +16,9 @@ Deno.serve(async (request) => {
     const secret = typeof body?.deviceSecret === 'string' ? body.deviceSecret : '';
     if (secret.length < 32 || secret.length > 256) throw new Error('invalid_device');
     const client = getAdminClient();
-    if (!(await consumeRateLimit(client, await hashToken(`${getClientAddress(request)}:device-register`), 8, 600))) return jsonResponse({ errorCategory: 'rate_limited' }, 429);
+    if (!(await consumeRateLimit(client, await hashToken(`${getClientAddress(request)}:device-register`), 8, 600))) {
+      return jsonResponse({ errorCategory: 'rate_limited' }, 429);
+    }
     const installationHash = await hashInstallation(installationId);
     const secretHash = await hashDeviceSecret(secret);
     const metadata = body?.metadata && typeof body.metadata === 'object' ? body.metadata as Record<string, unknown> : {};
@@ -27,23 +34,77 @@ Deno.serve(async (request) => {
       last_seen_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    const { data: existing, error: lookupError } = await client.from('devices').select('id,public_device_code,status').eq('installation_id_hash', installationHash).maybeSingle();
+
+    const lookupExisting = async () =>
+      client
+        .from('devices')
+        .select('id,public_device_code,status,device_secret_hash')
+        .eq('installation_id_hash', installationHash)
+        .maybeSingle();
+
+    const recoverExisting = async (existing: {
+      id: string;
+      public_device_code: string;
+      status: string;
+      device_secret_hash: string;
+    }) => {
+      if (existing.device_secret_hash !== secretHash) {
+        // Same generic error as a malformed request. Do not leak that a row exists.
+        return jsonResponse({ errorCategory: 'invalid_device' }, 400);
+      }
+      const { error } = await client.from('devices').update(patch).eq('id', existing.id);
+      if (error) throw new Error('server_configuration_error');
+      return jsonResponse({
+        deviceId: existing.id,
+        publicDeviceCode: existing.public_device_code,
+        status: existing.status,
+        recovered: true,
+      });
+    };
+
+    const { data: existing, error: lookupError } = await lookupExisting();
     if (lookupError) throw new Error('server_configuration_error');
     if (existing) {
-      const { error } = await client.from('devices').update({ ...patch, device_secret_hash: secretHash }).eq('id', existing.id);
-      if (error) throw new Error('server_configuration_error');
-      return jsonResponse({ deviceId: existing.id, publicDeviceCode: existing.public_device_code, status: existing.status });
+      return await recoverExisting(existing);
     }
-    let inserted = null;
+
+    let inserted: { id: string; public_device_code: string; status: string } | null = null;
     for (let attempt = 0; attempt < 3 && !inserted; attempt += 1) {
-      const result = await client.from('devices').insert({ installation_id_hash: installationHash, device_secret_hash: secretHash, public_device_code: createPublicDeviceCode(), ...patch }).select('id,public_device_code,status').single();
-      if (!result.error) inserted = result.data;
-      else if (!result.error.message.toLowerCase().includes('duplicate')) throw new Error('server_configuration_error');
+      const result = await client
+        .from('devices')
+        .insert({
+          installation_id_hash: installationHash,
+          device_secret_hash: secretHash,
+          public_device_code: createPublicDeviceCode(),
+          ...patch,
+        })
+        .select('id,public_device_code,status')
+        .single();
+      if (!result.error) {
+        inserted = result.data;
+        continue;
+      }
+      if (!isDuplicateConstraint(result.error)) {
+        throw new Error('server_configuration_error');
+      }
+      const raced = await lookupExisting();
+      if (raced.error) throw new Error('server_configuration_error');
+      if (raced.data) {
+        return await recoverExisting(raced.data);
+      }
     }
     if (!inserted) throw new Error('device_registration_failed');
-    return jsonResponse({ deviceId: inserted.id, publicDeviceCode: inserted.public_device_code, status: inserted.status });
+    return jsonResponse({
+      deviceId: inserted.id,
+      publicDeviceCode: inserted.public_device_code,
+      status: inserted.status,
+      recovered: false,
+    });
   } catch (error) {
     const category = error instanceof Error ? error.message : 'device_registration_failed';
-    return jsonResponse({ errorCategory: ['invalid_device', 'rate_limited'].includes(category) ? category : 'device_registration_failed' }, category === 'rate_limited' ? 429 : 400);
+    return jsonResponse(
+      { errorCategory: ['invalid_device', 'rate_limited'].includes(category) ? category : 'device_registration_failed' },
+      category === 'rate_limited' ? 429 : 400,
+    );
   }
 });

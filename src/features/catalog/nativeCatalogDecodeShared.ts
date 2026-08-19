@@ -19,7 +19,10 @@ export function nativeRecordToMovieSummary(
   posterStyleKey: string;
   posterUrl?: string;
   rating?: string;
+  addedAt?: number;
+  popularity?: number;
   releaseDate?: string;
+  year?: number;
   containerExtension?: string;
   providerSortOrder?: number;
 } {
@@ -34,7 +37,10 @@ export function nativeRecordToMovieSummary(
     posterStyleKey: 'native',
     posterUrl: record.artworkUrl ?? undefined,
     rating: record.rating != null ? String(record.rating) : undefined,
+    addedAt: typeof record.addedAt === 'number' ? record.addedAt : undefined,
+    popularity: typeof record.popularity === 'number' ? record.popularity : undefined,
     releaseDate: record.releaseDate ?? undefined,
+    year: typeof record.releaseYear === 'number' ? record.releaseYear : undefined,
     containerExtension: record.streamExtension ?? undefined,
     providerSortOrder: record.providerSortOrder ?? undefined,
   };
@@ -53,7 +59,10 @@ export function nativeRecordToSeriesSummary(
   posterUrl?: string;
   backdropUrl?: string;
   rating?: string;
+  addedAt?: number;
+  popularity?: number;
   releaseDate?: string;
+  year?: number;
 } {
   const seriesId = record.seriesId || record.contentId;
   return {
@@ -66,6 +75,9 @@ export function nativeRecordToSeriesSummary(
     posterUrl: record.artworkUrl ?? undefined,
     backdropUrl: record.backdropUrl ?? undefined,
     rating: record.rating != null ? String(record.rating) : undefined,
+    addedAt: typeof record.addedAt === 'number' ? record.addedAt : undefined,
+    popularity: typeof record.popularity === 'number' ? record.popularity : undefined,
     releaseDate: record.releaseDate ?? undefined,
+    year: typeof record.releaseYear === 'number' ? record.releaseYear : undefined,
   };
 }

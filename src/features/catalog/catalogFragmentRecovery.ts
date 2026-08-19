@@ -212,6 +212,8 @@ export async function recoverFragmentedMovieCatalogOnce(
         releaseDate: asNullableString(row.release_date),
         releaseYear: asNullableNumber(row.release_year),
         rating: asNullableNumber(row.rating),
+        addedAt: asNullableNumber(row.added_at),
+        popularity: asNullableNumber(row.popularity),
         description: asNullableString(row.description),
         streamExtension: asNullableString(row.stream_extension),
         providerSortOrder: asNullableNumber(row.provider_sort_order),

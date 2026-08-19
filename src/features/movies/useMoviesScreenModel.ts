@@ -8,6 +8,7 @@ import {
   createSqliteMovieDataSource,
   requestSqliteMovieCategoriesFullRefresh,
 } from './data/SqliteMovieDataSource';
+import { createMovieFirstRunPresentationBridge } from './data/movieFirstRunPresentationBridge';
 import { MOVIE_PAGE_SIZE } from './movieMockData';
 import type { MovieCategory, MovieSummary } from './movieTypes';
 import type { MovieDetailEnrichmentOrigin } from './movieDetailEnrichment';
@@ -49,6 +50,10 @@ import {
   subscribeMovieCatalogReady,
   subscribeMovieCategoriesUpdated,
 } from '@/features/providers/providerCatalogSync';
+import {
+  getCatalogBootstrapState,
+  resolveReadableCatalogGeneration,
+} from '@/features/catalog/catalogRepository';
 import { subscribeSmartCategoryCache } from '@/features/providers/smartCategoryCacheStore';
 import { isSmartCategoryId, normalizeSelectedSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
 import {
@@ -62,7 +67,14 @@ import {
   bumpMoviesBrowseListRevision,
   getMoviesDetailOpenForDiagnostics,
   isMoviesBrowseUiFrozenForDetail,
+  resetMoviesBrowsePresentationLatches,
 } from './moviesDiagnosticsState';
+import {
+  logMoviesPageCommit,
+  logMoviesRecovery,
+  nextMoviesPresentationInstance,
+  resolveMoviesPageCommitDecision,
+} from './moviesPageCommit';
 import {
   describeMoviesDeferredBrowseCommit,
   type MoviesDeferredBrowseCommitKind,
@@ -223,6 +235,10 @@ export function useMoviesScreenModel(
   const settings = useMoviesSettingsStore();
   const sortOption = settings.movieSortOption;
   const detailOriginRef = useRef<MovieDetailEnrichmentOrigin>('browse');
+  const [firstRunBridgeEligible, setFirstRunBridgeEligible] = useState(false);
+  const [firstRunBridgeProviderId, setFirstRunBridgeProviderId] = useState<string | null>(null);
+  const firstRunBridgeEligibleRef = useRef(false);
+  const bridgeHandoffPendingRef = useRef(false);
   const resolvedDataSource = useMemo(() => {
     if (dataSource) {
       return dataSource;
@@ -233,6 +249,13 @@ export function useMoviesScreenModel(
         providerId: selectedProvider.id,
       });
       const providerMovies = activeBundle?.movies;
+      if (
+        firstRunBridgeEligible &&
+        firstRunBridgeProviderId === selectedProvider.id &&
+        providerMovies
+      ) {
+        return createMovieFirstRunPresentationBridge(selectedProvider.id, providerMovies);
+      }
       return createSmartMovieDataSource(
         createSqliteMovieDataSource(selectedProvider.id, {
           fetchProviderMovieInfo: providerMovies?.getMovieInfo
@@ -249,7 +272,13 @@ export function useMoviesScreenModel(
     }
 
     return null;
-  }, [activeBundle?.movies, dataSource, selectedProvider?.id]);
+  }, [
+    activeBundle?.movies,
+    dataSource,
+    firstRunBridgeEligible,
+    firstRunBridgeProviderId,
+    selectedProvider?.id,
+  ]);
   const providerMemory = getMoviesScreenMemory(activeProviderId);
   const [categories, setCategories] = useState<MovieCategory[]>([]);
   const [selectedCategoryId, setSelectedCategoryId] = useState(
@@ -257,6 +286,7 @@ export function useMoviesScreenModel(
   );
   const [visibleMovies, setVisibleMovies] = useState<MovieSummary[]>([]);
   const visibleMoviesRef = useRef<MovieSummary[]>([]);
+  const presentationInstanceRef = useRef(nextMoviesPresentationInstance());
   const [focusedMovieId, setFocusedMovieId] = useState<string | null>(
     options.initialFocusedMovieId ?? providerMemory.focusedMovieId,
   );
@@ -334,6 +364,108 @@ export function useMoviesScreenModel(
     [activeProviderId],
   );
 
+  useEffect(() => {
+    if (dataSource || !selectedProvider?.id || !MOVIES_SQLITE_READS_ENABLED) {
+      firstRunBridgeEligibleRef.current = false;
+      return;
+    }
+
+    let mounted = true;
+    const providerId = selectedProvider.id;
+    const refreshBridgeEligibility = async (reason: string) => {
+      const [state, readableGeneration] = await Promise.all([
+        getCatalogBootstrapState(providerId, 'movie').catch(() => null),
+        resolveReadableCatalogGeneration(providerId, 'movie').catch(() => 0),
+      ]);
+      if (!mounted) {
+        return;
+      }
+
+      const eligible = Boolean(
+        state &&
+          readableGeneration <= 0 &&
+          state.durableReadyGeneration <= 0 &&
+          state.currentAttemptGeneration === 1 &&
+          state.currentStatus === 'syncing',
+      );
+      console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+        event: 'bridge-eligibility-check',
+        providerId,
+        currentAttemptGeneration: state?.currentAttemptGeneration ?? 0,
+        currentStatus: state?.currentStatus ?? null,
+        durableReadyGeneration: state?.durableReadyGeneration ?? 0,
+        readableGeneration,
+        eligible,
+        reason,
+      }));
+      if (eligible && !firstRunBridgeEligibleRef.current) {
+        console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+          event: 'bridge-enter',
+          providerId,
+          currentAttemptGeneration: state?.currentAttemptGeneration ?? 0,
+          currentStatus: state?.currentStatus ?? null,
+          durableReadyGeneration: state?.durableReadyGeneration ?? 0,
+          readableGeneration,
+          bridgeEpoch: 1,
+          reason,
+        }));
+      } else if (!eligible && firstRunBridgeEligibleRef.current) {
+        console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+          event: 'bridge-exit',
+          providerId,
+          readableGeneration,
+          reason,
+        }));
+      } else if (!eligible) {
+        console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+          event: 'bridge-skip',
+          providerId,
+          readableGeneration,
+          currentAttemptGeneration: state?.currentAttemptGeneration ?? 0,
+          currentStatus: state?.currentStatus ?? null,
+          durableReadyGeneration: state?.durableReadyGeneration ?? 0,
+          reason,
+        }));
+      }
+      firstRunBridgeEligibleRef.current = eligible;
+      setFirstRunBridgeProviderId(eligible ? providerId : null);
+      setFirstRunBridgeEligible(eligible);
+    };
+
+    void refreshBridgeEligibility('initial');
+    const unsubscribeSync = subscribeCatalogSyncPhase(providerId, (phase) => {
+      void refreshBridgeEligibility(`sync-phase:${phase}`);
+    });
+    const unsubscribeReady = subscribeMovieCatalogReady(providerId, (generation) => {
+      void refreshBridgeEligibility(`ready-publication:${generation}`);
+    });
+    return () => {
+      mounted = false;
+      if (firstRunBridgeEligibleRef.current) {
+        console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+          event: 'bridge-provider-invalidated',
+          providerId,
+          reason: 'provider-or-screen-lifecycle-changed',
+        }));
+      }
+      unsubscribeSync();
+      unsubscribeReady();
+    };
+  }, [dataSource, selectedProvider?.id]);
+
+  useEffect(() => {
+    if (!bridgeHandoffPendingRef.current || firstRunBridgeEligible || !resolvedDataSource) {
+      return;
+    }
+    bridgeHandoffPendingRef.current = false;
+    console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+      event: 'bridge-handoff-complete',
+      providerId: activeProviderId,
+      datasource: 'sqlite-v2',
+      reason: 'ready-generation-selected',
+    }));
+  }, [activeProviderId, firstRunBridgeEligible, resolvedDataSource]);
+
   const markStartupInteractiveIfReady = useCallback(() => {
     const state = startupStateRef.current;
     if (state.interactive) {
@@ -381,6 +513,24 @@ export function useMoviesScreenModel(
   }, [activeProviderId, emitMoviesStartup]);
 
   useEffect(() => {
+    resetMoviesBrowsePresentationLatches();
+    const sessionAlreadyInteractive = shouldBlockMoviesStartupReentry(activeProviderId);
+    logMoviesRecovery({
+      phase: 'component-mounted',
+      componentInstance: presentationInstanceRef.current,
+      sessionAlreadyInteractive,
+      localPresentationHydrated: visibleMoviesRef.current.length > 0,
+      readyGenerationPresent: true,
+    });
+    if (sessionAlreadyInteractive) {
+      logMoviesRecovery({
+        phase: 'sessionAlreadyInteractive',
+        componentInstance: presentationInstanceRef.current,
+        sessionAlreadyInteractive: true,
+        localPresentationHydrated: visibleMoviesRef.current.length > 0,
+        readyGenerationPresent: true,
+      });
+    }
     routeMountedAtRef.current = Date.now();
     const session = beginMoviesStartupSession(activeProviderId);
     startupStateRef.current = {
@@ -405,6 +555,9 @@ export function useMoviesScreenModel(
       startupSessionId: session.sessionId,
       marker: MOVIES_FOCUS_STAGE4L1_MARKER,
     });
+    return () => {
+      resetMoviesBrowsePresentationLatches();
+    };
   }, [activeProviderId, emitMoviesStartup]);
 
   const flushDeferredBrowseCommits = useCallback(() => {
@@ -440,7 +593,18 @@ export function useMoviesScreenModel(
 
   const enqueueOrApplyBrowseCommit = useCallback(
     (kind: MoviesDeferredBrowseCommitKind, apply: () => void) => {
-      if (isMoviesBrowseUiFrozenForDetail() || getMoviesDetailOpenForDiagnostics()) {
+      const decision = resolveMoviesPageCommitDecision({
+        browseUiFrozenForDetail: isMoviesBrowseUiFrozenForDetail(),
+        detailOpenForDiagnostics: getMoviesDetailOpenForDiagnostics(),
+        currentRequestTokenMatches: true,
+        selectedCategoryMatches: true,
+        mounted: true,
+        cancelled: false,
+        rowCount: kind === 'pagination' ? 0 : 1,
+        visibleCountBefore: visibleMoviesRef.current.length,
+        reason: kind,
+      });
+      if (!decision.apply) {
         deferredBrowseCommitsRef.current.push({
           kind,
           apply,
@@ -464,6 +628,7 @@ export function useMoviesScreenModel(
     (
       updater: MovieSummary[] | ((current: MovieSummary[]) => MovieSummary[]),
       reason: string,
+      onApplied?: (nextLength: number) => void,
     ) => {
       const kind: MoviesDeferredBrowseCommitKind =
         reason === 'pagination-append'
@@ -472,40 +637,40 @@ export function useMoviesScreenModel(
             ? 'catalog-commit'
             : 'list-replacement';
       enqueueOrApplyBrowseCommit(kind, () => {
-        setVisibleMovies((current) => {
-          const next = typeof updater === 'function' ? updater(current) : updater;
-          visibleMoviesRef.current = next;
-          if (kind !== 'pagination' && current !== next) {
-            bumpMoviesBrowseListRevision();
-          }
-          console.info(
-            '[NovaCast Movies Data] ' +
-              JSON.stringify({
-                reason,
-                arrayIdentityChanged: current !== next,
-                previousLength: current.length,
-                nextLength: next.length,
-                previousFirstId: current[0]?.id ?? null,
-                nextFirstId: next[0]?.id ?? null,
-                previousLastId: current[current.length - 1]?.id ?? null,
-                nextLastId: next[next.length - 1]?.id ?? null,
-              }),
+        const current = visibleMoviesRef.current;
+        const next = typeof updater === 'function' ? updater(current) : updater;
+        visibleMoviesRef.current = next;
+        if (kind !== 'pagination' && current !== next) {
+          bumpMoviesBrowseListRevision();
+        }
+        console.info(
+          '[NovaCast Movies Data] ' +
+            JSON.stringify({
+              reason,
+              arrayIdentityChanged: current !== next,
+              previousLength: current.length,
+              nextLength: next.length,
+              previousFirstId: current[0]?.id ?? null,
+              nextFirstId: next[0]?.id ?? null,
+              previousLastId: current[current.length - 1]?.id ?? null,
+              nextLastId: next[next.length - 1]?.id ?? null,
+            }),
+        );
+        if (isOnnMoviesTraceEnabled() && (next.length === 0 || current !== next)) {
+          traceOnnMoviesEvent(
+            'Catalog',
+            next.length === 0 ? 'visible_movies_cleared' : 'visible_movies_replaced',
+            {
+              reason,
+              previousLength: current.length,
+              nextLength: next.length,
+              selectedCategoryId: selectedCategoryIdRef.current,
+              gridMounted: isOnnMoviesGridMounted(),
+            },
           );
-          if (isOnnMoviesTraceEnabled() && (next.length === 0 || current !== next)) {
-            traceOnnMoviesEvent(
-              'Catalog',
-              next.length === 0 ? 'visible_movies_cleared' : 'visible_movies_replaced',
-              {
-                reason,
-                previousLength: current.length,
-                nextLength: next.length,
-                selectedCategoryId: selectedCategoryIdRef.current,
-                gridMounted: isOnnMoviesGridMounted(),
-              },
-            );
-          }
-          return next;
-        });
+        }
+        setVisibleMovies(next);
+        onApplied?.(next.length);
       });
     },
     [enqueueOrApplyBrowseCommit],
@@ -978,6 +1143,25 @@ export function useMoviesScreenModel(
         providerId: activeProviderId,
         generation,
       });
+      if (firstRunBridgeEligibleRef.current) {
+        console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+          event: 'bridge-ready-publication-received',
+          providerId: activeProviderId,
+          generation,
+          reason: 'ready-generation-wins',
+        }));
+        console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+          event: 'bridge-handoff-start',
+          providerId: activeProviderId,
+          generation,
+          reason: 'ready-generation-wins',
+        }));
+        requestGenerationRef.current += 1;
+        bridgeHandoffPendingRef.current = true;
+        firstRunBridgeEligibleRef.current = false;
+        setFirstRunBridgeEligible(false);
+        return;
+      }
       if (isOnnMoviesTraceEnabled()) {
         traceOnnMoviesEvent('Catalog', 'movie_catalog_ready', {
           providerId: activeProviderId,
@@ -1408,6 +1592,19 @@ export function useMoviesScreenModel(
       }
 
       try {
+        logMoviesPageCommit({
+          phase: 'query-start',
+          categoryId: selectedCategoryId,
+          requestToken: requestKey,
+          currentRequestTokenMatches: true,
+          componentInstance: presentationInstanceRef.current,
+          rowCount: 0,
+          selectedCategoryMatches: true,
+          mounted: !cancelled,
+          cancelled,
+          visibleCountBefore: visibleMoviesRef.current.length,
+          visibleCountAfter: visibleMoviesRef.current.length,
+        });
         const page =
           isSearchMode
             ? await resolvedDataSource.searchMovies({
@@ -1429,14 +1626,46 @@ export function useMoviesScreenModel(
                   getMoviesStartupSession(activeProviderId)?.sessionId ?? null,
               });
 
-        if (cancelled || buildContentSortRequestKey({
-          providerId: activeProviderId,
-          contentType: 'movie',
+        const tokenMatches =
+          !cancelled &&
+          buildContentSortRequestKey({
+            providerId: activeProviderId,
+            contentType: 'movie',
+            categoryId: selectedCategoryId,
+            sort: sortOption,
+            offset: 0,
+            generation,
+          }) === requestKey;
+        logMoviesPageCommit({
+          phase: 'query-resolved',
           categoryId: selectedCategoryId,
-          sort: sortOption,
-          offset: 0,
-          generation,
-        }) !== requestKey) {
+          requestToken: requestKey,
+          currentRequestTokenMatches: tokenMatches,
+          componentInstance: presentationInstanceRef.current,
+          rowCount: page.items.length,
+          selectedCategoryMatches: tokenMatches,
+          mounted: !cancelled,
+          cancelled,
+          visibleCountBefore: visibleMoviesRef.current.length,
+          visibleCountAfter: visibleMoviesRef.current.length,
+          rejectReason: tokenMatches ? null : cancelled ? 'cancelled-or-unmounted' : 'request-token-mismatch',
+        });
+
+        if (!tokenMatches) {
+          logMoviesPageCommit({
+            phase: 'commit-rejected',
+            categoryId: selectedCategoryId,
+            requestToken: requestKey,
+            currentRequestTokenMatches: false,
+            componentInstance: presentationInstanceRef.current,
+            rowCount: page.items.length,
+            selectedCategoryMatches: false,
+            mounted: !cancelled,
+            cancelled,
+            visibleCountBefore: visibleMoviesRef.current.length,
+            visibleCountAfter: visibleMoviesRef.current.length,
+            rejectReason: cancelled ? 'cancelled-or-unmounted' : 'request-token-mismatch',
+          });
           return;
         }
 
@@ -1451,7 +1680,8 @@ export function useMoviesScreenModel(
 
         // After startup focus is released / session interactive, Detail-active
         // completions must not mutate browse focus or preferred targets.
-        if (dropLateStartup && detailActive) {
+        // An empty remounted presentation must still hydrate from this page.
+        if (dropLateStartup && detailActive && visibleMoviesRef.current.length > 0) {
           emitMoviesStartup('movies_startup_late_focus_result_dropped', {
             categoryId: selectedCategoryId,
             returnedCount: page.items.length,
@@ -1463,25 +1693,105 @@ export function useMoviesScreenModel(
           return;
         }
 
+        const visibleCountBefore = visibleMoviesRef.current.length;
+        const commitDecision = resolveMoviesPageCommitDecision({
+          browseUiFrozenForDetail: isMoviesBrowseUiFrozenForDetail(),
+          detailOpenForDiagnostics: getMoviesDetailOpenForDiagnostics(),
+          currentRequestTokenMatches: true,
+          selectedCategoryMatches: true,
+          mounted: !cancelled,
+          cancelled,
+          rowCount: page.items.length,
+          visibleCountBefore,
+          reason: retainVisible ? 'category-first-page-replace' : 'category-first-page-load',
+        });
+        logMoviesPageCommit({
+          phase: 'commit-attempt',
+          categoryId: selectedCategoryId,
+          requestToken: requestKey,
+          currentRequestTokenMatches: true,
+          componentInstance: presentationInstanceRef.current,
+          rowCount: page.items.length,
+          selectedCategoryMatches: true,
+          mounted: !cancelled,
+          cancelled,
+          visibleCountBefore,
+          visibleCountAfter: visibleCountBefore,
+          rejectReason: commitDecision.rejectReason,
+        });
+
         offsetRef.current = page.items.length;
         startupStateRef.current.movieReplacements += 1;
-        updateVisibleMovies(page.items, retainVisible ? 'category-first-page-replace' : 'category-first-page-load');
+        updateVisibleMovies(
+          page.items,
+          retainVisible ? 'category-first-page-replace' : 'category-first-page-load',
+          (visibleCountAfter) => {
+            setFirstPageLoadGate((previous) => {
+              if (previous.loadingRequestToken !== requestKey) {
+                return previous;
+              }
+              return {
+                loadingCategoryId: selectedCategoryId,
+                loadingRequestToken: requestKey,
+                firstPageResolvedCategoryId: selectedCategoryId,
+              };
+            });
+            logMoviesPageCommit({
+              phase: 'commit-accepted',
+              categoryId: selectedCategoryId,
+              requestToken: requestKey,
+              currentRequestTokenMatches: true,
+              componentInstance: presentationInstanceRef.current,
+              rowCount: page.items.length,
+              selectedCategoryMatches: true,
+              mounted: !cancelled,
+              cancelled,
+              visibleCountBefore,
+              visibleCountAfter,
+            });
+            if (visibleCountAfter > 0) {
+              logMoviesRecovery({
+                phase: 'localPresentationHydrated',
+                componentInstance: presentationInstanceRef.current,
+                sessionAlreadyInteractive: shouldBlockMoviesStartupReentry(activeProviderId),
+                localPresentationHydrated: true,
+                readyGenerationPresent: true,
+              });
+            }
+          },
+        );
+        if (!commitDecision.apply) {
+          logMoviesPageCommit({
+            phase: 'commit-rejected',
+            categoryId: selectedCategoryId,
+            requestToken: requestKey,
+            currentRequestTokenMatches: true,
+            componentInstance: presentationInstanceRef.current,
+            rowCount: page.items.length,
+            selectedCategoryMatches: true,
+            mounted: !cancelled,
+            cancelled,
+            visibleCountBefore,
+            visibleCountAfter: visibleCountBefore,
+            rejectReason: commitDecision.rejectReason,
+          });
+        }
         setHasMore(page.hasMore);
         if ('hasValidRatings' in page) {
           setCategoryHasRatings(Boolean(page.hasValidRatings));
         }
         syncCategoryCount(selectedCategoryId, page.totalCount);
-        // Resolve gate only for this request token — stale completions cannot hide a newer loader.
-        setFirstPageLoadGate((previous) => {
-          if (previous.loadingRequestToken !== requestKey) {
-            return previous;
-          }
-          return {
-            loadingCategoryId: selectedCategoryId,
-            loadingRequestToken: requestKey,
-            firstPageResolvedCategoryId: selectedCategoryId,
-          };
-        });
+        if (firstRunBridgeEligibleRef.current) {
+          console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+            event: 'bridge-category-count-resolved',
+            providerId: activeProviderId,
+            selectedCategoryId,
+            totalCount: page.totalCount,
+            returnedCount: page.items.length,
+            requestToken: requestKey,
+            reason: 'bridge-page-total-count',
+          }));
+        }
         logMoviesPerf('movies_page_ready', {
           providerId: activeProviderId,
           categoryId: selectedCategoryId,
@@ -1934,6 +2244,17 @@ export function useMoviesScreenModel(
           setCategoryHasRatings((current) => current || Boolean(page.hasValidRatings));
         }
         syncCategoryCount(selectedCategoryId, page.totalCount);
+        if (firstRunBridgeEligibleRef.current) {
+          console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
+            event: 'bridge-category-count-resolved',
+            providerId: activeProviderId,
+            selectedCategoryId,
+            totalCount: page.totalCount,
+            returnedCount: page.items.length,
+            requestToken: `${generationAtRequest}:${selectedCategoryId}:${nextOffset}`,
+            reason: 'bridge-page-total-count',
+          }));
+        }
         setLoadStatus((current) => (current === 'error' ? current : 'ready'));
         if (!focusedMovieIdRef.current && page.items[0]) {
           setFocusedMovieId(page.items[0].id);

@@ -28,7 +28,15 @@ function rememberSearchContext(providerId: string, context?: SearchNavigationCon
 
 export function openSearchHit(router: SearchRouter, providerId: string, hit: ProviderSearchHit) {
   if (hit.kind === 'live') {
-    router.push({ pathname: '/live', params: { channelId: hit.id, returnRoute: 'search' } });
+    router.push({
+      pathname: '/live',
+      params: {
+        channelId: hit.id,
+        categoryId: hit.categoryId,
+        returnRoute: 'search',
+        directPlay: hit.categoryId ? '1' : undefined,
+      },
+    });
     return;
   }
 
@@ -51,7 +59,15 @@ export function openSearchResult(
   rememberSearchContext(providerId, context);
 
   if (result.type === 'live') {
-    router.push({ pathname: '/live', params: { channelId: result.id, returnRoute: 'search' } });
+    router.push({
+      pathname: '/live',
+      params: {
+        channelId: result.id,
+        categoryId: result.categoryId,
+        returnRoute: 'search',
+        directPlay: result.categoryId ? '1' : undefined,
+      },
+    });
     return;
   }
 

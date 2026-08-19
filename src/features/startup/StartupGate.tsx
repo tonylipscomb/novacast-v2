@@ -12,17 +12,18 @@ import {
   isPersonalPairingEnabled,
   useDeviceState,
 } from '@/features/device';
-import { downloadManagedProviderAssignment } from '@/features/device/managedProviderDownload';
-import { setContentPolicyOverride } from '@/features/content-policy';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
-import { hasSavedProvider, isProviderConnectionReady } from '@/features/providers/providerModel';
-import { getProviderState, useProviderStore } from '@/features/providers/providerStore';
+import { isProviderConnectionReady } from '@/features/providers/providerModel';
+import { useProviderStore } from '@/features/providers/providerStore';
 import { BetaInviteActivationScreen } from '@/features/device/BetaInviteActivationScreen';
 import { BetaExpiredScreen } from '@/features/device/BetaExpiredScreen';
 import { ProviderInitErrorScreen } from '@/features/startup/ProviderInitErrorScreen';
+import {
+  resolveStartupProvider,
+  type StartupProviderSource,
+} from '@/features/startup/resolveStartupProvider';
 import { markStartupReady } from '@/features/startup/startupReadiness';
 import {
-  STARTUP_BOOTSTRAP_TIMEOUT_MS,
   STARTUP_NETWORK_TIMEOUT_MS,
   resolveManagedLibraryMissingState,
   withTimeout,
@@ -89,65 +90,72 @@ export function StartupGate() {
     }
   }, [bootstrapping, isSwitchingProvider, ready]);
 
-  const ensureManagedProvider = useCallback(async () => {
-    if (!isClosedBetaManagedFlow()) {
-      return;
-    }
-    const status = getDeviceState().status;
-    if (!status || status.activationStatus !== 'active') {
-      return;
-    }
-    if (status.contentPolicy === 'us_only' || status.contentPolicy === 'unrestricted') {
-      setContentPolicyOverride(status.contentPolicy);
-    }
-
-    const providerState = await getProviderState();
-    if (hasSavedProvider(providerState) && getActiveRepositoryBundle()) {
+  const applyProviderResolution = useCallback((
+    result: Awaited<ReturnType<typeof resolveStartupProvider>>,
+  ) => {
+    setBootstrapping(false);
+    if (result.ok) {
       setLibraryMissing(false);
-      return;
-    }
-
-    if (!status.providerAssigned && !status.requiresProviderDownload) {
-      setLibraryMissing(true);
-      recordSanitizedDiagnostic({
-        operation: 'startup_managed_library',
-        screen: 'StartupGate',
-        errorType: 'no_library_assigned',
-        outcome: 'actionable_error',
-      });
-      return;
-    }
-
-    setBootstrapping(true);
-    setBootstrapError(null);
-    setLibraryMissing(false);
-    try {
-      await withTimeout(
-        downloadManagedProviderAssignment(),
-        STARTUP_BOOTSTRAP_TIMEOUT_MS,
-        'managed_provider_timeout',
-      );
+      setBootstrapError(null);
       reportNetworkOutcome(true);
-    } catch (error) {
-      reportNetworkOutcome(false);
-      setBootstrapError(error instanceof Error ? error.message : 'managed_provider_unavailable');
-      recordSanitizedDiagnostic({
-        operation: 'startup_managed_download',
-        screen: 'StartupGate',
-        errorType: error instanceof Error ? error.message : 'managed_provider_unavailable',
-        outcome: 'actionable_error',
-      });
-    } finally {
-      setBootstrapping(false);
+      return;
     }
+    if (result.errorCode === 'not_authorized') {
+      setLibraryMissing(false);
+      setBootstrapError(null);
+      return;
+    }
+    setLibraryMissing(result.libraryMissing);
+    setBootstrapError(result.libraryMissing ? null : result.errorCode);
+    reportNetworkOutcome(false);
+    recordSanitizedDiagnostic({
+      operation: result.libraryMissing ? 'startup_managed_library' : 'startup_managed_download',
+      screen: 'StartupGate',
+      errorType: result.errorCode ?? 'managed_provider_unavailable',
+      outcome: 'actionable_error',
+    });
   }, []);
 
+  const resolveProvider = useCallback(async (source: StartupProviderSource) => {
+    await Promise.resolve();
+    setBootstrapping(true);
+    setBootstrapError(null);
+    if (source === 'retry') {
+      setLibraryMissing(false);
+    }
+    const result = await resolveStartupProvider({ source });
+    applyProviderResolution(result);
+    return result;
+  }, [applyProviderResolution]);
+
+  const ensureManagedProvider = useCallback(async () => {
+    await resolveProvider('startup');
+  }, [resolveProvider]);
+
+  const retryStartupProvider = useCallback(async () => {
+    await resolveProvider('retry');
+  }, [resolveProvider]);
+
   useEffect(() => {
-    if (!device.status || device.status.activationStatus !== 'active') {
+    if (!device.authorization.effectiveAuthorized) {
       return;
     }
-    void ensureManagedProvider();
-  }, [device.status?.activationStatus, device.status?.providerAssigned, ensureManagedProvider]);
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        void ensureManagedProvider();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    device.authorization.effectiveAuthorized,
+    device.status?.providerAssigned,
+    device.status?.requiresProviderDownload,
+    device.status?.managedProviderId,
+    ensureManagedProvider,
+  ]);
 
   if (startupTimedOut && (device.state === 'idle' || device.state === 'checking' || device.state === 'registering')) {
     return (
@@ -192,14 +200,6 @@ export function StartupGate() {
     }
   }
 
-  if (!ready || isSwitchingProvider) {
-    return (
-      <View style={styles.loading}>
-        <NovaSpaceLoader label="Loading your provider…" />
-      </View>
-    );
-  }
-
   if (bootstrapError || libraryMissing) {
     return (
       <ProviderInitErrorScreen
@@ -207,9 +207,19 @@ export function StartupGate() {
         message={
           libraryMissing
             ? 'This device is activated, but no NovaCast library is assigned yet. Ask your beta admin to assign a provider, then retry.'
-            : undefined
+            : 'NovaCast could not connect to your saved provider. Retry or pair another provider.'
         }
+        retrying={bootstrapping}
+        onRetry={retryStartupProvider}
       />
+    );
+  }
+
+  if (!ready || isSwitchingProvider) {
+    return (
+      <View style={styles.loading}>
+        <NovaSpaceLoader label="Loading your provider…" />
+      </View>
     );
   }
 
@@ -226,6 +236,8 @@ export function StartupGate() {
           <ProviderInitErrorScreen
             title="Library not assigned"
             message="This device is activated, but no NovaCast library is assigned yet. Ask your beta admin to assign a provider, then retry."
+            retrying={bootstrapping}
+            onRetry={retryStartupProvider}
           />
         );
       }
@@ -238,11 +250,20 @@ export function StartupGate() {
     if (isPersonalPairingEnabled()) {
       return <Redirect href="/pair" />;
     }
+    if (device.authorization.localBypassAuthorized) {
+      return (
+        <ProviderInitErrorScreen
+          message="Local emulator activation bypass is enabled, but no provider is configured."
+          retrying={bootstrapping}
+          onRetry={retryStartupProvider}
+        />
+      );
+    }
     return <BetaInviteActivationScreen onActivated={() => void ensureManagedProvider()} />;
   }
 
   if (providerSwitchError || !providerInitialized) {
-    return <ProviderInitErrorScreen />;
+    return <ProviderInitErrorScreen retrying={bootstrapping} onRetry={retryStartupProvider} />;
   }
 
   return <Redirect href="/main-menu" />;

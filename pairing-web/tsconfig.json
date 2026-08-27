@@ -22,6 +22,7 @@
     "src/routing.test.ts",
     "src/siteConfig.test.ts",
     "src/providerHealthDisplay.test.ts",
-    "src/diagnosticsPresentation.test.ts"
+    "src/diagnosticsPresentation.test.ts",
+    "src/deviceDiagnosticsPresentation.test.ts"
   ]
 }

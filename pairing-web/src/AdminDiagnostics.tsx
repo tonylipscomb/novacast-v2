@@ -1,33 +1,92 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { adminRequest } from './pairing';
 import { diagnosticEventLabel, diagnosticStatusLabel, diagnosticTone, formatDiagnosticDuration } from './diagnosticsPresentation';
+import { captureRemainingLabel, deviceMatchesQuery } from './deviceDiagnosticsPresentation';
 
 type Row = Record<string, any>;
-type DiagnosticsData = { summary?: Row; devices?: Row[]; events?: Row[] };
+type DiagnosticsData = { summary?: Row; devices?: Row[]; selectedDevice?: Row; sessions?: Row[]; events?: Row[]; supportLogs?: Row[] };
+const TABS = ['OVERVIEW', 'PLAYBACK', 'NETWORK', 'PROVIDER', 'SUPPORT LOG', 'TECHNICAL'];
+const LOG_FILTERS = ['ALL', 'ERRORS', 'WARNINGS', 'PLAYBACK', 'NETWORK', 'PROVIDER', 'APP'];
 
 export function AdminDiagnostics({ token }: { token: string; onMessage?: (message: string) => void }) {
   const [data, setData] = useState<DiagnosticsData | null>(null);
   const [hours, setHours] = useState('24');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [selectedDevice, setSelectedDevice] = useState<Row | null>(null);
+  const [query, setQuery] = useState('');
+  const [selectedCode, setSelectedCode] = useState('');
+  const [tab, setTab] = useState('OVERVIEW');
   const [logFilter, setLogFilter] = useState('ALL');
-  const load = async () => { setLoading(true); setError(''); try { setData(await adminRequest(`admin-diagnostics?hours=${hours}`, token)); } catch { setError('Diagnostics data could not be loaded. Check the diagnostics service and try again.'); } finally { setLoading(false); } };
-  useEffect(() => { void load(); }, [token, hours]);
-  const summary = data?.summary ?? {};
+  const [logHours, setLogHours] = useState('24');
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const [captureMessage, setCaptureMessage] = useState('');
+  const [clock, setClock] = useState(Date.now());
+
+  const load = async (deviceCode = '') => {
+    setLoading(true); setError('');
+    try {
+      const suffix = deviceCode ? `&deviceId=${encodeURIComponent(deviceCode)}` : '';
+      setData(await adminRequest(`admin-diagnostics?hours=${hours}${suffix}`, token));
+    } catch { setError('Diagnostics data could not be loaded. Check the diagnostics service and try again.'); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { void load(selectedCode); }, [token, hours]);
   const devices = data?.devices ?? [];
+  const selected = data?.selectedDevice ?? devices.find((device) => device.publicDeviceCode === selectedCode) ?? null;
+  const filteredDevices = useMemo(() => devices.filter((device) => deviceMatchesQuery(device, query)).slice(0, 100), [devices, query]);
+  const summary = data?.summary ?? {};
   const metrics = [['TOTAL TESTERS', summary.totalDevices], ['HEALTHY', summary.healthy], ['NEEDS ATTENTION', Number(summary.degraded ?? 0) + Number(summary.activePlaybackIssues ?? 0)], ['OFFLINE', summary.offline], ['PLAYBACK ISSUES', summary.activePlaybackIssues]];
-  return <div className="diagnosticsPage"><div className="diagnosticsToolbar"><div><span className="diagnosticsEyebrow">BETA SUPPORT</span><strong>Device Diagnostics Center</strong><small>Human-readable health and playback signals for tester support.</small></div><select value={hours} onChange={(event) => setHours(event.target.value)} aria-label="Diagnostics time range"><option value="1">Last hour</option><option value="24">Last 24 hours</option><option value="168">Last 7 days</option></select><button onClick={() => void load()} disabled={loading}>{loading ? 'Refreshing' : 'Refresh'}</button></div>{error ? <div className="diagnosticsError" role="alert">{error}<button onClick={() => void load()}>Retry</button></div> : null}{loading && !data ? <div className="diagnosticEmpty">Loading support diagnostics…</div> : null}{!loading || data ? <><div className="diagnosticMetricGrid">{metrics.map(([label, value]) => <article className="diagnosticMetric" key={String(label)}><small>{label}</small><strong>{value ?? 0}</strong></article>)}</div><section className="diagnosticPanel"><header><div><span className="diagnosticsEyebrow">DEVICE OVERVIEW</span><h2>Tester health</h2></div><span>{devices.length} testers</span></header><div className="diagnosticDeviceGrid">{devices.length ? devices.map((device, index) => <DeviceCard key={device.publicDeviceCode ?? index} device={device} onSelect={() => setSelectedDevice(device)} />) : <p className="diagnosticEmpty">No diagnostic-safe health records have arrived yet.</p>}</div>{selectedDevice ? <SupportLog device={selectedDevice} filter={logFilter} setFilter={setLogFilter} token={token} /> : null}</section><section className="diagnosticPanel"><header><div><span className="diagnosticsEyebrow">ENGINEERING DETAIL</span><h2>Recent activity</h2></div></header><details className="diagnosticTechnical"><summary>Technical details</summary>{(data?.events ?? []).slice(0, 30).map((event, index) => <div className="diagnosticEvent" key={event.id ?? index}><strong>{diagnosticEventLabel(event.event_type)}</strong><span>{event.error_code ?? event.metadata?.contentTitle ?? 'No additional detail'}<small>{event.event_type}</small></span><time>{event.event_at ? new Date(event.event_at).toLocaleString() : 'Not enough data yet'}</time></div>)}</details></section></> : null}</div>;
+  const selectDevice = (device: Row) => { const code = String(device.publicDeviceCode ?? ''); setSelectedCode(code); setQuery(code); setTab('OVERVIEW'); setCaptureMessage(''); void load(code); };
+
+  useEffect(() => {
+    if (!selected?.captureActive || !selected.captureExpiresAt) return;
+    const timer = window.setTimeout(() => setClock(Date.now()), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [selected?.captureActive, selected?.captureExpiresAt, clock]);
+
+  const runCapture = async (action: 'start_diagnostics_capture' | 'stop_diagnostics_capture') => {
+    if (!selectedCode) return;
+    setCaptureBusy(true); setCaptureMessage('');
+    try {
+      await adminRequest('admin-device-action', token, { method: 'POST', body: JSON.stringify({ deviceId: selectedCode, action }) });
+      await load(selectedCode);
+    } catch { setCaptureMessage('Capture command could not be sent.'); }
+    finally { setCaptureBusy(false); }
+  };
+
+  return <div className="diagnosticsPage">
+    <div className="diagnosticsToolbar"><div><span className="diagnosticsEyebrow">BETA SUPPORT</span><strong>Device Diagnostics Center</strong><small>Fleet health at a glance, with one focused device workspace.</small></div><select value={hours} onChange={(event) => setHours(event.target.value)} aria-label="Diagnostics time range"><option value="1">Last hour</option><option value="24">Last 24 hours</option><option value="168">Last 7 days</option></select><button onClick={() => void load(selectedCode)} disabled={loading}>{loading ? 'Refreshing' : 'Refresh'}</button></div>
+    {error ? <div className="diagnosticsError" role="alert">{error}<button onClick={() => void load(selectedCode)}>Retry</button></div> : null}
+    {loading && !data ? <div className="diagnosticEmpty">Loading support diagnostics…</div> : null}
+    {data ? <>
+      <div className="diagnosticMetricGrid">{metrics.map(([label, value]) => <article className="diagnosticMetric" key={String(label)}><small>{label}</small><strong>{value ?? 0}</strong></article>)}</div>
+      <section className="diagnosticPanel diagnosticPicker"><header><div><span className="diagnosticsEyebrow">SELECT DEVICE</span><h2>Choose a beta tester device</h2></div><span>{devices.length} devices</span></header><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search code, tester, email, or model" aria-label="Search beta devices" />{query || !selected ? <div className="diagnosticDeviceOptions" role="listbox">{filteredDevices.map((device, index) => <button key={device.publicDeviceCode ?? index} role="option" aria-selected={device.publicDeviceCode === selectedCode} onClick={() => selectDevice(device)}><span><strong>{device.publicDeviceCode ?? 'Code unavailable'}</strong><small>{device.assignedTesterName || device.friendlyName || 'Unassigned'} · {[device.manufacturer, device.model].filter(Boolean).join(' ') || 'Model not reported'}</small></span><b className={`diagnosticStatus ${diagnosticTone(device.overallStatus)}`}>{device.overallStatus ?? 'NO DATA'}</b></button>)}{!filteredDevices.length ? <p className="diagnosticEmpty">No beta device matches that search.</p> : null}</div> : null}</section>
+      {!selected ? <div className="diagnosticEmpty diagnosticNoSelection">Select a beta device to view diagnostics.</div> : <SelectedWorkspace device={selected} tab={tab} setTab={setTab} logFilter={logFilter} setLogFilter={setLogFilter} logHours={logHours} setLogHours={setLogHours} captureBusy={captureBusy} captureMessage={captureMessage} onCapture={runCapture} clock={clock} />}
+    </> : null}
+  </div>;
 }
 
-function DeviceCard({ device, onSelect }: { device: Row; onSelect: () => void }) {
+function SelectedWorkspace({ device, tab, setTab, logFilter, setLogFilter, logHours, setLogHours, captureBusy, captureMessage, onCapture, clock }: { device: Row; tab: string; setTab: (value: string) => void; logFilter: string; setLogFilter: (value: string) => void; logHours: string; setLogHours: (value: string) => void; captureBusy: boolean; captureMessage: string; onCapture: (action: 'start_diagnostics_capture' | 'stop_diagnostics_capture') => void; clock: number }) {
   const playback = device.recentPlayback ?? {};
-  return <article className="diagnosticDeviceCard" tabIndex={0} onClick={onSelect} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onSelect(); }}><header><div><strong>{device.assignedTesterName || device.friendlyName || 'Unassigned tester'}</strong><span>{device.publicDeviceCode ?? 'Device ID unavailable'}</span><small>{[device.manufacturer, device.model].filter(Boolean).join(' ') || 'Model not reported'}</small></div><b className={`diagnosticStatus ${diagnosticTone(device.overallStatus)}`}>{device.overallStatus ?? 'UNKNOWN'}</b></header><div className="diagnosticIndicators">{[['INTERNET', device.internet], ['PROVIDER', device.providerStatus], ['PLAYBACK', device.playbackStatus]].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong className={`diagnosticIndicator ${diagnosticTone(value)}`}>{diagnosticStatusLabel(value)}</strong></div>)}</div><div className="diagnosticPlayback"><span>Provider <b>{device.providerName ?? 'Not enough data yet'}</b></span><span>Last played <b>{playback.contentTitle ?? 'Not enough data yet'}</b></span><span>Started in <b>{formatDiagnosticDuration(playback.timeToFirstFrameMs)}</b></span><span>Buffers <b>{playback.bufferCount ?? 0}</b></span></div><div className="diagnosticCause"><small>LIKELY ISSUE</small><strong>{String(device.likelyCause ?? 'UNKNOWN').replaceAll('_', ' ')}</strong><p>{device.likelyCauseExplanation ?? 'Not enough data yet'}</p></div></article>;
+  const report = () => { const text = ['NovaCast Beta Support Report', `Tester: ${device.assignedTesterName ?? 'Unknown'}`, `Device: ${device.publicDeviceCode ?? 'Unknown'}`, `Model: ${[device.manufacturer, device.model].filter(Boolean).join(' ') || 'Unknown'}`, `Status: ${device.overallStatus ?? 'Unknown'}`, `Internet: ${diagnosticStatusLabel(device.internet)}`, `Provider: ${diagnosticStatusLabel(device.providerStatus)}`, `Playback: ${diagnosticStatusLabel(device.playbackStatus)}`, `Last content: ${playback.contentTitle ?? 'None recorded'}`, `Likely issue: ${device.likelyCauseExplanation ?? 'Not enough data yet'}`].join('\n'); void navigator.clipboard?.writeText(text); };
+  const active = device.captureActive === true && !!device.captureExpiresAt && Date.parse(device.captureExpiresAt) > clock;
+  return <section className="diagnosticPanel diagnosticWorkspace"><header className="diagnosticWorkspaceHeader"><div><span className="diagnosticsEyebrow">SELECTED DEVICE</span><h2>{device.assignedTesterName || device.friendlyName || 'Unassigned tester'}</h2><strong>{device.publicDeviceCode ?? 'Device code unavailable'}</strong><p>{[device.manufacturer, device.model].filter(Boolean).join(' ') || 'Model not reported'} · NovaCast {device.appVersion ?? 'version unavailable'} ({device.appBuild ?? 'build unavailable'})</p><p>Provider: {device.providerName ?? 'Unassigned'} · Last seen: {device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : 'Not enough data yet'}</p></div><div className="diagnosticCapture"><b className={`diagnosticStatus ${diagnosticTone(device.overallStatus)}`}>{device.overallStatus ?? 'NO DATA'}</b>{active ? <><strong>🔴 ENHANCED CAPTURE ACTIVE</strong><span>{captureRemainingLabel(device.captureExpiresAt, clock)} remaining</span><button onClick={() => onCapture('stop_diagnostics_capture')} disabled={captureBusy}>Stop capture</button></> : <><span>Temporarily collect enhanced troubleshooting signals for this device.</span><button onClick={() => onCapture('start_diagnostics_capture')} disabled={captureBusy}>Start 15-minute capture</button></>}{captureMessage ? <small>{captureMessage}</small> : null}</div></header><div className="diagnosticWorkspaceActions"><button onClick={report}>Copy support report</button></div><div className="diagnosticTabs" role="tablist">{TABS.map((value) => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? 'selected' : ''} onClick={() => setTab(value)}>{value}</button>)}</div>{tab === 'SUPPORT LOG' ? <SupportLog device={device} filter={logFilter} setFilter={setLogFilter} hours={logHours} setHours={setLogHours} /> : <WorkspaceTab device={device} tab={tab} />}</section>;
 }
 
-function SupportLog({ device, filter, setFilter, token }: { device: Row; filter: string; setFilter: (value: string) => void; token: string }) {
-  const logs = (device.supportLogs ?? []).filter((entry: Row) => filter === 'ALL' || (filter === 'ERRORS' && entry.level === 'error') || (filter === 'WARNINGS' && entry.level === 'warning') || entry.category === filter.toLowerCase());
-  const copyReport = () => { const playback = device.recentPlayback ?? {}; const report = ['NovaCast Beta Support Report', '', `Tester: ${device.assignedTesterName ?? 'Unknown'}`, `Device: ${device.publicDeviceCode ?? 'Unknown'}`, `Hardware: ${[device.manufacturer, device.model].filter(Boolean).join(' ') || 'Unknown'}`, `NovaCast: ${device.appVersion ?? 'Unknown'} (${device.appBuild ?? 'Unknown'})`, '', `Status: ${device.overallStatus ?? 'Unknown'}`, `Internet: ${diagnosticStatusLabel(device.internet)}`, `Provider: ${diagnosticStatusLabel(device.providerStatus)}`, `Playback: ${diagnosticStatusLabel(device.playbackStatus)}`, '', `Last content: ${playback.contentTitle ?? 'None recorded'}`, `Startup: ${formatDiagnosticDuration(playback.timeToFirstFrameMs)}`, `Buffers: ${playback.bufferCount ?? 0}`, '', `Likely issue: ${device.likelyCauseExplanation ?? 'No active issue detected'}`, `Recent errors: ${device.recentError?.message ?? 'None'}`].join('\n'); void navigator.clipboard?.writeText(report); };
-  const sendCapture = async (action: 'start_diagnostics_capture' | 'stop_diagnostics_capture') => { await adminRequest('admin-device-action', token, { method: 'POST', body: JSON.stringify({ deviceId: device.publicDeviceCode, action }) }); };
-  return <div className="diagnosticSupportLog"><header><div><span className="diagnosticsEyebrow">SUPPORT LOG</span><h3>{device.publicDeviceCode ?? 'Selected device'} timeline</h3></div><div className="diagnosticLogActions"><button onClick={copyReport}>Copy support report</button><button onClick={() => void sendCapture('start_diagnostics_capture')}>Start 15-minute capture</button><button onClick={() => void sendCapture('stop_diagnostics_capture')}>Stop capture</button></div></header><div className="diagnosticLogFilters">{['ALL', 'ERRORS', 'WARNINGS', 'PLAYBACK', 'NETWORK', 'PROVIDER', 'APP'].map((value) => <button className={filter === value ? 'selected' : ''} key={value} onClick={() => setFilter(value)}>{value}</button>)}</div>{logs.slice(0, 100).map((entry: Row, index: number) => <div className="diagnosticLogEntry" key={entry.id ?? index}><time>{entry.logged_at ? new Date(entry.logged_at).toLocaleTimeString() : '—'}</time><span><b>{String(entry.category ?? 'app').toUpperCase()}</b>{entry.message ?? 'Diagnostic event'}<small>{entry.context?.contentTitle ?? ''}</small></span><strong className={`diagnosticLogLevel ${entry.level}`}>{entry.level}</strong></div>)}{!logs.length ? <p className="diagnosticEmpty">No support log entries in this filter.</p> : null}</div>;
+function WorkspaceTab({ device, tab }: { device: Row; tab: string }) {
+  const playback = device.recentPlayback ?? {};
+  const facts: [string, unknown][] = [['Last played', playback.contentTitle], ['Time to first frame', formatDiagnosticDuration(playback.timeToFirstFrameMs)], ['Buffer count', playback.bufferCount ?? 0], ['Playback duration', formatDiagnosticDuration(playback.playbackDurationMs)], ['Recent error', device.recentError?.errorCode ?? 'None recorded']];
+  if (tab === 'NETWORK') return <InfoGrid title="Network" items={ [['Connection', device.network?.connectionType], ['Internet', device.network?.internetReachable === true ? 'Reachable' : device.network?.internetReachable === false ? 'Unreachable' : 'Not enough data'], ['Observed latency', device.network?.latencyMs == null ? 'Not enough data' : `${device.network.latencyMs} ms`] ] as [string, unknown][] } />;
+  if (tab === 'PROVIDER') return <InfoGrid title="Provider" items={ [['Provider', device.providerName], ['Reachability', diagnosticStatusLabel(device.providerStatus)], ['Observed request latency', 'Not enough data yet'], ['Recent provider errors', device.providerStatus === 'PROBLEM' ? 'Provider health problem' : 'None recorded'] ] as [string, unknown][] } />;
+  if (tab === 'PLAYBACK') return <InfoGrid title="Recent playback" items={facts} />;
+  if (tab === 'TECHNICAL') return <div className="diagnosticEventList">{(device.events ?? []).map((event: Row, index: number) => <div className="diagnosticEvent" key={event.id ?? index}><strong>{diagnosticEventLabel(event.event_type)}</strong><span>{event.event_type}<small>{JSON.stringify(event.metadata ?? {})}</small></span><time>{event.event_at ? new Date(event.event_at).toLocaleString() : 'Not enough data yet'}</time></div>)}{!(device.events ?? []).length ? <p className="diagnosticEmpty">No technical events for this device.</p> : null}</div>;
+  return <><div className="diagnosticIndicators">{[['INTERNET', device.internet], ['PROVIDER', device.providerStatus], ['PLAYBACK', device.playbackStatus]].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong className={`diagnosticIndicator ${diagnosticTone(value)}`}>{diagnosticStatusLabel(value)}</strong></div>)}</div><InfoGrid title="Playback facts" items={facts} /><div className="diagnosticCause"><small>LIKELY ISSUE</small><strong>{String(device.likelyCause ?? 'UNKNOWN').replaceAll('_', ' ')}</strong><p>{device.likelyCauseExplanation ?? 'Not enough data yet'}</p></div></>;
+}
+
+function InfoGrid({ title, items }: { title: string; items: Array<[string, unknown]> }) { return <div className="diagnosticInfoSection"><h3>{title}</h3><div className="diagnosticInfoGrid">{items.map(([label, value]) => <div key={label}><small>{label}</small><strong>{value == null || value === '' ? 'Not enough data yet' : String(value)}</strong></div>)}</div></div>; }
+
+function SupportLog({ device, filter, setFilter, hours, setHours }: { device: Row; filter: string; setFilter: (value: string) => void; hours: string; setHours: (value: string) => void }) {
+  const cutoff = Date.now() - Number(hours) * 60 * 60 * 1000;
+  const logs = (device.supportLogs ?? []).filter((entry: Row) => (!entry.logged_at || Date.parse(entry.logged_at) >= cutoff) && (filter === 'ALL' || (filter === 'ERRORS' && entry.level === 'error') || (filter === 'WARNINGS' && entry.level === 'warning') || entry.category === filter.toLowerCase()));
+  return <div className="diagnosticSupportLog"><header><div><span className="diagnosticsEyebrow">SUPPORT LOG</span><h3>Structured troubleshooting timeline</h3></div><select value={hours} onChange={(event) => setHours(event.target.value)} aria-label="Support log time range"><option value="0.25">Last 15 minutes</option><option value="1">Last hour</option><option value="24">Last 24 hours</option></select></header><div className="diagnosticLogFilters">{LOG_FILTERS.map((value) => <button className={filter === value ? 'selected' : ''} key={value} onClick={() => setFilter(value)}>{value}</button>)}</div>{logs.map((entry: Row, index: number) => <div className="diagnosticLogEntry" key={entry.id ?? index}><time>{entry.logged_at ? new Date(entry.logged_at).toLocaleTimeString() : '—'}</time><span><b>{String(entry.category ?? 'app').toUpperCase()}</b>{entry.message ?? 'Diagnostic event'}<small>{entry.context?.contentTitle ?? ''}</small></span><strong className={`diagnosticLogLevel ${entry.level}`}>{entry.level}</strong></div>)}{!logs.length ? <p className="diagnosticEmpty">No support log entries in this filter.</p> : null}</div>;
 }

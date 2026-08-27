@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+// @ts-ignore TS5097: Node's strip-types runner requires the explicit extension.
 import { formatDiagnosticValue, normalizeDiagnosticLogs } from './diagnosticsNormalization.ts';
 
 test('diagnostic normalization handles null and malformed payloads', () => {

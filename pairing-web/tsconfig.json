@@ -21,6 +21,7 @@
     "src/pairing.test.ts",
     "src/routing.test.ts",
     "src/siteConfig.test.ts",
-    "src/providerHealthDisplay.test.ts"
+    "src/providerHealthDisplay.test.ts",
+    "src/diagnosticsPresentation.test.ts"
   ]
 }

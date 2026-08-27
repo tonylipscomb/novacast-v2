@@ -68,8 +68,8 @@ export function AdminCloud() {
   }, []);
 
   useEffect(() => {
-    if (token) void load(token);
-  }, [load, token]);
+    if (token && tab !== 'analytics') void load(token);
+  }, [load, tab, token]);
 
   const login = async (event: FormEvent) => {
     event.preventDefault();
@@ -275,7 +275,7 @@ export function AdminCloud() {
             <p>{subtitleFor(tab)}</p>
           </div>
           <div className="cloudTopActions">
-            <button onClick={() => void load(token, true)} disabled={refreshing}>
+            <button onClick={() => { if (tab !== 'analytics') void load(token, true); }} disabled={refreshing || tab === 'analytics'}>
               {refreshing ? 'Refreshing' : ' Refresh'}
             </button>
             <button className="cloudPrimary" onClick={() => { setTab('invitations'); setOpenCreateInvite(true); }}>

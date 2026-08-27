@@ -1,6 +1,7 @@
 import type { PlaybackItem, PlaybackLaunchSource, UnifiedPlayerMachineState } from '@/features/playback/unified/types';
 
 import { enqueueAnalyticsEvent } from './novaAnalytics';
+import { recordDiagnostic } from '@/features/diagnostics/diagnosticsClient';
 
 export type AnalyticsPlaybackType = 'live' | 'movie' | 'series';
 export type PlaybackFailureCategory = 'network' | 'provider' | 'timeout' | 'decoder' | 'unsupported' | 'user_cancelled' | 'unknown';
@@ -9,11 +10,13 @@ export type PlaybackStopReason = 'user_back' | 'playback_error' | 'route_change'
 type PlaybackEventInput = {
   providerId?: string;
   contentId?: string;
+  contentTitle?: string;
   contentType: AnalyticsPlaybackType;
   outcome?: string;
   durationMs?: number;
   countValue?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  sessionId?: string;
 };
 
 type PlaybackAttempt = {
@@ -29,6 +32,7 @@ type PlaybackAttempt = {
   recoveryPending: boolean;
   stopped: boolean;
   retryCount: number;
+  sessionId: string;
   lastState: UnifiedPlayerMachineState;
 };
 
@@ -51,11 +55,39 @@ function eventInput(attempt: PlaybackAttempt): PlaybackEventInput {
     providerId: attempt.item.providerId,
     contentId: attempt.item.id,
     contentType: attempt.contentType,
+    contentTitle: attempt.item.title,
+    sessionId: attempt.sessionId,
   };
+}
+
+function createPlaybackSessionId() {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  return typeof randomUUID === 'function'
+    ? randomUUID()
+    : `playback-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function emit(eventName: 'playback_requested' | 'playback_started' | 'playback_failed' | 'playback_recovered' | 'playback_stopped', input: PlaybackEventInput) {
   void enqueueAnalyticsEvent(eventName, input).catch(() => undefined);
+  const eventType = eventName === 'playback_requested'
+    ? 'play_attempt'
+    : eventName === 'playback_started'
+      ? 'playback_started'
+      : eventName === 'playback_failed'
+        ? 'playback_error'
+        : eventName === 'playback_stopped'
+          ? 'playback_stopped'
+          : 'playback_started';
+  recordDiagnostic({
+    eventType,
+    sessionId: input.sessionId,
+    contentType: input.contentType,
+    contentId: input.contentId,
+    managedProviderId: input.providerId,
+    durationMs: input.durationMs,
+    metadata: input.metadata,
+    errorCode: input.outcome,
+  });
 }
 
 export function extractPlaybackHttpStatus(error: unknown): number | null {
@@ -133,6 +165,7 @@ export function createPlaybackAnalyticsTracker(
       recoveryPending: Boolean(priorAttempt?.failed || priorAttempt?.recoveryPending),
       stopped: false,
       retryCount: force ? (priorAttempt?.retryCount ?? 0) + 1 : 0,
+      sessionId: createPlaybackSessionId(),
       lastState: 'loading',
     };
     attempt = next;
@@ -144,6 +177,26 @@ export function createPlaybackAnalyticsTracker(
       },
     });
     logPlaybackAnalytics('playback request', { attemptId: next.attemptId, retryCount: next.retryCount });
+    for (const eventType of ['provider_request_started', 'stream_resolution_started'] as const) {
+      recordDiagnostic({
+        eventType,
+        sessionId: next.sessionId,
+        contentType: next.contentType,
+        contentId: next.item.id,
+        contentTitle: next.item.title,
+        managedProviderId: next.item.providerId,
+        metadata: { launch_source: launchSource, retry_count: next.retryCount },
+      });
+    }
+    recordDiagnostic({
+      eventType: 'player_preparing',
+      sessionId: next.sessionId,
+      contentType: next.contentType,
+      contentId: next.item.id,
+      contentTitle: next.item.title,
+      managedProviderId: next.item.providerId,
+      metadata: { launch_source: launchSource, retry_count: next.retryCount },
+    });
     return true;
   }
 
@@ -156,6 +209,27 @@ export function createPlaybackAnalyticsTracker(
       ...eventInput(attempt),
       durationMs: startupDurationMs,
       metadata: {},
+    });
+    for (const eventType of ['provider_request_succeeded', 'stream_resolution_succeeded', 'player_ready'] as const) {
+      recordDiagnostic({
+        eventType,
+        sessionId: attempt.sessionId,
+        contentType: attempt.contentType,
+        contentId: attempt.item.id,
+        contentTitle: attempt.item.title,
+        managedProviderId: attempt.item.providerId,
+        durationMs: startupDurationMs,
+      });
+    }
+    recordDiagnostic({
+      eventType: 'first_frame',
+      contentType: attempt.contentType,
+      contentId: attempt.item.id,
+      contentTitle: attempt.item.title,
+      managedProviderId: attempt.item.providerId,
+      durationMs: startupDurationMs,
+      sessionId: attempt.sessionId,
+      metadata: { source, buffer_count: attempt.bufferingCount, total_buffer_duration_ms: attempt.bufferingDurationMs },
     });
     logPlaybackAnalytics('playback started', {
       attemptId: attempt.attemptId,
@@ -187,6 +261,22 @@ export function createPlaybackAnalyticsTracker(
       outcome: category,
       metadata: { error_classification: category, retry_count: attempt.retryCount },
     });
+    const failedStage = category === 'provider' ? 'provider_request_failed'
+      : category === 'timeout' ? 'stream_resolution_failed'
+        : category === 'network' ? 'network_request_failure'
+          : null;
+    if (failedStage) {
+      recordDiagnostic({
+        eventType: failedStage,
+        sessionId: attempt.sessionId,
+        contentType: attempt.contentType,
+        contentId: attempt.item.id,
+        contentTitle: attempt.item.title,
+        managedProviderId: attempt.item.providerId,
+        errorCode: category,
+        metadata: { failure_category: category, retry_count: attempt.retryCount },
+      });
+    }
     logPlaybackAnalytics('playback failed', { attemptId: attempt.attemptId, category });
     return true;
   }
@@ -199,10 +289,13 @@ export function createPlaybackAnalyticsTracker(
       attempt.bufferingCount += 1;
       attempt.bufferingStartedAt = timestamp;
       if (attempt.startedAt !== null) attempt.recoveryPending = true;
+      recordDiagnostic({ eventType: 'buffer_start', sessionId: attempt.sessionId, contentType: attempt.contentType, contentId: attempt.item.id, contentTitle: attempt.item.title, managedProviderId: attempt.item.providerId, bufferCount: attempt.bufferingCount });
     } else if (previousState === 'buffering' && nextState !== 'buffering') {
       if (attempt.bufferingStartedAt !== null) {
-        attempt.bufferingDurationMs += Math.max(0, timestamp - attempt.bufferingStartedAt);
+        const durationMs = Math.max(0, timestamp - attempt.bufferingStartedAt);
+        attempt.bufferingDurationMs += durationMs;
         attempt.bufferingStartedAt = null;
+        recordDiagnostic({ eventType: 'buffer_end', sessionId: attempt.sessionId, contentType: attempt.contentType, contentId: attempt.item.id, contentTitle: attempt.item.title, managedProviderId: attempt.item.providerId, durationMs, bufferCount: attempt.bufferingCount, totalBufferDurationMs: attempt.bufferingDurationMs });
       }
       if (attempt.startedAt !== null && attempt.recoveryPending && (nextState === 'ready' || nextState === 'playing' || nextState === 'paused')) {
         attempt.recoveryPending = false;

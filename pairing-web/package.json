@@ -1,22 +1,24 @@
 {
-  "name": "novacast-pairing-web",
-  "private": true,
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "test": "node --experimental-strip-types --test src/pairing.test.ts src/routing.test.ts src/siteConfig.test.ts src/providerHealthDisplay.test.ts",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest"
-  },
-  "devDependencies": {}
+    "name":  "novacast-pairing-web",
+    "private":  true,
+    "version":  "1.0.0",
+    "type":  "module",
+    "scripts":  {
+                    "dev":  "vite",
+                    "build":  "tsc -b \u0026\u0026 vite build",
+                    "test":  "node --experimental-strip-types --test src/pairing.test.ts src/routing.test.ts src/siteConfig.test.ts src/providerHealthDisplay.test.ts src/diagnosticsPresentation.test.ts src/deviceDiagnosticsPresentation.test.ts src/diagnosticsNormalization.test.ts",
+                    "preview":  "vite preview"
+                },
+    "dependencies":  {
+                         "@vitejs/plugin-react":  "latest",
+                         "vite":  "latest",
+                         "typescript":  "latest",
+                         "react":  "latest",
+                         "react-dom":  "latest",
+                         "@types/react":  "latest",
+                         "@types/react-dom":  "latest"
+                     },
+    "devDependencies":  {
+
+                        }
 }

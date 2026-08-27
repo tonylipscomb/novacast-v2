@@ -597,8 +597,90 @@ a.downloadButton {
 .providerDiagnostics li { display: grid; grid-template-columns: 18px 1fr; gap: 8px; color: #dce8fb; }
 .providerDiagnostics small { display: block; color: #8499b9; }
 .providerModal { width: min(100%, 640px); max-height: 90vh; overflow: auto; }
+ .diagnosticsPage { display: grid; gap: 14px; }
+ .diagnosticsToolbar { display: flex; align-items: center; gap: 10px; color: #8fa5c6; font-size: 12px; }
+ .diagnosticsToolbar span { flex: 1; }
+ .diagnosticsToolbar select, .diagnosticsToolbar button { min-height: 36px; border: 1px solid rgba(74,124,205,.28); border-radius: 8px; color: #e9f1ff; background: rgba(6,20,48,.78); padding: 0 12px; }
+ .diagnosticMetricGrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+ .diagnosticMetric, .diagnosticPanel { border: 1px solid rgba(74,124,205,.24); border-radius: 12px; background: linear-gradient(145deg, rgba(8,22,43,.92), rgba(5,14,30,.88)); }
+ .diagnosticMetric { display: grid; gap: 8px; padding: 16px; }
+ .diagnosticMetric small { color: #8ea1c1; font-size: 10px; letter-spacing: .06em; }
+ .diagnosticMetric strong { color: #f5f8ff; font-size: 28px; }
+ .diagnosticPanel { padding: 16px; }
+ .diagnosticPanel header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+ .diagnosticPanel h2 { margin: 0; color: #f5f8ff; font-size: 17px; }
+ .diagnosticPanel header span { color: #8499b9; font-size: 11px; }
+ .diagnosticTable { display: grid; gap: 4px; }
+ .diagnosticRow { display: grid; grid-template-columns: 1.1fr 1fr .8fr 1.2fr 1fr; gap: 12px; align-items: center; padding: 12px 8px; border-top: 1px solid rgba(74,124,205,.14); color: #dce8fb; font-size: 12px; }
+ .diagnosticRow span, .diagnosticRow time { color: #c4d2e9; }
+ .diagnosticRow small { display: block; margin-top: 4px; color: #8499b9; }
+ .diagnosticStatus { width: max-content; padding: 5px 8px; border-radius: 6px; font-size: 10px; }
+ .diagnosticStatus.healthy { color: #8fffd0; background: rgba(16,185,129,.22); }
+ .diagnosticStatus.degraded, .diagnosticStatus.critical { color: #ffe08a; background: rgba(217,119,6,.22); }
+ .diagnosticStatus.offline { color: #ffb8ae; background: rgba(185,28,28,.23); }
+ .diagnosticEvent { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 12px; padding: 10px 0; border-top: 1px solid rgba(74,124,205,.14); color: #dce8fb; font-size: 12px; }
+ .diagnosticEvent span, .diagnosticEvent time { color: #8ea1c1; }
+ .diagnosticEmpty { color: #8499b9; }
+ @media (max-width: 900px) { .diagnosticMetricGrid { grid-template-columns: repeat(2, 1fr); } .diagnosticRow { grid-template-columns: 1fr 1fr; } }
 @keyframes providerPulse { 50% { opacity: .35; } }
 @media (max-width: 760px) {
   .providerCard dl { grid-template-columns: 1fr; }
   .providersPage .inviteFilters { grid-template-columns: 1fr; }
 }
+
+/* Beta Support / Device Diagnostics Center */
+.diagnosticsToolbar { align-items: flex-end; }
+.diagnosticsToolbar > div { display: grid; gap: 4px; flex: 1; }
+.diagnosticsToolbar strong { color: #f5f8ff; font-size: 20px; }
+.diagnosticsToolbar small { color: #8195b8; }
+.diagnosticsEyebrow { color: #8d86ff; font-size: 10px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+.diagnosticsError { display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid rgba(239,68,68,.35); border-radius: 10px; color: #ffd8d8; background: rgba(127,29,29,.24); }
+.diagnosticsError button { padding: 5px 10px; border: 1px solid rgba(255,255,255,.2); border-radius: 6px; color: white; background: rgba(255,255,255,.08); }
+.diagnosticDeviceGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 12px; }
+.diagnosticDeviceCard { display: grid; gap: 14px; padding: 16px; border: 1px solid rgba(74,124,205,.22); border-radius: 12px; background: rgba(6,18,39,.66); }
+.diagnosticDeviceCard > header { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
+.diagnosticDeviceCard > header > div { display: grid; gap: 3px; min-width: 0; }
+.diagnosticDeviceCard header strong { color: #f5f8ff; font-size: 16px; }
+.diagnosticDeviceCard header span { color: #c3d3ed; font-size: 13px; letter-spacing: .05em; }
+.diagnosticDeviceCard header small { color: #8195b8; }
+.diagnosticIndicators { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+.diagnosticIndicators > div { display: grid; gap: 5px; padding: 9px; border: 1px solid rgba(74,124,205,.16); border-radius: 8px; background: rgba(5,14,30,.48); }
+.diagnosticIndicators span, .diagnosticCause small { color: #8195b8; font-size: 9px; font-weight: 900; letter-spacing: .08em; }
+.diagnosticIndicator { font-size: 11px; }
+.diagnosticStatus.good, .diagnosticIndicator.good { color: #8fffd0; }
+.diagnosticStatus.warning, .diagnosticIndicator.warning { color: #ffe08a; }
+.diagnosticStatus.problem, .diagnosticIndicator.problem { color: #ffaaa5; }
+.diagnosticStatus.unknown, .diagnosticIndicator.unknown { color: #b8c6dc; }
+.diagnosticPlayback { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; color: #8195b8; font-size: 11px; }
+.diagnosticPlayback b { display: block; margin-top: 3px; overflow: hidden; color: #e9f1ff; text-overflow: ellipsis; white-space: nowrap; }
+.diagnosticCause { padding-top: 10px; border-top: 1px solid rgba(74,124,205,.16); }
+.diagnosticCause strong { display: block; margin-top: 4px; color: #f5f8ff; font-size: 12px; }
+.diagnosticCause p { margin: 5px 0 0; color: #9db0cf; font-size: 11px; line-height: 1.45; }
+.diagnosticTechnical summary { cursor: pointer; color: #c4d2e9; font-weight: 800; }
+@media (max-width: 760px) { .diagnosticsToolbar { align-items: stretch; flex-wrap: wrap; }.diagnosticsToolbar > div { flex-basis: 100%; }.diagnosticDeviceGrid { grid-template-columns: 1fr; }.diagnosticIndicators, .diagnosticPlayback { grid-template-columns: 1fr; } }
+.diagnosticDeviceCard { cursor: pointer; }
+.diagnosticDeviceCard:focus-visible { outline: 2px solid #18d7ff; outline-offset: 2px; }
+.diagnosticSupportLog { margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(74,124,205,.2); }
+.diagnosticSupportLog h3 { margin: 4px 0 0; color: #f5f8ff; }
+.diagnosticLogActions, .diagnosticLogFilters { display: flex; flex-wrap: wrap; gap: 6px; }
+.diagnosticLogActions button, .diagnosticLogFilters button { min-height: 32px; padding: 0 9px; border: 1px solid rgba(74,124,205,.28); border-radius: 7px; color: #c4d2e9; background: rgba(10,27,52,.8); font-size: 10px; }
+.diagnosticLogFilters { margin: 12px 0; }
+.diagnosticLogFilters .selected { color: #fff; border-color: rgba(24,215,255,.65); background: rgba(24,125,190,.28); }
+.diagnosticLogEntry { display: grid; grid-template-columns: 88px 1fr auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid rgba(74,124,205,.14); color: #dce8fb; font-size: 12px; }
+.diagnosticLogEntry time { color: #8195b8; font-variant-numeric: tabular-nums; }.diagnosticLogEntry span { display: grid; gap: 3px; }.diagnosticLogEntry span b { margin-right: 8px; color: #8d86ff; font-size: 10px; letter-spacing: .08em; }.diagnosticLogEntry small { color: #8195b8; }.diagnosticLogLevel { font-size: 10px; text-transform: uppercase; }.diagnosticLogLevel.error { color: #ffaaa5; }.diagnosticLogLevel.warning { color: #ffe08a; }.diagnosticLogLevel.info { color: #8fffd0; }
+@media (max-width: 760px) { .diagnosticLogEntry { grid-template-columns: 1fr auto; }.diagnosticLogEntry span { grid-column: 1 / -1; }.diagnosticLogActions { justify-content: flex-start; } }
+
+/* Selected-device diagnostics workspace */
+.diagnosticPicker input { width: 100%; box-sizing: border-box; min-height: 44px; margin: 8px 0 10px; padding: 0 13px; border: 1px solid rgba(74,124,205,.3); border-radius: 9px; color: #f5f8ff; background: rgba(4,13,29,.75); }
+.diagnosticDeviceOptions { display: grid; gap: 6px; max-height: 300px; overflow: auto; }
+.diagnosticDeviceOptions button { display: flex; justify-content: space-between; align-items: center; gap: 14px; width: 100%; padding: 11px 12px; border: 1px solid rgba(74,124,205,.18); border-radius: 8px; color: #dce8fb; text-align: left; background: rgba(5,14,30,.54); cursor: pointer; }
+.diagnosticDeviceOptions button:hover, .diagnosticDeviceOptions button[aria-selected="true"] { border-color: rgba(24,215,255,.65); background: rgba(24,125,190,.2); }
+.diagnosticDeviceOptions button span { display: grid; gap: 4px; min-width: 0; }.diagnosticDeviceOptions small { color: #8195b8; }
+.diagnosticNoSelection { padding: 26px; border: 1px dashed rgba(74,124,205,.3); border-radius: 12px; text-align: center; }
+.diagnosticWorkspace { padding: 20px; }.diagnosticWorkspaceHeader { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }.diagnosticWorkspaceHeader h2 { margin: 4px 0; font-size: 23px; }.diagnosticWorkspaceHeader > div:first-child strong { color: #c9d8f4; letter-spacing: .08em; }.diagnosticWorkspaceHeader p { margin: 5px 0 0; color: #8195b8; font-size: 12px; }
+.diagnosticCapture { display: grid; justify-items: end; gap: 7px; max-width: 320px; text-align: right; }.diagnosticCapture span, .diagnosticCapture small { color: #8195b8; font-size: 11px; }.diagnosticCapture button, .diagnosticWorkspaceActions button { min-height: 36px; padding: 0 13px; border: 1px solid rgba(124,112,255,.6); border-radius: 8px; color: #fff; background: linear-gradient(135deg, rgba(105,72,232,.75), rgba(24,125,190,.55)); cursor: pointer; }
+.diagnosticWorkspaceActions { display: flex; justify-content: flex-end; margin: 12px 0; }.diagnosticWorkspaceActions button { min-height: 31px; font-size: 11px; background: rgba(10,27,52,.8); border-color: rgba(74,124,205,.28); }
+.diagnosticTabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 18px; border-bottom: 1px solid rgba(74,124,205,.2); }.diagnosticTabs button { padding: 10px 11px; border: 0; border-bottom: 2px solid transparent; color: #8195b8; background: transparent; font-size: 10px; font-weight: 900; letter-spacing: .06em; cursor: pointer; }.diagnosticTabs button.selected { border-color: #18d7ff; color: #f5f8ff; }
+.diagnosticInfoSection { margin-top: 16px; }.diagnosticInfoSection h3 { margin: 0 0 9px; color: #c4d2e9; font-size: 14px; }.diagnosticInfoGrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }.diagnosticInfoGrid div { min-height: 56px; padding: 10px; border: 1px solid rgba(74,124,205,.16); border-radius: 8px; background: rgba(5,14,30,.48); }.diagnosticInfoGrid small { display: block; color: #8195b8; font-size: 10px; }.diagnosticInfoGrid strong { display: block; margin-top: 6px; color: #e9f1ff; font-size: 12px; }
+.diagnosticEventList { display: grid; gap: 0; }.diagnosticSupportLog select { min-height: 32px; padding: 0 8px; border: 1px solid rgba(74,124,205,.28); border-radius: 7px; color: #c4d2e9; background: rgba(10,27,52,.8); }
+@media (max-width: 760px) { .diagnosticWorkspaceHeader { display: grid; }.diagnosticCapture { justify-items: start; text-align: left; }.diagnosticInfoGrid { grid-template-columns: repeat(2, 1fr); } }

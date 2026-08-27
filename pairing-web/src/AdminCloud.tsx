@@ -4,6 +4,11 @@ import { AdminDashboard } from './AdminDashboard';
 import { AdminDevices } from './AdminDevices';
 import { AdminInvitations } from './AdminInvitations';
 import { AdminProviders } from './AdminProviders';
+import { AdminDiagnostics } from './AdminDiagnostics';
+import {
+  formatProviderAssignmentMessage,
+  resolveProviderAssignmentAckState,
+} from './adminAssignmentCopy';
 import { adminLogin, adminRequest } from './pairing';
 
 type Row = Record<string, unknown>;
@@ -20,7 +25,7 @@ export function AdminCloud() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [token, setToken] = useState(() => sessionStorage.getItem('novacast-admin-token') ?? '');
-  const [tab, setTab] = useState<AdminTab>('dashboard');
+  const [tab, setTab] = useState<AdminTab>(() => window.location.pathname === '/admin/diagnostics' ? 'analytics' : 'dashboard');
   const [devices, setDevices] = useState<Row[]>([]);
   const [invitations, setInvitations] = useState<Row[]>([]);
   const [providers, setProviders] = useState<Row[]>([]);
@@ -63,8 +68,8 @@ export function AdminCloud() {
   }, []);
 
   useEffect(() => {
-    if (token) void load(token);
-  }, [load, token]);
+    if (token && tab !== 'analytics') void load(token);
+  }, [load, tab, token]);
 
   const login = async (event: FormEvent) => {
     event.preventDefault();
@@ -143,12 +148,41 @@ export function AdminCloud() {
       });
       const providerName =
         typeof result.providerName === 'string' ? result.providerName : 'selected provider';
+      const deviceOnline = result.deviceOnline === true;
       setMessage(
-        result.unchanged
-          ? `Device already uses ${providerName}.`
-          : `Provider changed to ${providerName}. The TV will redownload on next heartbeat.`,
+        formatProviderAssignmentMessage({
+          providerName,
+          unchanged: result.unchanged === true,
+          deviceOnline,
+          ackState: result.unchanged === true ? 'applied' : deviceOnline ? 'updating' : 'pending',
+        }),
       );
       await load(token, true);
+      if (result.unchanged === true) {
+        return;
+      }
+      const assignmentId = typeof result.assignmentId === 'string' ? result.assignmentId : '';
+      const deadline = Date.now() + 12_000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const latest = await adminRequest('admin-devices', token).catch(() => null);
+        const devices = Array.isArray(latest?.devices) ? latest.devices : [];
+        const updated = devices.find((device: Row) => String(device.id ?? '') === id);
+        if (!updated) {
+          continue;
+        }
+        setDevices(devices);
+        const ackState = resolveProviderAssignmentAckState({
+          assignment_id: assignmentId || updated.assignment_id,
+          assignment_command_status: updated.assignment_command_status,
+          applied_assignment_id: updated.applied_assignment_id,
+          assignment_applied_at: updated.assignment_applied_at,
+        });
+        if (ackState === 'applied') {
+          setMessage(formatProviderAssignmentMessage({ providerName, ackState: 'applied' }));
+          return;
+        }
+      }
     } catch (error) {
       const category = error instanceof Error ? error.message : 'admin_update_failed';
       setMessage('Provider could not be changed (' + category + ').');
@@ -241,7 +275,7 @@ export function AdminCloud() {
             <p>{subtitleFor(tab)}</p>
           </div>
           <div className="cloudTopActions">
-            <button onClick={() => void load(token, true)} disabled={refreshing}>
+            <button onClick={() => { if (tab !== 'analytics') void load(token, true); }} disabled={refreshing || tab === 'analytics'}>
               {refreshing ? 'Refreshing' : ' Refresh'}
             </button>
             <button className="cloudPrimary" onClick={() => { setTab('invitations'); setOpenCreateInvite(true); }}>
@@ -307,7 +341,7 @@ export function AdminCloud() {
           />
         ) : null}
         {!loading && tab === 'analytics' ? (
-          <ComingSoon title="Analytics workspace" text="Playback, device, and catalog performance reporting will appear here." />
+          <AdminDiagnostics token={token} onMessage={setMessage} />
         ) : null}
         {!loading && tab === 'settings' ? (
           <ComingSoon title="Cloud Admin settings" text="Administrator preferences and platform controls will appear here." />

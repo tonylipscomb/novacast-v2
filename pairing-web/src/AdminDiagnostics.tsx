@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { adminRequest } from './pairing';
 import { diagnosticEventLabel, diagnosticStatusLabel, diagnosticTone, formatDiagnosticDuration } from './diagnosticsPresentation';
 import { captureRemainingLabel, deviceMatchesQuery } from './deviceDiagnosticsPresentation';
+import { formatDiagnosticValue, normalizeDiagnosticLogs } from './diagnosticsNormalization';
 
 type Row = Record<string, any>;
 type DiagnosticsData = { summary?: Row; devices?: Row[]; selectedDevice?: Row; sessions?: Row[]; events?: Row[]; supportLogs?: Row[] };
 const TABS = ['OVERVIEW', 'PLAYBACK', 'NETWORK', 'PROVIDER', 'SUPPORT LOG', 'TECHNICAL'];
 const LOG_FILTERS = ['ALL', 'ERRORS', 'WARNINGS', 'PLAYBACK', 'NETWORK', 'PROVIDER', 'APP'];
 
-export function AdminDiagnostics({ token }: { token: string; onMessage?: (message: string) => void }) {
+function AdminDiagnosticsContent({ token }: { token: string; onMessage?: (message: string) => void }) {
   const [data, setData] = useState<DiagnosticsData | null>(null);
   const [hours, setHours] = useState('24');
   const [loading, setLoading] = useState(true);
@@ -73,20 +74,45 @@ function SelectedWorkspace({ device, tab, setTab, logFilter, setLogFilter, logHo
   return <section className="diagnosticPanel diagnosticWorkspace"><header className="diagnosticWorkspaceHeader"><div><span className="diagnosticsEyebrow">SELECTED DEVICE</span><h2>{device.assignedTesterName || device.friendlyName || 'Unassigned tester'}</h2><strong>{device.publicDeviceCode ?? 'Device code unavailable'}</strong><p>{[device.manufacturer, device.model].filter(Boolean).join(' ') || 'Model not reported'} · NovaCast {device.appVersion ?? 'version unavailable'} ({device.appBuild ?? 'build unavailable'})</p><p>Provider: {device.providerName ?? 'Unassigned'} · Last seen: {device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : 'Not enough data yet'}</p></div><div className="diagnosticCapture"><b className={`diagnosticStatus ${diagnosticTone(device.overallStatus)}`}>{device.overallStatus ?? 'NO DATA'}</b>{active ? <><strong>🔴 ENHANCED CAPTURE ACTIVE</strong><span>{captureRemainingLabel(device.captureExpiresAt, clock)} remaining</span><button onClick={() => onCapture('stop_diagnostics_capture')} disabled={captureBusy}>Stop capture</button></> : <><span>Temporarily collect enhanced troubleshooting signals for this device.</span><button onClick={() => onCapture('start_diagnostics_capture')} disabled={captureBusy}>Start 15-minute capture</button></>}{captureMessage ? <small>{captureMessage}</small> : null}</div></header><div className="diagnosticWorkspaceActions"><button onClick={report}>Copy support report</button></div><div className="diagnosticTabs" role="tablist">{TABS.map((value) => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? 'selected' : ''} onClick={() => setTab(value)}>{value}</button>)}</div>{tab === 'SUPPORT LOG' ? <SupportLog device={device} filter={logFilter} setFilter={setLogFilter} hours={logHours} setHours={setLogHours} /> : <WorkspaceTab device={device} tab={tab} />}</section>;
 }
 
-function WorkspaceTab({ device, tab }: { device: Row; tab: string }) {
+function UnsafeWorkspaceTab({ device, tab }: { device: Row; tab: string }) {
   const playback = device.recentPlayback ?? {};
   const facts: [string, unknown][] = [['Last played', playback.contentTitle], ['Time to first frame', formatDiagnosticDuration(playback.timeToFirstFrameMs)], ['Buffer count', playback.bufferCount ?? 0], ['Playback duration', formatDiagnosticDuration(playback.playbackDurationMs)], ['Recent error', device.recentError?.errorCode ?? 'None recorded']];
   if (tab === 'NETWORK') return <InfoGrid title="Network" items={ [['Connection', device.network?.connectionType], ['Internet', device.network?.internetReachable === true ? 'Reachable' : device.network?.internetReachable === false ? 'Unreachable' : 'Not enough data'], ['Observed latency', device.network?.latencyMs == null ? 'Not enough data' : `${device.network.latencyMs} ms`] ] as [string, unknown][] } />;
-  if (tab === 'PROVIDER') return <InfoGrid title="Provider" items={ [['Provider', device.providerName], ['Reachability', diagnosticStatusLabel(device.providerStatus)], ['Observed request latency', 'Not enough data yet'], ['Recent provider errors', device.providerStatus === 'PROBLEM' ? 'Provider health problem' : 'None recorded'] ] as [string, unknown][] } />;
+  if (tab === 'PROVIDER') return <InfoGrid title="Provider" items={ [['Provider', device.providerName], ['Reachability', diagnosticStatusLabel(device.providerStatus)], ['Last provider request', device.providerDiagnostics?.lastProviderRequestAt ? new Date(device.providerDiagnostics.lastProviderRequestAt).toLocaleString() : null], ['Last successful request', device.providerDiagnostics?.lastSuccessfulProviderRequestAt ? new Date(device.providerDiagnostics.lastSuccessfulProviderRequestAt).toLocaleString() : null], ['Last failed request', device.providerDiagnostics?.lastFailedProviderRequestAt ? new Date(device.providerDiagnostics.lastFailedProviderRequestAt).toLocaleString() : null] ] as [string, unknown][] } />;
   if (tab === 'PLAYBACK') return <InfoGrid title="Recent playback" items={facts} />;
   if (tab === 'TECHNICAL') return <div className="diagnosticEventList">{(device.events ?? []).map((event: Row, index: number) => <div className="diagnosticEvent" key={event.id ?? index}><strong>{diagnosticEventLabel(event.event_type)}</strong><span>{event.event_type}<small>{JSON.stringify(event.metadata ?? {})}</small></span><time>{event.event_at ? new Date(event.event_at).toLocaleString() : 'Not enough data yet'}</time></div>)}{!(device.events ?? []).length ? <p className="diagnosticEmpty">No technical events for this device.</p> : null}</div>;
   return <><div className="diagnosticIndicators">{[['INTERNET', device.internet], ['PROVIDER', device.providerStatus], ['PLAYBACK', device.playbackStatus]].map(([label, value]) => <div key={String(label)}><span>{label}</span><strong className={`diagnosticIndicator ${diagnosticTone(value)}`}>{diagnosticStatusLabel(value)}</strong></div>)}</div><InfoGrid title="Playback facts" items={facts} /><div className="diagnosticCause"><small>LIKELY ISSUE</small><strong>{String(device.likelyCause ?? 'UNKNOWN').replaceAll('_', ' ')}</strong><p>{device.likelyCauseExplanation ?? 'Not enough data yet'}</p></div></>;
 }
 
-function InfoGrid({ title, items }: { title: string; items: Array<[string, unknown]> }) { return <div className="diagnosticInfoSection"><h3>{title}</h3><div className="diagnosticInfoGrid">{items.map(([label, value]) => <div key={label}><small>{label}</small><strong>{value == null || value === '' ? 'Not enough data yet' : String(value)}</strong></div>)}</div></div>; }
+function InfoGrid({ title, items }: { title: string; items: Array<[string, unknown]> }) { return <div className="diagnosticInfoSection"><h3>{title}</h3><div className="diagnosticInfoGrid">{items.map(([label, value]) => <div key={label}><small>{label}</small><strong>{value == null || value === '' ? 'Not enough data yet' : formatDiagnosticValue(value)}</strong></div>)}</div></div>; }
 
-function SupportLog({ device, filter, setFilter, hours, setHours }: { device: Row; filter: string; setFilter: (value: string) => void; hours: string; setHours: (value: string) => void }) {
+function UnsafeSupportLog({ device, filter, setFilter, hours, setHours }: { device: Row; filter: string; setFilter: (value: string) => void; hours: string; setHours: (value: string) => void }) {
   const cutoff = Date.now() - Number(hours) * 60 * 60 * 1000;
-  const logs = (device.supportLogs ?? []).filter((entry: Row) => (!entry.logged_at || Date.parse(entry.logged_at) >= cutoff) && (filter === 'ALL' || (filter === 'ERRORS' && entry.level === 'error') || (filter === 'WARNINGS' && entry.level === 'warning') || entry.category === filter.toLowerCase()));
-  return <div className="diagnosticSupportLog"><header><div><span className="diagnosticsEyebrow">SUPPORT LOG</span><h3>Structured troubleshooting timeline</h3></div><select value={hours} onChange={(event) => setHours(event.target.value)} aria-label="Support log time range"><option value="0.25">Last 15 minutes</option><option value="1">Last hour</option><option value="24">Last 24 hours</option></select></header><div className="diagnosticLogFilters">{LOG_FILTERS.map((value) => <button className={filter === value ? 'selected' : ''} key={value} onClick={() => setFilter(value)}>{value}</button>)}</div>{logs.map((entry: Row, index: number) => <div className="diagnosticLogEntry" key={entry.id ?? index}><time>{entry.logged_at ? new Date(entry.logged_at).toLocaleTimeString() : '—'}</time><span><b>{String(entry.category ?? 'app').toUpperCase()}</b>{entry.message ?? 'Diagnostic event'}<small>{entry.context?.contentTitle ?? ''}</small></span><strong className={`diagnosticLogLevel ${entry.level}`}>{entry.level}</strong></div>)}{!logs.length ? <p className="diagnosticEmpty">No support log entries in this filter.</p> : null}</div>;
+  const supportLogs = normalizeDiagnosticLogs(device.supportLogs);
+  const logs = supportLogs.filter((entry: Row) => {
+    const timestamp = entry.logged_at == null ? NaN : Date.parse(entry.logged_at);
+    return (!entry.logged_at || (Number.isFinite(timestamp) && timestamp >= cutoff)) &&
+      (filter === 'ALL' || (filter === 'ERRORS' && entry.level === 'error') ||
+        (filter === 'WARNINGS' && entry.level === 'warning') || entry.category === filter.toLowerCase());
+  });
+  return <div className="diagnosticSupportLog"><header><div><span className="diagnosticsEyebrow">SUPPORT LOG</span><h3>Structured troubleshooting timeline</h3></div><select value={hours} onChange={(event) => setHours(event.target.value)} aria-label="Support log time range"><option value="0.25">Last 15 minutes</option><option value="1">Last hour</option><option value="24">Last 24 hours</option></select></header><div className="diagnosticLogFilters">{LOG_FILTERS.map((value) => <button className={filter === value ? 'selected' : ''} key={value} onClick={() => setFilter(value)}>{value}</button>)}</div>{logs.map((entry: Row, index: number) => { const context = entry.context && typeof entry.context === 'object' && !Array.isArray(entry.context) ? entry.context : {}; return <div className="diagnosticLogEntry" key={entry.id ?? index}><time>{entry.logged_at ? new Date(entry.logged_at).toLocaleTimeString() : '—'}</time><span><b>{String(entry.category ?? 'app').toUpperCase()}</b>{String(entry.message ?? 'Diagnostic event')}<small>{String(context.contentTitle ?? '')}</small></span><strong className={`diagnosticLogLevel ${String(entry.level ?? 'info')}`}>{String(entry.level ?? 'info')}</strong></div>; })}{!logs.length ? <p className="diagnosticEmpty">No support log entries in this filter.</p> : null}</div>;
+}
+
+class DiagnosticsErrorBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error: unknown) { console.error('[NovaCast Diagnostics] render failed', error); }
+  render() { return this.state.failed ? <div className="diagnosticEmpty" role="alert">Diagnostics could not be rendered. Refresh the device data to try again.</div> : this.props.children; }
+}
+
+function WorkspaceTab(props: { device: Row; tab: string }) {
+  return <DiagnosticsErrorBoundary key={`${props.device.publicDeviceCode ?? 'device'}:${props.tab}`}><UnsafeWorkspaceTab {...props} /></DiagnosticsErrorBoundary>;
+}
+
+function SupportLog(props: { device: Row; filter: string; setFilter: (value: string) => void; hours: string; setHours: (value: string) => void }) {
+  return <DiagnosticsErrorBoundary key={props.device.publicDeviceCode ?? 'device'}><UnsafeSupportLog {...props} /></DiagnosticsErrorBoundary>;
+}
+
+export function AdminDiagnostics(props: { token: string; onMessage?: (message: string) => void }) {
+  return <AdminDiagnosticsContent {...props} />;
 }

@@ -5,7 +5,7 @@ import { recordDiagnostic } from '@/features/diagnostics/diagnosticsClient';
 
 export type AnalyticsPlaybackType = 'live' | 'movie' | 'series';
 export type PlaybackFailureCategory = 'network' | 'provider' | 'timeout' | 'decoder' | 'unsupported' | 'user_cancelled' | 'unknown';
-export type PlaybackStopReason = 'user_back' | 'playback_error' | 'route_change' | 'unknown';
+export type PlaybackStopReason = 'user_back' | 'playback_error' | 'route_change' | 'channel_change' | 'unknown';
 
 type PlaybackEventInput = {
   providerId?: string;
@@ -83,6 +83,7 @@ function emit(eventName: 'playback_requested' | 'playback_started' | 'playback_f
     sessionId: input.sessionId,
     contentType: input.contentType,
     contentId: input.contentId,
+    contentTitle: input.contentTitle,
     managedProviderId: input.providerId,
     durationMs: input.durationMs,
     metadata: input.metadata,

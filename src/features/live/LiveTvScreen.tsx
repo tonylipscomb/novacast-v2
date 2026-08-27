@@ -18,6 +18,7 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { getTvDensity, NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusChrome } from '@/components/nova';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { usePlaybackActivity } from '@/features/playback/usePlaybackActivity';
 import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
@@ -438,12 +439,8 @@ export function LiveTvScreen() {
       selectedChannel,
     [channels, selectedChannel, liveState?.previewChannelId],
   );
-  const [focusedChannelId, setFocusedChannelId] = useState<string | null>(
+  const [, setFocusedChannelId] = useState<string | null>(
     liveMemory.focusedChannelId ?? null,
-  );
-  const focusedChannel = useMemo(
-    () => channels.find((channel) => channel.id === focusedChannelId) ?? null,
-    [channels, focusedChannelId],
   );
   const rowVisualFlags = getLiveTvRowVisualFlags();
   const frozenPreviewChannelRef = useRef<ProviderLiveChannel | null>(null);
@@ -462,7 +459,7 @@ export function LiveTvScreen() {
   }
   const detailPanelChannel = rowVisualFlags.freezeDetailPanel
     ? frozenPreviewChannelRef.current ?? previewChannel
-    : (focusedChannel ?? selectedChannel ?? previewChannel);
+    : (selectedChannel ?? previewChannel);
   const detailChannelIsFavorite = personalizationState.liveFavorites.map((item) => item.contentId).includes(detailPanelChannel?.id ?? '');
   const liveFavoriteContentIds = useMemo(
     () => new Set(personalizationState.liveFavorites.map((item) => item.contentId)),
@@ -488,14 +485,29 @@ export function LiveTvScreen() {
   const previousAnalyticsFullscreenIdRef = useRef<string | null>(null);
   useEffect(() => {
     const currentId = liveState?.fullscreenChannelId ?? null;
-    const previousId = previousAnalyticsFullscreenIdRef.current;
-    if (currentId && currentId !== previousId && livePlaybackItem) {
+    const trackedId = previousAnalyticsFullscreenIdRef.current;
+
+    if (!currentId) {
+      if (trackedId) {
+        playbackAnalyticsTracker.stop('user_back');
+        previousAnalyticsFullscreenIdRef.current = null;
+      }
+      return;
+    }
+
+    // The fullscreen id can update before the new source item. Do not consume
+    // that id until the item and fullscreen destination are the same channel.
+    if (!livePlaybackItem || livePlaybackItem.id !== currentId) {
+      return;
+    }
+
+    if (currentId !== trackedId) {
+      if (trackedId) {
+        playbackAnalyticsTracker.stop('channel_change');
+      }
       playbackAnalyticsTracker.request(livePlaybackItem, 'channel');
+      previousAnalyticsFullscreenIdRef.current = currentId;
     }
-    if (!currentId && previousId) {
-      playbackAnalyticsTracker.stop('user_back');
-    }
-    previousAnalyticsFullscreenIdRef.current = currentId;
   }, [livePlaybackItem, liveState?.fullscreenChannelId]);
   const categoriesRef = useRef<FlatList<ProviderLiveCategory>>(null);
   const channelsRef = useRef<FlatList<LiveTvChannelRowShellData>>(null);
@@ -507,9 +519,12 @@ export function LiveTvScreen() {
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [categoryNextFocusRightHandle, setCategoryNextFocusRightHandle] = useState<number | undefined>();
+  const [favoriteActionFocusHandle, setFavoriteActionFocusHandle] = useState<number | undefined>();
+  const [watchActionFocusHandle, setWatchActionFocusHandle] = useState<number | undefined>();
   const focusedChannelIdRef = useRef<string | null>(liveMemory.focusedChannelId ?? null);
   const [categoryFocusEpoch, setCategoryFocusEpoch] = useState(0);
   const watchButtonRef = useRef<ElementRef<typeof View>>(null);
+  const favoriteButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenCloseButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenLaunchSourceRef = useRef<FullscreenLaunchSource>(null);
   const previousFullscreenChannelIdRef = useRef<string | null>(null);
@@ -524,6 +539,18 @@ export function LiveTvScreen() {
   const preferChannelFocusRef = useRef(true);
   const surfSessionIdRef = useRef<string | null>(null);
   const intendedSurfChannelIdRef = useRef<string | null>(null);
+
+  const registerFavoriteButtonRef = useCallback((instance: ElementRef<typeof View> | null) => {
+    favoriteButtonRef.current = instance;
+    const nextTag = instance ? findNodeHandle(instance) : null;
+    setFavoriteActionFocusHandle((current) => (current === nextTag ? current : nextTag ?? undefined));
+  }, []);
+
+  const registerWatchButtonRef = useCallback((instance: ElementRef<typeof View> | null) => {
+    watchButtonRef.current = instance;
+    const nextTag = instance ? findNodeHandle(instance) : null;
+    setWatchActionFocusHandle((current) => (current === nextTag ? current : nextTag ?? undefined));
+  }, []);
 
   const registerFullscreenRetryButtonRef = useCallback((instance: ElementRef<typeof View> | null) => {
     fullscreenRetryButtonRef.current = instance;
@@ -1648,7 +1675,6 @@ export function LiveTvScreen() {
                 onPress={handleReload}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color={theme.colors.textPrimary} />
-                <Text style={styles.retryText}>Retry</Text>
               </Pressable>
             </>
           ) : (
@@ -1666,7 +1692,6 @@ export function LiveTvScreen() {
                 onPress={handleReload}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color={theme.colors.textPrimary} />
-                <Text style={styles.retryText}>Retry</Text>
               </Pressable>
             </>
           )}
@@ -1690,39 +1715,11 @@ export function LiveTvScreen() {
       {!renderState.fullscreenChannelId ? (
       <NovaTvShell
         activeId="live"
-        title="Live TV"
-        subtitle="Browse channels without losing the picture."
         providerLabel={selectedProviderLabel}
         preferActiveNavigationFocus={false}
         navigationFocusable={!searchOwnsBackgroundFocus}
         compactNavigationRail
-        headerSupplement={
-          <MovieToolbar
-            accessibilityLabel="Search Live TV"
-            buttonRef={searchToolbarRef}
-            focusable={!searchOverlayVisible && !renderState.fullscreenChannelId}
-            onSearchFocus={() => setFocusedAction('search')}
-            onSearchPress={openLiveSearch}
-            discoverZoneOpen={discoverZoneOpen}
-            onDiscoverPress={() => {
-              if (searchOpen) {
-                closeLiveSearch();
-              }
-              logLivePerformance({
-                event: 'discover-zone-open',
-                elapsedMs: 0,
-                providerIdPresent: Boolean(activeProviderId && activeProviderId !== 'no-provider'),
-                categoryCount: categories.length,
-                channelCount: channels.length,
-                selectedCategoryIdPresent: Boolean(selectedCategoryId),
-                source: 'memory',
-                epgPending: false,
-                discoverPending: true,
-              });
-              setDiscoverZoneOpen(true);
-            }}
-          />
-        }>
+        >
         <View
           style={styles.screen}
           pointerEvents={searchOwnsBackgroundFocus ? 'none' : 'auto'}
@@ -1786,9 +1783,53 @@ export function LiveTvScreen() {
             ]}>
             <View style={styles.panelHeader}>
               <Text style={styles.panelTitle}>Channels</Text>
-              <Text style={styles.panelCount}>
-                {showChannelPanelLoader ? '...' : channels.length.toLocaleString()}
-              </Text>
+              <View style={styles.channelHeaderActions}>
+                <MovieToolbar
+                  accessibilityLabel="Search Live TV"
+                  buttonRef={searchToolbarRef}
+                  focusable={!searchOverlayVisible && !renderState.fullscreenChannelId}
+                  onSearchFocus={() => setFocusedAction('search')}
+                  onSearchPress={openLiveSearch}
+                  discoverZoneOpen={discoverZoneOpen}
+                  onDiscoverPress={() => {
+                    if (searchOpen) closeLiveSearch();
+                    logLivePerformance({
+                      event: 'discover-zone-open', elapsedMs: 0,
+                      providerIdPresent: Boolean(activeProviderId && activeProviderId !== 'no-provider'),
+                      categoryCount: categories.length, channelCount: channels.length,
+                      selectedCategoryIdPresent: Boolean(selectedCategoryId), source: 'memory',
+                      epgPending: false, discoverPending: true,
+                    });
+                    setDiscoverZoneOpen(true);
+                  }}
+                />
+                <Pressable
+                  ref={registerFavoriteButtonRef}
+                  focusable={Boolean(detailPanelChannel) && !searchOverlayVisible && !renderState.fullscreenChannelId}
+                  accessibilityRole="button"
+                  accessibilityLabel={detailChannelIsFavorite ? 'Favorited' : 'Favorite'}
+                  onFocus={() => setFocusedAction('favorite')}
+                  onBlur={() => setFocusedAction(null)}
+                  {...(renderState.selectedChannelId
+                    ? { nextFocusLeft: findNodeHandle(channelRowRefs.current.get(renderState.selectedChannelId) ?? null) ?? undefined }
+                    : null)}
+                  {...(watchActionFocusHandle ? { nextFocusRight: watchActionFocusHandle } : null)}
+                  onPress={() => {
+                    if (detailPanelChannel) {
+                      void toggleLiveFavorite(activeProviderId, detailPanelChannel);
+                    }
+                  }}
+                  style={[styles.favoriteButton, novaTvFocus.base, focusedAction === 'favorite' && styles.textFocusActive]}>
+                  <MaterialCommunityIcons
+                    name={detailChannelIsFavorite ? 'heart' : 'heart-outline'}
+                    size={22}
+                    color={focusedAction === 'favorite' ? theme.colors.focusRing : theme.colors.textPrimary}
+                  />
+                </Pressable>
+                <Text style={styles.panelCount}>
+                  {showChannelPanelLoader ? '...' : channels.length.toLocaleString()}
+                </Text>
+              </View>
             </View>
             {showChannelPanelLoader ? (
               <LiveTvPlanetLoader label="Loading channels…" />
@@ -1810,6 +1851,7 @@ export function LiveTvScreen() {
                   previewChannelId={renderState.previewChannelId}
                   preferFocusChannelId={preferChannelFocusRef.current ? preferredChannelFocusId.current : null}
                   categoryFocusLeftHandle={categoryFocusLeftHandle}
+                  actionFocusRightHandle={favoriteActionFocusHandle}
                   listRef={channelsRef}
                   onTuneChannel={tuneChannel}
                   onChannelFocus={focusChannelRow}
@@ -1846,7 +1888,6 @@ export function LiveTvScreen() {
                       accessibilityLabel="Retry preview"
                       onPress={handlePreviewRetry}
                       style={[styles.watchButton, novaTvFocus.base]}>
-                      <Text style={styles.watchButtonText}>Retry</Text>
                     </Pressable>
                   </View>
                 ) : renderState.previewStatus === 'idle' || streamSurfaceInFullscreen || !hasLiveStream ? (
@@ -1876,32 +1917,12 @@ export function LiveTvScreen() {
                 <View style={styles.actionRow}>
                   <View style={styles.actionButtons}>
                     <Pressable
-                      focusable
-                      accessibilityRole="button"
-                      accessibilityLabel={detailChannelIsFavorite ? 'Favorited' : 'Favorite'}
-                      onFocus={() => setFocusedAction('favorite')}
-                      onBlur={() => setFocusedAction(null)}
-                      onPress={() => {
-                        if (detailPanelChannel) {
-                          void toggleLiveFavorite(activeProviderId, detailPanelChannel);
-                        }
-                      }}
-                      style={[styles.favoriteButton, novaTvFocus.base, focusedAction === 'favorite' && styles.textFocusActive]}>
-                      <MaterialCommunityIcons
-                        name={detailChannelIsFavorite ? 'star' : 'star-outline'}
-                        size={18}
-                        color={theme.colors.accentHover}
-                      />
-                    </Pressable>
-                    <Pressable
-                      ref={watchButtonRef}
+                      ref={registerWatchButtonRef}
                       focusable={Boolean(renderState.previewChannelId) && !renderState.fullscreenChannelId}
                       hasTVPreferredFocus={false}
                       accessibilityRole="button"
                       accessibilityLabel="Watch Full Screen"
-                      {...(renderState.selectedChannelId
-                        ? { nextFocusLeft: findNodeHandle(channelRowRefs.current.get(renderState.selectedChannelId) ?? null) ?? undefined }
-                        : null)}
+                      {...(favoriteActionFocusHandle ? { nextFocusLeft: favoriteActionFocusHandle } : null)}
                       onFocus={() => setFocusedAction('fullscreen')}
                       onBlur={() => setFocusedAction(null)}
                       onPress={watchFullScreen}
@@ -2007,7 +2028,6 @@ export function LiveTvScreen() {
                 onPress={retryFullscreenPlayback}
                 style={[styles.watchButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color="#FFFFFF" />
-                <Text style={styles.watchButtonText}>Retry</Text>
               </Pressable>
             </View>
           ) : null}
@@ -2153,11 +2173,6 @@ function createStyles(theme: NovaTheme) {
     backgroundColor: theme.colors.surface,
     paddingHorizontal: 16,
   },
-  retryText: {
-    color: theme.colors.textPrimary,
-    fontSize: 13,
-    fontWeight: '800',
-  },
   previewPlayer: {
     flex: 1,
     minHeight: 0,
@@ -2207,19 +2222,17 @@ function createStyles(theme: NovaTheme) {
     flex: 22,
     minWidth: 260,
     minHeight: 0,
-    borderRadius: 0,
-    borderWidth: 0,
-    borderRightWidth: 1,
-    borderColor: theme.colors.borderSubtle,
-    backgroundColor: 'transparent',
-    padding: 0,
-    paddingRight: 14,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    backgroundColor: 'rgba(3, 8, 20, 0.58)',
+    padding: 8,
   },
   categoriesPanelCompact: {
     flex: 22,
     minWidth: 200,
-    padding: 0,
-    paddingRight: 12,
+    padding: 6,
+    paddingRight: 6,
   },
   categoriesPanelNormal: {
     flex: 22,
@@ -2233,19 +2246,18 @@ function createStyles(theme: NovaTheme) {
     flex: 53,
     minWidth: 300,
     minHeight: 0,
-    borderRadius: 0,
-    borderWidth: 0,
-    borderRightWidth: 1,
-    borderColor: theme.colors.borderSubtle,
-    backgroundColor: 'transparent',
-    padding: 0,
-    paddingHorizontal: 14,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    backgroundColor: 'rgba(3, 8, 20, 0.58)',
+    padding: 8,
+    paddingHorizontal: 8,
   },
   channelsPanelCompact: {
     flex: 53,
     minWidth: 260,
-    padding: 0,
-    paddingHorizontal: 12,
+    padding: 6,
+    paddingHorizontal: 6,
   },
   channelsPanelNormal: {
     flex: 53,
@@ -2261,10 +2273,12 @@ function createStyles(theme: NovaTheme) {
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 5,
+    gap: 8,
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.borderSubtle,
   },
   panelTitle: {
+    flexShrink: 1,
     color: theme.colors.textPrimary,
     fontSize: 20,
     fontWeight: '800',
@@ -2279,6 +2293,12 @@ function createStyles(theme: NovaTheme) {
     fontWeight: '700',
     textAlign: 'center',
     paddingVertical: 4,
+  },
+  channelHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 0,
   },
   categoryList: {
     gap: 3,
@@ -2596,7 +2616,7 @@ function createStyles(theme: NovaTheme) {
     paddingVertical: 4,
   },
   description: {
-    color: theme.colors.textSecondary,
+    color: '#C4D0E4',
     fontSize: 13,
     lineHeight: 18,
   },

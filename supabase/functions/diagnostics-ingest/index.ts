@@ -1,10 +1,10 @@
 import { authenticateDevice } from '../_shared/device.ts';
 import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
 import { getAdminClient } from '../_shared/supabase.ts';
+import { redact } from './sanitizer.ts';
 
 const MAX_EVENTS = 25;
 const MAX_BODY = 128 * 1024;
-const SECRET = /(pass(word|wd)?|user(name)?|token|secret|authorization|bearer|api[ _-]?key|credential|cookie|jwt|dsn)/i;
 const ALLOWED = new Set([
   'play_attempt', 'provider_request_started', 'provider_request_succeeded', 'provider_request_failed',
   'stream_resolution_started', 'stream_resolution_succeeded', 'stream_resolution_failed', 'player_preparing', 'player_ready',
@@ -67,24 +67,6 @@ function supportLevel(eventType: string) {
   if (['playback_error', 'provider_request_failed', 'stream_resolution_failed', 'source_timeout', 'decoder_error', 'network_request_failure'].includes(eventType)) return 'error';
   if (['buffer_start', 'buffering_started', 'provider_request_started'].includes(eventType)) return 'warning';
   return 'info';
-}
-
-function redact(value: unknown, depth = 0): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 2) return {};
-  const out: Record<string, unknown> = {};
-  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
-    if (SECRET.test(key)) continue;
-    if (typeof raw === 'string') {
-      try {
-        const url = new URL(raw);
-        out[key] = { streamHost: url.hostname.slice(0, 160) };
-      } catch {
-        out[key.slice(0, 40)] = raw.replace(/[?&](token|password|username|user|auth|key)=[^&]*/gi, '').slice(0, 240);
-      }
-    } else if (typeof raw === 'number' || typeof raw === 'boolean' || raw === null) out[key.slice(0, 40)] = raw;
-    else out[key.slice(0, 40)] = redact(raw, depth + 1);
-  }
-  return out;
 }
 
 Deno.serve(async (request) => {

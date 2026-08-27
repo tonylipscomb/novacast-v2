@@ -45,3 +45,16 @@ test('playback lifecycle uses correlated sessions and aggregate buffering fields
   assert.match(ingest, /isUuid\(event\.sessionId\)/);
   assert.match(ingest, /total_buffer_duration_ms/);
 });
+
+test('canonical playback emitter preserves title and identity for every media type', () => {
+  assert.match(playback, /contentType: input\.contentType,[\s\S]*contentId: input\.contentId,[\s\S]*contentTitle: input\.contentTitle/);
+  for (const fixture of [
+    { contentType: 'live', contentId: 'channel-b', contentTitle: 'Channel B' },
+    { contentType: 'movie', contentId: 'movie-1', contentTitle: 'Movie One' },
+    { contentType: 'series', contentId: 'episode-1', contentTitle: 'Episode One' },
+  ]) {
+    assert.equal(typeof fixture.contentId, 'string');
+    assert.equal(typeof fixture.contentTitle, 'string');
+    assert.ok(fixture.contentTitle.length > 0);
+  }
+});

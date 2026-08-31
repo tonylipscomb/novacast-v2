@@ -282,7 +282,7 @@ export function AdminProviders({
                 <header>
                   <div>
                     <strong>{String(provider.display_name ?? provider.slug ?? 'Managed provider')}</strong>
-                    <small>Xtream · {activation === 'active' ? 'Enabled' : activation === 'paused' || activation === 'revoked' ? 'Disabled' : 'Not served to devices'}</small>
+                    <small>Xtream · {provider.goldAccount ? 'Gold Managed' : activation === 'active' ? 'Enabled' : activation === 'paused' || activation === 'revoked' ? 'Disabled' : 'Not served to devices'}</small>
                   </div>
                   <b className={`providerBadge badge-${healthTone(label)}`}>{label}</b>
                 </header>
@@ -293,6 +293,7 @@ export function AdminProviders({
                 </dl>
                 <p>Last tested: {formatTimestamp(provider.last_tested_at)}</p>
                 <p>Last successful: {formatTimestamp(provider.last_successful_test_at)}</p>
+                {provider.goldAccount ? <p className="providerNote">Gold: {String((provider.goldAccount as Row).gold_country ?? '—') === 'ALL' ? 'ALL — VPN / All Countries' : String((provider.goldAccount as Row).gold_country ?? '—')} · expires {String((provider.goldAccount as Row).gold_expiration ?? 'unknown')}</p> : null}
                 {summary?.overallLabel ? <p className="providerNote">{String(summary.overallLabel)}</p> : null}
                 {testing ? <ProgressPanel elapsed={elapsed} /> : null}
                 <footer>
@@ -414,6 +415,7 @@ export function AdminProviders({
             <span className="eyebrow">PROVIDER DIAGNOSTICS</span>
             <h2>{String(selected.display_name ?? 'Managed provider')}</h2>
             <p>Stream Probe checks endpoint media viability. Decoder compatibility is still proven on a NovaCast device.</p>
+            {selected.goldAccount ? <GoldDiagnostic account={selected.goldAccount as Row} /> : null}
             <DiagnosticsBody summary={(liveSummary ?? selected.last_health_summary) as Summary | null} />
             <div className="modalActions">
               <button type="button" className="ghost" onClick={() => setModal(null)}>Close</button>
@@ -424,6 +426,10 @@ export function AdminProviders({
       ) : null}
     </div>
   );
+}
+
+function GoldDiagnostic({ account }: { account: Row }) {
+  return <div className="providerDiagnostics"><strong>UPSTREAM GOLD ACCOUNT</strong><ul><li><span>Status</span><div><strong>{account.gold_enabled === false ? 'DISABLED' : 'ACTIVE'}</strong></div></li><li><span>Gold User ID</span><div><strong>{String(account.gold_user_id ?? 'Unknown')}</strong></div></li><li><span>Expiration</span><div><strong>{String(account.gold_expiration ?? 'Unknown')}</strong></div></li><li><span>Country</span><div><strong>{String(account.gold_country ?? 'Unknown') === 'ALL' ? 'ALL — VPN / All Countries' : String(account.gold_country ?? 'Unknown')}</strong></div></li><li><span>Last Sync</span><div><strong>{account.last_synced_at ? new Date(String(account.last_synced_at)).toLocaleString() : 'Never'}</strong></div></li><li><span>Route</span><div><strong>{String(account.route_mode ?? account.route_domain ?? 'Not configured')}</strong></div></li></ul><small>Gold account health is separate from Xtream API, stream delivery, route, and NovaCast compatibility health.</small></div>;
 }
 
 function canActivateFromSummary(summary: Summary | null) {

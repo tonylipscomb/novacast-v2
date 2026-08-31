@@ -5,6 +5,7 @@ import { AdminDevices } from './AdminDevices';
 import { AdminInvitations } from './AdminInvitations';
 import { AdminProviders } from './AdminProviders';
 import { AdminDiagnostics } from './AdminDiagnostics';
+import { AdminGoldPanel } from './AdminGoldPanel';
 import {
   formatProviderAssignmentMessage,
   resolveProviderAssignmentAckState,
@@ -12,7 +13,7 @@ import {
 import { adminLogin, adminRequest } from './pairing';
 
 type Row = Record<string, unknown>;
-type AdminTab = 'dashboard' | 'devices' | 'providers' | 'invitations' | 'analytics' | 'settings';
+type AdminTab = 'dashboard' | 'devices' | 'providers' | 'gold' | 'invitations' | 'analytics' | 'settings';
 
 type InvitationInput = {
   label: string;
@@ -256,6 +257,7 @@ export function AdminCloud() {
           <NavButton active={tab === 'dashboard'} icon="D" label="Dashboard" onClick={() => setTab('dashboard')} />
           <NavButton active={tab === 'devices'} icon="V" label="Devices" onClick={() => setTab('devices')} />
           <NavButton active={tab === 'providers'} icon="P" label="Providers" onClick={() => setTab('providers')} />
+          <NavButton active={tab === 'gold'} icon="G" label="Gold Panel" onClick={() => setTab('gold')} />
           <NavButton active={tab === 'invitations'} icon="I" label="Invitations" onClick={() => setTab('invitations')} />
           <NavButton active={tab === 'analytics'} icon="A" label="Analytics" onClick={() => setTab('analytics')} />
           <NavButton active={tab === 'settings'} icon="S" label="Settings" onClick={() => setTab('settings')} />
@@ -343,6 +345,7 @@ export function AdminCloud() {
         {!loading && tab === 'analytics' ? (
           <AdminDiagnostics token={token} onMessage={setMessage} />
         ) : null}
+        {!loading && tab === 'gold' ? <AdminGoldPanel token={token} devices={devices} providers={providers} onAssignProvider={(id, providerId) => void assignProvider(id, providerId)} onMessage={setMessage} /> : null}
         {!loading && tab === 'settings' ? (
           <ComingSoon title="Cloud Admin settings" text="Administrator preferences and platform controls will appear here." />
         ) : null}
@@ -385,6 +388,7 @@ function titleFor(tab: AdminTab) {
     dashboard: 'Dashboard',
     devices: 'Devices',
     providers: 'Providers',
+    gold: 'Gold Panel',
     invitations: 'Invitations',
     analytics: 'Analytics',
     settings: 'Settings',
@@ -396,6 +400,7 @@ function subtitleFor(tab: AdminTab) {
     dashboard: 'Monitor the NovaCast beta and manage platform operations.',
     devices: 'Manage and monitor all registered NovaCast devices.',
     providers: 'Add, validate, and activate managed IPTV providers before testers see them.',
+    gold: 'Provision and monitor Gold reseller accounts linked to NovaCast providers.',
     invitations: 'Create and track controlled beta access.',
     analytics: 'Review device and playback performance.',
     settings: 'Configure NovaCast Cloud Admin.',

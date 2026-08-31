@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BackHandler,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,6 +13,7 @@ import {
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
 import { createNovaTvFocusChrome, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -29,7 +31,11 @@ type DiscoverZoneOverlayProps = {
   providerId: string;
   scope: DiscoverZoneScope;
   onClose: () => void;
-  onSelectItem: (item: DiscoverZoneItem) => void;
+  onSelectItem: (
+    item: DiscoverZoneItem,
+    rail: 'watchlist' | 'favorites' | 'recent',
+    railItems?: DiscoverZoneItem[],
+  ) => void;
   retainMounted?: boolean;
   restoreFocusItemId?: string | null;
   onRestoreFocusHandled?: () => void;
@@ -159,7 +165,7 @@ function DiscoverZoneOverlayContent({
                           if (!canOpenDiscoverZoneDetail(item)) {
                             return;
                           }
-                          onSelectItem(item);
+                          onSelectItem(item, rail, items);
                         }}
                       />
                     ))}
@@ -189,6 +195,7 @@ function DiscoverZonePoster({
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [focused, setFocused] = useState(false);
   const focusChrome = useMemo(() => createNovaTvFocusChrome(theme), [theme]);
+  const lastPressAtRef = useRef(0);
 
   const initials = item.title
     .split(/\s+/)
@@ -197,6 +204,14 @@ function DiscoverZonePoster({
     .map((part) => part[0]?.toUpperCase() ?? '')
     .join('');
   const showPosterArt = isSafeDiscoverZoneArtworkUrl(item.artworkUrl);
+  const activate = () => {
+    const now = Date.now();
+    if (now - lastPressAtRef.current < 300) {
+      return;
+    }
+    lastPressAtRef.current = now;
+    onPress();
+  };
 
   return (
     <Pressable
@@ -207,7 +222,8 @@ function DiscoverZonePoster({
       accessibilityLabel={item.title}
       onFocus={() => setFocused(true)}
       onBlur={() => setFocused(false)}
-      onPress={onPress}
+      onPress={activate}
+      {...(Platform.isTV ? { onClick: activate } : {})}
       style={[styles.poster, focusChrome.base, focused && focusChrome.active]}>
       {showPosterArt ? (
         <TvRemoteImage uri={item.artworkUrl} style={styles.posterImage} />
@@ -239,8 +255,10 @@ function createStyles(theme: NovaTheme) {
     panel: {
       flex: 1,
       maxHeight: '92%',
-      borderRadius: 18,
-      backgroundColor: theme.colors.surface,
+      borderRadius: NOVA_GLASS.radius.base,
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.focused.borderColor,
+      backgroundColor: 'rgba(5,10,24,0.72)',
       padding: 22,
     },
     header: {
@@ -266,6 +284,8 @@ function createStyles(theme: NovaTheme) {
       alignItems: 'center',
       gap: 6,
       paddingHorizontal: 12,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
     },
     closeText: {
       color: theme.colors.textPrimary,
@@ -281,6 +301,11 @@ function createStyles(theme: NovaTheme) {
     },
     rail: {
       gap: 10,
+      padding: 12,
+      borderRadius: NOVA_GLASS.radius.subtle,
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      backgroundColor: 'rgba(5,10,24,0.32)',
     },
     railTitle: {
       color: theme.colors.textPrimary,
@@ -294,6 +319,8 @@ function createStyles(theme: NovaTheme) {
     poster: {
       width: 128,
       padding: 6,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
     },
     posterImage: {
       width: 116,

@@ -50,14 +50,13 @@ import {
   shouldRestoreBrowseFocusAfterDetailClose,
   shouldReturnToDiscoverZone,
 } from '@/features/personalization/discoverZoneNavigation';
-import { searchSeries } from '@/features/search/repositories/seriesSearchRepository';
-import type { SearchResult } from '@/features/search/searchTypes';
+import { searchByScope } from '@/features/search/repositories/globalSearchRepository';
+import type { SearchPageRequest, SearchResult } from '@/features/search/searchTypes';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import {
   resolvePosterRestorationId,
   shouldPreferNavigationFocus,
 } from '@/features/media-browser/posterGridFocusPolicy';
-import { MovieToolbar } from '@/features/movies/components/MovieToolbar';
 import { SeriesPosterGrid } from './components/SeriesPosterGrid';
 import { SeriesDetailPopupV2 } from './components/SeriesDetailPopupV2';
 import { sortEpisodesByNumber } from '@/features/playback/continuity/playbackContinuity';
@@ -91,7 +90,8 @@ export function SeriesScreen() {
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
   const [discoverZoneOpen, setDiscoverZoneOpen] = useState(() => Boolean(getSeriesScreenMemory(activeProviderId).openDiscoverZone));
   const [discoverZoneRestoreItemId, setDiscoverZoneRestoreItemId] = useState<string | null>(null);
-  const detailLaunchOriginRef = useRef<'browse' | typeof DISCOVERY_ZONE_ORIGIN>('browse');
+  const [searchOriginResultKey, setSearchOriginResultKey] = useState<string | null>(null);
+  const detailLaunchOriginRef = useRef<'browse' | 'search' | typeof DISCOVERY_ZONE_ORIGIN>('browse');
   const memory = getSeriesScreenMemory(activeProviderId);
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.series.key);
   const posterRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
@@ -99,6 +99,10 @@ export function SeriesScreen() {
   const categoryFocusPendingRef = useRef<string | null>(null);
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
+  const searchToolbarRef = useRef<View | null>(null);
+  const discoverToolbarRef = useRef<View | null>(null);
+  const [searchToolbarFocusHandle, setSearchToolbarFocusHandle] = useState<number | undefined>();
+  const [discoverToolbarFocusHandle, setDiscoverToolbarFocusHandle] = useState<number | undefined>();
   const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
   // series-pagination-focus-v6_1-confirmed-handoff
   const [paginationFocusHandoffActive, setPaginationFocusHandoffActive] = useState(false);
@@ -155,9 +159,6 @@ export function SeriesScreen() {
   // requestTvFocus "executed" is not proof of native focus ownership.
   const seriesV2CloseFocusTargetIdRef = useRef<string | null>(null);
   const seriesV2CloseFocusWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** True while native focus sits inside the popup's season/episode chip area. */
-  const episodesAreaFocusedRef = useRef(false);
-  const [episodesFocusReturnToken, setEpisodesFocusReturnToken] = useState(0);
   const [launchingEpisodePlayback, setLaunchingEpisodePlayback] = useState(false);
   const [episodePlaybackError, setEpisodePlaybackError] = useState<string | null>(null);
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
@@ -212,6 +213,7 @@ export function SeriesScreen() {
   // accessibility tools underneath the V2 popup.
   const seriesDetailPopupVisible = seriesDetailPopup.open && !playbackUiActive;
   const searchBlocksBrowse = searchOverlayReady;
+  const seriesBrowseLocked = seriesDetailPopupVisible || playbackUiActive || searchBlocksBrowse;
   const selectedItemRef = useRef(selectedItem);
 
   useEffect(() => {
@@ -257,6 +259,15 @@ export function SeriesScreen() {
   useEffect(() => {
     syncCategoryFocusLeftHandle();
   }, [categories.length, selectedCategoryId, syncCategoryFocusLeftHandle]);
+
+  useEffect(() => {
+    setSearchToolbarFocusHandle(
+      searchToolbarRef.current ? findNodeHandle(searchToolbarRef.current) ?? undefined : undefined,
+    );
+    setDiscoverToolbarFocusHandle(
+      discoverToolbarRef.current ? findNodeHandle(discoverToolbarRef.current) ?? undefined : undefined,
+    );
+  }, [discoverZoneOpen, searchOpen]);
 
   const focusSelectedPoster = useCallback((reason = 'restore-selected-poster') => {
     const restoreId = resolvePosterRestorationId({
@@ -391,6 +402,7 @@ export function SeriesScreen() {
       const originItemId = seriesDetailPopup.originItemId ?? seriesDetailPopup.series?.id ?? null;
       const fromDiscoverZone = shouldReturnToDiscoverZone(detailLaunchOriginRef.current);
       const restoreBrowseFocus = shouldRestoreBrowseFocusAfterDetailClose(detailLaunchOriginRef.current);
+      const fromSearch = detailLaunchOriginRef.current === 'search';
 
       logSeriesDetailPopupV2Event('series_detail_popup_v2_close', { source, originItemId, fromDiscoverZone });
       if (fromDiscoverZone) {
@@ -403,7 +415,6 @@ export function SeriesScreen() {
 
       // Immediate guest dismiss — browse stays mounted underneath.
       seriesDetailPopupOpenRef.current = false;
-      episodesAreaFocusedRef.current = false;
       setSeriesDetailPopup({ open: false, series: null, originItemId: null });
       setEpisodePlaybackError(null);
 
@@ -411,7 +422,7 @@ export function SeriesScreen() {
       // the origin card focusable in this SAME synchronous transition so it
       // does not depend on `postersFocusable` settling before the deferred
       // focus request below runs.
-      if (originItemId && restoreBrowseFocus) {
+      if (originItemId && restoreBrowseFocus && !fromSearch) {
         seriesV2CloseFocusTargetIdRef.current = originItemId;
         setRestoringBrowseFocus(true);
         setSeriesV2CloseFocusTargetId(originItemId);
@@ -428,7 +439,7 @@ export function SeriesScreen() {
         });
       }
 
-      if (originItemId && restoreBrowseFocus) {
+      if (originItemId && restoreBrowseFocus && !fromSearch) {
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
             requestTvFocus({
@@ -467,7 +478,7 @@ export function SeriesScreen() {
         setSeriesV2CloseFocusTargetId(null);
         setRestoringBrowseFocus(false);
         logSeriesDetailPopupV2Event('series_detail_popup_v2_origin_focus_skipped', {
-          reason: fromDiscoverZone ? 'discovery-zone-return' : 'origin-missing',
+          reason: fromSearch ? 'search-origin-return' : fromDiscoverZone ? 'discovery-zone-return' : 'origin-missing',
         });
       }
 
@@ -479,6 +490,7 @@ export function SeriesScreen() {
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setSearchOverlayReady(false);
+    setSearchOriginResultKey(null);
     focusSelectedPoster('restore-after-search-close');
   }, [focusSelectedPoster]);
 
@@ -557,7 +569,6 @@ export function SeriesScreen() {
       void loadSeriesDetail(series);
       // Stage 4.2O.1 — SeriesDetailPopupV2's own simple state (spec §2). The
       // legacy `SeriesDetailOverlay` is never opened on this path.
-      episodesAreaFocusedRef.current = false;
       setEpisodePlaybackError(null);
       if (seriesV2CloseFocusWatchdogRef.current) {
         clearTimeout(seriesV2CloseFocusWatchdogRef.current);
@@ -615,8 +626,6 @@ export function SeriesScreen() {
         return;
       }
 
-      setSearchOpen(false);
-      setSearchOverlayReady(false);
       const series = {
         id: result.id,
         seriesId: result.seriesId ?? result.id,
@@ -628,10 +637,9 @@ export function SeriesScreen() {
         posterUrl: result.posterUrl,
         posterStyleKey: 'ember' as const,
       };
+      setSearchOriginResultKey(`series:${result.id}`);
       selectSeries(series);
-      focusSeries(series);
       void loadSeriesDetail(series);
-      episodesAreaFocusedRef.current = false;
       setEpisodePlaybackError(null);
       if (seriesV2CloseFocusWatchdogRef.current) {
         clearTimeout(seriesV2CloseFocusWatchdogRef.current);
@@ -640,13 +648,14 @@ export function SeriesScreen() {
       seriesV2CloseFocusTargetIdRef.current = null;
       setSeriesV2CloseFocusTargetId(null);
       seriesDetailPopupOpenRef.current = true;
+      detailLaunchOriginRef.current = 'search';
       setSeriesDetailPopup({ open: true, series, originItemId: series.id });
       logSeriesDetailPopupV2Event('series_detail_popup_v2_active', {
         seriesId: series.id,
         origin: 'search',
       });
     },
-    [focusSeries, loadSeriesDetail, selectSeries, selectedCategoryId],
+    [loadSeriesDetail, selectSeries, selectedCategoryId],
   );
 
   /**
@@ -679,7 +688,6 @@ export function SeriesScreen() {
       // stale `true` here would make the NEXT Back press (after returning
       // from playback, with focus now on Resume) incorrectly collapse back
       // to the Episodes action instead of closing the popup.
-      episodesAreaFocusedRef.current = false;
       try {
         const launched = await launchSeriesEpisodePlayback({
           bundle,
@@ -762,15 +770,9 @@ export function SeriesScreen() {
           // Stage 4.2O.1: SeriesDetailPopupV2 owns Back while it is open. This
           // guard sits at the very top of the legacy handler (not dependent on
           // BackHandler listener registration order, which Movies found to be
-          // unreliable on Android) so the V2 popup always wins. Episode-chip
-          // focus collapses back to the Episodes action first (episode -> popup
-          // -> browse); only a second Back closes the popup itself.
+          // unreliable on Android) so the V2 popup always wins. The popup
+          // itself handles closing an open collection menu before this path.
           if (seriesDetailPopupOpenRef.current) {
-            if (episodesAreaFocusedRef.current) {
-              episodesAreaFocusedRef.current = false;
-              setEpisodesFocusReturnToken((token) => token + 1);
-              return true;
-            }
             closeSeriesDetailPopup('back');
             return true;
           }
@@ -913,8 +915,13 @@ export function SeriesScreen() {
   ]);
 
   const executeSeriesSearch = useCallback(
-    (request: Parameters<typeof searchSeries>[2]) => searchSeries(activeProviderId, bundle?.seriesDataSource, request),
-    [activeProviderId, bundle?.seriesDataSource],
+    (request: SearchPageRequest) => {
+      if (!bundle) {
+        return Promise.resolve({ items: [], totalCount: 0, hasMore: false });
+      }
+      return searchByScope(bundle, 'series', request);
+    },
+    [bundle],
   );
 
   const handleReload = useCallback(() => {
@@ -1125,15 +1132,15 @@ useEffect(() => {
     <View style={styles.root}>
       <View
         style={[styles.browseLayer, playbackUiActive && styles.browseLayerHidden]}
-        pointerEvents={seriesDetailPopup.open || searchBlocksBrowse || playbackUiActive ? 'none' : 'auto'}
+        pointerEvents={seriesBrowseLocked ? 'none' : 'auto'}
         importantForAccessibility={
-          seriesDetailPopup.open || searchBlocksBrowse || playbackUiActive ? 'no-hide-descendants' : 'auto'
+          seriesBrowseLocked ? 'no-hide-descendants' : 'auto'
         }
-        accessibilityElementsHidden={seriesDetailPopup.open || searchBlocksBrowse || playbackUiActive}>
+        accessibilityElementsHidden={seriesBrowseLocked}>
         <NovaTvShell
           activeId="series"
           providerLabel={selectedProviderLabel}
-          navigationFocusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesDetailPopupVisible && !playbackUiActive && !searchBlocksBrowse}
+          navigationFocusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesBrowseLocked}
           preferActiveNavigationFocus={shouldPreferNavigationFocus({
             playbackUiActive,
             detailOverlayVisible: seriesDetailPopupVisible,
@@ -1143,33 +1150,10 @@ useEffect(() => {
           })}
           compactNavigationRail>
           <View style={styles.screen}>
-            <View style={styles.topBar}>
-              <View style={styles.headingBlock}>
-                <Text style={styles.heading}>Series</Text>
-                <Text style={styles.copy}>Browse seasons and episodes from your provider.</Text>
-              </View>
-              <MovieToolbar
-                focusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesDetailPopupVisible && !playbackUiActive && !searchBlocksBrowse}
-                onSearchPress={() => {
-                  if (searchOpen) {
-                    closeSearch();
-                    return;
-                  }
-
-                  setSearchOpen(true);
-                }}
-                onDiscoverPress={() => {
-                  if (searchOpen) {
-                    closeSearch();
-                  }
-                  setDiscoverZoneOpen(true);
-                }}
-                discoverZoneOpen={discoverZoneOpen}
-              />
-            </View>
             <View style={styles.contentRow}>
             <MediaCategoryRail
-              focusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesDetailPopupVisible && !playbackUiActive && !searchBlocksBrowse}
+              focusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesBrowseLocked}
+              interactionLocked={seriesBrowseLocked}
               categories={categories}
               selectedCategoryId={selectedCategoryId}
               preferredCategoryId={selectedCategoryId}
@@ -1186,7 +1170,7 @@ useEffect(() => {
                   syncCategoryFocusLeftHandle();
                 }
               }}
-              nextFocusRightHandle={sortFocusRightHandle}
+              nextFocusRightHandle={searchToolbarFocusHandle}
             />
 
             <View style={styles.middleColumn}>
@@ -1201,6 +1185,9 @@ useEffect(() => {
               </View>
             ) : (
             <SeriesPosterGrid
+              windowWidth={width}
+              detailOpen={seriesDetailPopupVisible}
+              playbackUiActive={playbackUiActive}
               series={visibleItems}
               selectedCategoryLabel={selectedCategoryLabel}
               selectedCategoryId={selectedCategoryId}
@@ -1211,7 +1198,8 @@ useEffect(() => {
               emptyNotice={gridEmptyNotice}
               focusedSeriesId={focusedItem?.id ?? null}
               selectedSeriesId={selectedItem?.id ?? null}
-              postersFocusable={!seriesDetailPopup.open && !playbackUiActive && !searchBlocksBrowse && seriesV2CloseFocusTargetId == null}
+              postersFocusable={!seriesBrowseLocked && seriesV2CloseFocusTargetId == null}
+              interactionLocked={seriesBrowseLocked}
               closingFocusSeriesId={seriesV2CloseFocusTargetId}
               onFocusSeries={handleFocusSeries}
               onSelectSeries={handleSelectSeries}
@@ -1219,8 +1207,29 @@ useEffect(() => {
               sortOption={sortOption}
               onSortChange={setSort}
               showRatingSort={categoryHasRatings}
-              sortFocusLeftHandle={categoryFocusLeftHandle}
+              sortFocusLeftHandle={discoverToolbarFocusHandle ?? searchToolbarFocusHandle}
               onSortFocusHandleReady={setSortFocusRightHandle}
+              toolbarFocusable={!paginationFocusHandoffActive && !restoringBrowseFocus && !seriesBrowseLocked}
+              onSearchPress={() => {
+                if (searchOpen) {
+                  closeSearch();
+                  return;
+                }
+                setSearchOpen(true);
+              }}
+              onDiscoverPress={() => {
+                if (searchOpen) {
+                  closeSearch();
+                }
+                setDiscoverZoneOpen(true);
+              }}
+              discoverZoneOpen={discoverZoneOpen}
+              searchButtonRef={searchToolbarRef}
+              discoverButtonRef={discoverToolbarRef}
+              searchNextFocusLeft={categoryFocusLeftHandle}
+              searchNextFocusRight={discoverToolbarFocusHandle}
+              discoverNextFocusLeft={searchToolbarFocusHandle}
+              discoverNextFocusRight={sortFocusRightHandle}
               loadMore={loadMore}
               onPaginationFocusHandoffChange={setPaginationFocusHandoffActive}
             />
@@ -1241,7 +1250,76 @@ useEffect(() => {
         `logSeriesDetailLegacyOverlayPathViolation` — nothing opens them
         anymore, so `detailOverlayVisible` is permanently false.
       */}
-      <SeriesDetailPopupV2
+      <SearchOverlay
+        visible={searchOpen && !playbackUiActive}
+        retainMounted={searchOpen || seriesDetailPopup.open || playbackUiActive}
+        scope="series"
+        providerId={activeProviderId}
+        title="Search Series"
+        executeSearch={executeSeriesSearch}
+        onReady={() => setSearchOverlayReady(true)}
+        onClose={closeSearch}
+        onSelectResult={handleSearchSelect}
+        detailOpen={detailLaunchOriginRef.current === 'search' && seriesDetailPopup.open}
+        onDetailBack={() => closeSeriesDetailPopup('back')}
+        restoreFocusResultKey={searchOriginResultKey}
+        detailLayer={
+          detailLaunchOriginRef.current === 'search' && seriesDetailPopup.open ? (
+            <SeriesDetailPopupV2
+              visible={!playbackUiActive}
+              series={seriesDetailPopup.series}
+              detail={
+                seriesDetailPopup.series
+                  ? seriesDetail && seriesDetail.seriesId === seriesDetailPopup.series.seriesId
+                    ? buildSeriesMediaDetail(seriesDetail)
+                    : buildSeriesPreviewDetail(seriesDetailPopup.series)
+                  : null
+              }
+              loading={detailLoading}
+              error={detailError}
+              playbackError={episodePlaybackError}
+              playLabel={seriesPlayLabel}
+              isFavorite={seriesDetailPopup.series ? library.isFavorite(seriesDetailPopup.series.seriesId) : false}
+              isWatchlisted={seriesDetailPopup.series ? isSeriesWatchlisted(library.state.watchlist, seriesDetailPopup.series) : false}
+              originItemId={seriesDetailPopup.originItemId}
+              onClose={closeSeriesDetailPopup}
+              onRetry={handleDetailRetry}
+              onPlay={
+                seriesDetail && seriesDetail.seriesId === seriesDetailPopup.series?.seriesId && seriesDetail.seasons.length
+                  ? () => void playFirstEpisode()
+                  : undefined
+              }
+              onToggleFavorite={
+                seriesDetailPopup.series
+                  ? () => {
+                      const series = seriesDetailPopup.series!;
+                      void toggleMediaFavorite(activeProviderId, series.id || series.seriesId, 'series', {
+                        title: seriesDetail?.seriesId === series.seriesId ? seriesDetail.title : series.title,
+                        artworkUrl: seriesDetail?.seriesId === series.seriesId ? seriesDetail.posterUrl : series.posterUrl,
+                      });
+                    }
+                  : undefined
+              }
+              onToggleWatchlist={
+                seriesDetailPopup.series
+                  ? () => void toggleCanonicalSeriesWatchlist(activeProviderId, seriesDetailPopup.series!)
+                  : undefined
+              }
+              selectedSeasonNumber={Number(selectedSeasonId) || undefined}
+              focusedEpisodeId={focusedEpisodeId}
+              onSeasonPress={(seasonNumber) => selectSeason(String(seasonNumber))}
+              onEpisodeFocus={setFocusedEpisodeId}
+              onEpisodePress={(episode) => {
+                setFocusedEpisodeId(episode.id);
+                void playEpisodeById(episode.id, 'episode');
+              }}
+            />
+          ) : null
+        }
+      />
+
+      {detailLaunchOriginRef.current !== 'search' ? (
+        <SeriesDetailPopupV2
         visible={seriesDetailPopup.open && !playbackUiActive}
         series={seriesDetailPopup.series}
         detail={
@@ -1304,11 +1382,8 @@ useEffect(() => {
           setFocusedEpisodeId(episode.id);
           void playEpisodeById(episode.id, 'episode');
         }}
-        onEpisodesAreaFocusChange={(focused) => {
-          episodesAreaFocusedRef.current = focused;
-        }}
-        episodesFocusReturnToken={episodesFocusReturnToken}
-      />
+        />
+      ) : null}
 
       <DiscoverZoneOverlay
         visible={discoverZoneOpen && !playbackUiActive && !seriesDetailPopup.open}
@@ -1329,17 +1404,6 @@ useEffect(() => {
           handleSelectSeries(item.canonicalSeries, DISCOVERY_ZONE_ORIGIN);
         }}
       />
-      <SearchOverlay
-        visible={searchOpen && !playbackUiActive}
-        scope="series"
-        providerId={activeProviderId}
-        title="Search Series"
-        executeSearch={executeSeriesSearch}
-        onReady={() => setSearchOverlayReady(true)}
-        onClose={closeSearch}
-        onSelectResult={handleSearchSelect}
-      />
-
       <WalkthroughOverlay
         key={guide.visible ? 'series-guide-open' : 'series-guide-closed'}
         visible={guide.visible && !playbackUiActive}
@@ -1370,11 +1434,11 @@ function createSeriesStyles(theme: NovaTheme) {
     screen: {
       flex: 1,
       minHeight: 0,
-      paddingTop: 4,
-      gap: 12,
+      paddingTop: 0,
+      gap: 6,
     },
     topBar: {
-      minHeight: 48,
+      minHeight: 36,
       flexDirection: 'row',
       alignItems: 'flex-start',
       justifyContent: 'space-between',

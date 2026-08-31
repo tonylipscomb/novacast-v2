@@ -3,6 +3,7 @@ import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import type { ProviderLiveCategory } from '@/features/providers/providerRepositories';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -61,18 +62,18 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
       }}
       onBlur={() => setIsFocused(false)}
       onPress={onPress}
-      style={[styles.categoryRow, selected && styles.selectedRow, isFocused && styles.categoryRowFocused]}>
-      <View style={[styles.markerSlot, !showMarker && styles.markerSlotHidden]}>
-        {showMarker ? (
+      style={[styles.categoryRow, styles.categoryDefault, selected && styles.categoryActive, isFocused && (selected ? styles.categoryActiveFocused : styles.categoryRowFocused)]}>
+      {showMarker ? (
+        <View style={styles.markerSlot}>
           <ProviderCategoryMarker
             countryCode={category.countryCode}
             regionMarker={category.regionMarker}
             size="md"
           />
-        ) : null}
-      </View>
+        </View>
+      ) : null}
       <Text
-        numberOfLines={1}
+        numberOfLines={2}
         ellipsizeMode="tail"
         style={[styles.categoryName, selected && styles.categoryNameSelected, isFocused && styles.categoryNameFocused]}>
         {displayName}
@@ -80,7 +81,6 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
       <Text numberOfLines={1} style={[styles.categoryCount, isFocused && styles.categoryCountFocused]}>
         {formatLiveTvCategoryCount(category.count)}
       </Text>
-      {selected || isFocused ? <View style={[styles.selectedRail, isFocused && styles.focusRail]} /> : null}
     </Pressable>
   );
 }, areLiveTvCategoryRowPropsEqual);
@@ -90,27 +90,43 @@ const MARKER_SLOT_WIDTH = 28;
 function createStyles(theme: NovaTheme) {
   const focusText = createNovaTvFocusTextStyles(theme);
   const focusChrome = createNovaTvFocusChrome(theme);
-
   return StyleSheet.create({
     categoryRow: {
-      height: 38,
-      borderBottomWidth: 1,
-      borderBottomColor: theme.colors.borderSubtle,
+      minHeight: 38,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
       paddingHorizontal: 8,
-      paddingVertical: 0,
+      paddingVertical: 4,
       ...focusChrome.base,
     },
-    categoryRowFocused: focusChrome.active,
+    // Reuse the navbar's glass focus tokens for category rows.
+    categoryRowFocused: {
+      borderWidth: 1,
+      backgroundColor: NOVA_GLASS.focused.backgroundColor,
+      borderColor: NOVA_GLASS.focused.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
+    categoryDefault: {
+      backgroundColor: 'transparent',
+      borderColor: 'transparent',
+      borderRadius: 0,
+    },
+    categoryActive: {
+      backgroundColor: NOVA_GLASS.active.backgroundColor,
+      borderColor: NOVA_GLASS.active.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
+    categoryActiveFocused: {
+      borderWidth: 1,
+      backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+      borderColor: NOVA_GLASS.activeFocused.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
     markerSlot: {
       width: MARKER_SLOT_WIDTH,
       alignItems: 'center',
       justifyContent: 'center',
-    },
-    markerSlotHidden: {
-      opacity: 0,
     },
     categoryName: {
       flex: 1,
@@ -132,19 +148,5 @@ function createStyles(theme: NovaTheme) {
       textAlign: 'right',
     },
     categoryCountFocused: focusText.count,
-    selectedRail: {
-      width: 3,
-      height: 20,
-      borderRadius: 2,
-      backgroundColor: theme.colors.success,
-    },
-    focusRail: {
-      // Glass box carries focus; keep rail width for layout stability only.
-      backgroundColor: 'transparent',
-      shadowOpacity: 0,
-    },
-    selectedRow: {
-      backgroundColor: 'transparent',
-    },
   });
 }

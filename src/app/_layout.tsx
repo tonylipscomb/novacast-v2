@@ -2,7 +2,7 @@ import { Stack, usePathname } from 'expo-router';
 import * as Sentry from '@sentry/react-native';
 import * as SplashScreen from 'expo-splash-screen';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { LogBox, Platform, StyleSheet, View, DeviceEventEmitter } from 'react-native';
+import { AppState, ImageBackground, LogBox, Platform, StyleSheet, View, DeviceEventEmitter } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AppNotificationProvider } from '@/features/notifications/AppNotificationProvider';
@@ -11,7 +11,8 @@ import { NovaErrorBoundary } from '@/features/resilience/NovaErrorBoundary';
 import { OfflineStatusBanner } from '@/features/resilience/OfflineStatusBanner';
 import { ensureAppLifecycleMonitor, getAppLifecycleState, subscribeAppLifecycle } from '@/features/resilience/appLifecycle';
 import { cancelAllPendingTvFocus } from '@/features/navigation/tvFocusDiagnostics';
-import { AppThemeProvider, useAppTheme } from '@/theme/AppThemeProvider';
+import { AppThemeProvider } from '@/theme/AppThemeProvider';
+import { useAppTheme } from '@/theme/AppThemeProvider';
 import { UnifiedPlayerHost } from '@/features/playback/unified';
 import {
   completeLaunchOverlay,
@@ -27,14 +28,12 @@ import {
 import {
   beginStartupTiming,
   logStartupPhase,
-  markLaunchExitRequested,
   markLaunchTransitionComplete,
   markNativeSplashHidden,
   markProviderReady,
 } from '@/features/startup/startupDiagnostics';
-import { STARTUP_READY_TIMEOUT_MS } from '@/features/startup/startupLogic';
 import { useProviderStore } from '@/features/providers/providerStore';
-import { initializeDevice, sendDeviceHeartbeat } from '@/features/device';
+import { bindDeviceAssignmentRealtimeLifecycle, sendDeviceHeartbeat } from '@/features/device';
 import { isStartupReady, markStartupReady, subscribeStartupReadiness } from '@/features/startup/startupReadiness';
 import { beforeSendNovaEvent, initializeNovaSentryContext, setNovaLifecycleContext, setNovaPlaybackContext, setNovaProviderContext, setNovaRouteContext, setNovaStartupContext } from '@/features/diagnostics/sentryDiagnostics';
 import { initializeCatalogAudit, markCatalogAuditFocus } from '@/features/diagnostics/novaCastCatalogAudit';
@@ -51,6 +50,12 @@ import { closeUnifiedPlayback, getUnifiedPlayerState, subscribeUnifiedPlayer } f
 import { cancelPlaybackResumePrompt, getPlaybackResumeEpoch, subscribePlaybackResumePrompt } from '@/features/playback/continuity/playbackResumeGate';
 import { initializeNovaAnalytics, setAnalyticsRoute, setAnalyticsState } from '@/features/analytics';
 import { sendNovaAnalyticsHeartbeat } from '@/features/analytics/analyticsHeartbeat';
+import { recordSupportLog } from '@/features/diagnostics/diagnosticsClient';
+import { StartupVisualGateProvider } from '@/features/startup/startupVisualGate';
+
+const NOVACAST_BACKGROUND = require('../../assets/images/ncnewbackground.png');
+const NOVACAST_ICE_BACKGROUND = require('../../assets/images/novacasticeback.png');
+const NOVACAST_MIDNIGHT_BACKGROUND = require('../../assets/images/midnightbackground.png');
 
 const CATALOG_BUILD_MARKER = 'stage295-native-completion-v1';
 
@@ -79,17 +84,10 @@ setTimeout(() => {
 
 export default function RootLayout() {
   const [showColdIntro, setShowColdIntro] = useState(() => shouldPlayNovaCastIntro());
-  const [showBrandSplash, setShowBrandSplash] = useState(() => !shouldPlayNovaCastIntro());
-  const [exitRequested, setExitRequested] = useState(false);
   const [startupReady, setStartupReady] = useState(isStartupReady());
-  const [introComplete, setIntroComplete] = useState(false);
   const [launchOverlay, setLaunchOverlay] = useState(getLaunchOverlayState);
   const splashHiddenRef = useRef(false);
-  const exitRequestedRef = useRef(false);
-  const [startedAt] = useState(() => {
-    beginStartupTiming(Date.now());
-    return Date.now();
-  });
+  useState(() => beginStartupTiming(Date.now()));
   const { ready: providerStoreReady } = useProviderStore();
 
   useEffect(() => {
@@ -165,16 +163,6 @@ export default function RootLayout() {
     return () => timers.forEach((timer) => clearTimeout(timer));
   }, []);
 
-  const requestExit = useCallback(() => {
-    if (exitRequestedRef.current) {
-      return;
-    }
-
-    exitRequestedRef.current = true;
-    markLaunchExitRequested();
-    setExitRequested(true);
-  }, []);
-
   useEffect(() => {
     if (__DEV__) {
       LogBox.ignoreLogs(['Open debugger to view warnings']);
@@ -216,65 +204,54 @@ export default function RootLayout() {
     }
   }, [providerStoreReady]);
 
-  // Device registration is required for beta access; keep it early but timed.
+  // StartupGate owns the one-time registration/status check. RootLayout only
+  // owns the long-lived realtime binding and durable heartbeat fallback.
   useEffect(() => {
-    earlyBootMark('device_init_scheduled');
-    void earlyBootTimed('device.initializeDevice', () =>
-      initializeDevice()
-        .then(() => sendDeviceHeartbeat())
-        .catch(() => undefined),
-    );
+    earlyBootMark('device_assignment_realtime_scheduled');
+    const unbindAssignmentRealtime = bindDeviceAssignmentRealtimeLifecycle();
+    // Keep device commands (including enhanced diagnostics capture) responsive
+    // while the app is foregrounded; the heartbeat also enables diagnostics.
     const heartbeat = setInterval(() => {
       void sendDeviceHeartbeat().finally(() => {
         void sendNovaAnalyticsHeartbeat();
       });
-    }, 20 * 60 * 1000);
-    return () => clearInterval(heartbeat);
+    }, 60 * 1000);
+    void sendDeviceHeartbeat().finally(() => {
+      void sendNovaAnalyticsHeartbeat();
+    });
+    return () => {
+      clearInterval(heartbeat);
+      unbindAssignmentRealtime();
+    };
   }, []);
 
   // Analytics is not required for first usable Home focus — defer until shell exit
   // or a safety timeout so it cannot own the residual ~500 ms early-boot stall.
   useEffect(() => {
-    if (showColdIntro || (!exitRequested && showBrandSplash)) {
+    if (showColdIntro) {
       return;
     }
     earlyBootMark('analytics_init_scheduled');
     void earlyBootTimed('analytics.initializeNovaAnalytics', () => initializeNovaAnalytics()).finally(() => {
       void sendNovaAnalyticsHeartbeat();
     });
-  }, [exitRequested, showBrandSplash, showColdIntro]);
+  }, [showColdIntro]);
 
   useEffect(() => {
     const fallback = setTimeout(() => {
-      if (!exitRequestedRef.current) {
-        earlyBootMark('analytics_init_fallback_timeout');
-        void earlyBootTimed('analytics.initializeNovaAnalytics_fallback', () => initializeNovaAnalytics());
-      }
+      earlyBootMark('analytics_init_fallback_timeout');
+      void earlyBootTimed('analytics.initializeNovaAnalytics_fallback', () => initializeNovaAnalytics());
     }, 6_000);
     return () => clearTimeout(fallback);
   }, []);
 
   useEffect(() => {
-    if (!introComplete) {
+    if (true) {
       return;
     }
 
     // Exit as soon as the intro video finishes — don't hold for a min-duration leftover.
-    requestExit();
-  }, [introComplete, requestExit]);
-
-  useEffect(() => {
-    if (showColdIntro) {
-      return;
-    }
-    const forceTimer = setTimeout(() => {
-      logStartupPhase('startup ready timeout fallback');
-      markStartupReady();
-      requestExit();
-    }, STARTUP_READY_TIMEOUT_MS);
-
-    return () => clearTimeout(forceTimer);
-  }, [requestExit, showColdIntro, startedAt]);
+  }, []);
 
   const hideNativeSplash = useCallback(() => {
     if (splashHiddenRef.current) {
@@ -299,7 +276,6 @@ export default function RootLayout() {
 
   const handleLaunchExitComplete = () => {
     markLaunchTransitionComplete();
-    setShowBrandSplash(false);
     completeLaunchOverlay();
   };
 
@@ -311,44 +287,31 @@ export default function RootLayout() {
     markNovaCastIntroPlayed();
     hideNativeSplash();
     setShowColdIntro(false);
-    setShowBrandSplash(false);
     completeLaunchOverlay();
   }, [hideNativeSplash]);
-
-  if (showColdIntro) {
-    return (
-      <SafeAreaProvider>
-        <View style={styles.splashRoot}>
-          <NovaCastIntroScreen onReady={hideNativeSplash} onFinished={handleColdIntroFinished} />
-        </View>
-      </SafeAreaProvider>
-    );
-  }
-
-  if (showBrandSplash) {
-    return (
-      <SafeAreaProvider>
-        <View style={styles.splashRoot}>
-          <NovaCastLaunchSequence
-            exitRequested={exitRequested}
-            startupReady={startupReady}
-            onIntroComplete={() => setIntroComplete(true)}
-            onVideoReady={hideNativeSplash}
-            onExitComplete={handleLaunchExitComplete}
-          />
-        </View>
-      </SafeAreaProvider>
-    );
-  }
 
   return (
     <SafeAreaProvider>
       <NovaErrorBoundary region="root" showProviderAction>
         <AppThemeProvider>
-          <ThemedAppRoot
-            launchOverlay={launchOverlay}
-            onOverlayExitComplete={handleOverlayExitComplete}
-          />
+          <View style={styles.rootContainer}>
+            <View style={[styles.appScene, showColdIntro && styles.appSceneHidden]}>
+              <ThemedAppRoot
+                launchOverlay={launchOverlay}
+                onOverlayExitComplete={handleOverlayExitComplete}
+                visualsVisible={!showColdIntro}
+              />
+            </View>
+            {showColdIntro ? (
+              <View style={styles.introScene}>
+                <NovaCastIntroScreen
+                  appStartupReady={startupReady}
+                  onReady={hideNativeSplash}
+                  onFinished={handleColdIntroFinished}
+                />
+              </View>
+            ) : null}
+          </View>
         </AppThemeProvider>
       </NovaErrorBoundary>
     </SafeAreaProvider>
@@ -362,12 +325,14 @@ function getPlaybackBoundaryResetKey() {
 function ThemedAppRoot({
   launchOverlay,
   onOverlayExitComplete,
+  visualsVisible,
 }: {
   launchOverlay: ReturnType<typeof getLaunchOverlayState>;
   onOverlayExitComplete: () => void;
+  visualsVisible: boolean;
 }) {
-  const { theme } = useAppTheme();
   const pathname = usePathname();
+  const { themeId } = useAppTheme();
   const { selectedProvider } = useProviderStore();
   const playbackBoundaryResetKey = useSyncExternalStore(
     (onStoreChange) => {
@@ -384,11 +349,18 @@ function ThemedAppRoot({
 
   useEffect(() => {
     void initializeNovaSentryContext();
+    recordSupportLog({ eventType: 'app_launch', metadata: { platform: Platform.OS } });
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') recordSupportLog({ eventType: 'app_resumed' });
+      else if (state === 'background') recordSupportLog({ eventType: 'app_backgrounded' });
+    });
+    return () => subscription.remove();
   }, []);
 
   useEffect(() => {
     setNovaRouteContext({ route: pathname || '/', area: pathname?.split('/')[1] || 'startup' });
     setAnalyticsRoute(pathname || '/');
+    recordSupportLog({ eventType: 'route_changed', metadata: { route: pathname || '/' } });
   }, [pathname]);
 
   useEffect(() => {
@@ -438,62 +410,101 @@ function ThemedAppRoot({
   }, []);
 
   return (
-    <View style={[styles.root, { backgroundColor: theme.colors.background }]}>
-      <Stack
-        screenOptions={{
-          headerShown: false,
-          animation: 'fade',
-          contentStyle: { backgroundColor: theme.colors.background },
-        }}
-      />
-
-      <AppNotificationProvider />
-      <OfflineStatusBanner />
-      <TvPerfHud />
-
-      <View pointerEvents="box-none" style={styles.playerHostLayer}>
-        <NovaErrorBoundary
-          region="playback"
-          resetKey={playbackBoundaryResetKey}
-          onRetry={() => {
-            cancelPlaybackResumePrompt();
-            closeUnifiedPlayback();
-          }}
-          fallbackTitle="Playback unavailable"
-          fallbackMessage="Playback hit an unexpected problem. Retry or return home."
-          showHomeAction>
-          <UnifiedPlayerHost />
-        </NovaErrorBoundary>
-      </View>
-
-      {launchOverlay.visible ? (
-        <View
-          pointerEvents="none"
-          focusable={false}
-          accessibilityElementsHidden
-          importantForAccessibility="no-hide-descendants"
-          style={styles.launchOverlayLayer}>
-          <NovaCastLaunchSequence
-            exitRequested={launchOverlay.exiting}
-            startupReady={launchOverlay.exiting}
-            playVideo={false}
-            onIntroComplete={() => undefined}
-            onExitComplete={onOverlayExitComplete}
+    <ImageBackground
+      source={
+        themeId === 'ice'
+          ? NOVACAST_ICE_BACKGROUND
+          : themeId === 'blackout'
+            ? NOVACAST_MIDNIGHT_BACKGROUND
+            : NOVACAST_BACKGROUND
+      }
+      resizeMode="cover"
+      onLoad={() => console.info('[NovaCast Global Background]', 'loaded')}
+      style={styles.root}>
+      <View
+        pointerEvents={visualsVisible ? 'auto' : 'none'}
+        style={[styles.appContent, !visualsVisible && styles.appContentHidden]}>
+        <StartupVisualGateProvider interactive={visualsVisible}>
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              animation: 'fade',
+              contentStyle: { backgroundColor: 'transparent' },
+            }}
           />
+        </StartupVisualGateProvider>
+
+        <AppNotificationProvider />
+        <OfflineStatusBanner />
+        <TvPerfHud />
+
+        <View pointerEvents="box-none" style={styles.playerHostLayer}>
+          <NovaErrorBoundary
+            region="playback"
+            resetKey={playbackBoundaryResetKey}
+            onRetry={() => {
+              cancelPlaybackResumePrompt();
+              closeUnifiedPlayback();
+            }}
+            fallbackTitle="Playback unavailable"
+            fallbackMessage="Playback hit an unexpected problem. Retry or return home."
+            showHomeAction>
+            <UnifiedPlayerHost />
+          </NovaErrorBoundary>
         </View>
-      ) : null}
-    </View>
+
+        {launchOverlay.visible ? (
+          <View
+            pointerEvents="none"
+            focusable={false}
+            accessibilityElementsHidden
+            importantForAccessibility="no-hide-descendants"
+            style={styles.launchOverlayLayer}>
+            <NovaCastLaunchSequence
+              exitRequested={launchOverlay.exiting}
+              startupReady={launchOverlay.exiting}
+              playVideo={false}
+              onIntroComplete={() => undefined}
+              onExitComplete={onOverlayExitComplete}
+            />
+          </View>
+        ) : null}
+      </View>
+    </ImageBackground>
   );
 }
 
 const styles = StyleSheet.create({
+  rootContainer: {
+    flex: 1,
+  },
+  appScene: {
+    flex: 1,
+  },
+  appSceneHidden: {
+    display: 'none',
+  },
+  introScene: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
   splashRoot: {
     flex: 1,
     backgroundColor: '#000000',
   },
   root: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: '#05070A',
+  },
+  appContent: {
+    flex: 1,
+    zIndex: 1,
+  },
+  // Keep the router and startup/bootstrap effects mounted, but remove every
+  // native scene surface from the visual tree while the intro owns startup.
+  // This avoids Android TV SurfaceView z-order exposing Home over intro video.
+  appContentHidden: {
+    display: 'none',
   },
   launchOverlayLayer: {
     position: 'absolute',

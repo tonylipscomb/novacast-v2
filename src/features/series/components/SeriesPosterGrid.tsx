@@ -1,6 +1,6 @@
 import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FlatList, StyleSheet, Text, View, useWindowDimensions, type ListRenderItemInfo } from 'react-native';
+import { FlatList, StyleSheet, Text, View, type LayoutChangeEvent, type ListRenderItemInfo } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 
@@ -13,10 +13,46 @@ import { shouldAutoFocusSortControl, shouldClaimPreferredPosterFocus, isLastPost
 import { estimatePosterRowHeight, TV_POSTER_LIST_TUNING } from '@/features/media-browser/tvPosterListTuning';
 import { tvPerfRecordPosterRender, tvPerfSetVisiblePosters } from '@/features/perf/tvPerfStore';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
+import { isNovaCastTraceLoggingEnabled } from '@/features/diagnostics/novacastLogPolicy';
+import { MovieToolbar } from '@/features/movies/components/MovieToolbar';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
 import { SeriesPosterCard } from './SeriesPosterCard';
 
+const SERIES_GRID_COLUMN_GAP = 12;
+const SERIES_GRID_LEFT_PADDING = 6;
+const SERIES_GRID_RIGHT_PADDING = 18;
+
+let seriesGridMountGeneration = 0;
+let seriesRouteMountId = 0;
+
+type SeriesStageGeometryCache = {
+  windowWidth: number;
+  stageWidth: number;
+  stageX: number;
+};
+
+let lastKnownSeriesStageGeometry: SeriesStageGeometryCache | null = null;
+
+type SeriesNativeLayoutAuditEvent =
+  | 'fresh-layout'
+  | 'stage-layout'
+  | 'grid-mount'
+  | 'grid-unmount'
+  | 'flatlist-ref-set'
+  | 'flatlist-ref-cleared'
+  | 'detail-open'
+  | 'playback-open'
+  | 'playback-close'
+  | 'detail-restore'
+  | 'detail-close'
+  | 'browse-restore'
+  | 'origin-poster-focus-restored';
+
 type SeriesPosterGridProps = {
+  windowWidth: number;
+  detailOpen: boolean;
+  playbackUiActive: boolean;
   series: SeriesSummary[];
   selectedCategoryLabel: string;
   selectedCategoryId: string;
@@ -27,6 +63,7 @@ type SeriesPosterGridProps = {
   focusedSeriesId: string | null;
   selectedSeriesId: string | null;
   postersFocusable?: boolean;
+  interactionLocked?: boolean;
   /**
    * Stage 4.2O.1: force exactly one poster focusable even while
    * `postersFocusable` is false, so the Series Detail Popup V2 close path can
@@ -51,9 +88,22 @@ type SeriesPosterGridProps = {
   emptyNotice?: string | null;
   sortFocusLeftHandle?: number;
   onSortFocusHandleReady?: (handle: number | undefined) => void;
+  toolbarFocusable?: boolean;
+  onSearchPress?: () => void;
+  onDiscoverPress?: () => void;
+  discoverZoneOpen?: boolean;
+  searchButtonRef?: React.RefObject<View | null>;
+  discoverButtonRef?: React.RefObject<View | null>;
+  searchNextFocusLeft?: number;
+  searchNextFocusRight?: number;
+  discoverNextFocusLeft?: number;
+  discoverNextFocusRight?: number;
 };
 
 export function SeriesPosterGrid({
+  windowWidth,
+  detailOpen,
+  playbackUiActive,
   series,
   selectedCategoryLabel,
   selectedCategoryId,
@@ -64,6 +114,7 @@ export function SeriesPosterGrid({
   focusedSeriesId,
   selectedSeriesId,
   postersFocusable = true,
+  interactionLocked = false,
   closingFocusSeriesId = null,
   onFocusSeries,
   onSelectSeries,
@@ -77,9 +128,18 @@ export function SeriesPosterGrid({
   emptyNotice = null,
   sortFocusLeftHandle,
   onSortFocusHandleReady,
+  toolbarFocusable = true,
+  onSearchPress,
+  onDiscoverPress,
+  discoverZoneOpen = false,
+  searchButtonRef,
+  discoverButtonRef,
+  searchNextFocusLeft,
+  searchNextFocusRight,
+  discoverNextFocusLeft,
+  discoverNextFocusRight,
 }: SeriesPosterGridProps) {
   void isDiscover;
-  const gridHeaderSuffix = loading ? 'Loading' : hasMore ? 'More available' : `${series.length} items`;
   const firstSeriesId = series[0]?.id;
   const focusSeedRef = useRef<string | null>(null);
   const focusClaimedRef = useRef(false);
@@ -110,7 +170,23 @@ export function SeriesPosterGrid({
   const loadMoreRef = useRef(loadMore);
   const requestMoreRef = useRef<(() => void) | null>(null);
   const paginationGuardWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { width } = useWindowDimensions();
+  const [gridWidth, setGridWidth] = useState(0);
+  const stageLayoutRef = useRef({ x: 0, width: 0 });
+  const lastValidGridWidthRef = useRef(0);
+  const lastValidStageLayoutRef = useRef({ x: 0, width: 0 });
+  const freshLayoutLoggedRef = useRef(false);
+  const previousGeometryStateRef = useRef<{ detailOpen: boolean; playbackUiActive: boolean } | null>(null);
+  const listInstanceIdRef = useRef(0);
+  const listMountedRef = useRef(false);
+  const listRefInstanceRef = useRef<unknown>(null);
+  const posterGridMountedRef = useRef(false);
+  const gridMountGenerationRef = useRef(0);
+  const seriesRouteMountIdRef = useRef(++seriesRouteMountId);
+  const lastGeometryListKeyRef = useRef<string | null>(null);
+  const auditEventRef = useRef<(event: SeriesNativeLayoutAuditEvent, measuredWidth?: number) => void>(() => {});
+  const listKey = String(columns);
+  const interactionLockedRef = useRef(interactionLocked);
+  const closingFocusSeriesIdRef = useRef(closingFocusSeriesId);
 
   onFocusSeriesRef.current = onFocusSeries;
   onSelectSeriesRef.current = onSelectSeries;
@@ -122,6 +198,8 @@ export function SeriesPosterGrid({
   seriesRef.current = series;
   columnsRef.current = columns;
   loadMoreRef.current = loadMore;
+  interactionLockedRef.current = interactionLocked;
+  closingFocusSeriesIdRef.current = closingFocusSeriesId;
   if (!focusedSeriesIdRef.current && focusedSeriesId) focusedSeriesIdRef.current = focusedSeriesId;
 
   const releasePaginationFocusGuard = useCallback((reason: string) => {
@@ -150,9 +228,13 @@ export function SeriesPosterGrid({
 
   const handleFocusSeries = useCallback(
     (nextSeries: SeriesSummary) => {
+      if (interactionLockedRef.current) return;
       focusClaimedRef.current = true;
       focusedSeriesIdRef.current = nextSeries.id;
       onFocusSeriesRef.current(nextSeries);
+      if (closingFocusSeriesIdRef.current === nextSeries.id) {
+        auditEventRef.current('origin-poster-focus-restored');
+      }
 
       // series-pagination-focus-v6_3-lookahead-native-stable
       // Begin the next SQLite page while the focused poster is still several
@@ -196,6 +278,7 @@ export function SeriesPosterGrid({
   );
 
   const requestMore = useCallback(() => {
+    if (interactionLockedRef.current) return;
     if (!hasMoreRef.current || loadingRef.current || loadMoreInFlightRef.current) {
       return;
     }
@@ -232,6 +315,12 @@ export function SeriesPosterGrid({
       });
   }, []);
   requestMoreRef.current = requestMore;
+
+  useEffect(() => {
+    if (interactionLocked) {
+      releasePaginationFocusGuard('interaction-locked');
+    }
+  }, [interactionLocked, releasePaginationFocusGuard]);
 
   useEffect(() => {
     if (!paginationFocusAnchorId) {
@@ -274,7 +363,7 @@ export function SeriesPosterGrid({
 
     const frame1 = requestAnimationFrame(() => {
       const frame2 = requestAnimationFrame(() => {
-        if (cancelled || paginationRequestRef.current !== pending) {
+        if (cancelled || interactionLockedRef.current || paginationRequestRef.current !== pending) {
           return;
         }
 
@@ -291,7 +380,7 @@ export function SeriesPosterGrid({
           itemId: pending.anchorId,
           reason: 'pagination-preserve-same-poster',
           maxFrames: 30,
-          isActive: () => !cancelled && paginationRequestRef.current === pending,
+          isActive: () => !cancelled && !interactionLockedRef.current && paginationRequestRef.current === pending,
           getTarget: () => localPosterRefs.current.get(pending.anchorId),
           onSettled: (status) => {
             if (cancelled || paginationRequestRef.current !== pending) {
@@ -344,11 +433,13 @@ export function SeriesPosterGrid({
   const styles = useMemo(() => createStyles(theme), [theme]);
 
   useEffect(() => {
+    if (interactionLocked) return;
     focusClaimedRef.current = false;
     focusSeedRef.current = selectedSeriesId ?? firstSeriesId ?? null;
-  }, [firstSeriesId, selectedCategoryId, selectedSeriesId]);
+  }, [firstSeriesId, selectedCategoryId, selectedSeriesId, interactionLocked]);
 
   useEffect(() => {
+    if (interactionLocked) return;
     if (!sortMountedRef.current) {
       sortMountedRef.current = true;
       return;
@@ -359,7 +450,7 @@ export function SeriesPosterGrid({
     }
 
     requestAnimationFrame(() => sortControlRef.current?.focus());
-  }, [sortOption]);
+  }, [interactionLocked, sortOption]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -373,9 +464,132 @@ export function SeriesPosterGrid({
   }, [columns, series.length]);
 
   const columnWidth = useMemo(() => {
-    const usable = Math.max(240, width - 320);
-    return usable / Math.max(1, columns);
-  }, [columns, width]);
+    const sessionCachedWidth = lastKnownSeriesStageGeometry?.windowWidth === windowWidth
+      ? lastKnownSeriesStageGeometry.stageWidth
+      : 0;
+    const effectiveGridWidth = gridWidth > 0
+      ? gridWidth
+      : lastValidGridWidthRef.current > 0
+        ? lastValidGridWidthRef.current
+        : sessionCachedWidth;
+    const available =
+      effectiveGridWidth -
+      SERIES_GRID_LEFT_PADDING -
+      SERIES_GRID_RIGHT_PADDING -
+      SERIES_GRID_COLUMN_GAP * Math.max(0, columns - 1);
+    const measured = available / Math.max(1, columns);
+    return effectiveGridWidth > 0 ? Math.max(1, Math.floor(measured)) : 120;
+  }, [columns, gridWidth, windowWidth]);
+
+  const logNativeLayoutAudit = useCallback((event: SeriesNativeLayoutAuditEvent, measuredWidth?: number) => {
+    if (!isNovaCastTraceLoggingEnabled()) {
+      return;
+    }
+    const currentStageWidth = measuredWidth ?? stageLayoutRef.current.width;
+    const stageWidth = currentStageWidth > 0 ? currentStageWidth : 0;
+    const sessionCachedWidth = lastKnownSeriesStageGeometry?.windowWidth === windowWidth
+      ? lastKnownSeriesStageGeometry.stageWidth
+      : 0;
+    const effectiveGridWidth = stageWidth > 0
+      ? stageWidth
+      : gridWidth > 0
+        ? gridWidth
+        : lastValidGridWidthRef.current > 0
+          ? lastValidGridWidthRef.current
+          : sessionCachedWidth;
+    const effectiveStageLayout = stageWidth > 0
+      ? stageLayoutRef.current
+      : lastValidGridWidthRef.current > 0
+        ? lastValidStageLayoutRef.current
+        : sessionCachedWidth > 0 && lastKnownSeriesStageGeometry
+          ? { x: lastKnownSeriesStageGeometry.stageX, width: sessionCachedWidth }
+          : { x: 0, width: 0 };
+    const effectiveCardWidth = effectiveGridWidth > 0
+      ? Math.max(1, Math.floor((effectiveGridWidth - SERIES_GRID_LEFT_PADDING - SERIES_GRID_RIGHT_PADDING - SERIES_GRID_COLUMN_GAP * Math.max(0, columns - 1)) / Math.max(1, columns)))
+      : 120;
+    const calculatedRowWidth =
+      effectiveCardWidth * Math.max(1, columns) +
+      SERIES_GRID_COLUMN_GAP * Math.max(0, columns - 1) +
+      SERIES_GRID_LEFT_PADDING +
+      SERIES_GRID_RIGHT_PADDING;
+    console.info('[Series Native Layout Audit]', {
+      event,
+      windowWidth,
+      stageWidth,
+      gridWidth: effectiveGridWidth,
+      stageX: effectiveStageLayout.x,
+      stageRight: effectiveStageLayout.x + (stageWidth > 0 ? stageWidth : effectiveGridWidth),
+      cardWidth: effectiveCardWidth,
+      columnCount: columns,
+      columnGap: SERIES_GRID_COLUMN_GAP,
+      horizontalPadding: SERIES_GRID_LEFT_PADDING + SERIES_GRID_RIGHT_PADDING,
+      calculatedRowWidth,
+      calculatedColumns: columns,
+      measuredStageValid: stageWidth > 0,
+      rawStageWidth: stageWidth,
+      componentLastValidWidth: lastValidGridWidthRef.current,
+      sessionCachedStageWidth: sessionCachedWidth,
+      widthSource: stageWidth > 0
+        ? 'measured-stage'
+        : gridWidth > 0 || lastValidGridWidthRef.current > 0
+          ? 'component-last-valid-stage'
+          : sessionCachedWidth > 0
+            ? 'session-cached-measured-stage'
+            : 'startup-fallback',
+      playbackUiActive,
+      detailOpen,
+      listKey,
+      listRefPresent: listMountedRef.current,
+      listInstanceId: listInstanceIdRef.current,
+      gridMountGeneration: gridMountGenerationRef.current,
+      seriesRouteMountId: seriesRouteMountIdRef.current,
+      posterGridMounted: posterGridMountedRef.current,
+      selectedSeriesIdPresent: Boolean(selectedSeriesId),
+      focusedPosterIdPresent: Boolean(focusedSeriesIdRef.current),
+    });
+    lastGeometryListKeyRef.current = listKey;
+  }, [columns, detailOpen, focusedSeriesId, gridWidth, listKey, playbackUiActive, selectedSeriesId, windowWidth]);
+  auditEventRef.current = logNativeLayoutAudit;
+
+  useEffect(() => {
+    const previous = previousGeometryStateRef.current;
+    if (previous) {
+      const events: SeriesNativeLayoutAuditEvent[] = [];
+      if (!previous.detailOpen && detailOpen) events.push('detail-open');
+      if (!previous.playbackUiActive && playbackUiActive) events.push('playback-open');
+      if (previous.playbackUiActive && !playbackUiActive) events.push('playback-close');
+      if (previous.detailOpen && !detailOpen) events.push('detail-restore');
+      if ((previous.detailOpen || previous.playbackUiActive) && !detailOpen && !playbackUiActive) {
+        events.push('browse-restore');
+      }
+      if (previous.detailOpen && !detailOpen) events.push('detail-close');
+      events.forEach((event) => auditEventRef.current(event));
+    }
+    previousGeometryStateRef.current = { detailOpen, playbackUiActive };
+  }, [detailOpen, playbackUiActive]);
+
+  const registerListRef = useCallback((instance: unknown) => {
+    if (instance && listRefInstanceRef.current !== instance) {
+      listRefInstanceRef.current = instance;
+      listMountedRef.current = true;
+      listInstanceIdRef.current += 1;
+      auditEventRef.current('flatlist-ref-set');
+    } else if (!instance && listRefInstanceRef.current !== null) {
+      listRefInstanceRef.current = null;
+      listMountedRef.current = false;
+      auditEventRef.current('flatlist-ref-cleared');
+    }
+  }, []);
+
+  useEffect(() => {
+    gridMountGenerationRef.current = ++seriesGridMountGeneration;
+    posterGridMountedRef.current = true;
+    auditEventRef.current('grid-mount');
+    return () => {
+      posterGridMountedRef.current = false;
+      auditEventRef.current('grid-unmount');
+    };
+  }, []);
 
   const rowHeight = useMemo(() => estimatePosterRowHeight(columnWidth), [columnWidth]);
 
@@ -395,31 +609,35 @@ export function SeriesPosterGrid({
     ({ item, index }: ListRenderItemInfo<SeriesSummary>) => {
       tvPerfRecordPosterRender();
       return (
-        <SeriesPosterCard
-          series={item}
-          focusable={postersFocusable || closingFocusSeriesId === item.id}
-          trapFocusDown={isLastPosterRow({ index, itemCount: series.length, columns })}
-          hasPreferredFocus={
-            closingFocusSeriesId != null
-              ? closingFocusSeriesId === item.id
-              : shouldClaimPreferredPosterFocus({
-                  focusClaimed: focusClaimedRef.current,
-                  itemId: item.id,
-                  seedId: focusSeedRef.current,
-                })
-          }
-          onFocus={handleFocusSeries}
-          onPress={handleSelectSeries}
-          registerRef={(instance) => handleRegisterRef(item.id, instance)}
-        />
+        <View style={[styles.cell, { width: columnWidth, flexGrow: 0, flexShrink: 0 }]}>
+          <SeriesPosterCard
+            series={item}
+            focusable={!interactionLocked && (postersFocusable || closingFocusSeriesId === item.id)}
+            trapFocusDown={isLastPosterRow({ index, itemCount: series.length, columns })}
+            hasPreferredFocus={
+              !interactionLocked && closingFocusSeriesId != null
+                ? closingFocusSeriesId === item.id
+                : shouldClaimPreferredPosterFocus({
+                    focusClaimed: focusClaimedRef.current,
+                    itemId: item.id,
+                    seedId: focusSeedRef.current,
+                  })
+            }
+            onFocus={handleFocusSeries}
+            onPress={handleSelectSeries}
+            registerRef={(instance) => handleRegisterRef(item.id, instance)}
+          />
+        </View>
       );
     },
     [
       closingFocusSeriesId,
+      columnWidth,
       columns,
       handleFocusSeries,
       handleRegisterRef,
       handleSelectSeries,
+      interactionLocked,
       postersFocusable,
       paginationFocusAnchorId,
       series.length,
@@ -445,6 +663,20 @@ export function SeriesPosterGrid({
           {selectedCategoryLabel}
         </Text>
         <View style={styles.sortGroup}>
+          {onSearchPress && onDiscoverPress ? (
+            <MovieToolbar
+              focusable={toolbarFocusable}
+              onSearchPress={onSearchPress}
+              onDiscoverPress={onDiscoverPress}
+              discoverZoneOpen={discoverZoneOpen}
+              buttonRef={searchButtonRef}
+              discoverButtonRef={discoverButtonRef}
+              searchNextFocusLeft={searchNextFocusLeft}
+              searchNextFocusRight={searchNextFocusRight}
+              discoverNextFocusLeft={discoverNextFocusLeft}
+              discoverNextFocusRight={discoverNextFocusRight}
+            />
+          ) : null}
           <ContentSortControl
             ref={sortControlRef}
             value={sortOption}
@@ -453,7 +685,6 @@ export function SeriesPosterGrid({
             nextFocusLeft={sortFocusLeftHandle}
             focusable={closingFocusSeriesId == null && postersFocusable}
           />
-          <Text style={styles.subtitle}>{gridHeaderSuffix}</Text>
         </View>
       </View>
 
@@ -476,13 +707,39 @@ export function SeriesPosterGrid({
           <Text style={styles.emptyNoticeText}>{emptyNotice}</Text>
         </View>
       ) : (
-        <View style={styles.listStage}>
+        <View
+          style={styles.listStage}
+              onLayout={(event: LayoutChangeEvent) => {
+                const { x, width: measuredWidth } = event.nativeEvent.layout;
+                const nextWidth = Number.isFinite(measuredWidth) ? Math.floor(measuredWidth) : 0;
+                stageLayoutRef.current = { x, width: nextWidth };
+                if (nextWidth > 0) {
+                  lastValidGridWidthRef.current = nextWidth;
+                  lastValidStageLayoutRef.current = { x, width: nextWidth };
+                  lastKnownSeriesStageGeometry = {
+                    windowWidth,
+                    stageWidth: nextWidth,
+                    stageX: x,
+                  };
+                }
+                if (!freshLayoutLoggedRef.current && nextWidth > 0) {
+                  freshLayoutLoggedRef.current = true;
+                  auditEventRef.current('fresh-layout', nextWidth);
+                }
+                auditEventRef.current('stage-layout', nextWidth);
+                if (nextWidth > 0) {
+                  setGridWidth((current) => (current === nextWidth ? current : nextWidth));
+                }
+              }}>
           <FlatList
+            ref={registerListRef}
             data={series}
             key={columns}
             numColumns={columns}
             keyExtractor={keyExtractor}
-            scrollEnabled
+            scrollEnabled={!interactionLocked}
+            focusable={!interactionLocked}
+            accessible={!interactionLocked}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.list}
             columnWrapperStyle={columns > 1 ? styles.row : undefined}
@@ -531,18 +788,19 @@ function createStyles(theme: NovaTheme) {
     panel: {
       flex: 1,
       minWidth: 0,
-      borderTopWidth: 1,
-      borderTopColor: theme.colors.borderSubtle,
-      backgroundColor: 'transparent',
-      paddingHorizontal: 0,
-      paddingTop: 8,
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: 'rgba(3, 8, 20, 0.58)',
+      paddingHorizontal: 10,
+      paddingTop: 6,
     },
     header: {
-      minHeight: 36,
+      minHeight: 40,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      marginBottom: 6,
+      marginBottom: 4,
       paddingHorizontal: 2,
     },
     title: {
@@ -555,7 +813,8 @@ function createStyles(theme: NovaTheme) {
     sortGroup: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 12,
+      gap: 8,
+      flexShrink: 0,
     },
     subtitle: {
       color: theme.colors.textSecondary,
@@ -565,11 +824,19 @@ function createStyles(theme: NovaTheme) {
     list: {
       paddingTop: 2,
       paddingBottom: 20,
-      paddingHorizontal: 2,
+      paddingLeft: SERIES_GRID_LEFT_PADDING,
+      paddingRight: SERIES_GRID_RIGHT_PADDING,
     },
     row: {
-      gap: 6,
+      columnGap: SERIES_GRID_COLUMN_GAP,
       marginBottom: 6,
+      alignItems: 'flex-start',
+      justifyContent: 'flex-start',
+    },
+    cell: {
+      flexGrow: 0,
+      flexShrink: 0,
+      minWidth: 0,
     },
     emptyNotice: {
       flex: 1,

@@ -222,6 +222,31 @@ export function surfLiveFullscreenChannel(state: LiveTvState, channelId: string)
   };
 }
 
+/**
+ * Opens fullscreen only after the caller has resolved and bound a stream for
+ * this exact channel. Keeping this transition separate from surf state avoids
+ * treating a channel id as playback readiness.
+ */
+export function openResolvedLiveChannelFullscreen(
+  state: LiveTvState,
+  channelId: string,
+  streamUrl: string | null,
+): LiveTvState {
+  if (!streamUrl?.trim()) {
+    return state;
+  }
+
+  return {
+    ...state,
+    selectedChannelId: channelId,
+    previewChannelId: channelId,
+    previewConfirmedChannelId: channelId,
+    previewStatus: 'ready',
+    previewError: null,
+    fullscreenChannelId: channelId,
+  };
+}
+
 export function closeLiveFullscreen(state: LiveTvState): LiveTvState {
   if (!state.fullscreenChannelId) {
     return state;

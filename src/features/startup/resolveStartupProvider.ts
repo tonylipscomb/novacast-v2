@@ -3,7 +3,11 @@ import {
   initializeDevice,
   isClosedBetaManagedFlow,
 } from '@/features/device';
-import { downloadManagedProviderAssignment } from '@/features/device/managedProviderDownload';
+import {
+  assignmentFromDeviceStatus,
+  markDeviceAssignmentApplied,
+  runManagedProviderRefresh,
+} from '@/features/device/deviceAssignmentReconcile';
 import { setContentPolicyOverride } from '@/features/content-policy';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
 import {
@@ -181,10 +185,11 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
 
   try {
     await withTimeout(
-      downloadManagedProviderAssignment(),
+      runManagedProviderRefresh(),
       STARTUP_BOOTSTRAP_TIMEOUT_MS,
       'managed_provider_timeout',
     );
+    await markDeviceAssignmentApplied(assignmentFromDeviceStatus(getDeviceState().status));
   } catch (error) {
     const errorCode = safeErrorCode(error, 'managed_provider_unavailable');
     logProviderPhase('provider-download-failed', {

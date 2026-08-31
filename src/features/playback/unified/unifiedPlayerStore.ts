@@ -1,6 +1,7 @@
 import type { LaunchPlaybackOptions, PlaybackItem, UnifiedPlayerState } from './types.ts';
 import { normalizeMediaTitle } from '../../series/metadata/titleNormalization.ts';
 import { shouldAcceptUnifiedPlaybackClose } from './unifiedPlayerLogic.ts';
+import { playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
 
 function logUnifiedStore(event: string, payload: Record<string, unknown> = {}) {
   console.info('[NovaCast Unified Player]', event, payload);
@@ -109,6 +110,24 @@ export function launchUnifiedPlayback(item: PlaybackItem, options: LaunchPlaybac
     machineState: 'loading',
   });
 
+  /*
+   * NOVACAST_VOD_ANALYTICS_LAUNCH
+   *
+   * Start Movie/Series analytics at the accepted launch boundary.
+   * Do not depend on React observing a temporary loading state.
+   */
+  if (normalizedItem.mediaType !== 'live') {
+    /*
+     * Close any lingering tracker session first.
+     * This protects VOD -> Live -> VOD and rapid route transitions.
+     */
+    playbackAnalyticsTracker.stop('route_change');
+
+    playbackAnalyticsTracker.request(
+      normalizedItem,
+      options.launchSource ?? null,
+    );
+  }
   setState({
     machineState: 'loading',
     item: normalizedItem,
@@ -143,6 +162,10 @@ export function closeUnifiedPlayback() {
   lastCloseAcceptedAtMs = nowMs;
   const callback = state.onCloseCallback;
   logUnifiedStore('close', { id: state.item?.id ?? null, machineState: 'closing' });
+  // NOVACAST_VOD_ANALYTICS_CLOSE
+  if (state.item && state.item.mediaType !== 'live') {
+    playbackAnalyticsTracker.stop('user_back');
+  }
   setState({
     machineState: 'closing',
     item: null,

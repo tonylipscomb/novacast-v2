@@ -6,13 +6,32 @@ import {
 } from './catalogSchema.ts';
 import {
   getCatalogDatabaseOpener,
+  isCatalogDatabaseOpenerOverridden,
   openCatalogReadDatabase,
   type CatalogDatabaseHandle,
 } from './catalogDatabaseDriver.ts';
 import { isNovaCastCatalogTraceEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import { CATALOG_DATABASE_NAME } from './catalogTypes.ts';
 import { recordCatalogWritePhase } from './catalogWritePhaseAudit.ts';
+import {
+  resetCatalogForegroundPriorityForTests,
+  waitForForegroundCatalogReadsToDrain,
+} from './catalogForegroundPriority.ts';
 import { nowMs } from './jsChunkBudget.ts';
+
+export type { CatalogDatabaseHandle } from './catalogDatabaseDriver.ts';
+
+export {
+  beginCatalogForegroundRead,
+  getActiveCatalogForegroundReadCount,
+  getCatalogBackgroundWriteYield,
+  getCatalogUiSurface,
+  hasActiveCatalogForegroundRead,
+  isCatalogUiBrowseActive,
+  setCatalogUiSurface,
+  waitForForegroundCatalogReadsToDrain,
+} from './catalogForegroundPriority.ts';
+export type { CatalogUiSurface } from './catalogForegroundPriority.ts';
 
 let initPromise: Promise<CatalogDatabaseHandle> | null = null;
 let activeHandle: CatalogDatabaseHandle | null = null;
@@ -46,30 +65,51 @@ export type CatalogWalAuditContext = {
   statementExecuteMs?: number;
 };
 
-/** search-s5-foreground-read-priority */
-let activeForegroundCatalogReads = 0;
-const foregroundCatalogReadDrainWaiters = new Set<() => void>();
+let cachedJournalMode: string | null = null;
 
-export function beginCatalogForegroundRead(): () => void {
-  activeForegroundCatalogReads += 1;
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    activeForegroundCatalogReads = Math.max(0, activeForegroundCatalogReads - 1);
-    if (activeForegroundCatalogReads === 0) {
-      const waiters = [...foregroundCatalogReadDrainWaiters];
-      foregroundCatalogReadDrainWaiters.clear();
-      for (const resolve of waiters) resolve();
-    }
-  };
+export function getCachedCatalogJournalMode() {
+  return cachedJournalMode;
 }
 
-async function waitForForegroundCatalogReadsToDrain(): Promise<void> {
-  if (activeForegroundCatalogReads === 0) return;
-  await new Promise<void>((resolve) => {
-    foregroundCatalogReadDrainWaiters.add(resolve);
+export function isCatalogWalActive() {
+  return cachedJournalMode === 'wal';
+}
+
+export function isCatalogWriteTransactionActive() {
+  return activeCatalogTransactions > 0;
+}
+
+export function logCatalogForegroundReadIfSlow(input: {
+  purpose: string;
+  queueWaitMs: number;
+  sqliteExecutionMs: number;
+  waitedOnJsQueue: boolean;
+  writerTransactionActiveAtStart: boolean;
+}) {
+  if (input.sqliteExecutionMs < 100 && input.queueWaitMs < 50) {
+    return;
+  }
+  console.info('[NovaCast Catalog Foreground Read]', {
+    purpose: input.purpose,
+    queueWaitMs: Math.round(input.queueWaitMs),
+    sqliteExecutionMs: Math.round(input.sqliteExecutionMs),
+    journalMode: cachedJournalMode,
+    walActive: isCatalogWalActive(),
+    waitedOnJsQueue: input.waitedOnJsQueue,
+    writerTransactionActiveAtStart: input.writerTransactionActiveAtStart,
   });
+}
+
+export async function checkpointCatalogWalIfIdle() {
+  if (activeCatalogTransactions > 0) {
+    return;
+  }
+  try {
+    const db = await getCatalogDatabase();
+    await db.exec('PRAGMA wal_checkpoint(PASSIVE);');
+  } catch {
+    // Idle checkpoint must never fail publication or UI reads.
+  }
 }
 
 function reportCatalogDatabaseError(action: string, error: unknown) {
@@ -151,7 +191,12 @@ export async function initializeCatalogDatabase(
       });
       await db.exec('PRAGMA journal_mode = WAL;');
       await db.exec('PRAGMA synchronous = NORMAL;');
+      await db.exec('PRAGMA busy_timeout = 250;');
+      await db.exec('PRAGMA wal_autocheckpoint = 8000;');
       await db.exec('PRAGMA foreign_keys = ON;');
+      const journalRow = await db.getFirst<Record<string, unknown>>('PRAGMA journal_mode');
+      const journalValue = journalRow ? Object.values(journalRow)[0] : null;
+      cachedJournalMode = typeof journalValue === 'string' ? journalValue.toLowerCase() : null;
       const migrateStart = nowMs();
       await migrateCatalogDatabase(db);
       recordCatalogWritePhase('sqlite.migration', {
@@ -160,6 +205,8 @@ export async function initializeCatalogDatabase(
       });
       activeHandle = db;
       void logCatalogWalAudit(db, { reason: 'database-open' });
+      const { reconcileOrphanedCatalogSyncs } = await import('./catalogOrphanedSyncRecovery.ts');
+      await reconcileOrphanedCatalogSyncs(db);
       return db;
     } catch (error) {
       initPromise = null;
@@ -186,6 +233,10 @@ export async function getCatalogReadDatabase(): Promise<CatalogDatabaseHandle> {
   if (activeReadHandle) {
     return activeReadHandle;
   }
+  // Node tests inject `:memory:` openers. A second open is a different empty DB.
+  if (isCatalogDatabaseOpenerOverridden()) {
+    return getCatalogDatabase();
+  }
   if (readInitPromise) {
     return readInitPromise;
   }
@@ -196,6 +247,7 @@ export async function getCatalogReadDatabase(): Promise<CatalogDatabaseHandle> {
 
     const readDb = await openCatalogReadDatabase(CATALOG_DATABASE_NAME);
     await readDb.exec('PRAGMA query_only = ON;');
+    await readDb.exec('PRAGMA busy_timeout = 250;');
     activeReadHandle = readDb;
     return readDb;
   })().catch((error) => {
@@ -396,6 +448,8 @@ export async function resetCatalogDatabaseForTests(): Promise<void> {
   mutexWaitSamples = 0;
   mutexMaxWaitMs = 0;
   activeCatalogTransactions = 0;
+  cachedJournalMode = null;
+  resetCatalogForegroundPriorityForTests();
 }
 
 export async function getCatalogSchemaVersion(): Promise<number> {

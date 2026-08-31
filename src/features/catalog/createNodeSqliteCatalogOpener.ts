@@ -31,7 +31,6 @@ type NodeSqliteModule = {
 export function createNodeSqliteCatalogOpener(): CatalogDatabaseOpener {
   return async (databaseName: string) => {
     const nodeSqlite = (await import(
-      // @ts-expect-error Node built-in is unavailable in RN type roots.
       'node:sqlite'
     )) as NodeSqliteModule;
     const db = new nodeSqlite.DatabaseSync(databaseName === ':memory:' ? ':memory:' : databaseName);

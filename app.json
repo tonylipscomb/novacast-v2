@@ -1,66 +1,68 @@
 {
-  "expo": {
-    "name": "NovaCast",
-    "slug": "novacast-v2",
-    "version": "1.0.4-beta",
-    "orientation": "landscape",
-    "icon": "./assets/images/novacast-launcher-icon.png",
-    "scheme": "novacastv2",
-    "userInterfaceStyle": "dark",
-    "ios": {
-      "icon": "./assets/images/ios-icon.png"
-    },
-    "android": {
-      "icon": "./assets/images/novacast-launcher-icon.png",
-      "adaptiveIcon": {
-        "backgroundColor": "#32145F",
-        "foregroundImage": "./assets/images/novacast-launcher-foreground.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
-      },
-      "usesCleartextTraffic": true,
-      "predictiveBackGestureEnabled": false,
-      "package": "com.novacast.novacastv2",
-      "versionCode": 5
-    },
-    "web": {
-      "output": "static",
-      "favicon": "./assets/images/favicon.png"
-    },
-    "plugins": [
-      "expo-router",
-      "./plugins/withNovacastFeatureFlags.js",
-      "./plugins/withNovacastTvManifest.js",
-      [
-        "expo-splash-screen",
-        {
-          "backgroundColor": "#000000",
-          "image": "./splash.png",
-          "resizeMode": "cover"
-        }
-      ],
-      "expo-secure-store",
-      "expo-video",
-      [
-        "@sentry/react-native/expo",
-        {
-          "url": "https://sentry.io/",
-          "project": "novacast-tv",
-          "organization": "launchpoint-digital"
-        }
-      ],
-      "expo-sqlite"
-    ],
-    "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
-    },
-    "backgroundColor": "#32145F",
-    "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "0d343f80-34a6-4058-adc0-c3a2e8150beb"
-      }
-    },
-    "owner": "novacast"
-  }
+    "expo":  {
+                 "name":  "NovaCast",
+                 "slug":  "novacast-v2",
+                 "version":  "1.0.4-beta",
+                 "orientation":  "landscape",
+                 "icon":  "./assets/images/novacast-launcher-icon.png",
+                 "scheme":  "novacastv2",
+                 "userInterfaceStyle":  "dark",
+                 "ios":  {
+                             "icon":  "./assets/images/ios-icon.png"
+                         },
+                 "android":  {
+                                 "icon":  "./assets/images/novacast-launcher-icon.png",
+                                 "adaptiveIcon":  {
+                                                      "backgroundColor":  "#32145F",
+                                                      "foregroundImage":  "./assets/images/novacast-launcher-foreground.png",
+                                                      "monochromeImage":  "./assets/images/android-icon-monochrome.png"
+                                                  },
+                                 "usesCleartextTraffic":  true,
+                                 "predictiveBackGestureEnabled":  false,
+                                 "package":  "com.novacast.novacastv2",
+                                 "versionCode":  8
+                             },
+                 "web":  {
+                             "output":  "static",
+                             "favicon":  "./assets/images/favicon.png"
+                         },
+                 "plugins":  [
+                                 "expo-router",
+                                 "./plugins/withNovacastFeatureFlags.js",
+                                 "./plugins/withNovacastTvManifest.js",
+                                 [
+                                     "expo-splash-screen",
+                                     {
+                                         "backgroundColor":  "#000000",
+                                         "image":  "./splash.png",
+                                         "resizeMode":  "cover"
+                                     }
+                                 ],
+                                 "expo-secure-store",
+                                 "expo-video",
+                                 [
+                                     "@sentry/react-native/expo",
+                                     {
+                                         "url":  "https://sentry.io/",
+                                         "project":  "novacast-tv",
+                                         "organization":  "launchpoint-digital"
+                                     }
+                                 ],
+                                 "expo-sqlite"
+                             ],
+                 "experiments":  {
+                                     "typedRoutes":  true,
+                                     "reactCompiler":  true
+                                 },
+                 "backgroundColor":  "#32145F",
+                 "extra":  {
+                               "router":  {
+
+                                          },
+                               "eas":  {
+                                           "projectId":  "0d343f80-34a6-4058-adc0-c3a2e8150beb"
+                                       }
+                           },
+                 "owner":  "novacast"
+             }
 }

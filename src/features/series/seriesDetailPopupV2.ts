@@ -27,9 +27,8 @@ export type SeriesDetailPopupV2Layout = {
 };
 
 /**
- * Identical clamps to the accepted Movies V2 popup — same physically-
- * accepted shell, same sizing: ~58-64% of screen width, ~52-62% of screen
- * height, poster ~26-30% of popup width.
+ * Series detail is intentionally a little wider than the movie popup so the
+ * collection control and episode list can remain contained on a TV screen.
  */
 export function computeSeriesDetailPopupV2Layout(input: {
   screenWidth: number;
@@ -39,12 +38,12 @@ export function computeSeriesDetailPopupV2Layout(input: {
   const screenHeight = Math.max(0, input.screenHeight);
 
   const minWidth = Math.min(screenWidth * 0.58, Math.max(0, screenWidth - 48));
-  const maxWidthCap = Math.min(screenWidth * 0.64, 1180);
+  const maxWidthCap = Math.min(screenWidth * 0.72, 1320);
   const maxWidth = Math.max(maxWidthCap, minWidth);
-  const popupWidth = Math.round(Math.min(Math.max(screenWidth * 0.61, minWidth), maxWidth));
+  const popupWidth = Math.round(Math.min(Math.max(screenWidth * 0.68, minWidth), maxWidth));
 
   const popupHeight = Math.round(
-    Math.min(Math.max(screenHeight * 0.57, 420), Math.max(420, screenHeight * 0.62)),
+    Math.min(Math.max(screenHeight * 0.68, 500), Math.max(500, screenHeight * 0.78)),
   );
 
   const posterWidth = Math.round(popupWidth * 0.28);

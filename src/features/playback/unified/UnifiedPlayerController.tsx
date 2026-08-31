@@ -247,6 +247,7 @@ export function UnifiedPlayerController() {
   const resumeAppliedRef = useRef<string | null>(null);
   const appliedPlayingRef = useRef<boolean | null>(null);
   const previousAnalyticsSnapshotRef = useRef(snapshot);
+  const analyticsItemKeyRef = useRef<string | null>(null);
   const seekQueueRef = useRef<{
     inFlight: boolean;
     pendingMs: number | null;
@@ -913,21 +914,69 @@ export function UnifiedPlayerController() {
 
   useEffect(() => {
     const previous = previousAnalyticsSnapshotRef.current;
-    if (!previous.item && snapshot.item && snapshot.machineState === 'loading') {
-      playbackAnalyticsTracker.request(snapshot.item, snapshot.launchSource);
+    const item = snapshot.item;
+
+    const itemKey = item
+      ? `${item.providerId ?? 'none'}:${item.mediaType}:${item.id}`
+      : null;
+
+    const trackedItemKey = analyticsItemKeyRef.current;
+
+    /*
+     * UnifiedPlayerController can mount after the playback item has already
+     * entered the store. Do not require previous.item to be null.
+     *
+     * Start analytics once per actual movie/episode content identity.
+     */
+    if (
+      item &&
+      snapshot.machineState === 'loading' &&
+      itemKey !== trackedItemKey
+    ) {
+      if (trackedItemKey) {
+        playbackAnalyticsTracker.stop('route_change');
+      }
+
+      const accepted = playbackAnalyticsTracker.request(
+        item,
+        snapshot.launchSource,
+      );
+
+      if (accepted) {
+        analyticsItemKeyRef.current = itemKey;
+      }
     }
+
     if (snapshot.machineState !== previous.machineState) {
       playbackAnalyticsTracker.stateChanged(snapshot.machineState);
     }
-    if (snapshot.machineState === 'error' && previous.machineState !== 'error') {
+
+    if (
+      snapshot.machineState === 'error' &&
+      previous.machineState !== 'error'
+    ) {
       playbackAnalyticsTracker.failure(snapshot.errorMessage);
+
       if (snapshot.item?.mediaType === 'movie') {
-        noteMoviePlaybackFailed(snapshot.errorMessage ?? 'player-error', snapshot.item.id);
+        noteMoviePlaybackFailed(
+          snapshot.errorMessage ?? 'player-error',
+          snapshot.item.id,
+        );
       }
     }
-    if (snapshot.machineState === 'closing' && previous.machineState !== 'closing') {
+
+    if (
+      snapshot.machineState === 'closing' &&
+      previous.machineState !== 'closing'
+    ) {
       playbackAnalyticsTracker.stop('user_back');
+      analyticsItemKeyRef.current = null;
     }
+
+    if (!item && snapshot.machineState === 'idle') {
+      analyticsItemKeyRef.current = null;
+    }
+
     previousAnalyticsSnapshotRef.current = snapshot;
   }, [snapshot]);
 

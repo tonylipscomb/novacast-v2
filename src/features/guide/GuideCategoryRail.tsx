@@ -2,7 +2,7 @@ import { memo, useCallback, useMemo, useReducer, useRef, useState, type ElementR
 import { findNodeHandle, FlatList, Pressable, StyleSheet, Text } from 'react-native';
 
 import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
-import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { createNovaCategoryChrome, createNovaTvFocusChrome, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
 import type { ProviderLiveCategory } from '@/features/providers/providerRepositories';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -82,7 +82,7 @@ const GuideCategoryChip = memo(function GuideCategoryChip({
         onBlur();
       }}
       onPress={onPress}
-      style={[styles.chipInner, selected && styles.chipInnerSelected, isFocused && styles.chipInnerFocused]}>
+      style={[styles.chipInner, styles.chipInnerDefault, selected && styles.chipInnerActive, isFocused && (selected ? styles.chipInnerActiveFocused : styles.chipInnerFocused)]}>
       {showMarker ? (
         <ProviderCategoryMarker
           countryCode={category.countryCode}
@@ -175,6 +175,7 @@ export function GuideCategoryRail({ categories, selectedCategoryId, onSelect, on
 function createStyles(theme: NovaTheme) {
   const focusText = createNovaTvFocusTextStyles(theme);
   const focusChrome = createNovaTvFocusChrome(theme);
+  const categoryChrome = createNovaCategoryChrome();
   return StyleSheet.create({
     rail: { minHeight: 36, maxHeight: 36 },
     railContent: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 2 },
@@ -184,17 +185,15 @@ function createStyles(theme: NovaTheme) {
       alignItems: 'center',
       gap: 6,
       flexShrink: 0,
-      borderRadius: 0,
       backgroundColor: 'transparent',
       paddingHorizontal: 8,
       paddingVertical: 4,
       ...focusChrome.base,
     },
-    chipInnerSelected: {
-      borderBottomWidth: 2,
-      borderBottomColor: theme.colors.success,
-    },
-    chipInnerFocused: focusChrome.active,
+    chipInnerActive: categoryChrome.active,
+    chipInnerDefault: categoryChrome.default,
+    chipInnerFocused: categoryChrome.focused,
+    chipInnerActiveFocused: categoryChrome.activeFocused,
     chipName: {
       flexShrink: 0,
       color: theme.colors.textSecondary,

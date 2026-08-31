@@ -1,28 +1,35 @@
 import type { ComponentProps, PropsWithChildren, ReactNode } from 'react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { findNodeHandle, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { findNodeHandle, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { Href } from 'expo-router';
 import { usePathname, useRouter } from 'expo-router';
 
-import { NovaLogo } from '@/components/nova/NovaLogo';
-import { createNovaTvFocusTextStyles, createNovaTvFocusChrome, novaTvFocus } from '@/components/nova/novaTvFocus';
+import {
+  GlassNavDivider,
+  GlassNavItem,
+  GlassNavbarFocusGuide,
+  GlassNavbarFrame,
+  GlassNavbarLogo,
+} from '@/components/nova/NovaGlassNavbar';
+import { NovaGlassStatusFooter } from '@/components/nova/NovaGlassStatusFooter';
 import { NovaScreen } from '@/components/nova/NovaScreen';
 import { getTvDensity } from '@/components/nova/tvDensity';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
-import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
-import { useProviderChrome } from '@/features/providers/providerStore';
-import { isClosedBetaManagedFlow } from '@/features/device/deviceFeatureFlags';
-import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
+import { noteFocusLifecycleEvent, recordFocusAudit } from '@/features/navigation/focusRequestAudit';
+import { shouldArmNavbarPreferredFocus } from '@/features/navigation/navbarInitialFocus';
 import { markCatalogAuditFocus, markCatalogAuditRender } from '@/features/diagnostics/novaCastCatalogAudit';
 import { noteFocusLatencyFocus } from '@/features/diagnostics/focusLatencyAudit';
+import { useStartupVisualInteractive } from '@/features/startup/startupVisualGate';
+import { setCatalogUiSurface } from '@/features/catalog/catalogForegroundPriority.ts';
 import { useAppTheme } from '@/theme/AppThemeProvider';
-import { themeLogoIncludesWordmark } from '@/theme/brandingAssets';
 import type { NovaTheme } from '@/theme/tokens';
 
 type IconName = ComponentProps<typeof MaterialCommunityIcons>['name'];
 
 type NavigationId = 'home' | 'live' | 'movies' | 'series' | 'search' | 'guide' | 'settings';
+
+let nextShellInstanceId = 1;
 
 export type NovaNavigationId = NavigationId;
 export type NovaNavigationFocusHandles = Partial<Record<NavigationId, number>>;
@@ -32,17 +39,63 @@ type NavItem = {
   label: string;
   icon: IconName;
   route: string;
+  iconOnly?: boolean;
+  group: 'primary' | 'utility';
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'home', label: 'Home', icon: 'home-outline', route: '/main-menu' },
-  { id: 'live', label: 'Live TV', icon: 'television-play', route: '/live' },
-  { id: 'movies', label: 'Movies', icon: 'movie-open-outline', route: '/movies' },
-  { id: 'series', label: 'Series', icon: 'play-box-multiple-outline', route: '/series' },
-  { id: 'search', label: 'Search', icon: 'magnify', route: '/search' },
-  { id: 'guide', label: 'Guide', icon: 'calendar-clock-outline', route: '/guide' },
-  { id: 'settings', label: 'Settings', icon: 'cog-outline', route: '/settings' },
+  { id: 'home', label: 'Home', icon: 'home-outline', route: '/main-menu', group: 'primary' },
+  { id: 'movies', label: 'Movies', icon: 'movie-open-outline', route: '/movies', group: 'primary' },
+  { id: 'series', label: 'Series', icon: 'play-box-multiple-outline', route: '/series', group: 'primary' },
+  { id: 'live', label: 'Live TV', icon: 'television-play', route: '/live', group: 'primary' },
+  { id: 'search', label: 'Search', icon: 'magnify', route: '/search', group: 'primary' },
+  { id: 'guide', label: 'Guide', icon: 'view-grid-outline', route: '/guide', group: 'primary' },
+  { id: 'settings', label: 'Settings', icon: 'cog-outline', route: '/settings', group: 'utility', iconOnly: true },
 ];
+
+const PRIMARY_NAV_ITEMS = NAV_ITEMS.filter((item) => item.group === 'primary');
+const UTILITY_NAV_ITEMS = NAV_ITEMS.filter((item) => item.group === 'utility');
+const NAVBAR_CONTENT_GAP = 16;
+const NAVBAR_ITEM_WIDTHS: Record<NavigationId, number> = {
+  home: 92,
+  movies: 102,
+  series: 96,
+  live: 104,
+  search: 98,
+  guide: 94,
+  settings: 52,
+};
+const NAVBAR_PRIMARY_GAP = 5;
+
+// TEMPORARY: release-candidate focus-paint audit is disabled. Set true only
+// for an explicit developer/device diagnostic build.
+const FOCUS_VISUAL_AUDIT_ENABLED = false;
+
+function logFocusVisualAudit({
+  event,
+  activeId,
+  focusedId,
+  itemId,
+  ...details
+}: {
+  event: string;
+  activeId: NavigationId;
+  focusedId?: NavigationId | null;
+  itemId?: NavigationId;
+  [key: string]: unknown;
+}) {
+  if (!FOCUS_VISUAL_AUDIT_ENABLED) {
+    return;
+  }
+  console.info('[NovaCast Focus Visual Audit]', {
+    event,
+    timestamp: Date.now(),
+    activeId,
+    ...(focusedId !== undefined ? { focusedId } : null),
+    ...(itemId !== undefined ? { itemId } : null),
+    ...details,
+  });
+}
 
 type NovaTvShellProps = PropsWithChildren<{
   activeId: NavigationId;
@@ -54,68 +107,22 @@ type NovaTvShellProps = PropsWithChildren<{
   preferActiveNavigationFocus?: boolean;
   /** Narrow guard for native preferred focus; does not affect focusability or navigation. */
   suppressNavbarPreferredFocus?: boolean;
-  /** When false, the left navigation rail cannot receive D-pad focus. */
+  /** When false, the top navigation bar cannot receive D-pad focus. */
   navigationFocusable?: boolean;
   /** Native focus handles for navigation items (focusable mode only). */
   onNavigationFocusHandles?: (handles: NovaNavigationFocusHandles) => void;
   /** Fires when a navbar item gains or loses TV focus. */
   onNavigationItemFocus?: (id: NavigationId | null) => void;
-  /** When set, Right from the matching nav item jumps to this native handle. */
+  /**
+   * When set, Down from the matching nav item jumps to this native handle.
+   * Prop name is historical from the left-rail layout; it now maps to nextFocusDown.
+   */
   navigationNextFocusRight?: Partial<Record<NavigationId, number>>;
-  /** When set, Right from every nav item jumps to this native handle. */
+  /** When set, Down from every nav item jumps to this native handle. */
   navigationContentFocusHandle?: number;
   showNavigationRail?: boolean;
   compactNavigationRail?: boolean;
 }>;
-
-function formatClock(date: Date) {
-  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-}
-
-/** Isolated so the 30s clock tick does not re-render the navbar or screen children. */
-function ShellHeaderClock({ style }: { style: { color?: string; fontSize?: number; fontWeight?: '600' | '700' | '800' | '900' } }) {
-  const [clock, setClock] = useState(() => new Date());
-  useEffect(() => {
-    const timer = setInterval(() => setClock(new Date()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
-  return <Text style={style}>{formatClock(clock)}</Text>;
-}
-
-/** Isolated so the 1s beta countdown tick does not re-render the navbar or screen children. */
-function ShellBetaExpiration({
-  captionStyle,
-  valueStyle,
-  boxStyle,
-  divider,
-}: {
-  captionStyle: { color?: string; fontSize?: number; fontWeight?: '600' | '700' | '800' | '900'; textTransform?: 'uppercase'; letterSpacing?: number };
-  valueStyle: { color?: string; fontSize?: number; fontWeight?: '600' | '700' | '800' | '900' };
-  boxStyle: { alignItems?: 'flex-end' | 'center' | 'flex-start'; gap?: number };
-  divider: ReactNode;
-}) {
-  const {
-    selectedProvider,
-  } = useProviderChrome();
-  const accessExpiration = useAccessExpirationDisplay({
-    provider: selectedProvider,
-    account: selectedProvider?.account ?? null,
-  });
-
-  if (!accessExpiration.closedBeta || !accessExpiration.value) {
-    return null;
-  }
-
-  return (
-    <>
-      <View style={boxStyle}>
-        <Text style={captionStyle}>{accessExpiration.caption}</Text>
-        <Text style={valueStyle}>{accessExpiration.value}</Text>
-      </View>
-      {divider}
-    </>
-  );
-}
 
 export function NovaTvShell({
   activeId,
@@ -126,7 +133,7 @@ export function NovaTvShell({
   headerSupplement,
   preferActiveNavigationFocus = true,
   suppressNavbarPreferredFocus = false,
-  navigationFocusable = true,
+  navigationFocusable: navigationFocusableProp = true,
   onNavigationFocusHandles,
   onNavigationItemFocus,
   navigationNextFocusRight,
@@ -136,68 +143,298 @@ export function NovaTvShell({
   children,
 }: NovaTvShellProps) {
   markCatalogAuditRender('NovaTvShell');
-  const { theme, themeId } = useAppTheme();
+  const startupInteractive = useStartupVisualInteractive();
+  const navigationFocusable = navigationFocusableProp && startupInteractive;
+  const { theme } = useAppTheme();
   const styles = useMemo(() => createShellStyles(theme), [theme]);
   const router = useRouter();
   const pathname = usePathname();
+  const shellInstanceIdRef = useRef<number | null>(null);
+  if (shellInstanceIdRef.current == null) {
+    shellInstanceIdRef.current = nextShellInstanceId++;
+  }
+  const shellInstanceId = shellInstanceIdRef.current;
+  const shellRenderCountRef = useRef(0);
+  shellRenderCountRef.current += 1;
+  if (__DEV__ && shellRenderCountRef.current > 1) {
+    console.info('[NovaCast Shell Lifecycle]', {
+      event: 'rerender',
+      shellInstanceId,
+      renderCount: shellRenderCountRef.current,
+      timestamp: Date.now(),
+    });
+  }
   const { width } = useWindowDimensions();
-  const [focusedId, setFocusedId] = useState<NavigationId | null>(null);
+  // Native TV focus still owns the real focus lifecycle. This initial value only
+  // makes the preferred active item render its glass state on the first frame,
+  // before Android TV delivers the native onFocus callback.
+  const [focusedId, setFocusedId] = useState<NavigationId | null>(() =>
+    preferActiveNavigationFocus && !suppressNavbarPreferredFocus ? activeId : null,
+  );
   const navigationGateRef = useRef(createTvNavigationGate());
+  const navbarLayoutLoggedRef = useRef(false);
+  const navbarMountedAtRef = useRef(Date.now());
+  const firstNavbarFocusLoggedRef = useRef(false);
+  const focusVisualStateRequestedAtRef = useRef<number | null>(null);
   const navItemRefs = useRef<Partial<Record<NavigationId, View | null>>>({});
+  const [navbarHandles, setNavbarHandles] = useState<NovaNavigationFocusHandles>({});
   const lastNavHandlesJson = useRef('');
-  const {
-    selectedProviderName,
-    selectedProviderExpiration,
-  } = useProviderChrome();
-  const resolvedProviderLabel = providerLabel ?? selectedProviderName;
-  const nonBetaExpirationLabel = expirationLabel ?? selectedProviderExpiration;
-  const navbarPreferredFocus = preferActiveNavigationFocus && !suppressNavbarPreferredFocus;
+  const lastNavbarFocusGraphJson = useRef('');
+  const preferredFocusConsumedRef = useRef(false);
+  const navbarPreferredFocus = navigationFocusable && preferActiveNavigationFocus && !suppressNavbarPreferredFocus;
   useEffect(() => {
-    if (navbarPreferredFocus) {
+    const committedAt = Date.now();
+    const requestedAt = focusVisualStateRequestedAtRef.current;
+    logFocusVisualAudit({
+      event: 'navbar-commit',
+      activeId,
+      focusedId,
+      stateUpdateToCommitMs: requestedAt == null ? null : committedAt - requestedAt,
+    });
+  }, [activeId, focusedId]);
+  useLayoutEffect(() => {
+    if (__DEV__) {
+      console.info('[NovaCast Shell Lifecycle]', {
+        event: 'mount',
+        shellInstanceId,
+        timestamp: Date.now(),
+      });
+    }
+    noteFocusLifecycleEvent('shell-mount', { activeId, shellInstanceId });
+    logFocusVisualAudit({ event: 'shell-mount', activeId, focusedId, shellInstanceId });
+    if (showNavigationRail) {
+      noteFocusLifecycleEvent('navbar-mount', { activeId, shellInstanceId });
+    }
+    return () => {
+      if (__DEV__) {
+        console.info('[NovaCast Shell Lifecycle]', {
+          event: 'unmount',
+          shellInstanceId,
+          timestamp: Date.now(),
+          lifetimeMs: Date.now() - navbarMountedAtRef.current,
+        });
+      }
+    };
+  }, []);
+  useEffect(() => {
+    if (navbarPreferredFocus && !preferredFocusConsumedRef.current) {
       recordFocusAudit({
         component: 'NovaTvShell.navbar',
         action: 'hasTVPreferredFocus',
         itemId: activeId,
       });
+      noteFocusLifecycleEvent('hasTVPreferredFocus', { activeId });
+      logFocusVisualAudit({ event: 'preferred-focus-armed', activeId, focusedId, itemId: activeId });
+      if (__DEV__ && activeId === 'home') {
+        console.info('[NovaCast Navbar Focus]', {
+          event: 'preferred-owner',
+          owner: navbarPreferredFocus ? 'home-nav' : 'hero',
+        });
+      }
     }
   }, [activeId, navbarPreferredFocus]);
+  useEffect(() => {
+    const surface = activeId === 'live' || activeId === 'movies' || activeId === 'series' ? activeId : 'other';
+    setCatalogUiSurface(surface);
+    return () => {
+      setCatalogUiSurface('other');
+    };
+  }, [activeId]);
   const density = getTvDensity(width);
-  const compactNavWidth = density === 'compact' ? 60 : 68;
-  const safeHorizontal = density === 'compact' ? 28 : density === 'normal' ? 38 : 46;
-  const safeVertical = density === 'compact' ? 18 : density === 'normal' ? 24 : 30;
-  const shellGap = density === 'compact' ? 14 : density === 'normal' ? 20 : 24;
-  const headerHeight = density === 'compact' ? 56 : density === 'normal' ? 64 : 70;
+  const safeHorizontal = density === 'compact' ? 44 : density === 'normal' ? 48 : 52;
+  const safeVertical = density === 'compact' ? 18 : density === 'normal' ? 20 : 22;
+  const navIconSize = density === 'compact' ? 23 : density === 'normal' ? 25 : 27;
+  const navbarOverlayHeight = density === 'compact' ? 66 : 68;
+  const navbarReserve = showNavigationRail
+    ? safeVertical + navbarOverlayHeight + (compactNavigationRail ? 4 : NAVBAR_CONTENT_GAP)
+    : safeVertical;
+  const bleedContentUnderNavbar = false;
+  const showPageHeader = Boolean(title || subtitle || headerSupplement);
+  void compactNavigationRail;
+
+  useEffect(() => {
+    if (!__DEV__ || navbarLayoutLoggedRef.current || !showNavigationRail) {
+      return;
+    }
+    navbarLayoutLoggedRef.current = true;
+    const navGroupWidth = PRIMARY_NAV_ITEMS.reduce((sum, item) => sum + NAVBAR_ITEM_WIDTHS[item.id], 0)
+      + NAVBAR_PRIMARY_GAP * Math.max(0, PRIMARY_NAV_ITEMS.length - 1);
+    const totalNavbarWidth = Math.min(1820, Math.max(0, width - safeHorizontal * 2));
+    const logoWidth = density === 'compact' ? 150 : density === 'normal' ? 166 : 178;
+    const settingsWidth = NAVBAR_ITEM_WIDTHS.settings;
+    const settingsSlotWidth = 1 + 12 + settingsWidth;
+    const availableGap = totalNavbarWidth - 36 - logoWidth - navGroupWidth - settingsSlotWidth;
+    if (availableGap < 0) {
+      console.warn('[NovaCast Navbar Layout] fixed slots exceed available width', {
+        totalNavbarWidth,
+        availableGap,
+      });
+    }
+    console.info('[NovaCast Navbar Layout]', {
+      screenWidth: width,
+      totalNavbarWidth,
+      navbarHeight: navbarOverlayHeight,
+      logoWidth,
+      centerGroupWidth: navGroupWidth,
+      settingsWidth,
+      availableGap: Math.max(0, availableGap),
+      overlaps: availableGap < 0,
+    });
+  }, [density, navbarOverlayHeight, safeHorizontal, showNavigationRail, width]);
+
+  const setNavItemRef = useCallback((itemId: NavigationId, node: View | null) => {
+    navItemRefs.current[itemId] = node;
+    // Keep the last known native handle. Clearing it during a ref callback would
+    // briefly remove native LEFT/RIGHT destinations during ordinary rerenders.
+    if (node == null) {
+      return;
+    }
+    const handle = findNodeHandle(node);
+    if (handle == null) {
+      return;
+    }
+    setNavbarHandles((previous) => (
+      previous[itemId] === handle ? previous : { ...previous, [itemId]: handle }
+    ));
+  }, []);
 
   useLayoutEffect(() => {
     if (!navigationFocusable || !onNavigationFocusHandles) {
       return;
     }
 
-    const handles: NovaNavigationFocusHandles = {};
-    for (const item of NAV_ITEMS) {
-      const node = navItemRefs.current[item.id];
-      if (node) {
-        const handle = findNodeHandle(node) ?? undefined;
-        if (handle) {
-          handles[item.id] = handle;
-        }
-      }
-    }
-
-    const serialized = JSON.stringify(handles);
+    const serialized = JSON.stringify(navbarHandles);
     if (serialized !== lastNavHandlesJson.current) {
       lastNavHandlesJson.current = serialized;
-      onNavigationFocusHandles(handles);
+      onNavigationFocusHandles(navbarHandles);
     }
-  }, [navigationFocusable, onNavigationFocusHandles, activeId, pathname, focusedId]);
+  }, [navigationFocusable, navbarHandles, onNavigationFocusHandles]);
 
-  const navWidth = useMemo(
-    () =>
-      compactNavigationRail
-        ? compactNavWidth
-        : Math.min(theme.layout.navMaxWidth, Math.max(theme.layout.navMinWidth, width * 0.105)),
-    [compactNavWidth, compactNavigationRail, theme.layout.navMaxWidth, theme.layout.navMinWidth, width],
-  );
+  useEffect(() => {
+    if (!__DEV__ || !navigationFocusable) {
+      return;
+    }
+    const graphReady = NAV_ITEMS.every((item) => navbarHandles[item.id] != null);
+    if (!graphReady) {
+      return;
+    }
+    const graph = NAV_ITEMS.map((item, index) => {
+      const previous = NAV_ITEMS[Math.max(0, index - 1)];
+      const next = NAV_ITEMS[Math.min(NAV_ITEMS.length - 1, index + 1)];
+      return {
+        itemId: item.id,
+        leftTargetId: previous.id,
+        rightTargetId: next.id,
+        leftHandlePresent: navbarHandles[previous.id] != null,
+        rightHandlePresent: navbarHandles[next.id] != null,
+      };
+    });
+    const serialized = JSON.stringify(graph);
+    if (serialized === lastNavbarFocusGraphJson.current) {
+      return;
+    }
+    lastNavbarFocusGraphJson.current = serialized;
+    for (const entry of graph) {
+      console.info('[NovaCast Navbar Focus Graph]', entry);
+    }
+  }, [navbarHandles, navigationFocusable]);
+
+  const horizontalFocusTarget = (itemIndex: number, direction: 'left' | 'right') => {
+    const item = NAV_ITEMS[itemIndex];
+    const neighborIndex = direction === 'left'
+      ? Math.max(0, itemIndex - 1)
+      : Math.min(NAV_ITEMS.length - 1, itemIndex + 1);
+    // A missing neighbor must never fall through to page content. Self is also
+    // the intentional edge target for the first/last navbar item.
+    return navbarHandles[NAV_ITEMS[neighborIndex].id] ?? navbarHandles[item.id];
+  };
+
+  const contentDownHandle = (itemId: NavigationId) => {
+    if (itemId !== activeId) {
+      return undefined;
+    }
+    return navigationNextFocusRight?.[itemId] ?? navigationContentFocusHandle;
+  };
+
+  const renderNavItem = (item: NavItem) => {
+    const itemIndex = NAV_ITEMS.findIndex((candidate) => candidate.id === item.id);
+    const active = item.id === activeId;
+    const focused = navigationFocusable && item.id === focusedId;
+    const downHandle = contentDownHandle(item.id);
+    return (
+      <GlassNavItem
+        key={item.id}
+        label={item.label}
+        icon={item.icon}
+        iconOnly={item.iconOnly}
+        active={active}
+        focused={focused}
+        focusable={navigationFocusable}
+        hasTVPreferredFocus={shouldArmNavbarPreferredFocus({
+          preferActiveNavigationFocus,
+          suppressNavbarPreferredFocus,
+          navigationFocusable,
+          isActiveItem: active,
+          preferredFocusConsumed: preferredFocusConsumedRef.current,
+        })}
+        iconSize={item.iconOnly ? navIconSize + 2 : navIconSize}
+        slotWidth={NAVBAR_ITEM_WIDTHS[item.id]}
+        nativeRef={(node) => {
+          setNavItemRef(item.id, node);
+        }}
+        nextFocusLeft={horizontalFocusTarget(itemIndex, 'left')}
+        nextFocusRight={horizontalFocusTarget(itemIndex, 'right')}
+        nextFocusUp={navbarHandles[item.id]}
+        nextFocusDown={downHandle}
+        onFocus={() => {
+          const focusReceivedAt = Date.now();
+          focusVisualStateRequestedAtRef.current = focusReceivedAt;
+          logFocusVisualAudit({
+            event: 'focus-state-requested',
+            activeId,
+            focusedId: item.id,
+            itemId: item.id,
+            focusReceivedAt,
+          });
+          preferredFocusConsumedRef.current = true;
+          if (__DEV__ && !firstNavbarFocusLoggedRef.current) {
+            firstNavbarFocusLoggedRef.current = true;
+            console.info('[NovaCast Navbar Focus]', {
+              event: 'first-focus',
+              control: `nav:${item.id}`,
+              elapsedMs: Date.now() - navbarMountedAtRef.current,
+            });
+            console.info('[NovaCast Fresh Focus]', {
+              event: 'first-native-focus',
+              control: activeId === 'home' && item.id === 'home' ? 'home-nav' : `nav:${item.id}`,
+              elapsedFromShellMountMs: Date.now() - navbarMountedAtRef.current,
+            });
+          }
+          noteFocusLifecycleEvent('native-focus', { source: `nav:${item.id}`, activeId });
+          logFocusVisualAudit({ event: 'native-focus', activeId, focusedId: item.id, itemId: item.id });
+          recordFocusAudit({ component: 'NovaTvShell.navbar', action: 'focus-received', itemId: item.id });
+          markCatalogAuditFocus(`nav:${item.id}`);
+          noteFocusLatencyFocus(`nav:${item.id}`);
+          setFocusedId(item.id);
+          onNavigationItemFocus?.(item.id);
+        }}
+        onBlur={() => {
+          setFocusedId(null);
+          onNavigationItemFocus?.(null);
+        }}
+        onPress={() => {
+          if (item.route === pathname) {
+            return;
+          }
+
+          if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
+            return;
+          }
+          router.replace(item.route as Href);
+        }}
+      />
+    );
+  };
 
   return (
     <NovaScreen padded={false}>
@@ -205,322 +442,124 @@ export function NovaTvShell({
         style={[
           styles.safeFrame,
           {
-            paddingTop: safeVertical,
             paddingRight: safeHorizontal,
             paddingBottom: safeVertical,
             paddingLeft: safeHorizontal,
-            gap: shellGap,
           },
         ]}>
-        {showNavigationRail ? (
-          <View
-            pointerEvents={navigationFocusable ? 'auto' : 'none'}
-            style={[styles.navRail, compactNavigationRail && styles.navRailCompact, { width: navWidth }]}>
-            <View style={[styles.logoWrap, compactNavigationRail && styles.logoWrapCompact]}>
-              <NovaLogo variant="mark" size={compactNavigationRail ? 'md' : 'lg'} />
-              {compactNavigationRail || themeLogoIncludesWordmark(themeId) ? null : (
-                <Text style={styles.logoText}>NOVACAST</Text>
-              )}
+        <View
+          style={[
+            styles.mainArea,
+            bleedContentUnderNavbar ? null : { paddingTop: navbarReserve },
+          ]}>
+          {bleedContentUnderNavbar ? (
+            <View pointerEvents="box-none" style={styles.backdropBleed}>
+              {children}
             </View>
+          ) : null}
 
-            <View
-              style={[styles.navItems, compactNavigationRail && styles.navItemsCompact]}
-              {...(!navigationFocusable ? { importantForAccessibility: 'no-hide-descendants' as const } : null)}>
-              {NAV_ITEMS.map((item) => {
-                const active = item.id === activeId;
-                const focused = navigationFocusable && item.id === focusedId;
-                const itemStyle = [
-                  styles.navItem,
-                  compactNavigationRail && styles.navItemCompact,
-                  novaTvFocus.base,
-                  focused && styles.navItemFocused,
-                ];
-                const iconColor = active || focused ? theme.colors.textPrimary : theme.colors.textSecondary;
-
-                const itemContent = (
-                  <>
-                    {focused ? <View style={styles.navFocusIndicator} pointerEvents="none" /> : active ? <View style={styles.navActiveIndicator} pointerEvents="none" /> : null}
-                    <MaterialCommunityIcons
-                      name={item.icon}
-                      size={compactNavigationRail ? 22 : 25}
-                      color={iconColor}
-                      style={focused ? styles.navIconFocused : undefined}
-                    />
-                    {compactNavigationRail ? null : (
-                      <View style={styles.navLabelBlock}>
-                        <Text numberOfLines={1} style={[styles.navLabel, (active || focused) && styles.navLabelActive, focused && styles.navLabelFocused]}>
-                          {item.label}
-                        </Text>
-                      </View>
-                    )}
-                  </>
-                );
-
-                if (!navigationFocusable) {
-                  return (
-                    <View
-                      key={item.id}
-                      focusable={false}
-                      accessible={false}
-                      importantForAccessibility="no"
-                      style={[itemStyle, active && styles.navItemActive]}>
-                      {active ? <View style={styles.navActiveIndicator} pointerEvents="none" /> : null}
-                      <MaterialCommunityIcons
-                        name={item.icon}
-                        size={compactNavigationRail ? 22 : 25}
-                        color={active ? theme.colors.textPrimary : theme.colors.textSecondary}
-                      />
-                      {compactNavigationRail ? null : (
-                        <View style={styles.navLabelBlock}>
-                          <Text numberOfLines={1} style={[styles.navLabel, active && styles.navLabelActive]}>
-                            {item.label}
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-                  );
-                }
-
-                return (
-                  <Pressable
-                    key={item.id}
-                    ref={(node) => {
-                      navItemRefs.current[item.id] = node;
-                    }}
-                    focusable
-                    hasTVPreferredFocus={navbarPreferredFocus && active}
-                    onFocus={() => {
-                      recordFocusAudit({ component: 'NovaTvShell.navbar', action: 'focus-received', itemId: item.id });
-                      markCatalogAuditFocus(`nav:${item.id}`);
-                      noteFocusLatencyFocus(`nav:${item.id}`);
-                      setFocusedId(item.id);
-                      onNavigationItemFocus?.(item.id);
-                    }}
-                    onBlur={() => {
-                      setFocusedId(null);
-                      onNavigationItemFocus?.(null);
-                    }}
-                    {...(navigationNextFocusRight?.[item.id]
-                      ? { nextFocusRight: navigationNextFocusRight[item.id] }
-                      : navigationContentFocusHandle
-                        ? { nextFocusRight: navigationContentFocusHandle }
-                        : null)}
-                    onPress={() => {
-                      if (item.route === pathname) {
-                        return;
-                      }
-
-                      if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
-                        return;
-                      }
-                      router.replace(item.route as Href);
-                    }}
-                    style={itemStyle}>
-                    {itemContent}
-                  </Pressable>
-                );
-              })}
-            </View>
-
-          </View>
-        ) : null}
-
-        <View style={styles.mainArea}>
-          <View style={[styles.header, { height: headerHeight }]}>
-            <View style={styles.headerCopy}>
-              {title ? <Text style={styles.title}>{title}</Text> : null}
-              {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
-            </View>
-            <View style={styles.headerRight}>
-              <View style={styles.headerMeta}>
-                <MaterialCommunityIcons name="wifi" size={19} color={theme.colors.success} />
-                {resolvedProviderLabel ? (
-                  <Text numberOfLines={1} style={styles.provider}>
-                    {resolvedProviderLabel}
-                  </Text>
-                ) : null}
-                {isClosedBetaManagedFlow() ? (
-                  <ShellBetaExpiration
-                    captionStyle={styles.expirationLabel}
-                    valueStyle={styles.expirationValue}
-                    boxStyle={styles.expirationBox}
-                    divider={<View style={styles.metaDivider} />}
-                  />
-                ) : nonBetaExpirationLabel ? (
-                  <>
-                    <View style={styles.expirationBox}>
-                      <Text style={styles.expirationLabel}>Expires</Text>
-                      <Text style={styles.expirationValue}>{nonBetaExpirationLabel}</Text>
-                    </View>
-                    <View style={styles.metaDivider} />
-                  </>
-                ) : null}
-                <ShellHeaderClock style={styles.clock} />
+          {showPageHeader ? (
+            <View style={[styles.header, bleedContentUnderNavbar ? { marginTop: navbarReserve } : null]}>
+              <View style={styles.headerCopy}>
+                {title ? <Text style={styles.title}>{title}</Text> : null}
+                {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
               </View>
               {headerSupplement ? <View style={styles.headerSupplement}>{headerSupplement}</View> : null}
             </View>
-          </View>
+          ) : null}
 
-          <View style={styles.content}>{children}</View>
+          {bleedContentUnderNavbar ? null : <View style={styles.content}>{children}</View>}
         </View>
+
+        {showNavigationRail ? (
+          <NovaGlassStatusFooter
+            density={density}
+            providerLabel={providerLabel}
+            expirationLabel={expirationLabel}
+          />
+        ) : null}
+
+        {showNavigationRail ? (
+          <View
+            pointerEvents={navigationFocusable ? 'box-none' : 'none'}
+            style={[
+              styles.navbarOverlay,
+              {
+                top: safeVertical,
+                right: safeHorizontal,
+                left: safeHorizontal,
+              },
+            ]}
+            {...(!navigationFocusable ? { importantForAccessibility: 'no-hide-descendants' as const } : null)}>
+            <GlassNavbarFrame density={density}>
+              <GlassNavbarLogo density={density} />
+              <GlassNavbarFocusGuide trapFocusUp>
+                <View style={styles.primaryCluster}>{PRIMARY_NAV_ITEMS.map(renderNavItem)}</View>
+                <View style={styles.settingsSlot}>
+                  <GlassNavDivider />
+                  <View style={styles.utilityCluster}>{UTILITY_NAV_ITEMS.map(renderNavItem)}</View>
+                </View>
+              </GlassNavbarFocusGuide>
+            </GlassNavbarFrame>
+          </View>
+        ) : null}
       </View>
     </NovaScreen>
   );
 }
 
 function createShellStyles(theme: NovaTheme) {
-  const focusText = createNovaTvFocusTextStyles(theme);
-  const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
     safeFrame: {
       flex: 1,
-      flexDirection: 'row',
-      // Extra top inset so the header (provider + clock) clears TV overscan.
-      paddingTop: theme.safeArea.top + 28,
+      position: 'relative',
+      paddingTop: 0,
       paddingRight: theme.safeArea.right,
       paddingBottom: theme.safeArea.bottom,
       paddingLeft: theme.safeArea.left,
-      gap: theme.spacing.xl,
     },
-    navRail: {
-      minWidth: theme.layout.navMinWidth,
-      maxWidth: theme.layout.navMaxWidth,
-      borderRightWidth: 1,
-      borderRightColor: theme.colors.borderSubtle,
-      paddingRight: theme.spacing.lg,
-    },
-    navRailCompact: {
-      minWidth: 0,
-      maxWidth: 72,
-      paddingRight: theme.spacing.sm,
-    },
-    logoWrap: {
-      minHeight: 94,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginBottom: theme.spacing.md,
-    },
-    logoWrapCompact: {
-      minHeight: 72,
-      marginBottom: theme.spacing.sm,
-    },
-    navItemsCompact: {
-      gap: 6,
-    },
-    logoText: {
-      marginTop: -8,
-      color: theme.colors.textPrimary,
-      fontSize: 14,
-      fontWeight: '900',
-      letterSpacing: 2.1,
-    },
-    navItems: {
-      flex: 1,
-      gap: 6,
-    },
-    navItem: {
-      position: 'relative',
-      minHeight: 46,
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10,
-      paddingHorizontal: 8,
-      paddingVertical: 4,
-      ...focusChrome.base,
-    },
-    navItemCompact: {
-      minHeight: 40,
-      justifyContent: 'center',
-      gap: 0,
-      paddingHorizontal: 4,
-    },
-    navItemActive: {
-      backgroundColor: 'transparent',
-    },
-    navItemFocused: focusChrome.active,
-    navActiveIndicator: {
+    navbarOverlay: {
       position: 'absolute',
-      left: 0,
-      top: 6,
-      bottom: 6,
-      width: 3,
-      backgroundColor: theme.colors.success,
+      maxWidth: 1820,
+      alignSelf: 'center',
+      zIndex: 8,
     },
-    navFocusIndicator: {
-      // Glass box replaces the old focus rail / glow.
-      width: 0,
-      height: 0,
-      opacity: 0,
-    },
-    navLabel: {
-      flexShrink: 1,
-      color: theme.colors.textSecondary,
-      fontSize: theme.typography.nav,
-      fontWeight: '600',
-    },
-    navLabelBlock: {
-      flex: 1,
-      minWidth: 0,
-    },
-    navLabelActive: {
-      color: theme.colors.textPrimary,
-      fontWeight: '700',
-    },
-    navLabelFocused: focusText.title,
-    navIconFocused: {},
-    connectionCard: {
-      minHeight: 58,
-      borderTopWidth: 1,
-      borderTopColor: theme.colors.borderSubtle,
+    primaryCluster: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 10,
-      paddingTop: 14,
+      flexShrink: 0,
+      gap: 5,
     },
-    connectionCardCompact: {
-      minHeight: 20,
-      justifyContent: 'center',
+    settingsSlot: {
+      flexDirection: 'row',
       alignItems: 'center',
-      paddingTop: 10,
-      gap: 0,
+      flexShrink: 0,
+      marginLeft: 'auto',
     },
-    connectionDot: {
-      width: 9,
-      height: 9,
-      borderRadius: 999,
-      backgroundColor: theme.colors.success,
-    },
-    connectionCopy: {
-      flex: 1,
-    },
-    connectionTitle: {
-      color: theme.colors.textPrimary,
-      fontSize: 13,
-      fontWeight: '700',
-    },
-    connectionMeta: {
-      marginTop: 2,
-      color: theme.colors.textMuted,
-      fontSize: 11,
+    utilityCluster: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flexShrink: 0,
     },
     mainArea: {
       flex: 1,
       minWidth: 0,
+      minHeight: 0,
+    },
+    backdropBleed: {
+      ...StyleSheet.absoluteFillObject,
     },
     header: {
-      height: theme.layout.headerHeight,
+      minHeight: 44,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
       gap: theme.spacing.lg,
-      marginBottom: theme.spacing.md,
+      marginBottom: 6,
+      backgroundColor: 'transparent',
     },
     headerCopy: {
       flex: 1,
-    },
-    headerRight: {
-      alignItems: 'flex-end',
-      gap: 8,
     },
     title: {
       color: theme.colors.textPrimary,
@@ -532,50 +571,6 @@ function createShellStyles(theme: NovaTheme) {
       marginTop: 4,
       color: theme.colors.textSecondary,
       fontSize: theme.typography.pageSubtitle,
-    },
-    headerMeta: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10,
-    },
-    provider: {
-      color: theme.colors.textSecondary,
-      fontSize: 14,
-      fontWeight: '600',
-      maxWidth: 220,
-      flexShrink: 1,
-    },
-    expirationBox: {
-      flexDirection: 'row',
-      alignItems: 'baseline',
-      gap: 6,
-      borderBottomWidth: 1,
-      borderBottomColor: theme.colors.success,
-      paddingHorizontal: 2,
-      paddingBottom: 4,
-    },
-    expirationLabel: {
-      color: theme.colors.success,
-      fontSize: 10,
-      fontWeight: '700',
-      textTransform: 'uppercase',
-      letterSpacing: 0.8,
-    },
-    expirationValue: {
-      color: theme.colors.textPrimary,
-      fontSize: 12,
-      fontWeight: '700',
-    },
-    metaDivider: {
-      width: 1,
-      height: 22,
-      backgroundColor: theme.colors.borderStrong,
-      marginHorizontal: 4,
-    },
-    clock: {
-      color: theme.colors.textPrimary,
-      fontSize: 17,
-      fontWeight: '700',
     },
     headerSupplement: {
       alignItems: 'flex-end',

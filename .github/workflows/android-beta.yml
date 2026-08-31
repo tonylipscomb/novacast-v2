@@ -3,7 +3,7 @@ name: Android Beta APK
 on:
   push:
     branches:
-      - main
+      - beta-rolling-download
     tags:
       - 'v*'
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF_NAME}"
           else
-            VERSION="beta-main-${GITHUB_RUN_NUMBER}"
+            VERSION="beta-${GITHUB_RUN_NUMBER}"
           fi
 
           IS_PRERELEASE=false
@@ -118,7 +118,29 @@ jobs:
       - name: Generate Android native project
         run: npx expo prebuild --platform android --non-interactive
 
-      - name: Configure optional release signing
+      - name: Verify production signing configuration
+        shell: bash
+        env:
+          NOVACAST_KEYSTORE_BASE64: ${{ secrets.NOVACAST_KEYSTORE_BASE64 }}
+          NOVACAST_KEYSTORE_PASSWORD: ${{ secrets.NOVACAST_KEYSTORE_PASSWORD }}
+          NOVACAST_KEY_ALIAS: ${{ secrets.NOVACAST_KEY_ALIAS }}
+          NOVACAST_KEY_PASSWORD: ${{ secrets.NOVACAST_KEY_PASSWORD }}
+          NOVACAST_RELEASE_CERT_SHA256: ${{ secrets.NOVACAST_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in NOVACAST_KEYSTORE_BASE64 NOVACAST_KEYSTORE_PASSWORD NOVACAST_KEY_ALIAS NOVACAST_KEY_PASSWORD NOVACAST_RELEASE_CERT_SHA256; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required production signing secret ${name}"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "Production signing configuration is incomplete; refusing to build/publish a debug-signed rolling beta."
+            exit 1
+          fi
+
+      - name: Configure release signing
         shell: bash
         env:
           NOVACAST_KEYSTORE_BASE64: ${{ secrets.NOVACAST_KEYSTORE_BASE64 }}
@@ -128,15 +150,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -z "${NOVACAST_KEYSTORE_BASE64:-}" ]]; then
-            echo "No production keystore configured; using Expo debug-signed release."
-            exit 0
-          fi
-
           if [[ -z "${NOVACAST_KEYSTORE_PASSWORD:-}" ]] ||
              [[ -z "${NOVACAST_KEY_ALIAS:-}" ]] ||
              [[ -z "${NOVACAST_KEY_PASSWORD:-}" ]]; then
-            echo "::error::Release keystore exists, but one or more signing secrets are missing."
+            echo "Production signing configuration is incomplete; refusing to build/publish a debug-signed rolling beta."
             exit 1
           fi
 
@@ -155,6 +172,44 @@ jobs:
           NOVACAST_KEY_ALIAS: ${{ secrets.NOVACAST_KEY_ALIAS }}
           NOVACAST_KEY_PASSWORD: ${{ secrets.NOVACAST_KEY_PASSWORD }}
         run: ./gradlew app:assembleRelease --no-daemon
+
+      - name: Verify production APK signing and metadata
+        shell: bash
+        env:
+          NOVACAST_RELEASE_CERT_SHA256: ${{ secrets.NOVACAST_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          [[ -f "$APK_PATH" ]] || { echo "::error::Release APK missing"; exit 1; }
+          [[ -x "$APKSIGNER" ]] || { echo "::error::apksigner not found"; exit 1; }
+          [[ -x "$AAPT" ]] || { echo "::error::aapt not found"; exit 1; }
+
+          CERT_OUTPUT="$($APKSIGNER verify --verbose --print-certs "$APK_PATH")"
+          echo "$CERT_OUTPUT"
+          ACTUAL_CERT="$(printf '%s\n' "$CERT_OUTPUT" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          EXPECTED_CERT="$(printf '%s' "$NOVACAST_RELEASE_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          [[ -n "$ACTUAL_CERT" && "$ACTUAL_CERT" == "$EXPECTED_CERT" ]] || {
+            echo "::error::APK certificate does not match the required production certificate"
+            exit 1
+          }
+          [[ "$ACTUAL_CERT" != "FAC61745DC0903786FB9EDE62A962B399F7348F0BB6F899B8332667591033B9C" ]] || {
+            echo "::error::Debug certificate detected; refusing to publish"
+            exit 1
+          }
+
+          BADGING="$($AAPT dump badging "$APK_PATH")"
+          echo "$BADGING" | grep -Fq "package: name='com.novacast.novacastv2' versionCode='8' versionName='1.0.4-beta'" || {
+            echo "::error::APK package/version metadata mismatch"
+            exit 1
+          }
+          if echo "$BADGING" | grep -Fq "application-debuggable"; then
+            echo "::error::APK is debuggable"
+            exit 1
+          fi
+          echo "Production APK signature and metadata verified."
 
       - name: Package novacast.apk artifacts
         id: apk
@@ -198,7 +253,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish rolling beta download
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/beta-rolling-download'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -223,7 +278,7 @@ jobs:
               "$CHECKSUM_PATH" \
               --target "$GITHUB_SHA" \
               --title "NovaCast Beta - Latest" \
-              --notes "Rolling NovaCast beta build. This release is automatically replaced whenever main builds successfully." \
+              --notes "Rolling NovaCast beta build from the beta-rolling-download branch. novacast.apk is replaced automatically after each successful signed beta build." \
               --prerelease
           fi
 

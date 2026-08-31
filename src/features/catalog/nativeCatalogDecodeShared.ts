@@ -1,4 +1,4 @@
-import type { NativeCatalogRecord } from './nativeCatalogDecodeTypes.ts';
+import type { CatalogDecodeBatchStats, NativeCatalogRecord } from './nativeCatalogDecodeTypes.ts';
 import { resolveCatalogItemCategoryId } from './vodCategoryFilterCapability.ts';
 
 export function isCatalogSqliteWriterOnlyDiagnosticEnabled() {
@@ -6,6 +6,38 @@ export function isCatalogSqliteWriterOnlyDiagnosticEnabled() {
     typeof process !== 'undefined' &&
     process.env?.EXPO_PUBLIC_CATALOG_SQLITE_WRITER_ONLY_DIAGNOSTIC === 'true'
   );
+}
+
+/** Always-on decode failure probe. Never include credentials or request URLs. */
+export function logCatalogDecodeFailure(fields: Record<string, unknown>) {
+  console.info(
+    '[NovaCast Catalog Decode Probe]',
+    JSON.stringify({
+      event: 'category-decode-failed',
+      ...fields,
+    }),
+  );
+}
+
+export type CatalogDecodeThrownError = Error & {
+  errorReason?: string | null;
+  httpStatus?: number | null;
+  bytesRead?: number | null;
+  rawSeen?: number | null;
+  decoderStage?: string | null;
+};
+
+export function createCatalogDecodeThrownError(
+  message: string,
+  stats?: CatalogDecodeBatchStats | null,
+): CatalogDecodeThrownError {
+  const error = new Error(message) as CatalogDecodeThrownError;
+  error.errorReason = stats?.errorReason ?? message;
+  error.httpStatus = stats?.httpStatus ?? null;
+  error.bytesRead = stats?.bytesRead ?? stats?.responseBytes ?? null;
+  error.rawSeen = stats?.rawSeen ?? null;
+  error.decoderStage = stats?.decoderStage ?? null;
+  return error;
 }
 
 export function nativeRecordToMovieSummary(

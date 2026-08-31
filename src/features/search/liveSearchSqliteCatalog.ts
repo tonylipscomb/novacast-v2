@@ -1,6 +1,23 @@
 import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
+import { LIVE_UNKNOWN_CATEGORY_ID, logLivePublicationTrace } from '../providers/liveCatalogCompletion.ts';
+import { getSampledLiveStreamId, logSampledLiveStreamRow, persistableLiveDirectSource } from '../providers/liveStreamRowDiagnostics.ts';
 import type { ProviderLiveCategory, ProviderLiveChannel, ProviderLiveRepository } from '../providers/providerRepositories.ts';
-import { getCatalogDatabase, getCatalogReadDatabase, withCatalogTransaction } from '../catalog/catalogDatabase.ts';
+import {
+  buildPublishedLiveCategories,
+  countPersistedLiveDirectSources,
+  publishedLiveRowToChannel,
+  resolvePublishedLiveCategoryName,
+} from './livePublishedCatalogRead.ts';
+import {
+  beginCatalogForegroundRead,
+  getCachedCatalogJournalMode,
+  getCatalogDatabase,
+  getCatalogReadDatabase,
+  isCatalogWalActive,
+  isCatalogWriteTransactionActive,
+  logCatalogForegroundReadIfSlow,
+  withCatalogTransaction,
+} from '../catalog/catalogDatabase.ts';
 import { patchLiveTvWorkload } from '../live/liveTvWorkload.ts';
 import { escapeLikeWildcards, normalizeSearchQuery, tokenizeSearchQuery } from './searchQuery.ts';
 import { ingestLiveSearchCategories, type LiveSearchMatchMode } from './liveChannelIndex.ts';
@@ -13,6 +30,7 @@ import {
 } from './liveSearchCatalogPolicy.ts';
 import { liveSearchSqlRankCase } from './liveSearchMatching.ts';
 import type { LiveSearchResult, SearchPageResult } from './searchTypes.ts';
+import { processTimeBudgeted, type TimeBudgetResult } from '../catalog/jsChunkBudget.ts';
 
 export const LIVE_SEARCH_SQLITE_CATALOG_MARKER = 'live-search-sqlite-v1_1';
 export { LIVE_SEARCH_BUILD_CONCURRENCY, LIVE_SEARCH_WRITE_BATCH_SIZE } from './liveSearchCatalogPolicy.ts';
@@ -42,6 +60,7 @@ type LiveSearchCatalogRow = {
   logo_url: string | null;
   channel_number: number | string | null;
   stream_extension: string | null;
+  direct_source?: string | null;
   tone: string | null;
 };
 
@@ -52,6 +71,41 @@ export type LiveSearchCatalogBuildResult = {
   channelCount: number;
   counts: Record<string, number>;
 };
+
+export type PublishedLiveCatalogState = {
+  ready: boolean;
+  generation: number;
+  channelCount: number;
+  counts: Record<string, number>;
+  status: string | null;
+  stateRowPresent: boolean;
+  buildingGeneration: number;
+  stateChannelCount: number;
+  unreadinessReason: string | null;
+};
+
+type PublishedLivePointer = {
+  ready: boolean;
+  generation: number;
+  channelCount: number;
+  status: string | null;
+  stateRowPresent: boolean;
+  buildingGeneration: number;
+  unreadinessReason: string | null;
+};
+
+const publishedStateCache = new Map<string, PublishedLiveCatalogState>();
+const publishedStateInflight = new Map<string, Promise<PublishedLiveCatalogState>>();
+const publishedPointerCache = new Map<string, PublishedLivePointer>();
+
+export function resetLiveSearchCatalogForTests() {
+  inFlightBuilds.clear();
+  cancelRequested.clear();
+  publishedStateCache.clear();
+  publishedStateInflight.clear();
+  publishedPointerCache.clear();
+  schemaPromise = null;
+}
 
 function asNumber(value: unknown, fallback = 0) {
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -71,6 +125,20 @@ function logLiveSearchCatalog(event: string, payload: Record<string, unknown> = 
 
 async function yieldToUi(ms = LIVE_SEARCH_INDEX_YIELD_MS) {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function logLivePublicationStage(
+  event: string,
+  rowCount: number,
+  startedAt: number,
+  extra: Record<string, unknown> = {},
+) {
+  logLivePublicationTrace(event, {
+    timestamp: Date.now(),
+    rowCount,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    ...extra,
+  });
 }
 
 function isBuildCancelled(providerId: string, isCancelled?: () => boolean) {
@@ -116,6 +184,7 @@ async function ensureLiveSearchSchema() {
         logo_url TEXT,
         channel_number INTEGER,
         stream_extension TEXT,
+        direct_source TEXT,
         tone TEXT,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (provider_id, generation, channel_id)
@@ -129,13 +198,30 @@ async function ensureLiveSearchSchema() {
 
       CREATE INDEX IF NOT EXISTS idx_live_search_channels_provider_generation_number
         ON live_search_channels (provider_id, generation, channel_number);
+
+      CREATE TABLE IF NOT EXISTS live_search_category_counts (
+        provider_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        category_id TEXT NOT NULL,
+        item_count INTEGER NOT NULL,
+        PRIMARY KEY (provider_id, generation, category_id)
+      );
     `);
+    await ensureLiveSearchDirectSourceColumn(db);
   })().catch((error) => {
     schemaPromise = null;
     throw error;
   });
 
   return schemaPromise;
+}
+
+async function ensureLiveSearchDirectSourceColumn(db: Awaited<ReturnType<typeof getCatalogDatabase>>) {
+  const columns = await db.getAll<{ name: string }>('PRAGMA table_info(live_search_channels)');
+  if (columns.some((column) => column.name === 'direct_source')) {
+    return;
+  }
+  await db.exec('ALTER TABLE live_search_channels ADD COLUMN direct_source TEXT');
 }
 
 async function readState(providerId: string): Promise<LiveSearchCatalogStateRow | null> {
@@ -150,12 +236,80 @@ async function readState(providerId: string): Promise<LiveSearchCatalogStateRow 
   );
 }
 
+async function readPersistedCategoryCounts(
+  providerId: string,
+  generation: number,
+): Promise<Record<string, number> | null> {
+  if (generation <= 0) {
+    return null;
+  }
+  await ensureLiveSearchSchema();
+  const db = await getCatalogReadDatabase();
+  const rows = await db.getAll<{ category_id: string; item_count: number | string }>(
+    `SELECT category_id, item_count
+       FROM live_search_category_counts
+      WHERE provider_id = ? AND generation = ?`,
+    [providerId, generation],
+  );
+  if (!rows.length) {
+    return null;
+  }
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    const categoryId = String(row.category_id ?? '').trim() || LIVE_UNKNOWN_CATEGORY_ID;
+    counts[categoryId] = (counts[categoryId] ?? 0) + asNumber(row.item_count);
+  }
+  return counts;
+}
+
+async function persistCategoryCounts(
+  providerId: string,
+  generation: number,
+  counts: Record<string, number>,
+): Promise<void> {
+  if (generation <= 0) {
+    return;
+  }
+  await ensureLiveSearchSchema();
+  const db = await getCatalogDatabase();
+  await withCatalogTransaction(async () => {
+    await db.run(
+      `DELETE FROM live_search_category_counts
+        WHERE provider_id = ? AND generation != ?`,
+      [providerId, generation],
+    );
+    for (const [categoryId, itemCount] of Object.entries(counts)) {
+      const id = String(categoryId ?? '').trim() || LIVE_UNKNOWN_CATEGORY_ID;
+      await db.run(
+        `INSERT OR REPLACE INTO live_search_category_counts (
+           provider_id, generation, category_id, item_count
+         ) VALUES (?, ?, ?, ?)`,
+        [providerId, generation, id, asNumber(itemCount)],
+      );
+    }
+  });
+}
+
 async function readGenerationSummary(
   providerId: string,
   generation: number,
-): Promise<{ channelCount: number; counts: Record<string, number> }> {
+  options?: { allowScan?: boolean },
+): Promise<{ channelCount: number; counts: Record<string, number>; scannedAllChannels: boolean }> {
   if (generation <= 0) {
-    return { channelCount: 0, counts: {} };
+    return { channelCount: 0, counts: {}, scannedAllChannels: false };
+  }
+
+  const persisted = await readPersistedCategoryCounts(providerId, generation);
+  if (persisted) {
+    let channelCount = 0;
+    for (const total of Object.values(persisted)) {
+      channelCount += total;
+    }
+    return { channelCount, counts: persisted, scannedAllChannels: false };
+  }
+
+  if (options?.allowScan === false) {
+    return { channelCount: 0, counts: {}, scannedAllChannels: false };
   }
 
   await ensureLiveSearchSchema();
@@ -178,16 +332,19 @@ async function readGenerationSummary(
 
   const counts: Record<string, number> = {};
   for (const row of categoryRows) {
-    const categoryId = row.category_id?.trim();
-    if (categoryId) {
-      counts[categoryId] = asNumber(row.total);
-    }
+    const categoryId = row.category_id?.trim() || LIVE_UNKNOWN_CATEGORY_ID;
+    counts[categoryId] = (counts[categoryId] ?? 0) + asNumber(row.total);
   }
 
-  return {
+  const summary = {
     channelCount: asNumber(totalRow?.total),
     counts,
+    scannedAllChannels: true,
   };
+  if (summary.channelCount > 0) {
+    await persistCategoryCounts(providerId, generation, counts).catch(() => undefined);
+  }
+  return summary;
 }
 
 async function markBuildStarted(providerId: string, generation: number) {
@@ -231,9 +388,16 @@ async function markBuildFailed(providerId: string, generation: number, errorCode
       [errorCode, providerId],
     );
   });
+  publishedStateCache.delete(providerId);
+  publishedPointerCache.delete(providerId);
 }
 
-async function activateGeneration(providerId: string, generation: number, channelCount: number) {
+async function activateGeneration(
+  providerId: string,
+  generation: number,
+  channelCount: number,
+  counts?: Record<string, number>,
+) {
   const completedAt = Date.now();
   const db = await getCatalogDatabase();
   await withCatalogTransaction(async () => {
@@ -254,6 +418,11 @@ async function activateGeneration(providerId: string, generation: number, channe
       [providerId, generation],
     );
   });
+  if (counts && Object.keys(counts).length) {
+    await persistCategoryCounts(providerId, generation, counts).catch(() => undefined);
+  }
+  publishedStateCache.delete(providerId);
+  publishedPointerCache.delete(providerId);
 }
 
 function rowForChannel(
@@ -276,9 +445,31 @@ function rowForChannel(
     logoUrl: channel.logoUrl ?? null,
     channelNumber: Number.isFinite(channel.number) ? channel.number : null,
     streamExtension: channel.containerExtension ?? null,
+    directSource: persistableLiveDirectSource(channel.streamUrl),
     tone: channel.tone ?? null,
     updatedAt: Date.now(),
   };
+}
+
+function logPersistedLiveRowSample(
+  providerId: string,
+  generation: number,
+  row: ReturnType<typeof rowForChannel>,
+) {
+  const sampledId = getSampledLiveStreamId();
+  if (sampledId && row.channelId !== sampledId) {
+    return;
+  }
+  logSampledLiveStreamRow('sqlite-persisted', {
+    stream_id: row.channelId,
+    category_id: row.categoryId,
+    ...(row.streamExtension ? { container_extension: row.streamExtension, stream_extension: row.streamExtension } : {}),
+    ...(row.directSource ? { direct_source: row.directSource } : {}),
+  }, {
+    providerIdPresent: Boolean(providerId),
+    generationPresent: Number.isFinite(generation),
+    directSourcePersisted: Boolean(row.directSource),
+  });
 }
 
 async function writeChannelRows(
@@ -288,28 +479,81 @@ async function writeChannelRows(
   channels: ProviderLiveChannel[],
   seenChannelIds: Set<string>,
   counts: Record<string, number>,
+  isCancelled?: () => boolean,
 ) {
+  const rowCount = channels.length;
+  const memoryStartedAt = Date.now();
+  logLivePublicationStage('live-memory-publish-start', rowCount, memoryStartedAt);
   const uniqueRows: ReturnType<typeof rowForChannel>[] = [];
+  let memoryTiming: TimeBudgetResult | null = null;
+  memoryTiming = await processTimeBudgeted(
+    channels,
+    (channel) => {
+      const channelId = channel.id?.trim();
+      if (!channelId || seenChannelIds.has(channelId)) {
+        return;
+      }
+      seenChannelIds.add(channelId);
+      const row = rowForChannel(providerId, generation, fallbackCategoryId, channel);
+      logPersistedLiveRowSample(providerId, generation, row);
+      uniqueRows.push(row);
+    },
+    {
+      kind: 'liveNormalization',
+      targetMs: 8,
+      softMs: 50,
+      hardMs: 100,
+      minItems: 16,
+      maxItems: 300,
+      isCancelled,
+    },
+  );
+  logLivePublicationStage('live-memory-publish-complete', rowCount, memoryStartedAt, {
+    outputRows: uniqueRows.length,
+    maxSegmentMs: Math.round(memoryTiming.maxChunkMs),
+    yieldCount: Math.max(0, memoryTiming.chunks - 1),
+  });
 
-  for (const channel of channels) {
-    const channelId = channel.id?.trim();
-    if (!channelId || seenChannelIds.has(channelId)) {
-      continue;
-    }
-    seenChannelIds.add(channelId);
-    const row = rowForChannel(providerId, generation, fallbackCategoryId, channel);
-    uniqueRows.push(row);
-    counts[row.categoryId] = (counts[row.categoryId] ?? 0) + 1;
-  }
+  const indexStartedAt = Date.now();
+  logLivePublicationStage('live-index-build-start', uniqueRows.length, indexStartedAt);
+  const indexTiming = await processTimeBudgeted(
+    uniqueRows,
+    (row) => {
+      counts[row.categoryId] = (counts[row.categoryId] ?? 0) + 1;
+    },
+    {
+      kind: 'liveNormalization',
+      targetMs: 8,
+      softMs: 50,
+      hardMs: 100,
+      minItems: 16,
+      maxItems: 300,
+      isCancelled,
+    },
+  );
+  logLivePublicationStage('live-index-build-complete', uniqueRows.length, indexStartedAt, {
+    categoryCount: Object.keys(counts).length,
+    maxSegmentMs: Math.round(indexTiming.maxChunkMs),
+    yieldCount: Math.max(0, indexTiming.chunks - 1),
+  });
 
   if (!uniqueRows.length) {
     return 0;
   }
 
   const db = await getCatalogDatabase();
+  const sqliteStartedAt = Date.now();
+  logLivePublicationStage('live-sqlite-write-start', rowCount, sqliteStartedAt, {
+    batchSize: LIVE_SEARCH_WRITE_BATCH_SIZE,
+    transactionType: 'live-search-generation-staging',
+  });
+  let persistedRows = 0;
   for (let offset = 0; offset < uniqueRows.length; offset += LIVE_SEARCH_WRITE_BATCH_SIZE) {
+    if (isCancelled?.()) {
+      break;
+    }
     const batch = uniqueRows.slice(offset, offset + LIVE_SEARCH_WRITE_BATCH_SIZE);
-    const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+    const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
     const params: Array<string | number | null> = [];
 
     for (const row of batch) {
@@ -325,6 +569,7 @@ async function writeChannelRows(
         row.logoUrl,
         row.channelNumber,
         row.streamExtension,
+        row.directSource,
         row.tone,
         row.updatedAt,
       );
@@ -335,16 +580,22 @@ async function writeChannelRows(
         `INSERT OR IGNORE INTO live_search_channels (
            provider_id, generation, channel_id, category_id,
            title, normalized_title, current_program, normalized_current,
-           logo_url, channel_number, stream_extension, tone, updated_at
+           logo_url, channel_number, stream_extension, direct_source, tone, updated_at
          ) VALUES ${placeholders}`,
         params,
       );
     });
+    persistedRows += batch.length;
     batch.length = 0;
     await yieldToUi(0);
   }
 
-  const written = uniqueRows.length;
+  const written = persistedRows;
+  logLivePublicationStage('live-sqlite-write-complete', rowCount, sqliteStartedAt, {
+    writtenRows: persistedRows,
+    batchSize: LIVE_SEARCH_WRITE_BATCH_SIZE,
+    yieldCount: Math.ceil(uniqueRows.length / LIVE_SEARCH_WRITE_BATCH_SIZE),
+  });
   uniqueRows.length = 0;
   return written;
 }
@@ -412,6 +663,50 @@ async function buildLiveSearchCatalog(input: {
       retainedJsItemCount: 0,
     });
 
+    let dumpChannels: ProviderLiveChannel[] = [];
+    try {
+      dumpChannels = await live.getChannels('all');
+    } catch {
+      dumpChannels = [];
+    }
+    if (dumpChannels.length) {
+      await writeChannelRows(
+        providerId,
+        generation,
+        LIVE_UNKNOWN_CATEGORY_ID,
+        dumpChannels,
+        seenChannelIds,
+        counts,
+        isCancelled,
+      );
+      const dumpSummary = await readGenerationSummary(providerId, generation);
+      if (dumpSummary.channelCount <= 0) {
+        throw new Error('live_search_catalog_empty_generation');
+      }
+      await activateGeneration(providerId, generation, dumpSummary.channelCount, dumpSummary.counts);
+      patchLiveTvWorkload(
+        { searchIndexBuildActive: false, searchIndexPendingCategories: 0 },
+        { log: true, reason: 'search-index-completed-full-dump' },
+      );
+      logLiveSearchCatalog('completed', {
+        providerId,
+        generation,
+        channelCount: dumpSummary.channelCount,
+        categoryCount: Object.keys(dumpSummary.counts).length,
+        duration: Date.now() - startedAt,
+        durationMs: Date.now() - startedAt,
+        retainedJsItemCount: seenChannelIds.size,
+        strategy: 'full-dump-stream-category',
+      });
+      return {
+        ready: true,
+        rebuilt: true,
+        generation,
+        channelCount: dumpSummary.channelCount,
+        counts: dumpSummary.counts,
+      };
+    }
+
     let paused = false;
     for (let index = 0; index < categories.length; index += 1) {
       const pauseState = await waitWhileLiveSearchIndexPaused({
@@ -464,6 +759,7 @@ async function buildLiveSearchCatalog(input: {
           channels,
           seenChannelIds,
           counts,
+          isCancelled,
         );
       }
       channels = [];
@@ -504,6 +800,7 @@ async function buildLiveSearchCatalog(input: {
           channels,
           seenChannelIds,
           counts,
+          isCancelled,
         );
         failedCategories.delete(categoryId);
       } catch {
@@ -521,7 +818,14 @@ async function buildLiveSearchCatalog(input: {
       throw new Error('live_search_catalog_empty_generation');
     }
 
-    await activateGeneration(providerId, generation, summary.channelCount);
+    const subscriberStartedAt = Date.now();
+    logLivePublicationStage('live-subscriber-notify-start', seenChannelIds.size, subscriberStartedAt, {
+      listenerStrategy: 'generation-pointer-publication',
+    });
+    await activateGeneration(providerId, generation, summary.channelCount, summary.counts);
+    logLivePublicationStage('live-subscriber-notify-complete', seenChannelIds.size, subscriberStartedAt, {
+      listenerStrategy: 'generation-pointer-publication',
+    });
     patchLiveTvWorkload(
       { searchIndexBuildActive: false, searchIndexPendingCategories: 0 },
       { log: true, reason: 'search-index-completed' },
@@ -632,6 +936,121 @@ export async function ensureLiveSearchSqliteCatalog(input: {
   return build;
 }
 
+export async function publishLiveSearchCatalogFromDump(input: {
+  providerId: string;
+  channels: ProviderLiveChannel[];
+  categories?: readonly ProviderLiveCategory[];
+  isCancelled?: () => boolean;
+  requestSource?: string;
+}): Promise<LiveSearchCatalogBuildResult> {
+  const providerId = input.providerId.trim();
+  const previousState = await readState(providerId);
+  const previousGeneration = asNumber(previousState?.active_generation);
+  const previousSummary = await readGenerationSummary(providerId, previousGeneration);
+  if (!providerId || input.isCancelled?.()) {
+    logLivePublicationTrace('live-publication-skipped', {
+      providerId,
+      requestSource: input.requestSource ?? null,
+      publishedCount: previousSummary.channelCount,
+      generation: previousGeneration || null,
+      skipReason: !providerId ? 'empty-provider-id' : 'cancelled-before-write',
+    });
+    return {
+      ready: previousGeneration > 0 && previousSummary.channelCount > 0,
+      rebuilt: false,
+      generation: previousGeneration,
+      channelCount: previousSummary.channelCount,
+      counts: previousSummary.counts,
+    };
+  }
+
+  await ensureLiveSearchSchema();
+  const generation = Math.max(
+    Date.now(),
+    previousGeneration + 1,
+    asNumber(previousState?.building_generation) + 1,
+  );
+  await markBuildStarted(providerId, generation);
+  const startedAt = Date.now();
+  const seenChannelIds = new Set<string>();
+  const counts: Record<string, number> = {};
+
+  try {
+    if (input.categories?.length) {
+      ingestLiveSearchCategories(providerId, [...input.categories]);
+    }
+    await writeChannelRows(
+      providerId,
+      generation,
+      LIVE_UNKNOWN_CATEGORY_ID,
+      input.channels,
+      seenChannelIds,
+      counts,
+      input.isCancelled,
+    );
+    if (input.isCancelled?.()) {
+      throw new Error('live_search_catalog_cancelled');
+    }
+    logLivePublicationTrace('live-publication-write-complete', {
+      providerId,
+      requestSource: input.requestSource ?? null,
+      publishedCount: seenChannelIds.size,
+      generation,
+    });
+    const summary = await readGenerationSummary(providerId, generation);
+    if (summary.channelCount <= 0) {
+      throw new Error('live_search_catalog_empty_generation');
+    }
+    await activateGeneration(providerId, generation, summary.channelCount, summary.counts);
+    logLivePublicationTrace('live-publication-activated', {
+      providerId,
+      requestSource: input.requestSource ?? null,
+      publishedCount: summary.channelCount,
+      generation,
+    });
+    logLiveSearchCatalog('completed', {
+      providerId,
+      generation,
+      channelCount: summary.channelCount,
+      categoryCount: Object.keys(summary.counts).length,
+      durationMs: Date.now() - startedAt,
+      strategy: 'full-dump-stream-category',
+    });
+    return {
+      ready: true,
+      rebuilt: true,
+      generation,
+      channelCount: summary.channelCount,
+      counts: summary.counts,
+    };
+  } catch (error) {
+    const errorCode = error instanceof Error ? error.message.slice(0, 180) : 'live_search_catalog_failed';
+    await markBuildFailed(providerId, generation, errorCode).catch(() => undefined);
+    logLiveSearchCatalog('build-failed', {
+      providerId,
+      generation,
+      errorCode,
+      durationMs: Date.now() - startedAt,
+      retainedPreviousGeneration: previousGeneration,
+      retainedPreviousChannelCount: previousSummary.channelCount,
+    });
+    logLivePublicationTrace('live-publication-skipped', {
+      providerId,
+      requestSource: input.requestSource ?? null,
+      publishedCount: previousSummary.channelCount,
+      generation: previousGeneration || null,
+      skipReason: `publish-failed:${errorCode}`,
+    });
+    return {
+      ready: previousGeneration > 0 && previousSummary.channelCount > 0,
+      rebuilt: false,
+      generation: previousGeneration,
+      channelCount: previousSummary.channelCount,
+      counts: previousSummary.counts,
+    };
+  }
+}
+
 export function scheduleLiveSearchCatalogIdleBuild(input: {
   providerId: string;
   live: ProviderLiveRepository;
@@ -739,7 +1158,7 @@ export async function searchLiveSqliteCatalog(input: {
   const startedAt = Date.now();
   const rows = await db.getAll<LiveSearchCatalogRow>(
     `SELECT channel_id, category_id, title, current_program, logo_url,
-            channel_number, stream_extension, tone
+            channel_number, stream_extension, direct_source, tone
        FROM live_search_channels
       WHERE ${where}
       ORDER BY
@@ -785,6 +1204,7 @@ export async function searchLiveSqliteCatalog(input: {
     tone: row.tone || undefined,
     categoryId: row.category_id || undefined,
     containerExtension: row.stream_extension || undefined,
+    streamUrl: row.direct_source || undefined,
   }));
 
   logLiveSearchCatalog('search', {
@@ -802,4 +1222,459 @@ export async function searchLiveSqliteCatalog(input: {
     totalCount: asNumber(totalRow?.total),
     hasMore,
   };
+}
+
+export {
+  buildPublishedLiveCategories,
+  normalizePublishedCategoryCounts,
+  publishedLiveRowToChannel,
+  resolvePublishedLiveCategoryName,
+} from './livePublishedCatalogRead.ts';
+
+async function describeLiveSearchInventory(providerId: string): Promise<string> {
+  try {
+    await ensureLiveSearchSchema();
+    const db = await getCatalogReadDatabase();
+    const states = await db.getAll<{
+      provider_id: string;
+      status: string;
+      active_generation: number | string;
+      channel_count: number | string;
+    }>(`SELECT provider_id, status, active_generation, channel_count FROM live_search_state`);
+    const gens = await db.getAll<{
+      provider_id: string;
+      generation: number | string;
+      total: number | string;
+    }>(
+      `SELECT provider_id, generation, COUNT(*) AS total
+         FROM live_search_channels
+        GROUP BY provider_id, generation`,
+    );
+    const stateParts = states.map(
+      (row) =>
+        `${row.provider_id === providerId ? 'self' : 'other'}:${row.status}:${asNumber(row.active_generation)}:${asNumber(row.channel_count)}`,
+    );
+    const genParts = gens.map(
+      (row) =>
+        `${row.provider_id === providerId ? 'self' : 'other'}:${asNumber(row.generation)}:${asNumber(row.total)}`,
+    );
+    return `states=${states.length}[${stateParts.join(';')}] channelGens=${gens.length}[${genParts.join(';')}]`;
+  } catch (error) {
+    return `inventory-failed:${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+function emptyPublishedLiveCatalogState(unreadinessReason: string): PublishedLiveCatalogState {
+  return {
+    ready: false,
+    generation: 0,
+    channelCount: 0,
+    counts: {},
+    status: null,
+    stateRowPresent: false,
+    buildingGeneration: 0,
+    stateChannelCount: 0,
+    unreadinessReason,
+  };
+}
+
+function logLiveReadTiming(fields: Record<string, unknown>): void {
+  console.info('[NovaCast Live Screen Read Trace]', JSON.stringify(fields));
+}
+
+async function resolvePublishedLivePointer(providerId: string): Promise<PublishedLivePointer> {
+  const startedAt = Date.now();
+  const id = providerId.trim();
+  if (!id) {
+    return {
+      ready: false,
+      generation: 0,
+      channelCount: 0,
+      status: null,
+      stateRowPresent: false,
+      buildingGeneration: 0,
+      unreadinessReason: 'empty-provider-id',
+    };
+  }
+  const cached = publishedPointerCache.get(id);
+  const state = await readState(id);
+  const generation = asNumber(state?.active_generation);
+  const buildingGeneration = asNumber(state?.building_generation);
+  const channelCount = asNumber(state?.channel_count);
+  if (cached && cached.generation === generation && cached.channelCount === channelCount) {
+    logLiveReadTiming({
+      event: 'published-pointer-timing',
+      providerId: id,
+      generation,
+      sqliteMs: Date.now() - startedAt,
+      rowCount: 1,
+      usedCache: true,
+      elapsedMs: Date.now() - startedAt,
+    });
+    return cached;
+  }
+  const ready = Boolean(state && generation > 0 && channelCount > 0);
+  const pointer: PublishedLivePointer = {
+    ready,
+    generation,
+    channelCount,
+    status: state?.status ?? null,
+    stateRowPresent: Boolean(state),
+    buildingGeneration,
+    unreadinessReason: !state
+      ? 'live-search-state-row-missing'
+      : generation <= 0
+        ? 'active-generation-not-positive'
+        : ready
+          ? null
+          : 'active-generation-has-zero-rows',
+  };
+  publishedPointerCache.set(id, pointer);
+  logLiveReadTiming({
+    event: 'published-pointer-timing',
+    providerId: id,
+    generation,
+    sqliteMs: Date.now() - startedAt,
+    rowCount: 1,
+    usedCache: false,
+    elapsedMs: Date.now() - startedAt,
+  });
+  return pointer;
+}
+
+async function loadPublishedLiveCatalogState(
+  providerId: string,
+  pointer: PublishedLivePointer,
+): Promise<PublishedLiveCatalogState> {
+  if (!pointer.ready) {
+    const result = {
+      ...emptyPublishedLiveCatalogState(pointer.unreadinessReason ?? 'published-state-not-ready'),
+      generation: pointer.generation,
+      status: pointer.status,
+      stateRowPresent: pointer.stateRowPresent,
+      buildingGeneration: pointer.buildingGeneration,
+      stateChannelCount: pointer.channelCount,
+    };
+    if (!pointer.stateRowPresent || pointer.generation <= 0) {
+      result.unreadinessReason = pointer.unreadinessReason;
+    }
+    return result;
+  }
+
+  const summaryStartedAt = Date.now();
+  const summary = await readGenerationSummary(providerId, pointer.generation);
+  const ready = summary.channelCount > 0 || pointer.channelCount > 0;
+  return {
+    ready,
+    generation: pointer.generation,
+    channelCount: summary.channelCount || pointer.channelCount,
+    counts: summary.counts,
+    status: pointer.status,
+    stateRowPresent: true,
+    buildingGeneration: pointer.buildingGeneration,
+    stateChannelCount: pointer.channelCount,
+    unreadinessReason: ready ? null : 'active-generation-has-zero-rows',
+    scannedAllChannels: summary.scannedAllChannels,
+    summaryMs: Date.now() - summaryStartedAt,
+  } as PublishedLiveCatalogState & { scannedAllChannels?: boolean; summaryMs?: number };
+}
+
+export function clearPublishedLiveCatalogStateCacheForTests(): void {
+  publishedStateCache.clear();
+  publishedStateInflight.clear();
+  publishedPointerCache.clear();
+}
+
+export async function getPublishedLiveCatalogState(providerId: string): Promise<PublishedLiveCatalogState> {
+  const id = providerId.trim();
+  const stateStartedAt = Date.now();
+  logLiveReadTiming({
+    event: 'published-state-read-start',
+    providerId: id || null,
+  });
+  if (!id) {
+    const empty = emptyPublishedLiveCatalogState('empty-provider-id');
+    logLiveReadTiming({
+      event: 'published-state-read-result',
+      providerId: null,
+      returnReason: empty.unreadinessReason,
+      source: 'none',
+      elapsedMs: Date.now() - stateStartedAt,
+    });
+    return empty;
+  }
+
+  const pointer = await resolvePublishedLivePointer(id);
+  const cached = publishedStateCache.get(id);
+  if (cached && cached.generation === pointer.generation && cached.ready === pointer.ready) {
+    logLiveReadTiming({
+      event: 'published-state-read-result',
+      providerId: id,
+      readableGeneration: cached.ready ? cached.generation : null,
+      publishedGeneration: cached.generation,
+      publishedTotal: cached.channelCount,
+      categoryCount: Object.keys(cached.counts).length,
+      channelCount: cached.channelCount,
+      source: cached.ready ? 'published-sqlite' : 'none',
+      returnReason: cached.unreadinessReason,
+      usedCache: true,
+      scannedAllChannels: false,
+      elapsedMs: Date.now() - stateStartedAt,
+    });
+    return cached;
+  }
+
+  const inflight = publishedStateInflight.get(id);
+  if (inflight) {
+    return inflight;
+  }
+
+  const pending = loadPublishedLiveCatalogState(id, pointer).then((result) => {
+    publishedStateCache.set(id, result);
+    return result;
+  }).finally(() => {
+    publishedStateInflight.delete(id);
+  });
+  publishedStateInflight.set(id, pending);
+  const result = await pending;
+  logLiveReadTiming({
+    event: 'published-state-read-result',
+    providerId: id,
+    readableGeneration: result.ready ? result.generation : null,
+    publishedGeneration: result.generation,
+    publishedTotal: result.channelCount,
+    categoryCount: Object.keys(result.counts).length,
+    channelCount: result.channelCount,
+    source: result.ready ? 'published-sqlite' : 'none',
+    returnReason: result.unreadinessReason,
+    usedCache: false,
+    scannedAllChannels: Boolean((result as { scannedAllChannels?: boolean }).scannedAllChannels),
+    elapsedMs: Date.now() - stateStartedAt,
+  });
+  return result;
+}
+
+export async function getPublishedLiveChannelCount(providerId: string): Promise<number> {
+  const pointer = await resolvePublishedLivePointer(providerId);
+  return pointer.ready ? pointer.channelCount : 0;
+}
+
+/** Resolve one channel from the active published generation without loading the catalog into JS. */
+export async function getPublishedLiveChannelById(
+  providerId: string,
+  channelId: string,
+): Promise<ProviderLiveChannel | null> {
+  const id = String(channelId ?? '').trim();
+  if (!providerId.trim() || !id) return null;
+  const pointer = await resolvePublishedLivePointer(providerId);
+  if (!pointer.ready) return null;
+  await ensureLiveSearchSchema();
+  const db = await getCatalogReadDatabase();
+  const row = await db.getFirst<LiveSearchCatalogRow>(
+    `SELECT channel_id, category_id, title, current_program, logo_url,
+            channel_number, stream_extension, direct_source, tone
+       FROM live_search_channels
+      WHERE provider_id = ? AND generation = ? AND channel_id = ?
+      LIMIT 1`,
+    [providerId, pointer.generation, id],
+  );
+  return row ? publishedLiveRowToChannel(row, 0, { publishedGeneration: pointer.generation }) : null;
+}
+
+/** Legacy migration lookup: exact normalized title, bounded to detect ambiguity. */
+export async function findPublishedLiveChannelsByTitle(
+  providerId: string,
+  title: string,
+): Promise<ProviderLiveChannel[]> {
+  const normalizedTitle = normalizeSearchQuery(title);
+  if (!providerId.trim() || !normalizedTitle) return [];
+  const pointer = await resolvePublishedLivePointer(providerId);
+  if (!pointer.ready) return [];
+  await ensureLiveSearchSchema();
+  const db = await getCatalogReadDatabase();
+  const rows = await db.getAll<LiveSearchCatalogRow>(
+    `SELECT channel_id, category_id, title, current_program, logo_url,
+            channel_number, stream_extension, direct_source, tone
+       FROM live_search_channels
+      WHERE provider_id = ? AND generation = ? AND normalized_title = ?
+      ORDER BY channel_id ASC
+      LIMIT 2`,
+    [providerId, pointer.generation, normalizedTitle],
+  );
+  return rows.map((row, index) => publishedLiveRowToChannel(row, index, {
+    publishedGeneration: pointer.generation,
+  }));
+}
+
+export async function getPublishedLiveCategories(
+  providerId: string,
+  options?: { state?: PublishedLiveCatalogState },
+): Promise<ProviderLiveCategory[]> {
+  const startedAt = Date.now();
+  logLiveReadTiming({
+    event: 'published-category-read-start',
+    providerId,
+  });
+  const stateStartedAt = Date.now();
+  const state = options?.state?.ready ? options.state : await getPublishedLiveCatalogState(providerId);
+  const stateMs = Date.now() - stateStartedAt;
+  if (!state.ready) {
+    logLiveReadTiming({
+      event: 'getPublishedLiveCategories-timing',
+      providerId,
+      publishedGeneration: state.generation || null,
+      rowCount: 0,
+      stateMs,
+      sqliteMs: 0,
+      normalizeMs: 0,
+      sortMs: 0,
+      scannedAllChannels: false,
+      elapsedMs: Date.now() - startedAt,
+      returnReason: state.unreadinessReason ?? 'published-state-not-ready',
+    });
+    return [];
+  }
+
+  const normalizeStartedAt = Date.now();
+  const categories = buildPublishedLiveCategories(state.counts, (categoryId) =>
+    resolvePublishedLiveCategoryName(providerId, categoryId),
+  );
+  const normalizeMs = Date.now() - normalizeStartedAt;
+  logLiveReadTiming({
+    event: 'getPublishedLiveCategories-timing',
+    providerId,
+    readableGeneration: state.generation,
+    publishedGeneration: state.generation,
+    publishedTotal: state.channelCount,
+    categoryCount: categories.length,
+    rowCount: categories.length,
+    stateMs,
+    sqliteMs: 0,
+    normalizeMs,
+    sortMs: normalizeMs,
+    scannedAllChannels: Boolean((state as { scannedAllChannels?: boolean }).scannedAllChannels),
+    source: 'published-sqlite',
+    elapsedMs: Date.now() - startedAt,
+  });
+  return categories;
+}
+
+export async function getPublishedLiveChannels(
+  providerId: string,
+  categoryId?: string,
+  options?: { offset?: number; limit?: number },
+): Promise<ProviderLiveChannel[]> {
+  const startedAt = Date.now();
+  const pointerStartedAt = Date.now();
+  const pointer = await resolvePublishedLivePointer(providerId);
+  const stateMs = Date.now() - pointerStartedAt;
+  if (!pointer.ready) {
+    logLiveReadTiming({
+      event: 'getPublishedLiveChannels-timing',
+      providerId,
+      selectedCategoryId: categoryId ?? null,
+      rowCount: 0,
+      stateMs,
+      sqliteMs: 0,
+      normalizeMs: 0,
+      scannedAllChannels: false,
+      elapsedMs: Date.now() - startedAt,
+      returnReason: pointer.unreadinessReason,
+    });
+    return [];
+  }
+
+  const scopedCategoryId = String(categoryId ?? '').trim();
+  const offset = Math.max(options?.offset ?? 0, 0);
+  const limit = options?.limit == null ? null : Math.max(options.limit, 0);
+  if (!scopedCategoryId && limit == null) {
+    logLiveReadTiming({
+      event: 'getPublishedLiveChannels-timing',
+      providerId,
+      publishedGeneration: pointer.generation,
+      selectedCategoryId: null,
+      rowCount: 0,
+      stateMs,
+      sqliteMs: 0,
+      normalizeMs: 0,
+      scannedAllChannels: false,
+      elapsedMs: Date.now() - startedAt,
+      returnReason: 'unscoped-full-dump-refused',
+    });
+    return [];
+  }
+
+  const releaseForegroundRead = beginCatalogForegroundRead();
+  const writerTransactionActiveAtStart = isCatalogWriteTransactionActive();
+  const foregroundStartedAt = Date.now();
+  try {
+  await ensureLiveSearchSchema();
+  const db = await getCatalogReadDatabase();
+  const queueWaitMs = Date.now() - foregroundStartedAt;
+  const params: Array<string | number> = [providerId, pointer.generation];
+  const where = ['provider_id = ?', 'generation = ?'];
+  if (scopedCategoryId) {
+    if (scopedCategoryId === LIVE_UNKNOWN_CATEGORY_ID) {
+      where.push(`(category_id = ? OR category_id IS NULL OR TRIM(category_id) = '')`);
+      params.push(scopedCategoryId);
+    } else {
+      where.push('category_id = ?');
+      params.push(scopedCategoryId);
+    }
+  }
+
+  let sql = `SELECT channel_id, category_id, title, current_program, logo_url,
+                    channel_number, stream_extension, direct_source, tone
+               FROM live_search_channels
+              WHERE ${where.join(' AND ')}
+              ORDER BY channel_number ASC, normalized_title ASC, channel_id ASC`;
+  if (limit != null) {
+    sql += ' LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+  }
+
+  const sqliteStartedAt = Date.now();
+  const rows = await db.getAll<LiveSearchCatalogRow>(sql, params);
+  const sqliteMs = Date.now() - sqliteStartedAt;
+  logCatalogForegroundReadIfSlow({
+    purpose: 'live-published-channels',
+    queueWaitMs,
+    sqliteExecutionMs: sqliteMs,
+    waitedOnJsQueue: writerTransactionActiveAtStart || queueWaitMs >= 50,
+    writerTransactionActiveAtStart,
+  });
+  const pageStats = countPersistedLiveDirectSources(rows);
+  const normalizeStartedAt = Date.now();
+  const channels = rows.map((row, index) => publishedLiveRowToChannel(row, offset + index, {
+    ...pageStats,
+    publishedGeneration: pointer.generation,
+  }));
+  const normalizeMs = Date.now() - normalizeStartedAt;
+  logLiveReadTiming({
+    event: 'getPublishedLiveChannels-timing',
+    providerId,
+    readableGeneration: pointer.generation,
+    publishedGeneration: pointer.generation,
+    publishedTotal: pointer.channelCount,
+    selectedCategoryId: scopedCategoryId || null,
+    channelCount: channels.length,
+    rowCount: channels.length,
+    ...pageStats,
+    stateMs,
+    sqliteMs,
+    sqliteExecutionMs: sqliteMs,
+    queueWaitMs,
+    journalMode: getCachedCatalogJournalMode(),
+    walActive: isCatalogWalActive(),
+    waitedOnJsQueue: writerTransactionActiveAtStart || queueWaitMs >= 50,
+    writerTransactionActiveAtStart,
+    normalizeMs,
+    scannedAllChannels: false,
+    source: 'published-sqlite',
+    elapsedMs: Date.now() - startedAt,
+  });
+  return channels;
+  } finally {
+    releaseForegroundRead();
+  }
 }

@@ -4,19 +4,23 @@
  */
 
 type NetworkStatus = 'online' | 'offline' | 'unknown';
+type NetworkFailureKind = 'transport' | 'provider' | 'authorization' | 'unknown';
 
 type OfflineSnapshot = {
   status: NetworkStatus;
   lastChangedAt: number | null;
   lastOutageNotifiedAt: number | null;
+  consecutiveFailures: number;
 };
 
 const OUTAGE_DEDUPE_MS = 60_000;
+const OFFLINE_FAILURE_THRESHOLD = 3;
 
 let snapshot: OfflineSnapshot = {
   status: 'unknown',
   lastChangedAt: null,
   lastOutageNotifiedAt: null,
+  consecutiveFailures: 0,
 };
 
 const listeners = new Set<() => void>();
@@ -36,14 +40,30 @@ export function subscribeOfflineStatus(listener: () => void) {
   };
 }
 
-export function reportNetworkOutcome(ok: boolean) {
-  const next: NetworkStatus = ok ? 'online' : 'offline';
+export function reportNetworkOutcome(ok: boolean, failureKind: NetworkFailureKind = 'transport') {
+  if (!ok && (failureKind === 'provider' || failureKind === 'authorization')) {
+    return;
+  }
+  if (ok) {
+    const next: NetworkStatus = 'online';
+    if (snapshot.status === next && snapshot.consecutiveFailures === 0) return;
+    snapshot = { ...snapshot, status: next, consecutiveFailures: 0, lastChangedAt: Date.now() };
+    emit();
+    return;
+  }
+  const consecutiveFailures = snapshot.consecutiveFailures + 1;
+  if (consecutiveFailures < OFFLINE_FAILURE_THRESHOLD) {
+    snapshot = { ...snapshot, consecutiveFailures };
+    return;
+  }
+  const next: NetworkStatus = 'offline';
   if (snapshot.status === next) {
     return;
   }
   snapshot = {
     ...snapshot,
     status: next,
+    consecutiveFailures,
     lastChangedAt: Date.now(),
   };
   emit();
@@ -67,5 +87,6 @@ export function resetOfflineStatusForTests() {
     status: 'unknown',
     lastChangedAt: null,
     lastOutageNotifiedAt: null,
+    consecutiveFailures: 0,
   };
 }

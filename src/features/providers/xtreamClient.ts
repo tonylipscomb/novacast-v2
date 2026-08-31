@@ -1,6 +1,18 @@
 import type { ProviderCredentialRecord } from './providerModel.ts';
 import { normalizePlaybackExtension } from './playbackSourceDiagnostics.ts';
+import {
+  coerceOutputFormatList,
+  extractXtreamUserInfoRecord,
+  inspectAccountOutputFormats,
+  logAccountOutputFormatPropagation,
+} from './accountOutputFormats.ts';
 import { markCatalogAuditHttp, getActiveVodCategoryPhaseProfile, addVodCategoryPhaseMs } from '../diagnostics/novaCastCatalogAudit.ts';
+import {
+  classifyNonJsonBody,
+  classifyXtreamHttpStatus,
+  createXtreamFailureError,
+  retryXtreamCategoryFetch,
+} from './xtreamTransientRetry.ts';
 
 export type XtreamUserInfo = {
   username?: string;
@@ -51,6 +63,7 @@ export type XtreamLiveStreamResponse = {
   custom_sid?: string;
   tv_archive?: number | string;
   tv_archive_duration?: number | string;
+  stream_type?: string;
   direct_source?: string;
   container_extension?: string;
   [key: string]: unknown;
@@ -137,6 +150,7 @@ export type XtreamRequestInit = Omit<RequestInit, 'body'> & {
 export type XtreamClientOptions = {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  providerId?: string;
 };
 
 const MAX_XTREAM_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -203,36 +217,26 @@ function toStringOrNull(value: unknown) {
   return undefined;
 }
 
-function normalizeOutputFormats(value: XtreamUserInfo['allowed_output_formats']) {
-  if (Array.isArray(value)) {
-    return value.map((item) => String(item)).filter(Boolean);
-  }
-
-  if (typeof value === 'string') {
-    return value
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-  }
-
-  return [];
+export function normalizeOutputFormats(value: unknown) {
+  return coerceOutputFormatList(value);
 }
 
-function resolvePreferredOutputFormat(userInfo: XtreamUserInfo) {
-  const outputs = normalizeOutputFormats(userInfo.allowed_output_formats);
-  if (outputs.includes('m3u8')) {
-    return 'm3u8';
-  }
-  if (outputs.includes('ts')) {
-    return 'ts';
-  }
-  return outputs[0] ?? 'ts';
+export function resolvePreferredOutputFormat(userInfo: XtreamUserInfo | Record<string, unknown>) {
+  const inspection = inspectAccountOutputFormats({ user_info: userInfo });
+  return inspection.preferredOutputFormat ?? undefined;
 }
 
 async function parseJsonResponse<T>(response: Response) {
-  const contentLength = Number(response.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_XTREAM_RESPONSE_BYTES) {
-    throw new Error('Xtream provider response is too large to process safely.');
+  const contentType = response.headers.get('content-type');
+  const contentLengthHeader = Number(response.headers.get('content-length') ?? 0);
+  if (contentLengthHeader > MAX_XTREAM_RESPONSE_BYTES) {
+    throw createXtreamFailureError('Xtream provider response is too large to process safely.', {
+      classification: 'response_too_large',
+      httpStatus: response.status,
+      contentType,
+      contentLength: contentLengthHeader,
+      errorReason: 'response_too_large',
+    });
   }
 
   const bodyStarted = Date.now();
@@ -245,10 +249,25 @@ async function parseJsonResponse<T>(response: Response) {
   }
 
   if (text.length > MAX_XTREAM_RESPONSE_BYTES) {
-    throw new Error('Xtream provider response is too large to process safely.');
+    throw createXtreamFailureError('Xtream provider response is too large to process safely.', {
+      classification: 'response_too_large',
+      httpStatus: response.status,
+      contentType,
+      contentLength: text.length,
+      errorReason: 'response_too_large',
+    });
   }
 
   const parseStarted = Date.now();
+  if (!text.trim()) {
+    throw createXtreamFailureError('Xtream provider returned a non-JSON response.', {
+      classification: 'empty_body',
+      httpStatus: response.status,
+      contentType,
+      contentLength: text.length,
+      errorReason: 'empty_body',
+    });
+  }
   try {
     const parsed = JSON.parse(text) as T;
     const jsonParseMs = Date.now() - parseStarted;
@@ -260,7 +279,14 @@ async function parseJsonResponse<T>(response: Response) {
     if (profile) {
       addVodCategoryPhaseMs('jsonParseMs', Date.now() - parseStarted);
     }
-    throw new Error('Xtream provider returned a non-JSON response.');
+    const classification = classifyNonJsonBody(text);
+    throw createXtreamFailureError('Xtream provider returned a non-JSON response.', {
+      classification,
+      httpStatus: response.status,
+      contentType,
+      contentLength: text.length,
+      errorReason: classification,
+    });
   }
 }
 
@@ -270,6 +296,7 @@ export class XtreamClient {
   readonly password: string;
   readonly fetchImpl: typeof fetch;
   readonly timeoutMs: number;
+  readonly providerId: string | null;
 
   constructor(connection: ProviderCredentialRecord, options: XtreamClientOptions = {}) {
     this.baseUrl = normalizeBaseUrl(connection.baseUrl);
@@ -277,6 +304,7 @@ export class XtreamClient {
     this.password = connection.password;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 10000;
+    this.providerId = options.providerId ?? null;
   }
 
   private buildUrl(action?: string, query: Record<string, string | number | boolean | null | undefined> = {}) {
@@ -335,7 +363,13 @@ export class XtreamClient {
       }
 
       if (!response.ok) {
-        throw new Error(`Xtream request failed with status ${response.status}.`);
+        throw createXtreamFailureError(`Xtream request failed with status ${response.status}.`, {
+          classification: classifyXtreamHttpStatus(response.status),
+          httpStatus: response.status,
+          contentType: response.headers.get('content-type'),
+          contentLength: Number(response.headers.get('content-length') ?? 0) || null,
+          errorReason: `http_${response.status}`,
+        });
       }
 
       const payload = await parseJsonResponse<T>(response);
@@ -382,7 +416,13 @@ export class XtreamClient {
   }
 
   async getVodCategories(signal?: AbortSignal) {
-    return boundList(await this.request<XtreamCategoryResponse[]>(this.buildUrl('get_vod_categories'), { signal }));
+    return boundList(
+      await retryXtreamCategoryFetch({
+        providerId: this.providerId,
+        mediaType: 'movie',
+        work: () => this.request<XtreamCategoryResponse[]>(this.buildUrl('get_vod_categories'), { signal }),
+      }),
+    );
   }
 
   async getVodStreams(categoryId?: string | number, signal?: AbortSignal) {
@@ -408,7 +448,13 @@ export class XtreamClient {
   }
 
   async getSeriesCategories(signal?: AbortSignal) {
-    return boundList(await this.request<XtreamCategoryResponse[]>(this.buildUrl('get_series_categories'), { signal }));
+    return boundList(
+      await retryXtreamCategoryFetch({
+        providerId: this.providerId,
+        mediaType: 'series',
+        work: () => this.request<XtreamCategoryResponse[]>(this.buildUrl('get_series_categories'), { signal }),
+      }),
+    );
   }
 
   async getSeries(categoryId?: string | number, signal?: AbortSignal) {
@@ -480,8 +526,14 @@ export class XtreamClient {
     return `xtream:${this.baseUrl}:${(hash >>> 0).toString(16)}`;
   }
   buildLiveStreamUrl(streamId: string | number, extension?: string) {
+    const id = encodeURIComponent(String(streamId).trim());
+    const user = encodeURIComponent(this.username);
+    const pass = encodeURIComponent(this.password);
+    if (extension === '') {
+      return `${this.baseUrl}/live/${user}/${pass}/${id}`;
+    }
     const resolvedExtension = normalizePlaybackExtension(extension, 'ts');
-    return `${this.baseUrl}/live/${encodeURIComponent(this.username)}/${encodeURIComponent(this.password)}/${encodeURIComponent(String(streamId).trim())}.${resolvedExtension}`;
+    return `${this.baseUrl}/live/${user}/${pass}/${id}.${resolvedExtension}`;
   }
 
   buildVodStreamUrl(streamId: string | number, extension?: string) {
@@ -496,16 +548,38 @@ export class XtreamClient {
 }
 
 export function normalizeXtreamAccountMetadata(response: XtreamAccountResponse | null | undefined) {
-  const userInfo = response?.user_info ?? {};
+  const userInfo = extractXtreamUserInfoRecord(response);
   const expiresAt = toEpochMilliseconds(userInfo.exp_date);
   const createdAt = toEpochMilliseconds(userInfo.created_at);
+  const inspection = inspectAccountOutputFormats(response);
 
-  return {
+  logAccountOutputFormatPropagation({
+    stage: 'account-response',
+    userInfoPresent: inspection.userInfoPresent,
+    outputFormatKeyPresent: inspection.outputFormatKeyPresent,
+    outputFormatValueKind: inspection.outputFormatValueKind,
+    allowedOutputFormats: inspection.allowedOutputFormats,
+    preferredOutputFormat: inspection.preferredOutputFormat,
+  });
+
+  const normalized = {
     status: toStringOrNull(userInfo.status)?.trim().toLowerCase(),
     expiresAt,
     createdAt,
     updatedAt: Date.now(),
-    preferredOutputFormat: resolvePreferredOutputFormat(userInfo),
+    preferredOutputFormat: inspection.preferredOutputFormat,
+    allowedOutputFormats: inspection.allowedOutputFormats,
   };
+
+  logAccountOutputFormatPropagation({
+    stage: 'normalized',
+    userInfoPresent: inspection.userInfoPresent,
+    outputFormatKeyPresent: inspection.outputFormatKeyPresent,
+    outputFormatValueKind: inspection.outputFormatValueKind,
+    allowedOutputFormats: normalized.allowedOutputFormats,
+    preferredOutputFormat: normalized.preferredOutputFormat,
+  });
+
+  return normalized;
 }
 

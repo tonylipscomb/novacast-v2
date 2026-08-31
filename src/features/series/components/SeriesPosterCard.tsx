@@ -1,14 +1,16 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ElementRef } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
-import { NOVA_TV_GLASS } from '@/components/nova/novaTvFocus';
+import { NovaPosterFocusOverlay } from '@/components/nova/NovaPosterFocusOverlay';
+import { formatRatingOneDecimal } from '@/features/media-browser/ratingNormalization';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { displayStreamTitle, formatMediaMetaLabel } from '@/features/series/metadata/titleNormalization';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
+import { createMoviePosterFocusChrome } from '@/features/movies/moviePosterFocusChrome';
 
 type SeriesPosterCardProps = {
   series: SeriesSummary;
@@ -72,6 +74,7 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [isFocused, setIsFocused] = useState(false);
+  const focusScale = useRef(new Animated.Value(1)).current;
   const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
   const [selfFocusHandle, setSelfFocusHandle] = useState<number | undefined>();
   // series-pagination-focus-v6_3-lookahead-native-stable
@@ -85,6 +88,7 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
   const posterKey = `${series.id}:${series.posterUrl ?? ''}`;
   const posterFailed = failedPosterKey === posterKey;
   const showPosterArt = Boolean(series.posterUrl) && !posterFailed;
+  const displayRating = formatRatingOneDecimal(series.rating);
   const metaPrimary = formatMediaMetaLabel({
     year: series.year,
     rating: series.rating,
@@ -126,12 +130,29 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
       {...(trapFocusDown && selfFocusHandle != null ? { nextFocusDown: selfFocusHandle } : null)}
       onFocus={() => {
         setIsFocused(true);
+        Animated.timing(focusScale, {
+          toValue: 1.025,
+          duration: 120,
+          useNativeDriver: true,
+        }).start();
         onFocus(series);
       }}
-      onBlur={() => setIsFocused(false)}
+      onBlur={() => {
+        setIsFocused(false);
+        Animated.timing(focusScale, {
+          toValue: 1,
+          duration: 90,
+          useNativeDriver: true,
+        }).start();
+      }}
       onPress={() => onPress?.(series)}
       style={styles.card}>
-      <View style={[styles.posterShell, isFocused && styles.posterShellFocused]}>
+      <Animated.View
+        style={[
+          styles.posterShell,
+          isFocused && styles.posterShellFocused,
+          { transform: [{ scale: focusScale }] },
+        ]}>
         <View
           style={[
             styles.poster,
@@ -141,10 +162,10 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
           {showPosterArt ? (
             <>
               <TvRemoteImage uri={series.posterUrl} style={styles.posterImage} onError={() => setFailedPosterKey(posterKey)} />
-              {series.rating ? (
+              {displayRating ? (
                 <View style={styles.ratingBadge}>
                   <MaterialCommunityIcons name="star" size={10} color="#F6C85F" />
-                  <Text style={styles.ratingText}>{series.rating}</Text>
+                  <Text style={styles.ratingText}>{displayRating}</Text>
                 </View>
               ) : null}
             </>
@@ -166,22 +187,23 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
                   {displayStreamTitle(series.title)}
                 </Text>
               </View>
-              {series.rating ? (
+              {displayRating ? (
                 <View style={styles.ratingBadge}>
                   <MaterialCommunityIcons name="star" size={10} color={posterColors.accent} />
-                  <Text style={styles.ratingText}>{series.rating}</Text>
+                  <Text style={styles.ratingText}>{displayRating}</Text>
                 </View>
               ) : null}
             </>
           )}
-</View>
-      </View>
+          {isFocused ? <NovaPosterFocusOverlay /> : null}
+        </View>
+      </Animated.View>
 
       <Text numberOfLines={1} style={[styles.title, isFocused && styles.titleFocused]}>
         {displayStreamTitle(series.title)}
       </Text>
       <View style={styles.metaRow}>
-        {metaPrimary ? <Text style={styles.meta}>{metaPrimary}</Text> : null}
+        {metaPrimary ? <Text style={[styles.meta, isFocused && styles.metaFocused]}>{metaPrimary}</Text> : null}
         {metaPrimary && series.genres[0] ? <View style={styles.metaDot} /> : null}
         <Text style={styles.meta}>{series.genres[0] ?? 'Series'}</Text>
       </View>
@@ -190,39 +212,15 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
 }, seriesPosterCardPropsAreEqual);
 
 function createStyles(theme: NovaTheme) {
-  const light = theme.scheme === 'light';
+  const focusChrome = createMoviePosterFocusChrome(theme);
   return StyleSheet.create({
+    ...focusChrome,
     card: {
-      flex: 1,
+      ...focusChrome.card,
+      width: '100%',
+      flexGrow: 0,
+      flexShrink: 0,
       minWidth: 0,
-      borderRadius: 0,
-      padding: 6,
-    },
-    posterShell: {
-      borderRadius: 2,
-    },
-    posterShellFocused: {
-      transform: [{ scale: 1.025 }],
-    },
-    poster: {
-      aspectRatio: 2 / 3,
-      borderRadius: 2,
-      borderWidth: 2,
-      borderColor: theme.colors.borderSubtle,
-      overflow: 'hidden',
-      padding: 10,
-    },
-    posterFocused: {
-      borderColor: light ? theme.colors.focusRing : '#8FE9FF',
-      borderWidth: 4,
-      backgroundColor: 'rgba(7,15,24,0.96)',
-    },
-    posterWithArt: {
-      padding: 0,
-      backgroundColor: '#0B1018',
-    },
-    posterImage: {
-      ...StyleSheet.absoluteFill,
     },
     posterFrame: {
       position: 'absolute',
@@ -294,29 +292,18 @@ function createStyles(theme: NovaTheme) {
       fontSize: 10,
       fontWeight: '800',
     },
-    title: {
-      marginTop: 4,
-      color: theme.colors.textPrimary,
-      fontSize: 11,
-      fontWeight: '700',
-    },
-    titleFocused: {
-      color: '#BFF4FF',
-      fontWeight: '900',
-      textShadowColor: 'rgba(143,233,255,0.65)',
-      textShadowOffset: { width: 0, height: 0 },
-      textShadowRadius: 4,
-    },
+    title: focusChrome.title,
+    titleFocused: focusChrome.titleFocused,
     metaRow: {
       marginTop: 1,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 5,
     },
-    meta: {
-      color: theme.colors.textMuted,
-      fontSize: 9,
-      fontWeight: '600',
+    meta: focusChrome.meta,
+    metaFocused: {
+      color: theme.colors.textSecondary,
+      fontWeight: '800',
     },
     metaDot: {
       width: 3,

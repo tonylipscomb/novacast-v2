@@ -1,7 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ComponentProps, ElementRef } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { BackHandler, findNodeHandle, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Animated, BackHandler, findNodeHandle, Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 
 import { getTvDensity } from '@/components/nova/tvDensity';
 import { createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
@@ -61,6 +61,16 @@ export function AppNotificationToast({ notification, captureFocus = false }: App
   const passive = isPassiveNotification(notification.interactionMode);
   const showFocusableControls = shouldRenderNotificationFocusableControls(notification.interactionMode);
   const blocking = showFocusableControls && captureFocus;
+  const entrance = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    entrance.setValue(0);
+    Animated.timing(entrance, {
+      toValue: 1,
+      duration: 180,
+      useNativeDriver: true,
+    }).start();
+  }, [entrance, notification.id]);
 
   const actionRef = useRef<Focusable | null>(null);
   const dismissRef = useRef<Focusable | null>(null);
@@ -166,9 +176,9 @@ export function AppNotificationToast({ notification, captureFocus = false }: App
   const actionTrapHandle = actionHandle ?? dismissHandle;
 
   return (
-    <View
+    <Animated.View
       pointerEvents={passive ? 'none' : 'auto'}
-      style={[styles.toast, { maxWidth, borderColor: `${accentColor}66` }]}
+      style={[styles.toast, { maxWidth, borderColor: `${accentColor}88`, opacity: entrance, transform: [{ translateY: entrance.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }] }]}
       importantForAccessibility={passive ? 'no-hide-descendants' : 'yes'}
       accessible={!passive}>
       <View style={[styles.accentRail, { backgroundColor: accentColor }]} />
@@ -262,7 +272,7 @@ export function AppNotificationToast({ notification, captureFocus = false }: App
           </View>
         ) : null}
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -274,16 +284,14 @@ function createStyles(theme: NovaTheme) {
       minWidth: 320,
       flexDirection: 'row',
       overflow: 'hidden',
-      borderRadius: 0,
-      borderTopWidth: 1,
-      borderBottomWidth: 1,
-      backgroundColor: theme.colors.backgroundRaised,
-      borderColor: theme.colors.borderStrong,
+      borderRadius: 18,
+      borderWidth: 1,
+      backgroundColor: light ? 'rgba(245,248,255,0.88)' : 'rgba(7,9,22,0.82)',
       shadowColor: light ? theme.colors.textPrimary : '#000000',
       shadowOpacity: light ? 0.12 : 0.25,
       shadowRadius: light ? 8 : 6,
       shadowOffset: { width: 0, height: 3 },
-      elevation: 5,
+      elevation: 8,
     },
     accentRail: {
       width: 3,
@@ -303,8 +311,8 @@ function createStyles(theme: NovaTheme) {
     iconChip: {
       width: 28,
       height: 28,
-      borderRadius: 0,
-      borderBottomWidth: 1,
+      borderRadius: 14,
+      borderWidth: 1,
       alignItems: 'center',
       justifyContent: 'center',
     },

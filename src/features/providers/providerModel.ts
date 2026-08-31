@@ -22,6 +22,7 @@ export type ProviderAccountMetadata = {
   createdAt?: number | null;
   updatedAt?: number | null;
   preferredOutputFormat?: string | null;
+  allowedOutputFormats?: string[];
 };
 
 export type ProviderRecord = {
@@ -165,12 +166,30 @@ function normalizeAccount(value: unknown): ProviderAccountMetadata | undefined {
     return undefined;
   }
 
+  const allowedRaw = value.allowedOutputFormats ?? value.allowed_output_formats;
+  const allowedOutputFormats = Array.isArray(allowedRaw)
+    ? allowedRaw.map((item) => String(item).trim().toLowerCase().replace(/^\./, '')).filter(Boolean).slice(0, 12)
+    : typeof allowedRaw === 'string'
+      ? allowedRaw.split(/[,\s|]+/).map((item) => item.trim().toLowerCase().replace(/^\./, '')).filter(Boolean).slice(0, 12)
+      : allowedRaw && typeof allowedRaw === 'object'
+        ? Object.values(allowedRaw).map((item) => String(item).trim().toLowerCase().replace(/^\./, '')).filter(Boolean).slice(0, 12)
+        : undefined;
+  const preferredOutputFormat =
+    typeof value.preferredOutputFormat === 'string' && value.preferredOutputFormat.trim()
+      ? value.preferredOutputFormat.trim().toLowerCase().replace(/^\./, '')
+      : allowedOutputFormats?.includes('m3u8')
+        ? 'm3u8'
+        : allowedOutputFormats?.includes('ts')
+          ? 'ts'
+          : allowedOutputFormats?.[0];
+
   return {
     status: typeof value.status === 'string' ? value.status : undefined,
     expiresAt: toEpochMilliseconds(value.expiresAt),
     createdAt: toEpochMilliseconds(value.createdAt),
     updatedAt: toEpochMilliseconds(value.updatedAt),
-    preferredOutputFormat: typeof value.preferredOutputFormat === 'string' ? value.preferredOutputFormat : undefined,
+    preferredOutputFormat,
+    allowedOutputFormats,
   };
 }
 

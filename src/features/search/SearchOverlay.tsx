@@ -5,6 +5,7 @@ import { BackHandler, findNodeHandle, Keyboard, Modal, Platform, Pressable, Styl
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import {
   decideLiveSearchOverlayBack,
@@ -27,6 +28,7 @@ import { SearchPosterGrid } from './SearchPosterGrid';
 import { SearchResults } from './SearchResults';
 import { TvSearchKeyboard } from './TvSearchKeyboard';
 import { logSearchEvent } from './searchDiagnostics';
+import { searchResultKey } from './searchScopes';
 import { createSearchInputActivationGate } from './searchInputActivation';
 import {
   cancelMoviesSearchResultFocus,
@@ -52,6 +54,25 @@ import { isSearchableQuery } from './searchQuery';
 import type { SearchResult, SearchScope } from './searchTypes';
 import { useSearchController } from './useSearchController';
 
+const SEARCH_MODAL_STATE_AUDIT_ENABLED = __DEV__;
+
+function logSearchModalState(data: {
+  event: 'overlay-open' | 'detail-open' | 'detail-close' | 'restore-result' | 'overlay-close';
+  mounted: boolean;
+  visibleProp: boolean;
+  retainMounted: boolean;
+  nativeModalVisible: boolean;
+  contentVisible: boolean;
+  interactive: boolean;
+  hostedDetailOpen: boolean;
+  restoreTargetId: string | null;
+}) {
+  if (!SEARCH_MODAL_STATE_AUDIT_ENABLED) {
+    return;
+  }
+  console.info('[NovaCast Search Modal State]', data);
+}
+
 type SearchOverlayProps = {
   visible: boolean;
   /**
@@ -73,6 +94,14 @@ type SearchOverlayProps = {
   /** Fires once the native Modal is on screen — browse layers can defer blocking until then. */
   onReady?: () => void;
   onSelectResult: (result: SearchResult) => void;
+  /** Optional detail layer rendered inside this overlay's native Modal. */
+  detailLayer?: ReactNode;
+  /** Suppresses Search's automatic focus claim while the hosted detail owns focus. */
+  detailOpen?: boolean;
+  /** Handles BACK without dismissing Search while hosted detail owns the modal. */
+  onDetailBack?: () => void;
+  /** Restores the result that opened a hosted detail layer after it closes. */
+  restoreFocusResultKey?: string | null;
   onQueryCommitted?: (query: string) => void;
   pageSize?: number;
   favoriteContentIds?: ReadonlySet<string>;
@@ -95,12 +124,15 @@ function SearchOverlayContent({
   onRestoreFocusHandled,
   scope,
   providerId,
-  title,
   placeholder,
   executeSearch,
   onClose,
   onReady,
   onSelectResult,
+  detailLayer,
+  detailOpen = false,
+  onDetailBack,
+  restoreFocusResultKey = null,
   onQueryCommitted,
   pageSize = 50,
   favoriteContentIds,
@@ -109,6 +141,7 @@ function SearchOverlayContent({
   const searchShellRef = useRef<View | null>(null);
   const closeButtonRef = useRef<View | null>(null);
   const restoreRowRef = useRef<View | null>(null);
+  const restoreResultRef = useRef<View | null>(null);
   const focusConfirmedRef = useRef(false);
   const initialFocusRequestedRef = useRef(false);
   const closeOwnsFocusRef = useRef(false);
@@ -121,6 +154,12 @@ function SearchOverlayContent({
   const [closeHandle, setCloseHandle] = useState<number | undefined>(undefined);
   const [firstResultNativeTag, setFirstResultNativeTag] = useState<number | undefined>(undefined);
   const [handoffActive, setHandoffActive] = useState(false);
+  const interactive = visible && !detailOpen;
+  const previousModalStateRef = useRef({
+    visible,
+    detailOpen,
+    restoreFocusResultKey,
+  });
   // Fire TV / Android TV: native soft keyboard. Close never reclaims Search focus.
   const useNativeTvKeyboard = Platform.isTV;
   const useOnScreenKeyboard = Platform.OS === 'android' && !useNativeTvKeyboard;
@@ -128,6 +167,38 @@ function SearchOverlayContent({
   const preferSearchFocusRef = useRef(true);
   const imeVisibleRef = useRef(false);
   const handoffGuardRef = useRef(false);
+
+  useEffect(() => {
+    const previous = previousModalStateRef.current;
+    const state = {
+      mounted: true,
+      visibleProp: visible,
+      retainMounted,
+      nativeModalVisible: visible,
+      contentVisible: visible,
+      interactive,
+      hostedDetailOpen: detailOpen,
+      restoreTargetId: restoreFocusResultKey,
+    };
+
+    if (!previous.visible && visible) {
+      logSearchModalState({ event: 'overlay-open', ...state });
+    }
+    if (!previous.detailOpen && detailOpen) {
+      logSearchModalState({ event: 'detail-open', ...state });
+    }
+    if (previous.detailOpen && !detailOpen && visible) {
+      logSearchModalState({ event: 'detail-close', ...state });
+    }
+    if (previous.restoreFocusResultKey !== restoreFocusResultKey && restoreFocusResultKey && visible && !detailOpen) {
+      logSearchModalState({ event: 'restore-result', ...state });
+    }
+    if (previous.visible && !visible) {
+      logSearchModalState({ event: 'overlay-close', ...state });
+    }
+
+    previousModalStateRef.current = { visible, detailOpen, restoreFocusResultKey };
+  }, [detailOpen, interactive, retainMounted, restoreFocusResultKey, visible]);
 
   const confirmOverlayFocus = useCallback(
     (source: string) => {
@@ -338,7 +409,7 @@ function SearchOverlayContent({
         resultCount: 0,
       });
       cancelMoviesSearchInputHandoff('search-closed', {
-        searchInputFocused: false,
+        inputFocused: false,
         resultCount: 0,
       });
     }
@@ -406,6 +477,38 @@ function SearchOverlayContent({
       clearTimeout(timer);
     };
   }, [onRestoreFocusHandled, restoreFocusLiveChannelId, scope, visible]);
+
+  useEffect(() => {
+    if (!visible || detailOpen || !restoreFocusResultKey) {
+      return;
+    }
+
+    setPreferSearchFocus(false);
+    preferSearchFocusRef.current = false;
+    setFocusedResultKey(restoreFocusResultKey);
+
+    let cancelled = false;
+    const frame = requestAnimationFrame(() => {
+      if (cancelled) {
+        return;
+      }
+      requestTvFocus({
+        screen: 'search-overlay',
+        source: 'SearchOverlay',
+        region: 'search-results',
+        itemId: restoreFocusResultKey,
+        reason: 'restore-after-hosted-detail-close',
+        isActive: () => visible && !detailOpen,
+        getTarget: () => restoreResultRef.current,
+      });
+      onRestoreFocusHandled?.();
+    });
+
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
+  }, [detailOpen, onRestoreFocusHandled, restoreFocusResultKey, visible]);
 
   useEffect(() => {
     return () => {
@@ -544,6 +647,10 @@ function SearchOverlayContent({
       wrapOnnMoviesBackHandler(
         handlerId,
         () => {
+          if (detailOpen) {
+            onDetailBack?.();
+            return true;
+          }
           if (scope === 'live') {
             return handleLiveSearchHardwareBack();
           }
@@ -560,7 +667,7 @@ function SearchOverlayContent({
     );
 
     return () => subscription.remove();
-  }, [handleLiveSearchHardwareBack, onClose, scope, visible]);
+  }, [detailOpen, handleLiveSearchHardwareBack, onClose, onDetailBack, scope, visible]);
 
   const handleSelect = useCallback(
     (result: SearchResult) => {
@@ -738,6 +845,9 @@ function SearchOverlayContent({
   const FocusBoundaryView = (reactNative.TVFocusGuideView ?? View) as unknown as ComponentType<{
     children?: ReactNode;
     style?: unknown;
+    pointerEvents?: 'auto' | 'none' | 'box-none' | 'box-only';
+    importantForAccessibility?: 'auto' | 'yes' | 'no' | 'no-hide-descendants';
+    accessibilityElementsHidden?: boolean;
     autoFocus?: boolean;
     trapFocusLeft?: boolean;
     trapFocusRight?: boolean;
@@ -773,6 +883,8 @@ function SearchOverlayContent({
         searchQuery={trimmedQuery}
         onFocusResult={handlePosterFocus}
         onSelectResult={handleSelect}
+        restoreResultKey={restoreFocusResultKey}
+        restoreResultRef={restoreResultRef}
         onEndReached={handleLoadMore}
         loadingMore={controller.status === 'loading' && controller.results.length > 0}
         focusUpHandle={resultsFocusUpHandle}
@@ -809,7 +921,7 @@ function SearchOverlayContent({
       animationType="fade"
       onRequestClose={scope === 'live' ? () => {
         handleLiveSearchHardwareBack();
-      } : onClose}
+      } : detailOpen ? (onDetailBack ?? onClose) : onClose}
       onShow={handleModalShow}
       presentationStyle="overFullScreen"
       statusBarTranslucent
@@ -819,9 +931,12 @@ function SearchOverlayContent({
 
         <FocusBoundaryView
           style={styles.focusBoundary}
+          pointerEvents={interactive ? 'auto' : 'none'}
+          importantForAccessibility={interactive ? 'auto' : 'no-hide-descendants'}
+          accessibilityElementsHidden={!interactive}
           {...(Platform.OS === 'android'
             ? {
-                autoFocus: shouldAutoFocusSearchFocusGuide(),
+                autoFocus: !detailOpen && shouldAutoFocusSearchFocusGuide(),
                 trapFocusLeft: true,
                 trapFocusRight: true,
                 trapFocusUp: true,
@@ -830,7 +945,6 @@ function SearchOverlayContent({
             : {})}>
           <View style={styles.panel}>
           <View style={styles.header} pointerEvents="box-none">
-            <Text style={styles.title}>{title}</Text>
             <Pressable
               ref={closeButtonRef}
               focusable
@@ -883,7 +997,6 @@ function SearchOverlayContent({
             focusUpHandle={shouldWireSearchNextFocusUpToClose() ? closeHandle : undefined}
             // Stage 3G.2: point Down at the first mounted result — never trap to self.
             focusDownHandle={
-              scope === 'movie' &&
               controller.results.length > 0 &&
               firstResultNativeTag != null &&
               firstResultNativeTag !== searchFieldHandle
@@ -920,6 +1033,7 @@ function SearchOverlayContent({
           </View>
           </View>
         </FocusBoundaryView>
+        {detailLayer}
       </View>
     </Modal>
   );
@@ -934,25 +1048,34 @@ const styles = StyleSheet.create({
   },
   scrim: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(7, 9, 13, 0.92)',
+    backgroundColor: 'rgba(3, 5, 12, 0.60)',
   },
   focusBoundary: {
     flex: 1,
+    marginHorizontal: 32,
+    marginVertical: 26,
   },
   panel: {
     flex: 1,
     paddingHorizontal: 24,
     paddingTop: 18,
     paddingBottom: 16,
-    backgroundColor: 'rgba(10, 14, 22, 0.96)',
-    borderLeftWidth: 1,
-    borderColor: novaTheme.colors.borderSubtle,
+    backgroundColor: 'rgba(7, 9, 22, 0.88)',
+    borderWidth: 1,
+    borderColor: 'rgba(130, 145, 220, 0.34)',
+    borderRadius: 26,
+    overflow: 'hidden',
+    shadowColor: '#4c5cff',
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 12,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 10,
+    marginBottom: 4,
   },
   searchSlot: {
     zIndex: 1,
@@ -960,8 +1083,8 @@ const styles = StyleSheet.create({
   body: {
     flex: 1,
     minHeight: 0,
-    marginTop: 10,
-    gap: 10,
+    marginTop: 6,
+    gap: 6,
   },
   title: {
     color: novaTheme.colors.textPrimary,
@@ -980,7 +1103,10 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   closeButtonFocused: {
-    ...novaTvFocus.active,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
   },
   closeIconFocused: {},
   closeText: {

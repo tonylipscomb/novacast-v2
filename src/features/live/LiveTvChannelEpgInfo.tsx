@@ -49,7 +49,7 @@ function createStyles(theme: NovaTheme) {
   return StyleSheet.create({
     nowPlaying: {
       marginTop: 2,
-      color: theme.colors.textSecondary,
+      color: '#C0CCE0',
       fontSize: 11,
     },
     progressTrack: {

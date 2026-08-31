@@ -12,7 +12,7 @@ import { resolveReadableCatalogGeneration } from '../catalog/catalogRepository.t
 import { createSqliteSeriesDataSource } from '../series/data/SqliteSeriesDataSource.ts';
 import type { SeriesDataSource } from '../series/data/SeriesDataSource.ts';
 
-const SERIES_SQLITE_READS_ENABLED = process.env.EXPO_PUBLIC_SERIES_SQLITE_READS === 'true';
+export const SERIES_SQLITE_READS_ENABLED = process.env.EXPO_PUBLIC_SERIES_SQLITE_READS === 'true';
 
 export type SeriesSearchDatasourceSelection = {
   providerId: string;
@@ -25,6 +25,8 @@ export type SeriesSearchDatasourceSelection = {
 export async function resolveSeriesSearchDatasource(input: {
   providerId: string;
   query?: string;
+  offset?: number;
+  limit?: number;
   bundleSeriesDataSource?: SeriesDataSource | null;
 }): Promise<SeriesSearchDatasourceSelection> {
   let readableGeneration = 0;
@@ -36,6 +38,19 @@ export async function resolveSeriesSearchDatasource(input: {
   }
 
   const sqliteAvailable = SERIES_SQLITE_READS_ENABLED && readableGeneration > 0;
+  novacastTrace(
+    '[NovaCast Series Search Runtime] ' +
+      JSON.stringify({
+        queryLength: (input.query ?? '').trim().length,
+        providerId: input.providerId,
+        SERIES_SQLITE_READS_ENABLED,
+        readableGeneration,
+        sqliteAvailable,
+        selectedDatasource: sqliteAvailable ? 'sqlite-v2' : input.bundleSeriesDataSource ? 'bundle' : 'none',
+        offset: input.offset ?? 0,
+        limit: input.limit ?? 0,
+      }),
+  );
   if (sqliteAvailable) {
     const selection: SeriesSearchDatasourceSelection = {
       providerId: input.providerId,

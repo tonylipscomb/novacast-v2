@@ -1,9 +1,11 @@
 import type { ElementRef } from 'react';
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { findNodeHandle, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
-import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -25,8 +27,15 @@ export type LiveTvChannelRowProps = {
   trapFocusUp: boolean;
   trapFocusDown: boolean;
   nextFocusLeft?: number;
+  nextFocusRight?: number;
   onFocus: (channelId: string) => void;
   onTune: (channelId: string) => void;
+  isFavorite: boolean;
+  onFavorite: (channelId: string) => void;
+  onPlay: (channelId: string) => void;
+  playEnabled: boolean;
+  registerFavoriteActionRef?: (channelId: string, instance: ElementRef<typeof View> | null) => void;
+  registerPlayActionRef?: (channelId: string, instance: ElementRef<typeof View> | null) => void;
   registerRef: (channelId: string, instance: ElementRef<typeof View> | null) => void;
 };
 
@@ -40,8 +49,15 @@ function channelRowPropsAreEqual(previous: LiveTvChannelRowProps, next: LiveTvCh
     previous.trapFocusUp === next.trapFocusUp &&
     previous.trapFocusDown === next.trapFocusDown &&
     previous.nextFocusLeft === next.nextFocusLeft &&
+    previous.nextFocusRight === next.nextFocusRight &&
     previous.onFocus === next.onFocus &&
     previous.onTune === next.onTune &&
+    previous.isFavorite === next.isFavorite &&
+    previous.onFavorite === next.onFavorite &&
+    previous.onPlay === next.onPlay &&
+    previous.playEnabled === next.playEnabled &&
+    previous.registerFavoriteActionRef === next.registerFavoriteActionRef &&
+    previous.registerPlayActionRef === next.registerPlayActionRef &&
     previous.registerRef === next.registerRef
   );
 }
@@ -55,14 +71,23 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   trapFocusUp,
   trapFocusDown,
   nextFocusLeft,
+  nextFocusRight,
   onFocus,
   onTune,
+  isFavorite,
+  onFavorite,
+  onPlay,
+  playEnabled,
+  registerFavoriteActionRef,
+  registerPlayActionRef,
   registerRef,
 }: LiveTvChannelRowProps) {
   recordLiveTvChannelRowRender();
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [isFocused, setIsFocused] = useState(false);
+  const [focusedAction, setFocusedAction] = useState<'favorite' | 'play' | null>(null);
+  const longPressHandledRef = useRef(false);
   // Edge trap handles must be in state so nextFocus* props update after layout.
   const [focusTrapHandle, setFocusTrapHandle] = useState<number | undefined>(undefined);
 
@@ -71,6 +96,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   const hasProgram = displayCurrent !== LIVE_TV_NO_PROGRAM_LABEL;
   const showSelected = rowVisualFlags.showSelectedHighlight && selected;
   const showPreviewing = rowVisualFlags.showPreviewingHighlight && previewing;
+  const showRowActions = isFocused || selected;
 
   const assignRef = useCallback(
     (instance: ElementRef<typeof View> | null) => {
@@ -93,6 +119,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
       {...(trapFocusUp && focusTrapHandle ? { nextFocusUp: focusTrapHandle } : null)}
       {...(trapFocusDown && focusTrapHandle ? { nextFocusDown: focusTrapHandle } : null)}
       {...(Platform.OS === 'android' && nextFocusLeft ? { nextFocusLeft } : null)}
+      {...(Platform.OS === 'android' && nextFocusRight ? { nextFocusRight } : null)}
       onFocus={() => {
         setIsFocused(true);
         recordLiveTvChannelFocus();
@@ -100,12 +127,27 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
         onFocus(data.id);
       }}
       onBlur={() => setIsFocused(false)}
-      onPress={() => onTune(data.id)}
+      onLongPress={() => {
+        longPressHandledRef.current = true;
+        onFavorite(data.id);
+      }}
+      delayLongPress={650}
+      accessibilityHint="Hold select to add or remove this channel from favorites"
+      onPressIn={() => {
+        longPressHandledRef.current = false;
+      }}
+      onPress={() => {
+        if (longPressHandledRef.current) {
+          longPressHandledRef.current = false;
+          return;
+        }
+        onTune(data.id);
+      }}
       style={[
         styles.channelRow,
         showSelected && styles.selectedRow,
         showPreviewing && styles.previewingRow,
-        isFocused && styles.channelRowFocused,
+        isFocused && (selected ? styles.channelRowActiveFocused : styles.channelRowFocused),
       ]}>
       <View style={[styles.channelRail, selected && styles.selectedRail, isFocused && styles.focusRail]} />
       <Text style={[styles.channelNumber, selected && styles.selectedText, isFocused && styles.focusedText]}>{data.number}</Text>
@@ -122,6 +164,32 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
           {displayCurrent}
         </Text>
       </View>
+      {showRowActions ? (
+        <View style={styles.rowActions}>
+          <Pressable
+            ref={(instance) => registerFavoriteActionRef?.(data.id, instance)}
+            focusable
+            accessibilityRole="button"
+            accessibilityLabel={isFavorite ? 'Favorited' : 'Favorite'}
+            onFocus={() => setFocusedAction('favorite')}
+            onBlur={() => setFocusedAction(null)}
+            onPress={() => onFavorite(data.id)}
+            style={[styles.rowAction, novaTvFocus.base, focusedAction === 'favorite' && novaTvFocus.active]}>
+            <MaterialCommunityIcons name={isFavorite ? 'heart' : 'heart-outline'} size={20} color={theme.colors.textPrimary} />
+          </Pressable>
+          <Pressable
+            ref={(instance) => registerPlayActionRef?.(data.id, instance)}
+            focusable={playEnabled}
+            accessibilityRole="button"
+            accessibilityLabel="Play channel"
+            onFocus={() => setFocusedAction('play')}
+            onBlur={() => setFocusedAction(null)}
+            onPress={() => onPlay(data.id)}
+            style={[styles.rowAction, novaTvFocus.base, focusedAction === 'play' && novaTvFocus.active, !playEnabled && styles.rowActionDisabled]}>
+            <MaterialCommunityIcons name="play" size={20} color={theme.colors.textPrimary} />
+          </Pressable>
+        </View>
+      ) : null}
     </Pressable>
   );
 }, channelRowPropsAreEqual);
@@ -133,8 +201,6 @@ function createStyles(theme: NovaTheme) {
   return StyleSheet.create({
     channelRow: {
       minHeight: 52,
-      borderBottomWidth: 1,
-      borderBottomColor: theme.colors.borderSubtle,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 7,
@@ -142,7 +208,18 @@ function createStyles(theme: NovaTheme) {
       paddingVertical: 4,
       ...focusChrome.base,
     },
-    channelRowFocused: focusChrome.active,
+    channelRowFocused: {
+      borderWidth: 1,
+      backgroundColor: NOVA_GLASS.focused.backgroundColor,
+      borderColor: NOVA_GLASS.focused.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
+    channelRowActiveFocused: {
+      borderWidth: 1,
+      backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+      borderColor: NOVA_GLASS.activeFocused.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
     previewingRow: {
       backgroundColor: 'transparent',
     },
@@ -174,6 +251,23 @@ function createStyles(theme: NovaTheme) {
       minWidth: 0,
       gap: 1,
     },
+    rowActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      marginLeft: 4,
+    },
+    rowAction: {
+      width: 34,
+      height: 34,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: 'transparent',
+      borderRadius: 10,
+    },
+    rowActionDisabled: {
+      opacity: 0.35,
+    },
     channelTitleRow: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -187,15 +281,15 @@ function createStyles(theme: NovaTheme) {
       fontWeight: '800',
     },
     nowPlaying: {
-      color: theme.colors.textMuted,
+      color: '#B8C6DD',
       fontSize: 10,
       fontWeight: '600',
       lineHeight: 13,
     },
     nowPlayingEmpty: {
-      color: theme.colors.textMuted,
+      color: '#AEBBD0',
       fontStyle: 'italic',
-      opacity: 0.72,
+      opacity: 0.92,
     },
     resolution: {
       color: theme.colors.textSecondary,

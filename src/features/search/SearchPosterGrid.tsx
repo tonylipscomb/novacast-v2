@@ -38,6 +38,8 @@ type SearchPosterGridProps = {
   listFooter?: React.ReactNode;
   focusUpHandle?: number;
   focusLeftHandle?: number;
+  restoreResultKey?: string | null;
+  restoreResultRef?: React.MutableRefObject<View | null>;
 };
 
 function isPosterResult(result: SearchResult): result is MovieSearchResult | SeriesSearchResult {
@@ -46,12 +48,12 @@ function isPosterResult(result: SearchResult): result is MovieSearchResult | Ser
 
 function getSearchPosterColumns(width: number) {
   if (width >= 1600) {
-    return 7;
+    return 8;
   }
   if (width >= 1280) {
-    return 6;
+    return 7;
   }
-  return 5;
+  return 6;
 }
 
 export const SearchPosterGrid = memo(function SearchPosterGrid({
@@ -67,10 +69,17 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
   listFooter,
   focusUpHandle,
   focusLeftHandle,
+  restoreResultKey,
+  restoreResultRef,
 }: SearchPosterGridProps) {
   void focusedResultKey;
   const { width } = useWindowDimensions();
   const columns = getSearchPosterColumns(width);
+  const columnWidth = useMemo(() => {
+    const gap = novaTheme.density.artworkGap;
+    const usable = Math.max(240, width - 320);
+    return Math.max(120, (usable - gap * Math.max(0, columns - 1)) / Math.max(1, columns));
+  }, [columns, width]);
   const posterResults = useMemo(() => results.filter(isPosterResult), [results]);
   const listRef = useRef<FlatList<MovieSearchResult | SeriesSearchResult>>(null);
   const onFocusResultRef = useRef(onFocusResult);
@@ -283,20 +292,21 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
         item.type === 'movie' ? focusedMovieId === item.id : focusedResultKey === key;
 
       return (
-        <View style={styles.cell}>
+        <View style={[styles.cell, { width: columnWidth }]}>
           <SearchPosterCard
             result={item}
             focused={focused}
             searchQuery={searchQuery}
             nextFocusUp={isFirstRow ? focusUpHandle : undefined}
             nextFocusLeft={isFirstColumn ? focusLeftHandle : undefined}
+            restoreTargetRef={restoreResultKey === key ? restoreResultRef : undefined}
             onFocus={() => handleFocus(key, index)}
             onPress={() => onSelectResultRef.current?.(item)}
           />
         </View>
       );
     },
-    [columns, focusLeftHandle, focusUpHandle, focusedMovieId, focusedResultKey, handleFocus, searchQuery],
+    [columnWidth, columns, focusLeftHandle, focusUpHandle, focusedMovieId, focusedResultKey, handleFocus, searchQuery],
   );
 
   const keyExtractor = useCallback((item: MovieSearchResult | SeriesSearchResult) => searchResultKey(item), []);
@@ -365,9 +375,12 @@ const styles = StyleSheet.create({
   row: {
     gap: novaTheme.density.artworkGap,
     marginBottom: novaTheme.density.artworkGap,
+    alignItems: 'flex-start',
+    justifyContent: 'flex-start',
   },
   cell: {
-    flex: 1,
+    flexGrow: 0,
+    flexShrink: 0,
     minWidth: 0,
   },
 });

@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Redirect } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { NovaSpaceLoader } from '@/components/nova';
+import { MainMenuScreen } from '@/features/hub/MainMenuScreen';
 import {
   checkDeviceStatus,
   getDeviceState,
+  hydrateCachedDeviceState,
   initializeDevice,
   isClosedBetaManagedFlow,
   isDeviceActivationRequired,
@@ -23,6 +25,7 @@ import {
   type StartupProviderSource,
 } from '@/features/startup/resolveStartupProvider';
 import { markStartupReady } from '@/features/startup/startupReadiness';
+import { enableCatalogInteractiveStartupProtection, markCatalogInteractiveUiReady } from '@/features/catalog/catalogInteractiveStartup';
 import {
   STARTUP_NETWORK_TIMEOUT_MS,
   resolveManagedLibraryMissingState,
@@ -31,12 +34,19 @@ import {
 import { recordSanitizedDiagnostic } from '@/features/resilience/sanitizedDiagnostics';
 import { reportNetworkOutcome } from '@/features/resilience/offlineStatus';
 import { novaTheme } from '@/theme';
+import { BetaDiagnosticsDisclosure } from '@/features/diagnostics/BetaDiagnosticsDisclosure';
+import { DIAGNOSTICS_DISCLOSURE_KEY, DIAGNOSTICS_DISCLOSURE_VERSION } from '@/features/diagnostics/diagnosticsConfig';
+import { getSecureValue } from '@/features/providers/providerCredentialStore';
+import { resetPairingKeepDevice } from '@/features/pairing/resetPairing';
 
 /**
  * Central closed-beta / production startup coordinator.
  * Preserves personal pairing as a fallback when closed-beta managed flow is off.
  */
 export function StartupGate() {
+  useLayoutEffect(() => {
+    enableCatalogInteractiveStartupProtection();
+  }, []);
   const device = useDeviceState();
   const {
     ready,
@@ -50,13 +60,36 @@ export function StartupGate() {
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [startupTimedOut, setStartupTimedOut] = useState(false);
   const [libraryMissing, setLibraryMissing] = useState(false);
+  const [diagnosticsDisclosure, setDiagnosticsDisclosure] = useState<boolean | null>(null);
   const initAttemptRef = useRef(0);
   const providerInitialized = Boolean(getActiveRepositoryBundle()) && !providerSwitchError;
 
   useEffect(() => {
     let cancelled = false;
     initAttemptRef.current += 1;
-    void withTimeout(initializeDevice(), STARTUP_NETWORK_TIMEOUT_MS, 'device_status_timeout')
+    console.info('[NovaCast Startup Gate]', JSON.stringify({
+      event: 'activation-network-check-start',
+      timestamp: Date.now(),
+    }));
+    void hydrateCachedDeviceState()
+      .then(() => {
+        if (!cancelled) {
+          console.info('[NovaCast Startup Gate]', JSON.stringify({
+            event: 'startup-state-loaded',
+            timestamp: Date.now(),
+            effectiveAuthorized: getDeviceState().authorization.effectiveAuthorized,
+          }));
+        }
+        return withTimeout(initializeDevice(), STARTUP_NETWORK_TIMEOUT_MS, 'device_status_timeout');
+      })
+      .then((result) => {
+        console.info('[NovaCast Startup Gate]', JSON.stringify({
+          event: 'activation-network-check-complete',
+          timestamp: Date.now(),
+          effectiveAuthorized: result.authorization.effectiveAuthorized,
+          state: result.state,
+        }));
+      })
       .then(() => {
         if (!cancelled) {
           reportNetworkOutcome(true);
@@ -107,7 +140,7 @@ export function StartupGate() {
     }
     setLibraryMissing(result.libraryMissing);
     setBootstrapError(result.libraryMissing ? null : result.errorCode);
-    reportNetworkOutcome(false);
+    reportNetworkOutcome(false, 'provider');
     recordSanitizedDiagnostic({
       operation: result.libraryMissing ? 'startup_managed_library' : 'startup_managed_download',
       screen: 'StartupGate',
@@ -157,6 +190,20 @@ export function StartupGate() {
     ensureManagedProvider,
   ]);
 
+  useEffect(() => {
+    if (!device.authorization.effectiveAuthorized || device.status?.diagnosticsEnabled !== true) {
+      setDiagnosticsDisclosure(true);
+      return;
+    }
+    let cancelled = false;
+    void getSecureValue(DIAGNOSTICS_DISCLOSURE_KEY).then((value) => {
+      if (!cancelled) setDiagnosticsDisclosure(value === DIAGNOSTICS_DISCLOSURE_VERSION);
+    }).catch(() => {
+      if (!cancelled) setDiagnosticsDisclosure(false);
+    });
+    return () => { cancelled = true; };
+  }, [device.authorization.effectiveAuthorized, device.status?.diagnosticsEnabled]);
+
   if (startupTimedOut && (device.state === 'idle' || device.state === 'checking' || device.state === 'registering')) {
     return (
       <StartupActionScreen
@@ -175,9 +222,10 @@ export function StartupGate() {
 
   if (device.state === 'idle' || device.state === 'registering' || device.state === 'checking' || bootstrapping) {
     return (
-      <View style={styles.loading}>
-        <NovaSpaceLoader label={bootstrapping ? 'Preparing your library…' : 'Starting NovaCast…'} />
-      </View>
+      <StartupHomeShell
+        label={bootstrapping ? 'Preparing your library…' : 'Starting NovaCast…'}
+        showHome={device.authorization.effectiveAuthorized}
+      />
     );
   }
 
@@ -217,9 +265,7 @@ export function StartupGate() {
 
   if (!ready || isSwitchingProvider) {
     return (
-      <View style={styles.loading}>
-        <NovaSpaceLoader label="Loading your provider…" />
-      </View>
+      <StartupHomeShell label="Loading your provider…" showHome={device.authorization.effectiveAuthorized} />
     );
   }
 
@@ -266,7 +312,40 @@ export function StartupGate() {
     return <ProviderInitErrorScreen retrying={bootstrapping} onRetry={retryStartupProvider} />;
   }
 
-  return <Redirect href="/main-menu" />;
+  if (device.authorization.effectiveAuthorized && device.status?.diagnosticsEnabled === true && diagnosticsDisclosure !== true) {
+    return diagnosticsDisclosure === null
+      ? <View style={styles.loading}><NovaSpaceLoader label="Preparing NovaCast…" /></View>
+      : <BetaDiagnosticsDisclosure
+          onAcknowledged={() => setDiagnosticsDisclosure(true)}
+          onExit={() => { void resetPairingKeepDevice(); }}
+        />;
+  }
+
+  return <StartupHomeShell label="" showHome />;
+}
+
+function StartupHomeShell({ label, showHome }: { label: string; showHome: boolean }) {
+  useLayoutEffect(() => {
+    if (showHome) {
+      markCatalogInteractiveUiReady();
+    }
+  }, [showHome]);
+  if (showHome) {
+    console.info('[NovaCast Startup Gate]', JSON.stringify({
+      event: 'shell-render-eligible',
+      timestamp: Date.now(),
+      activeId: 'home',
+    }));
+  }
+
+  return (
+    <View style={styles.startupShell}>
+      {showHome ? <MainMenuScreen /> : null}
+      <View pointerEvents="none" focusable={false} style={[styles.startupStatus, showHome && styles.startupStatusHome]}>
+        {label ? <NovaSpaceLoader label={label} /> : null}
+      </View>
+    </View>
+  );
 }
 
 function StartupActionScreen({
@@ -303,6 +382,19 @@ const styles = StyleSheet.create({
     backgroundColor: novaTheme.colors.background,
     paddingHorizontal: 40,
     gap: 14,
+  },
+  startupShell: {
+    flex: 1,
+    backgroundColor: 'transparent',
+  },
+  startupStatusHome: {
+    backgroundColor: 'transparent',
+  },
+  startupStatus: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.24)',
   },
   errorTitle: {
     color: novaTheme.colors.textPrimary,

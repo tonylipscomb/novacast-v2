@@ -9,6 +9,14 @@ export const DEVICE_ID_KEY = 'novacast.device.backend-id';
 export const PUBLIC_DEVICE_CODE_KEY = 'novacast.device.public-code';
 export const LEGACY_INSTALLATION_ID_KEY = 'novacast.installation.id';
 const DEVICE_STATUS_CACHE_KEY = 'novacast.device.status-cache';
+const APPLIED_ASSIGNMENT_KEY = 'novacast.device.applied-assignment';
+
+export type AppliedDeviceAssignment = {
+  assignmentId: string | null;
+  managedProviderId: string | null;
+  assignedAt: string | null;
+  appliedAt: string;
+};
 
 export async function readStoredDeviceIdentityKeys() {
   const [
@@ -71,6 +79,31 @@ export function clearCachedDeviceStatus() {
   return removeSecureValue(DEVICE_STATUS_CACHE_KEY);
 }
 
+export async function readAppliedDeviceAssignment(): Promise<AppliedDeviceAssignment | null> {
+  const value = await getSecureValue(APPLIED_ASSIGNMENT_KEY);
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as AppliedDeviceAssignment;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      assignmentId: typeof parsed.assignmentId === 'string' ? parsed.assignmentId : null,
+      managedProviderId: typeof parsed.managedProviderId === 'string' ? parsed.managedProviderId : null,
+      assignedAt: typeof parsed.assignedAt === 'string' ? parsed.assignedAt : null,
+      appliedAt: typeof parsed.appliedAt === 'string' ? parsed.appliedAt : new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function writeAppliedDeviceAssignment(value: AppliedDeviceAssignment) {
+  return setSecureValue(APPLIED_ASSIGNMENT_KEY, JSON.stringify(value));
+}
+
+export function clearAppliedDeviceAssignment() {
+  return removeSecureValue(APPLIED_ASSIGNMENT_KEY);
+}
+
 export async function clearDeviceIdentity() {
   return Promise.all([
     removeSecureValue(DEVICE_INSTALLATION_ID_KEY),
@@ -78,6 +111,7 @@ export async function clearDeviceIdentity() {
     removeSecureValue(DEVICE_ID_KEY),
     removeSecureValue(PUBLIC_DEVICE_CODE_KEY),
     removeSecureValue(DEVICE_STATUS_CACHE_KEY),
+    removeSecureValue(APPLIED_ASSIGNMENT_KEY),
   ]);
 }
 

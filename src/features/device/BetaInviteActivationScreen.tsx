@@ -15,6 +15,7 @@ import { novaTvFocus } from '@/components/nova/novaTvFocus';
 import { activateAndBootstrapManagedProvider } from '@/features/device/inviteActivation';
 import { initializeDevice, useDeviceState } from '@/features/device/deviceActivation';
 import { novaTheme } from '@/theme';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
 const backgroundAsset = require('@/assets/images/pairingbackground.png');
 const logoAsset = require('@/assets/images/novacast-logo.png');
@@ -124,7 +125,7 @@ export function BetaInviteActivationScreen({ onActivated }: { onActivated?: () =
   return (
     <ImageBackground source={backgroundAsset} resizeMode="cover" style={styles.screen}>
       <View pointerEvents="none" style={styles.overlay} />
-      <View style={[styles.layout, { paddingHorizontal: 72 * scale, paddingVertical: 48 * scale }]}>
+      <View style={[styles.layout, styles.glassPanel, { paddingHorizontal: 72 * scale, paddingVertical: 48 * scale }]}>
         <Image source={logoAsset} resizeMode="contain" style={{ width: 280 * scale, height: 210 * scale }} />
         <Text style={[styles.eyebrow, { fontSize: 18 * scale }]}>NOVACAST CLOSED BETA</Text>
         <Text style={[styles.title, { fontSize: 42 * scale }]}>Enter your invitation code</Text>
@@ -186,6 +187,12 @@ const styles = StyleSheet.create({
   overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(2,6,17,0.55)' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 48 },
   layout: { flex: 1, justifyContent: 'center', maxWidth: 860 },
+  glassPanel: {
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: 'rgba(5,10,24,0.46)',
+  },
   eyebrow: {
     marginTop: 8,
     color: novaTheme.colors.accentHover,
@@ -218,8 +225,9 @@ const styles = StyleSheet.create({
   codeInput: {
     marginTop: 22,
     borderWidth: 1,
-    borderColor: 'rgba(131,180,255,0.35)',
-    backgroundColor: 'rgba(8,18,38,0.72)',
+    borderColor: NOVA_GLASS.focused.borderColor,
+    borderRadius: NOVA_GLASS.radius.base,
+    backgroundColor: NOVA_GLASS.focused.backgroundColor,
     color: '#F5F8FF',
     paddingHorizontal: 18,
     paddingVertical: 14,
@@ -234,9 +242,10 @@ const styles = StyleSheet.create({
   submit: {
     marginTop: 22,
     alignSelf: 'flex-start',
-    backgroundColor: 'rgba(59,130,246,0.28)',
+    borderRadius: NOVA_GLASS.radius.base,
+    backgroundColor: NOVA_GLASS.active.backgroundColor,
     borderWidth: 1,
-    borderColor: 'rgba(96,165,255,0.55)',
+    borderColor: NOVA_GLASS.active.borderColor,
   },
   submitText: {
     color: '#F5F8FF',

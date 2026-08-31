@@ -1,11 +1,11 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { findNodeHandle, ImageBackground as ReactNativeImageBackground, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { findNodeHandle, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import * as ReactNative from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 
-import { NovaLogo, NovaTvShell } from '@/components/nova';
+import { NovaTvShell } from '@/components/nova';
 import type { NovaNavigationFocusHandles, NovaNavigationId } from '@/components/nova';
 import { novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { ChannelHeroCard } from '@/features/hub/ChannelHeroCard';
@@ -53,7 +53,6 @@ import { subscribeMediaLibrary } from '@/features/media-browser/mediaLibraryStor
 import type { HomeContinueWatchingItem, RecentItemRecord } from '@/features/personalization/personalizationModel';
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
-import { getThemeHeroSource } from '@/theme/brandingAssets';
 import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
 import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
 import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
@@ -62,6 +61,8 @@ import { noteFocusLatencyFocus } from '@/features/diagnostics/focusLatencyAudit'
 import { waitOutCatalogWriteQuietPeriod } from '@/features/catalog/catalogWriteQuietPeriod';
 import { processTimeBudgeted } from '@/features/catalog/jsChunkBudget';
 import { showNotification } from '@/features/notifications/notificationStore';
+import { maybeTriggerDevCatalogRefreshOnce } from '@/features/diagnostics/devCatalogRefreshOnce';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
 /**
  * Resolves a channel's category type for accent-color purposes. Prefers an
@@ -80,10 +81,8 @@ function resolveChannelCategoryType(
 
 export function MainMenuScreen() {
   markCatalogAuditRender('MainMenuScreen');
-  const { theme, themeId } = useAppTheme();
+  const { theme } = useAppTheme();
   const styles = useMemo(() => createHomeStyles(theme), [theme]);
-  const heroArtwork = useMemo(() => getThemeHeroSource(themeId), [themeId]);
-  const { width } = useWindowDimensions();
   const router = useRouter();
   const navigationGateRef = useRef(createTvNavigationGate());
   const { selectedProvider } = useProviderStore();
@@ -92,7 +91,7 @@ export function MainMenuScreen() {
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.hub.key);
   const exitConfirm = useExitConfirmOnBack(!playbackActive && !playbackClosing && !guide.visible);
   const activeProviderId = selectedProvider?.id ?? 'demo-provider';
-  const heroHeight = Math.min(280, Math.max(200, Math.round(width * 0.16)));
+  const freshFocusLoggedRef = useRef(false);
   const [categoryTypeById, setCategoryTypeById] = useState<Map<string, ProviderCategoryType>>(new Map());
   const [personalization, setPersonalization] = useState<HomePersonalizationSnapshot>(() => ({
     providerId: '',
@@ -115,7 +114,24 @@ export function MainMenuScreen() {
         ...personalization.favoriteMovies.map((item) => ({ kind: 'movie' as const, item })),
         ...personalization.favoriteSeries.map((item) => ({ kind: 'series' as const, item })),
       ]
-    : [];
+      : [];
+  const continueWatchingCount = personalization.providerId === activeProviderId
+    ? personalization.continueWatching.length
+    : 0;
+
+  // Temporary startup rendering audit; remove after the physical-TV regression is closed.
+  useEffect(() => {
+    if (!__DEV__) {
+      return;
+    }
+    console.info('[NovaCast Home Render]', {
+      heroRendered: false,
+      continueWatchingCount,
+      watchlistCount: watchlistItems.length,
+      favoriteChannelCount: personalization.favoriteChannels.length,
+      favoritesCount: favoriteItems.length,
+    });
+  }, [continueWatchingCount, favoriteItems.length, personalization.favoriteChannels.length, watchlistItems.length]);
   const firstHomeFocusId =
     guide.visible
       ? null
@@ -128,6 +144,24 @@ export function MainMenuScreen() {
             : favoriteItems.length
               ? `favorite-${favoriteItems[0].kind}-${favoriteItems[0].item.id}`
               : null;
+
+  useEffect(() => {
+    if (!__DEV__ || freshFocusLoggedRef.current || !guide.ready) {
+      return;
+    }
+    freshFocusLoggedRef.current = true;
+    const owners = ['home-nav'];
+    console.info('[NovaCast Fresh Focus]', {
+      event: 'startup-focus-owner',
+      candidate: 'home-nav',
+    });
+    if (owners.length > 1) {
+      console.warn('[NovaCast Fresh Focus]', {
+        event: 'multiple-preferred-owners',
+        owners,
+      });
+    }
+  }, [guide.ready]);
 
   const [navFocusHandles, setNavFocusHandles] = useState<NovaNavigationFocusHandles>({});
   const [homeContentHandle, setHomeContentHandle] = useState<number | null>(null);
@@ -179,6 +213,10 @@ export function MainMenuScreen() {
   useEffect(() => {
     setHomeContentHandle(null);
   }, [firstHomeFocusId]);
+
+  useEffect(() => {
+    maybeTriggerDevCatalogRefreshOnce();
+  }, [bundle]);
 
   useEffect(() => {
     if (!bundle || !selectedProvider) {
@@ -552,22 +590,75 @@ export function MainMenuScreen() {
     }
 
     if (item.mediaType === 'movie') {
-      rememberMoviesScreenMemory(activeProviderId, {
-        selectedCategoryId: 'smart:recently-watched',
-        focusedMovieId: item.contentId,
-        selectedMovieId: item.contentId,
+      await openContinueItem({
+        providerId: activeProviderId,
+        mediaType: 'movie',
+        contentId: item.contentId,
+        title: item.title,
+        artworkUrl: item.artworkUrl,
+        positionMs: 0,
+        durationMs: 0,
+        progressPercent: 0,
+        updatedAt: item.lastOpenedAt,
+        containerExtension: undefined,
       });
-      navigateTo('/movies');
       return;
     }
 
-    if (item.mediaType === 'episode' || item.mediaType === 'series') {
-      rememberSeriesScreenMemory(activeProviderId, {
-        selectedCategoryId: 'smart:recently-watched',
-        focusedSeriesId: item.parentSeriesId ?? item.contentId,
-        selectedSeriesId: item.parentSeriesId ?? item.contentId,
+    if (item.mediaType === 'episode') {
+      await openContinueItem({
+        providerId: activeProviderId,
+        mediaType: 'episode',
+        contentId: item.contentId,
+        title: item.title,
+        artworkUrl: item.artworkUrl,
+        parentSeriesId: item.parentSeriesId,
+        episodeId: item.contentId,
+        seasonNumber: item.seasonNumber,
+        episodeNumber: item.episodeNumber,
+        positionMs: 0,
+        durationMs: 0,
+        progressPercent: 0,
+        updatedAt: item.lastOpenedAt,
       });
-      navigateTo('/series');
+      return;
+    }
+
+    if (item.mediaType === 'series') {
+      const detail = bundle
+        ? await bundle.seriesDataSource.getSeriesInfo(item.contentId).catch(() => null)
+        : null;
+      if (detail) {
+        const series: SeriesSummary = {
+          id: detail.seriesId,
+          seriesId: detail.seriesId,
+          categoryId: item.categoryId ?? '',
+          title: detail.title || item.title,
+          year: detail.year,
+          rating: detail.rating,
+          releaseDate: detail.releaseDate,
+          description: detail.description,
+          genres: detail.genres,
+          posterStyleKey: 'ember',
+          posterUrl: detail.posterUrl ?? item.artworkUrl,
+          backdropUrl: detail.backdropUrl,
+        };
+        rememberSeriesScreenMemory(activeProviderId, {
+          pendingSeriesDetail: series,
+          selectedSeriesId: series.id,
+          focusedSeriesId: series.id,
+          openDiscoverZone: false,
+        });
+        navigateTo('/series');
+        return;
+      }
+      showNotification({
+        type: 'error',
+        title: 'Unable to play series',
+        message: 'This series has no episode identity to play.',
+        duration: 6000,
+        scope: 'home',
+      });
       return;
     }
 
@@ -575,8 +666,17 @@ export function MainMenuScreen() {
       const channel = await bundle.live.getChannel(item.contentId).catch(() => null);
       if (channel) {
         await playLiveChannelFullscreen(channel);
+        return;
       }
     }
+
+    showNotification({
+      type: 'error',
+      title: 'Unable to play channel',
+      message: 'This channel is no longer available.',
+      duration: 6000,
+      scope: 'home',
+    });
   };
 
   return (
@@ -584,9 +684,7 @@ export function MainMenuScreen() {
       <View style={styles.browseLayer} pointerEvents={playbackActive || playbackClosing ? 'none' : 'auto'}>
         <NovaTvShell
           activeId="home"
-          title="Home"
-          subtitle="Your entertainment. One place."
-          preferActiveNavigationFocus={!firstHomeFocusId}
+          preferActiveNavigationFocus
           onNavigationFocusHandles={setNavFocusHandles}
           onNavigationItemFocus={setNavbarFocusedId}
           navigationContentFocusHandle={navigationContentFocusHandle}
@@ -597,24 +695,6 @@ export function MainMenuScreen() {
             contentContainerStyle={styles.screen}
             showsVerticalScrollIndicator={false}
             nestedScrollEnabled>
-        <View style={styles.heroBlock}>
-          <ReactNativeImageBackground
-            source={heroArtwork}
-            resizeMode="cover"
-            imageStyle={styles.heroArtwork}
-            style={[styles.hero, { height: heroHeight }]}>
-            <View pointerEvents="none" style={styles.heroContent}>
-              <NovaLogo
-                size="md"
-                subtitle="ENTERTAINMENT STARTS HERE"
-                variant="full"
-              />
-              <Text style={styles.heroEyebrow}>WELCOME BACK</Text>
-              <Text numberOfLines={1} style={styles.heroTitle}>Entertainment starts here.</Text>
-            </View>
-          </ReactNativeImageBackground>
-        </View>
-
         <View style={styles.rows}>
           {personalization.providerId === activeProviderId && personalization.continueWatching.length ? (
             <HomeRow title="Continue Watching">
@@ -625,7 +705,8 @@ export function MainMenuScreen() {
                   subtitle={item.subtitle ?? `${Math.round(item.progressPercent)}% watched`}
                   artworkUrl={item.artworkUrl}
                   progress={item.progressPercent}
-                  preferredFocus={firstHomeFocusId === `continue-${item.contentId}`}
+                  preferredFocus={false}
+                  nextFocusUp={firstHomeFocusId === `continue-${item.contentId}` ? navFocusHandles.home : undefined}
                   onFocusHandle={
                     firstHomeFocusId === `continue-${item.contentId}`
                       ? (handle) => registerHomeFocusHandle(`continue-${item.contentId}`, handle)
@@ -646,7 +727,8 @@ export function MainMenuScreen() {
                   title={entry.item.title}
                   subtitle={entry.kind === 'movie' ? 'Movie watchlist' : 'Series watchlist'}
                   artworkUrl={entry.item.posterUrl}
-                  preferredFocus={firstHomeFocusId === `watchlist-${entry.kind}-${entry.item.id}`}
+                  preferredFocus={false}
+                  nextFocusUp={firstHomeFocusId === `watchlist-${entry.kind}-${entry.item.id}` ? navFocusHandles.home : undefined}
                   onFocusHandle={
                     firstHomeFocusId === `watchlist-${entry.kind}-${entry.item.id}`
                       ? (handle) => registerHomeFocusHandle(`watchlist-${entry.kind}-${entry.item.id}`, handle)
@@ -700,7 +782,7 @@ export function MainMenuScreen() {
           ) : null}
 
           {personalization.providerId === activeProviderId && personalization.favoriteChannels.length ? (
-            <HomeRow title="Favorite Channels">
+            <HomeRow title="My Channels">
               {personalization.favoriteChannels.map((item) => (
                 <ChannelHeroCard
                   key={item.id}
@@ -709,7 +791,8 @@ export function MainMenuScreen() {
                   logoUrl={item.artworkUrl}
                   categoryType={resolveChannelCategoryType({ categoryId: item.categoryId, name: item.title }, categoryTypeById)}
                   isLive
-                  preferredFocus={firstHomeFocusId === `favorite-channel-${item.id}`}
+                  preferredFocus={false}
+                  nextFocusUp={firstHomeFocusId === `favorite-channel-${item.id}` ? navFocusHandles.home : undefined}
                   onFocusHandle={
                     firstHomeFocusId === `favorite-channel-${item.id}`
                       ? (handle) => registerHomeFocusHandle(`favorite-channel-${item.id}`, handle)
@@ -729,7 +812,8 @@ export function MainMenuScreen() {
                   title={entry.item.title}
                   subtitle={entry.kind === 'movie' ? 'Favorite movie' : 'Favorite series'}
                   artworkUrl={entry.item.posterUrl}
-                  preferredFocus={firstHomeFocusId === `favorite-${entry.kind}-${entry.item.id}`}
+                  preferredFocus={false}
+                  nextFocusUp={firstHomeFocusId === `favorite-${entry.kind}-${entry.item.id}` ? navFocusHandles.home : undefined}
                   onFocusHandle={
                     firstHomeFocusId === `favorite-${entry.kind}-${entry.item.id}`
                       ? (handle) => registerHomeFocusHandle(`favorite-${entry.kind}-${entry.item.id}`, handle)
@@ -800,6 +884,7 @@ type HomeMediaCardProps = {
   progress?: number;
   icon?: 'television' | 'history' | 'movie-open-outline';
   preferredFocus?: boolean;
+  nextFocusUp?: number;
   onFocusHandle?: (handle: number | null) => void;
   onPress: () => void;
   onRemove?: () => void;
@@ -812,6 +897,7 @@ const HomeMediaCard = memo(function HomeMediaCard({
   progress,
   icon,
   preferredFocus = false,
+  nextFocusUp,
   onFocusHandle,
   onPress,
   onRemove,
@@ -830,6 +916,7 @@ const HomeMediaCard = memo(function HomeMediaCard({
         collapsable={false}
         focusable
         hasTVPreferredFocus={preferredFocus && !preferredFocusConsumedRef.current}
+        {...(nextFocusUp != null ? { nextFocusUp } : null)}
         onFocus={() => {
           preferredFocusConsumedRef.current = true;
           markCatalogAuditFocus('home-card');
@@ -838,7 +925,7 @@ const HomeMediaCard = memo(function HomeMediaCard({
         }}
         onBlur={() => setFocused(false)}
         onPress={onPress}
-        style={[styles.mediaCard, novaTvFocus.base, focused && styles.mediaCardFocused]}>
+        style={[styles.mediaCard, novaTvFocus.base, styles.mediaCardGlassBase, focused && styles.mediaCardFocused]}>
         <View style={[styles.mediaArtwork, focused && styles.mediaArtworkFocused]}>
           {artworkUrl ? <Image source={{ uri: artworkUrl }} style={styles.mediaArtworkImage} contentFit="cover" /> : null}
           {!artworkUrl ? <MaterialCommunityIcons name={icon ?? 'movie-open-outline'} size={28} color={theme.colors.accent} /> : null}
@@ -881,85 +968,52 @@ function createHomeStyles(theme: NovaTheme) {
     flex: 1,
   },
   screen: {
+    flexGrow: 1,
     paddingBottom: 20,
-    gap: 8,
-  },
-  heroBlock: {
-    width: '100%',
-  },
-  hero: {
-    width: '100%',
-    borderRadius: 0,
-    overflow: 'hidden',
-    backgroundColor: '#050816',
-  },
-  heroArtwork: {
-    borderRadius: 0,
-  },
-  heroContent: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    alignItems: 'flex-start',
-    paddingHorizontal: 24,
-    paddingBottom: 12,
-  },
-  heroEyebrow: {
-    marginTop: 4,
-    color: '#55A8FF',
-    fontSize: 12,
-    fontWeight: '900',
-    letterSpacing: 1.8,
-  },
-  heroTitle: {
-    marginTop: 2,
-    color: '#FFFFFF',
-    fontSize: 26,
-    fontWeight: '900',
-    letterSpacing: -0.5,
-  },
-  heroSubtitle: {
-    marginTop: 3,
-    maxWidth: 620,
-    color: 'rgba(255,255,255,0.82)',
-    fontSize: 19,
-    fontWeight: '600',
+    gap: 4,
   },
   rows: {
-    gap: 8,
+    gap: 4,
   },
   rowSection: {
-    minHeight: 168,
-    gap: 2,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.borderSubtle,
+    minHeight: 170,
+    gap: 0,
+    paddingBottom: 4,
   },
   rowSectionCompact: {
-    minHeight: 148,
+    minHeight: 155,
   },
   rowCards: {
-    gap: 10,
+    gap: 8,
     paddingVertical: 2,
     paddingRight: 18,
   },
   mediaCard: {
-    width: 168,
-    minHeight: 148,
-    borderRadius: 0,
+    width: 215,
+    minHeight: 160,
     backgroundColor: 'transparent',
     padding: 0,
     ...focusChrome.base,
   },
-  mediaCardFocused: focusChrome.active,
+  mediaCardGlassBase: {
+    borderWidth: 1,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    backgroundColor: NOVA_GLASS.subtle.backgroundColor,
+  },
+  mediaCardFocused: {
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+    borderRadius: NOVA_GLASS.radius.base,
+  },
   mediaArtworkFocused: {},
   mediaCardWrap: {
-    width: 168,
-    gap: 5,
+    width: 215,
+    gap: 3,
   },
   removeButton: {
-    minHeight: 28,
-    borderRadius: 0,
+    minHeight: 24,
     borderTopWidth: 1,
-    borderColor: theme.colors.borderSubtle,
     backgroundColor: 'transparent',
     flexDirection: 'row',
     alignItems: 'center',
@@ -970,12 +1024,12 @@ function createHomeStyles(theme: NovaTheme) {
   removeButtonFocused: focusChrome.active,
   removeButtonText: {
     color: theme.colors.textSecondary,
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '700',
   },
   mediaArtwork: {
-    height: 96,
-    borderRadius: 0,
+    height: 116,
+    borderRadius: 11,
     backgroundColor: theme.colors.backgroundRaised,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1001,16 +1055,16 @@ function createHomeStyles(theme: NovaTheme) {
     backgroundColor: theme.colors.accent,
   },
   mediaTitle: {
-    marginTop: 7,
+    marginTop: 4,
     color: theme.colors.textPrimary,
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '800',
   },
   mediaTitleFocused: focusText.title,
   mediaSubtitle: {
-    marginTop: 3,
+    marginTop: 1,
     color: theme.colors.textMuted,
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '600',
   },
   mediaSubtitleFocused: focusText.secondary,
@@ -1029,15 +1083,15 @@ function createHomeStyles(theme: NovaTheme) {
     minWidth: 280,
   },
   sectionHeader: {
-    height: 26,
+    height: 24,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 2,
+    marginBottom: 0,
   },
   sectionTitle: {
     color: theme.colors.textPrimary,
-    fontSize: theme.typography.sectionTitle,
+    fontSize: 19,
     fontWeight: '800',
   },
   continueEmpty: {

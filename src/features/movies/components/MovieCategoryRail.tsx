@@ -1,4 +1,3 @@
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useEffect, useMemo, useRef, useState, type ElementRef } from 'react';
 import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 
@@ -12,6 +11,7 @@ import {
 import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
@@ -35,6 +35,7 @@ type MovieCategoryRailProps = {
   preferredCategoryId?: string | null;
   suppressPreferredFocus?: boolean;
   focusable?: boolean;
+  interactionLocked?: boolean;
   discoverStatusMessage?: string | null;
   contentType?: ProviderCategoryContentType;
   /** Stage 4.2K.1: stable diagnostics identity — must not be used as a React key. */
@@ -51,6 +52,7 @@ export function MovieCategoryRail({
   preferredCategoryId,
   suppressPreferredFocus = false,
   focusable = true,
+  interactionLocked = false,
   discoverStatusMessage,
   contentType = 'movie',
   railInstanceId,
@@ -65,7 +67,8 @@ export function MovieCategoryRail({
   const preferredFocusConsumedRef = useRef(false);
   const initialPreferredCategoryIdRef = useRef(preferredCategoryId);
   const listRef = useRef<FlatList<MovieCategory> | null>(null);
-  const hostProps = resolveMoviesBrowseListHostProps({ hostEnabled: focusable });
+  const effectiveFocusable = focusable && !interactionLocked;
+  const hostProps = resolveMoviesBrowseListHostProps({ hostEnabled: effectiveFocusable });
 
   if (isOnnMoviesTraceEnabled()) {
     noteOnnMoviesRender('MovieCategoryRail');
@@ -91,15 +94,10 @@ export function MovieCategoryRail({
 
   useEffect(() => {
     applyMoviesBrowseListHostNativeFocus(listRef.current, hostProps.hostFocusable);
-  }, [focusable, hostProps.hostFocusable]);
+  }, [effectiveFocusable, hostProps.hostFocusable]);
 
   return (
     <View style={styles.panel} collapsable={false}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Categories</Text>
-        <MaterialCommunityIcons name="view-list-outline" size={18} color={theme.colors.textMuted} />
-      </View>
-
       {discoverStatusMessage ? (
         <View style={styles.discoverStatusSlot}>
           <View style={styles.discoverStatus}>
@@ -114,7 +112,7 @@ export function MovieCategoryRail({
           applyMoviesBrowseListHostNativeFocus(instance, hostProps.hostFocusable);
         }}
         data={categories}
-        extraData={`${focusable}:${hostProps.scrollEnabled}`}
+        extraData={`${effectiveFocusable}:${hostProps.scrollEnabled}`}
         focusable={hostProps.hostFocusable}
         accessible={hostProps.hostFocusable}
         scrollEnabled={hostProps.scrollEnabled}
@@ -124,7 +122,7 @@ export function MovieCategoryRail({
         style={styles.listContainer}
         removeClippedSubviews={false}
         onFocus={() => {
-          if (!focusable) {
+          if (!effectiveFocusable) {
             logMoviesDetailV2FocusOwnership({
               phase: 'unexpected-background-focus',
               detailOpen: true,
@@ -169,16 +167,17 @@ export function MovieCategoryRail({
           const showMarker = isProviderCategory(item) && (Boolean(countryCode) || regionMarker === 'multi');
 
           const preferInitialFocus =
-            focusable &&
+            effectiveFocusable &&
             !suppressPreferredFocus &&
             !preferredFocusConsumedRef.current &&
             Boolean(initialPreferredCategoryIdRef.current && item.id === initialPreferredCategoryIdRef.current);
           const isSmartCategory = item.kind === 'smart';
           const rowStyle = [
             styles.row,
+            styles.categoryDefault,
             isSmartCategory && styles.rowSmart,
-            selected && styles.rowSelected,
-            focused && styles.rowFocused,
+            selected && styles.categoryActive,
+            focused && (selected ? styles.categoryActiveFocused : styles.categoryFocused),
           ];
 
           if (preferInitialFocus) {
@@ -189,7 +188,7 @@ export function MovieCategoryRail({
             });
           }
 
-          if (!focusable) {
+          if (!effectiveFocusable) {
             return (
               <View
                 focusable={false}
@@ -228,7 +227,7 @@ export function MovieCategoryRail({
           return (
             <Pressable
               ref={(instance) => registerItemRef?.(item.id, instance)}
-              focusable
+              focusable={effectiveFocusable}
               accessible
               hasTVPreferredFocus={preferInitialFocus}
               {...(selected && nextFocusRightHandle ? { nextFocusRight: nextFocusRightHandle } : null)}
@@ -285,25 +284,11 @@ function createStyles(theme: NovaTheme) {
       flexShrink: 0,
       flex: 1,
       minHeight: 0,
-      borderRadius: 0,
-      borderRightWidth: 1,
-      borderRightColor: theme.colors.borderSubtle,
-      backgroundColor: 'transparent',
-      padding: 0,
-      paddingRight: 10,
-    },
-    header: {
-      minHeight: 32,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingHorizontal: 6,
-      marginBottom: 2,
-    },
-    title: {
-      color: theme.colors.textPrimary,
-      fontSize: 18,
-      fontWeight: '800',
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: 'rgba(3, 8, 20, 0.58)',
+      padding: 8,
     },
     list: {
       gap: 0,
@@ -316,10 +301,7 @@ function createStyles(theme: NovaTheme) {
     },
     row: {
       minHeight: 40,
-      borderRadius: 0,
       backgroundColor: 'transparent',
-      borderBottomWidth: 1,
-      borderBottomColor: theme.colors.borderSubtle,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
@@ -328,13 +310,31 @@ function createStyles(theme: NovaTheme) {
       paddingVertical: 4,
       ...focusChrome.base,
     },
-    rowSelected: {
-      borderBottomColor: theme.colors.success,
+    // Reuse the navbar's glass focus tokens for category rows.
+    categoryActive: {
+      backgroundColor: NOVA_GLASS.active.backgroundColor,
+      borderColor: NOVA_GLASS.active.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
     },
-    rowFocused: focusChrome.active,
+    categoryDefault: {
+      backgroundColor: 'transparent',
+      borderColor: 'transparent',
+      borderRadius: 0,
+    },
+    categoryFocused: {
+      borderWidth: 1,
+      backgroundColor: NOVA_GLASS.focused.backgroundColor,
+      borderColor: NOVA_GLASS.focused.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
+    categoryActiveFocused: {
+      borderWidth: 1,
+      backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+      borderColor: NOVA_GLASS.activeFocused.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
     rowSmart: {
-      borderBottomWidth: 1,
-      borderBottomColor: theme.colors.borderSubtle,
+      backgroundColor: 'transparent',
     },
     name: {
       flex: 1,

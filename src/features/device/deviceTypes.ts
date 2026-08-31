@@ -25,10 +25,13 @@ export type DeviceStatusResponse = {
   remainingBetaHours?: number | null;
   providerAssigned?: boolean;
   managedProviderId?: string | null;
+  assignmentId?: string | null;
+  assignedAt?: string | null;
   contentPolicy?: string | null;
   requiresProviderDownload?: boolean;
   serverTime: string;
   offlineGraceUntil: string | null;
+  diagnosticsEnabled?: boolean;
 };
 
 export type DeviceHeartbeatResponse = {
@@ -40,11 +43,14 @@ export type DeviceHeartbeatResponse = {
   remainingBetaHours: number | null;
   providerAssigned: boolean;
   managedProviderId: string | null;
+  assignmentId?: string | null;
+  assignedAt?: string | null;
   contentPolicy: string;
   serverTime: string;
   pendingCommands: DevicePendingCommand[];
   requiredSync: boolean;
   offlineGraceUntil: string | null;
+  diagnosticsEnabled?: boolean;
 };
 
 export type DeviceAuthorization = {

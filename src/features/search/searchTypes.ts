@@ -35,6 +35,7 @@ export type LiveSearchResult = SearchResultBase & {
   categoryName?: string;
   currentProgram?: string;
   containerExtension?: string;
+  streamUrl?: string;
 };
 
 export type MovieSearchResult = SearchResultBase & {

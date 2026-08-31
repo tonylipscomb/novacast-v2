@@ -1,4 +1,4 @@
-import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
+import { adminJsonResponse, adminOptionsResponse, readJson } from '../_shared/http.ts';
 import { requireAdmin } from '../_shared/admin.ts';
 import { decryptSecret, encryptSecret, normalizeProviderUrl } from '../_shared/security.ts';
 import { canActivateFromHealth, sanitizeHealthSummary } from '../_shared/providerHealth.ts';
@@ -14,7 +14,7 @@ const ACCOUNT_SELECT = 'id,managed_provider_id,gold_user_id,gold_package_id,gold
 function errorResponse(request: Request, error: unknown) {
   const category = error instanceof GoldPanelError ? error.category : error instanceof Error && error.message === 'admin_unauthorized' ? 'admin_unauthorized' : 'gold_request_failed';
   const status = error instanceof GoldPanelError ? error.status : category === 'admin_unauthorized' ? 401 : 500;
-  return jsonResponse({ errorCategory: category, error: sanitizeGoldError(error instanceof Error ? error.message : 'Gold Panel request failed') }, status);
+  return adminJsonResponse(request, { errorCategory: category, error: sanitizeGoldError(error instanceof Error ? error.message : 'Gold Panel request failed') }, status);
 }
 
 function slugify(value: string) { return value.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || `gold-${crypto.randomUUID().slice(0, 8)}`; }
@@ -75,16 +75,16 @@ async function listAccounts(client: Client) {
 }
 
 Deno.serve(async (request) => {
-  if (request.method === 'OPTIONS') return optionsResponse();
+  if (request.method === 'OPTIONS') return adminOptionsResponse(request);
   try {
     const { client } = await requireAdmin(request);
-    if (request.method === 'GET') return jsonResponse({ accounts: await listAccounts(client) });
-    if (request.method !== 'POST') return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
+    if (request.method === 'GET') return adminJsonResponse(request, { accounts: await listAccounts(client) });
+    if (request.method !== 'POST') return adminJsonResponse(request, { errorCategory: 'method_not_allowed' }, 405);
     const body = await readJson(request); const action = String(body?.action ?? '');
-    if (action === 'reseller') return jsonResponse({ reseller: await getReseller() });
-    if (action === 'packages') return jsonResponse({ packages: await getPackages() });
-    if (action === 'list_accounts') return jsonResponse({ accounts: await listAccounts(client) });
-    if (action === 'route_health') return jsonResponse({ route: await checkGoldRoute(String(body?.domain ?? '')) });
+    if (action === 'reseller') return adminJsonResponse(request, { reseller: await getReseller() });
+    if (action === 'packages') return adminJsonResponse(request, { packages: await getPackages() });
+    if (action === 'list_accounts') return adminJsonResponse(request, { accounts: await listAccounts(client) });
+    if (action === 'route_health') return adminJsonResponse(request, { route: await checkGoldRoute(String(body?.domain ?? '')) });
 
     if (action === 'retry_recovery') {
       const reference = typeof body?.recoveryReference === 'string' ? body.recoveryReference : '';
@@ -95,7 +95,7 @@ Deno.serve(async (request) => {
       const { data: account, error: metadataError } = await client.from('gold_panel_accounts').insert({ managed_provider_id: provider.id, gold_user_id: recovery.gold_user_id, gold_package_id: recovery.gold_package_id, gold_package_name: recovery.gold_package_name, gold_country: recovery.gold_country, gold_notes: recovery.gold_notes, gold_upstream_url: credentials.baseUrl, gold_enabled: true }).select(ACCOUNT_SELECT).single();
       if (metadataError || !account) throw new GoldPanelError('gold_metadata_create_failed', 'NovaCast provider was created but Gold metadata could not be attached.', 502);
       await client.from('gold_panel_recoveries').update({ used_at: new Date().toISOString() }).eq('id', reference);
-      return jsonResponse({ success: true, recoveryRequired: false, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider });
+      return adminJsonResponse(request, { success: true, recoveryRequired: false, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider });
     }
 
     const accountId = typeof body?.accountId === 'string' ? body.accountId : '';
@@ -117,38 +117,38 @@ Deno.serve(async (request) => {
       catch (error) {
         const encrypted = await encryptSecret(JSON.stringify(credentials));
         const recovery = await client.from('gold_panel_recoveries').insert({ gold_user_id: String(body?.goldUserId ?? credentials.username), credentials_ciphertext: encrypted.ciphertext, credentials_iv: encrypted.iv, gold_package_id: body?.packageId ?? null, gold_package_name: body?.packageName ?? null, gold_country: body?.country ?? null, gold_notes: String(body?.notes ?? '').slice(0, 500) || null }).select('id,gold_user_id').single();
-        if (recovery.error || !recovery.data) return jsonResponse({ success: false, goldCreated, novaCastProviderCreated: false, recoveryRequired: false, errorCategory: 'recovery_persistence_failed' }, 502);
-        return jsonResponse({ success: false, goldCreated, novaCastProviderCreated: false, recoveryRequired: true, recoveryReference: recovery.data.id, goldUserId: recovery.data.gold_user_id, errorCategory: 'novacast_provider_create_failed', error: sanitizeGoldError(error instanceof Error ? error.message : 'Provider creation failed') }, 502);
+        if (recovery.error || !recovery.data) return adminJsonResponse(request, { success: false, goldCreated, novaCastProviderCreated: false, recoveryRequired: false, errorCategory: 'recovery_persistence_failed' }, 502);
+        return adminJsonResponse(request, { success: false, goldCreated, novaCastProviderCreated: false, recoveryRequired: true, recoveryReference: recovery.data.id, goldUserId: recovery.data.gold_user_id, errorCategory: 'novacast_provider_create_failed', error: sanitizeGoldError(error instanceof Error ? error.message : 'Provider creation failed') }, 502);
       }
       const info = await getDeviceInfo(credentials.username, credentials.password).catch(() => null);
       const { data: account, error } = await client.from('gold_panel_accounts').insert({
         managed_provider_id: provider.id, gold_user_id: String(body?.goldUserId ?? info?.goldUserId ?? credentials.username), gold_package_id: body?.packageId ?? null, gold_package_name: body?.packageName ?? null, gold_country: body?.country ?? info?.country ?? null, gold_expiration: info?.expire?.slice(0, 10) ?? null, gold_enabled: info?.enabled ?? true, gold_notes: String(body?.notes ?? '').slice(0, 500) || null, gold_upstream_url: credentials.baseUrl, route_mode: body?.routeMode ?? null, route_domain: body?.routeDomain ?? null, last_synced_at: info ? new Date().toISOString() : null,
       }).select(ACCOUNT_SELECT).single();
-      if (error || !account) return jsonResponse({ goldCreated, novaCastProviderCreated: true, managedProviderId: provider.id, errorCategory: 'gold_metadata_create_failed' }, 502);
+      if (error || !account) return adminJsonResponse(request, { goldCreated, novaCastProviderCreated: true, managedProviderId: provider.id, errorCategory: 'gold_metadata_create_failed' }, 502);
       let summary = null;
       if (body?.runDiagnostics === true) {
         const health = await runProviderHealthCheck({ baseUrl: credentials.baseUrl, username: credentials.username, password: credentials.password });
         summary = sanitizeHealthSummary(health, credentials.username, credentials.password);
         await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, last_successful_test_at: canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? health.testedAt : null, validation_stale: false, last_health_summary: summary, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString(), ...(body?.activateIfHealthy === true && canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? { status: 'active' } : {}) }).eq('id', provider.id);
       }
-      return jsonResponse({ success: true, goldCreated, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider, summary });
+      return adminJsonResponse(request, { success: true, goldCreated, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider, summary });
     }
 
     if (!accountId) throw new GoldPanelError('invalid_request', 'Gold account is required.', 400);
     const { data: account, error: accountError } = await client.from('gold_panel_accounts').select('*').eq('id', accountId).maybeSingle();
     if (accountError || !account) throw new GoldPanelError('gold_account_not_found', 'Gold account was not found.', 404);
-    if (action === 'account_info' || action === 'sync_account') return jsonResponse({ account: await syncAccount(client, account) });
+    if (action === 'account_info' || action === 'sync_account') return adminJsonResponse(request, { account: await syncAccount(client, account) });
     if (action === 'run_diagnostics') {
       const credentials = await providerCredentials(client, account.managed_provider_id);
       const health = await runProviderHealthCheck(credentials);
       const safeHealth = sanitizeHealthSummary(health, credentials.username, credentials.password);
       await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, validation_stale: false, last_health_summary: safeHealth, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString() }).eq('id', account.managed_provider_id);
-      return jsonResponse({ summary: safeHealth, account });
+      return adminJsonResponse(request, { summary: safeHealth, account });
     }
-    if (action === 'renew_account') { const credentials = await providerCredentials(client, account.managed_provider_id); await renewAccount({ username: credentials.username, password: credentials.password, sub: String(body?.sub ?? '1') }); return jsonResponse({ account: await syncAccount(client, account) }); }
-    if (action === 'set_account_status') { await setAccountStatus(account.gold_user_id, body?.enabled !== false); return jsonResponse({ account: await syncAccount(client, account) }); }
-    if (action === 'account_credentials') { const credentials = await providerCredentials(client, account.managed_provider_id); return jsonResponse({ username: credentials.username, password: credentials.password, baseUrl: credentials.baseUrl }); }
-    if (action === 'update_route') { const { data, error } = await client.from('gold_panel_accounts').update({ route_mode: String(body?.routeMode ?? '').slice(0, 80) || null, route_domain: String(body?.routeDomain ?? '').slice(0, 240) || null, updated_at: new Date().toISOString() }).eq('id', accountId).select(ACCOUNT_SELECT).single(); if (error) throw new Error('gold_metadata_update_failed'); return jsonResponse({ account: data }); }
+    if (action === 'renew_account') { const credentials = await providerCredentials(client, account.managed_provider_id); await renewAccount({ username: credentials.username, password: credentials.password, sub: String(body?.sub ?? '1') }); return adminJsonResponse(request, { account: await syncAccount(client, account) }); }
+    if (action === 'set_account_status') { await setAccountStatus(account.gold_user_id, body?.enabled !== false); return adminJsonResponse(request, { account: await syncAccount(client, account) }); }
+    if (action === 'account_credentials') { const credentials = await providerCredentials(client, account.managed_provider_id); return adminJsonResponse(request, { username: credentials.username, password: credentials.password, baseUrl: credentials.baseUrl }); }
+    if (action === 'update_route') { const { data, error } = await client.from('gold_panel_accounts').update({ route_mode: String(body?.routeMode ?? '').slice(0, 80) || null, route_domain: String(body?.routeDomain ?? '').slice(0, 240) || null, updated_at: new Date().toISOString() }).eq('id', accountId).select(ACCOUNT_SELECT).single(); if (error) throw new Error('gold_metadata_update_failed'); return adminJsonResponse(request, { account: data }); }
     throw new GoldPanelError('invalid_request', 'Unsupported Gold Panel action.', 400);
   } catch (error) { return errorResponse(request, error); }
 });

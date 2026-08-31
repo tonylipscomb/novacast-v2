@@ -1,19 +1,45 @@
-import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
+import { adminJsonResponse, adminOptionsResponse, readJson } from '../_shared/http.ts';
 import { requireAdmin } from '../_shared/admin.ts';
+import {
+  broadcastDeviceAssignmentChanged,
+  isAdminDeviceOnline,
+} from '../_shared/deviceAssignmentBroadcast.ts';
 
 const MIN_EXTENSION_HOURS = 1;
 const MAX_EXTENSION_HOURS = 24 * 365 * 100;
+const adminActionResponse = adminJsonResponse;
 
 Deno.serve(async (request) => {
-  if (request.method === 'OPTIONS') return optionsResponse();
-  if (request.method !== 'POST') return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
+  if (request.method === 'OPTIONS') return adminOptionsResponse(request);
+  if (request.method !== 'POST') return adminJsonResponse(request, { errorCategory: 'method_not_allowed' }, 405);
 
   try {
     const { client, user } = await requireAdmin(request);
     const body = await readJson(request);
     const deviceId = typeof body?.deviceId === 'string' ? body.deviceId : '';
     const action = typeof body?.action === 'string' ? body.action : '';
-    if (!deviceId || !action) return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+    if (!deviceId || !action) return adminActionResponse(request, { errorCategory: 'invalid_request' }, 400);
+
+    if (action === 'start_diagnostics_capture' || action === 'stop_diagnostics_capture') {
+      let captureDeviceId = deviceId;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deviceId)) {
+        const target = await client.from('devices').select('id').eq('public_device_code', deviceId.trim().toUpperCase()).maybeSingle();
+        if (target.error || !target.data?.id) return adminActionResponse(request, { errorCategory: 'device_not_found' }, 400);
+        captureDeviceId = target.data.id;
+      }
+      const captureId = crypto.randomUUID();
+      const enabled = action === 'start_diagnostics_capture';
+      const expiresAt = enabled ? new Date(Date.now() + 15 * 60 * 1000).toISOString() : new Date().toISOString();
+      const { data, error } = await client.from('device_commands').insert({
+        device_id: captureDeviceId,
+        command: action,
+        payload: { enabled, captureId, expiresAt },
+        status: 'pending',
+        created_by: user.id,
+      }).select('id').single();
+      if (error) throw new Error('admin_update_failed');
+      return adminActionResponse(request, { ok: true, commandId: data?.id ?? null, captureId: enabled ? captureId : null, expiresAt });
+    }
 
     if (action === 'extend') {
       const hours = Number(body?.hours);
@@ -22,7 +48,7 @@ Deno.serve(async (request) => {
         hours < MIN_EXTENSION_HOURS ||
         hours > MAX_EXTENSION_HOURS
       ) {
-        return jsonResponse({ errorCategory: 'invalid_extension' }, 400);
+        return adminActionResponse(request, { errorCategory: 'invalid_extension' }, 400);
       }
       const { data, error } = await client.rpc('extend_device_activation', {
         p_device_id: deviceId,
@@ -30,7 +56,7 @@ Deno.serve(async (request) => {
       });
 
       if (!error && data?.[0]) {
-        return jsonResponse({ ok: true, expiresAt: data[0].expires_at, mode: 'rpc' });
+        return adminActionResponse(request, { ok: true, expiresAt: data[0].expires_at, mode: 'rpc' });
       }
 
       const { data: activations, error: activationReadError } = await client
@@ -42,7 +68,7 @@ Deno.serve(async (request) => {
         .limit(1);
 
       if (activationReadError || !activations?.[0]) {
-        return jsonResponse(
+        return adminActionResponse(request,
           {
             errorCategory: 'activation_not_found',
             detail: activationReadError?.message ?? error?.message ?? null,
@@ -69,7 +95,7 @@ Deno.serve(async (request) => {
         .eq('id', activations[0].id);
 
       if (activationUpdateError) {
-        return jsonResponse(
+        return adminActionResponse(request,
           { errorCategory: 'activation_update_failed', detail: activationUpdateError.message },
           500,
         );
@@ -85,13 +111,13 @@ Deno.serve(async (request) => {
         .eq('id', deviceId);
 
       if (deviceUpdateError) {
-        return jsonResponse(
+        return adminActionResponse(request,
           { errorCategory: 'device_update_failed', detail: deviceUpdateError.message },
           500,
         );
       }
 
-      return jsonResponse({ ok: true, expiresAt, mode: 'fallback' });
+      return adminActionResponse(request, { ok: true, expiresAt, mode: 'fallback' });
     }
 
     if (action === 'revoke' || action === 'restore') {
@@ -129,7 +155,7 @@ Deno.serve(async (request) => {
           .eq('device_id', deviceId)
           .eq('status', 'active');
       }
-      return jsonResponse({ ok: true });
+      return adminActionResponse(request, { ok: true });
     }
 
     if (action === 'assign_invite') {
@@ -137,7 +163,7 @@ Deno.serve(async (request) => {
       const publicDeviceCode =
         typeof body?.publicDeviceCode === 'string' ? body.publicDeviceCode.trim().toUpperCase() : '';
       if (!inviteId || !publicDeviceCode) {
-        return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+        return adminActionResponse(request, { errorCategory: 'invalid_request' }, 400);
       }
       const { data, error } = await client.rpc('admin_activate_device_with_invite_id', {
         p_public_device_code: publicDeviceCode,
@@ -156,9 +182,9 @@ Deno.serve(async (request) => {
           'invite_exhausted',
         ] as const;
         const category = known.find((code) => detail.includes(code)) ?? 'admin_update_failed';
-        return jsonResponse({ errorCategory: category }, 400);
+        return adminActionResponse(request, { errorCategory: category }, 400);
       }
-      return jsonResponse({
+      return adminActionResponse(request, {
         ok: true,
         deviceId: data[0].device_id,
         expiresAt: data[0].expires_at,
@@ -172,19 +198,19 @@ Deno.serve(async (request) => {
       const managedProviderId =
         typeof body?.managedProviderId === 'string' ? body.managedProviderId.trim() : '';
       if (!managedProviderId) {
-        return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+        return adminActionResponse(request, { errorCategory: 'invalid_request' }, 400);
       }
 
       const { data: device, error: deviceError } = await client
         .from('devices')
-        .select('id,status,managed_provider_id')
+        .select('id,status,managed_provider_id,last_seen_at')
         .eq('id', deviceId)
         .maybeSingle();
       if (deviceError || !device) {
-        return jsonResponse({ errorCategory: 'device_not_found' }, 400);
+        return adminActionResponse(request, { errorCategory: 'device_not_found' }, 400);
       }
       if (['revoked', 'disabled'].includes(String(device.status ?? ''))) {
-        return jsonResponse({ errorCategory: 'device_blocked' }, 400);
+        return adminActionResponse(request, { errorCategory: 'device_blocked' }, 400);
       }
 
       const { data: provider, error: providerError } = await client
@@ -193,14 +219,14 @@ Deno.serve(async (request) => {
         .eq('id', managedProviderId)
         .maybeSingle();
       if (providerError || !provider) {
-        return jsonResponse({ errorCategory: 'provider_not_found' }, 400);
+        return adminActionResponse(request, { errorCategory: 'provider_not_found' }, 400);
       }
       if (String(provider.status ?? '') !== 'active') {
-        return jsonResponse({ errorCategory: 'provider_inactive' }, 400);
+        return adminActionResponse(request, { errorCategory: 'provider_inactive' }, 400);
       }
 
       if (device.managed_provider_id === managedProviderId) {
-        return jsonResponse({
+        return adminActionResponse(request, {
           ok: true,
           managedProviderId,
           providerName: provider.display_name,
@@ -220,21 +246,25 @@ Deno.serve(async (request) => {
         .eq('device_id', deviceId)
         .eq('status', 'active');
       if (supersedeError) {
-        return jsonResponse(
+        return adminActionResponse(request,
           { errorCategory: 'assignment_update_failed', detail: supersedeError.message },
           500,
         );
       }
 
-      const { error: insertError } = await client.from('device_provider_assignments').insert({
-        device_id: deviceId,
-        managed_provider_id: managedProviderId,
-        content_policy: contentPolicy,
-        status: 'active',
-      });
-      if (insertError) {
-        return jsonResponse(
-          { errorCategory: 'assignment_create_failed', detail: insertError.message },
+      const { data: createdAssignment, error: insertError } = await client
+        .from('device_provider_assignments')
+        .insert({
+          device_id: deviceId,
+          managed_provider_id: managedProviderId,
+          content_policy: contentPolicy,
+          status: 'active',
+        })
+        .select('id,assigned_at,managed_provider_id')
+        .single();
+      if (insertError || !createdAssignment) {
+        return adminActionResponse(request,
+          { errorCategory: 'assignment_create_failed', detail: insertError?.message ?? null },
           500,
         );
       }
@@ -248,7 +278,7 @@ Deno.serve(async (request) => {
         })
         .eq('id', deviceId);
       if (deviceUpdateError) {
-        return jsonResponse(
+        return adminActionResponse(request,
           { errorCategory: 'device_update_failed', detail: deviceUpdateError.message },
           500,
         );
@@ -265,32 +295,48 @@ Deno.serve(async (request) => {
         .eq('status', 'active');
 
       // Queue a config push so the TV re-downloads credentials for the new provider.
-      await client.from('device_commands').insert({
-        device_id: deviceId,
-        command: 'push_configuration',
-        payload: {
-          reason: 'admin_assign_provider',
-          managedProviderId,
-          contentPolicy,
-          redownloadProvider: true,
-        },
-        status: 'pending',
-        created_by: user.id,
+      const { data: queuedCommand } = await client
+        .from('device_commands')
+        .insert({
+          device_id: deviceId,
+          command: 'push_configuration',
+          payload: {
+            reason: 'admin_assign_provider',
+            managedProviderId,
+            assignmentId: createdAssignment.id,
+            contentPolicy,
+            redownloadProvider: true,
+          },
+          status: 'pending',
+          created_by: user.id,
+        })
+        .select('id')
+        .single();
+
+      await broadcastDeviceAssignmentChanged({
+        deviceId,
+        assignmentId: createdAssignment.id,
+        managedProviderId,
+        assignedAt: createdAssignment.assigned_at ?? now,
       });
 
-      return jsonResponse({
+      return adminActionResponse(request, {
         ok: true,
         managedProviderId,
         providerName: provider.display_name,
         contentPolicy,
+        assignmentId: createdAssignment.id,
+        assignedAt: createdAssignment.assigned_at ?? now,
+        assignmentCommandId: queuedCommand?.id ?? null,
+        deviceOnline: isAdminDeviceOnline(device.last_seen_at, device.status),
         unchanged: false,
       });
     }
 
-    return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+    return adminActionResponse(request, { errorCategory: 'invalid_request' }, 400);
   } catch (error) {
     const category =
       error instanceof Error && error.message === 'admin_unauthorized' ? error.message : 'admin_update_failed';
-    return jsonResponse({ errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);
+    return adminActionResponse(request, { errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);
   }
 });

@@ -1,4 +1,4 @@
-import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
+import { adminJsonResponse, adminOptionsResponse, readJson } from '../_shared/http.ts';
 import { requireAdmin } from '../_shared/admin.ts';
 import { decryptSecret, encryptSecret, normalizeProviderUrl } from '../_shared/security.ts';
 import {
@@ -155,17 +155,17 @@ function canActivateRow(row: ManagedProviderRow) {
 }
 
 Deno.serve(async (request) => {
-  if (request.method === 'OPTIONS') return optionsResponse();
+  if (request.method === 'OPTIONS') return adminOptionsResponse(request);
 
   try {
     const { client } = await requireAdmin(request);
 
     if (request.method === 'GET') {
-      return jsonResponse({ providers: await loadPublicProviders(client) });
+      return adminJsonResponse(request, { providers: await loadPublicProviders(client) });
     }
 
     if (request.method !== 'POST' && request.method !== 'PATCH') {
-      return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
+      return adminJsonResponse(request, { errorCategory: 'method_not_allowed' }, 405);
     }
 
     const body = await readJson(request);
@@ -174,7 +174,7 @@ Deno.serve(async (request) => {
     if (action === 'probe') {
       const credentials = await readXtreamCredentials(body?.credentials);
       const summary = await runProviderHealthCheck(credentials);
-      return jsonResponse({
+      return adminJsonResponse(request, {
         summary: sanitizeHealthSummary(summary, credentials.username, credentials.password),
         persisted: false,
       });
@@ -198,7 +198,7 @@ Deno.serve(async (request) => {
         const patch = healthColumns(summary, credentials.username, credentials.password, row.last_successful_test_at ?? null);
         const { error } = await client.from('managed_providers').update(patch).eq('id', id);
         if (error) throw new Error('admin_update_failed');
-        return jsonResponse({ ok: true, summary: patch.last_health_summary, providerId: id });
+        return adminJsonResponse(request, { ok: true, summary: patch.last_health_summary, providerId: id });
       } catch (error) {
         const failedAt = new Date().toISOString();
         await client
@@ -233,7 +233,7 @@ Deno.serve(async (request) => {
       const now = new Date().toISOString();
       const { error } = await client.from('managed_providers').update({ status: 'active', updated_at: now }).eq('id', id);
       if (error) throw new Error('admin_update_failed');
-      return jsonResponse({ ok: true, status: 'active' });
+      return adminJsonResponse(request, { ok: true, status: 'active' });
     }
 
     if (action === 'disable') {
@@ -242,7 +242,7 @@ Deno.serve(async (request) => {
       const now = new Date().toISOString();
       const { error } = await client.from('managed_providers').update({ status: 'paused', updated_at: now }).eq('id', id);
       if (error) throw new Error('admin_update_failed');
-      return jsonResponse({ ok: true, status: 'paused' });
+      return adminJsonResponse(request, { ok: true, status: 'paused' });
     }
 
     if (request.method === 'PATCH' || action === 'update') {
@@ -284,7 +284,7 @@ Deno.serve(async (request) => {
 
       const { error } = await client.from('managed_providers').update(patch).eq('id', id);
       if (error) throw new Error('admin_update_failed');
-      return jsonResponse({ ok: true, validationStale: Boolean(patch.validation_stale) });
+      return adminJsonResponse(request, { ok: true, validationStale: Boolean(patch.validation_stale) });
     }
 
     const displayName = String(body?.displayName ?? '').trim().slice(0, 120);
@@ -324,15 +324,15 @@ Deno.serve(async (request) => {
           if (eligible) Object.assign(patch, { status: 'active' });
           await client.from('managed_providers').update(patch).eq('id', data.id);
           if (!eligible) {
-            return jsonResponse(
+            return adminJsonResponse(request,
               { errorCategory: 'activation_blocked', provider: { ...data, ...patch, status: 'draft' }, summary: patch.last_health_summary },
               409,
             );
           }
-          return jsonResponse({ provider: { ...data, ...patch, status: 'active' }, summary: patch.last_health_summary });
+          return adminJsonResponse(request, { provider: { ...data, ...patch, status: 'active' }, summary: patch.last_health_summary });
         }
         await client.from('managed_providers').update(patch).eq('id', data.id);
-        return jsonResponse({ provider: { ...data, ...patch }, summary: patch.last_health_summary });
+        return adminJsonResponse(request, { provider: { ...data, ...patch }, summary: patch.last_health_summary });
       } catch (error) {
         const failedAt = new Date().toISOString();
         await client
@@ -356,9 +356,9 @@ Deno.serve(async (request) => {
       }
     }
 
-    return jsonResponse({ provider: data });
+    return adminJsonResponse(request, { provider: data });
   } catch (error) {
     const category = mapError(error);
-    return jsonResponse({ errorCategory: category }, statusCodeFor(category));
+    return adminJsonResponse(request, { errorCategory: category }, statusCodeFor(category));
   }
 });

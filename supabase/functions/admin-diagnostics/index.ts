@@ -1,31 +1,7 @@
 import { requireAdmin } from '../_shared/admin.ts';
-import { corsHeaders } from '../_shared/http.ts';
+import { adminJsonResponse, adminOptionsResponse } from '../_shared/http.ts';
 
-// TEMPORARY: admin diagnostics is called by both production and beta admin UIs.
-const APPROVED_ADMIN_ORIGINS = new Set([
-  'https://novacast-connect.netlify.app',
-  'https://beta-rolling-download--novacast-connect.netlify.app',
-]);
-
-function adminCorsHeaders(request: Request) {
-  const headers: Record<string, string> = { ...corsHeaders, Vary: 'Origin' };
-  delete headers['Access-Control-Allow-Origin'];
-
-  const origin = request.headers.get('origin');
-  if (origin && APPROVED_ADMIN_ORIGINS.has(origin)) {
-    headers['Access-Control-Allow-Origin'] = origin;
-  }
-
-  return headers;
-}
-
-function adminResponse(request: Request, body: Record<string, unknown>, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: adminCorsHeaders(request) });
-}
-
-function adminOptionsResponse(request: Request) {
-  return new Response('ok', { headers: adminCorsHeaders(request) });
-}
+const adminResponse = adminJsonResponse;
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return adminOptionsResponse(request);

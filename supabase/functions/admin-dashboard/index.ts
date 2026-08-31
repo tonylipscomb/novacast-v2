@@ -1,9 +1,9 @@
-import { jsonResponse, optionsResponse } from '../_shared/http.ts';
+import { adminJsonResponse, adminOptionsResponse } from '../_shared/http.ts';
 import { requireAdmin } from '../_shared/admin.ts';
 
 Deno.serve(async (request) => {
-  if (request.method === 'OPTIONS') return optionsResponse();
-  if (request.method !== 'GET') return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
+  if (request.method === 'OPTIONS') return adminOptionsResponse(request);
+  if (request.method !== 'GET') return adminJsonResponse(request, { errorCategory: 'method_not_allowed' }, 405);
 
   try {
     const { client } = await requireAdmin(request);
@@ -51,7 +51,7 @@ Deno.serve(async (request) => {
     }
     const currentBetaBuild = [...builds.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 
-    return jsonResponse({
+    return adminJsonResponse(request, {
       serverTime: nowIso,
       dashboard: {
         devicesOnline: online,
@@ -74,6 +74,6 @@ Deno.serve(async (request) => {
   } catch (error) {
     const category =
       error instanceof Error && error.message === 'admin_unauthorized' ? error.message : 'admin_request_failed';
-    return jsonResponse({ errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);
+    return adminJsonResponse(request, { errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);
   }
 });

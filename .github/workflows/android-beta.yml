@@ -189,7 +189,12 @@ jobs:
 
           CERT_OUTPUT="$($APKSIGNER verify --verbose --print-certs "$APK_PATH")"
           echo "$CERT_OUTPUT"
-          ACTUAL_CERT="$(printf '%s\n' "$CERT_OUTPUT" | awk -F': ' '/Signer #1 certificate SHA-256 digest:/{print $2; exit}' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          ACTUAL_CERT="$(
+            printf '%s\n' "$CERT_OUTPUT" |
+            awk -F': ' '/certificate SHA-256 digest:/{print $NF; exit}' |
+            tr -d ':[:space:]' |
+            tr '[:lower:]' '[:upper:]'
+          )"
           EXPECTED_CERT="$(printf '%s' "$NOVACAST_RELEASE_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
           [[ -n "$ACTUAL_CERT" && "$ACTUAL_CERT" == "$EXPECTED_CERT" ]] || {
             echo "::error::APK certificate does not match the required production certificate"

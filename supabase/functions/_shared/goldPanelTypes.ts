@@ -8,6 +8,7 @@ export type GoldAccountCredentials = {
 };
 
 export type GoldPackage = { id: string; name: string };
+export type GoldPackagesResult = { packages: GoldPackage[]; emptyReason?: 'no_custom_bouquets' };
 
 export type GoldAccountInfo = {
   goldUserId: string | null;

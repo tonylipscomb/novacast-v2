@@ -81,8 +81,8 @@ Deno.serve(async (request) => {
     if (request.method === 'GET') return adminJsonResponse(request, { accounts: await listAccounts(client) });
     if (request.method !== 'POST') return adminJsonResponse(request, { errorCategory: 'method_not_allowed' }, 405);
     const body = await readJson(request); const action = String(body?.action ?? '');
-    if (action === 'reseller') return adminJsonResponse(request, { reseller: await getReseller() });
-    if (action === 'packages') return adminJsonResponse(request, { packages: await getPackages() });
+    if (action === 'reseller') return adminJsonResponse(request, { success: true, reseller: await getReseller() });
+    if (action === 'packages') return adminJsonResponse(request, { success: true, ...(await getPackages()) });
     if (action === 'list_accounts') return adminJsonResponse(request, { accounts: await listAccounts(client) });
     if (action === 'route_health') return adminJsonResponse(request, { route: await checkGoldRoute(String(body?.domain ?? '')) });
 

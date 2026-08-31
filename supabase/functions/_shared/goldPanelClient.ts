@@ -1,4 +1,4 @@
-import type { GoldAccountCredentials, GoldAccountInfo, GoldPackage, GoldReseller, GoldRouteHealth } from './goldPanelTypes.ts';
+import type { GoldAccountCredentials, GoldAccountInfo, GoldPackagesResult, GoldPackage, GoldReseller, GoldRouteHealth } from './goldPanelTypes.ts';
 import { sanitizeGoldError, sanitizeGoldText } from './goldPanelSanitization.ts';
 
 const DEFAULT_API_URL = 'https://8k.cms-only.ru/api/api.php';
@@ -48,7 +48,11 @@ export function goldApiUrl() {
   return (Deno.env.get('GOLD_PANEL_API_URL') || DEFAULT_API_URL).trim();
 }
 
-async function request(params: Record<string, string>, timeoutMs = 12_000): Promise<unknown> {
+async function request(
+  params: Record<string, string>,
+  timeoutMs = 12_000,
+  options: { validateOperationStatus?: boolean } = {},
+): Promise<unknown> {
   const apiKey = Deno.env.get('GOLD_PANEL_API_KEY');
   if (!apiKey) throw new GoldPanelError('gold_configuration_error', 'Gold Panel API key is not configured.', 500);
   const url = new URL(goldApiUrl());
@@ -62,7 +66,9 @@ async function request(params: Record<string, string>, timeoutMs = 12_000): Prom
     let payload: unknown;
     try { payload = JSON.parse(text); } catch { throw new GoldPanelError('gold_invalid_response', 'Gold Panel returned malformed JSON.'); }
     if (!response.ok) throw new GoldPanelError('gold_http_failure', `Gold Panel HTTP ${response.status}.`, 502);
-    if (!success(payload)) throw new GoldPanelError('gold_operation_failed', responseText(payload, [apiKey]));
+    if (options.validateOperationStatus !== false && !success(payload)) {
+      throw new GoldPanelError('gold_operation_failed', responseText(payload, [apiKey]));
+    }
     return payload;
   } catch (error) {
     if (error instanceof GoldPanelError) throw error;
@@ -77,11 +83,38 @@ export async function getReseller(): Promise<GoldReseller> {
   return { username: sanitizeGoldText(reseller.username, 128), credits: number(reseller.credits), enabled: bool(reseller.enabled) };
 }
 
-export async function getPackages(): Promise<GoldPackage[]> {
-  const payload = await request({ action: 'bouquet' });
-  const row = asRecord(payload);
-  const raw = Array.isArray(row.packages) ? row.packages : Array.isArray(payload) ? payload : [];
-  return raw.map(asRecord).map((item) => ({ id: String(item.id ?? item.package_id ?? '').trim(), name: sanitizeGoldText(item.name ?? item.package_name, 160) ?? '' })).filter((item) => item.id && item.name);
+export async function getPackages(): Promise<GoldPackagesResult> {
+  const payload = await request({ action: 'bouquet' }, 12_000, { validateOperationStatus: false });
+  if (!Array.isArray(payload)) {
+    const row = asRecord(payload);
+    const statusIsError = typeof row.status === 'string' && row.status.trim().toLowerCase() === 'error';
+    const emptyCustomBouquet = statusIsError && ['result', 'message'].some((key) => (
+      typeof row[key] === 'string' && row[key].trim().toLowerCase() === 'empty custom bouquet'
+    ));
+    if (emptyCustomBouquet) return { packages: [], emptyReason: 'no_custom_bouquets' };
+    const hasGoldError =
+      statusIsError ||
+      bool(row.success) === false ||
+      bool(row.status) === false ||
+      ['error', 'message', 'msg'].some((key) => typeof row[key] === 'string' && row[key].trim());
+    throw new GoldPanelError(
+      hasGoldError ? 'gold_operation_failed' : 'gold_packages_invalid_response',
+      hasGoldError
+        ? responseText(payload, [Deno.env.get('GOLD_PANEL_API_KEY') ?? ''])
+        : 'Gold Panel returned an invalid package response.',
+      502,
+    );
+  }
+  const packages = payload
+    .map((value) => {
+      const item = asRecord(value);
+      const rawId = item.id ?? item.package_id;
+      const rawName = item.name ?? item.package_name;
+      if (!((typeof rawId === 'string' || typeof rawId === 'number') && typeof rawName === 'string')) return null;
+      return { id: String(rawId).trim(), name: sanitizeGoldText(rawName, 160) ?? '' };
+    })
+    .filter((item): item is GoldPackage => Boolean(item?.id && item.name));
+  return { packages };
 }
 
 export function parseM3uUrl(value: unknown): GoldAccountCredentials {

@@ -117,6 +117,9 @@ function healthColumns(summary: ProviderHealthSummary, username: string, passwor
 async function loadPublicProviders(client: Awaited<ReturnType<typeof requireAdmin>>['client']) {
   const { data, error } = await client.from('managed_providers').select(PROVIDER_SELECT).order('created_at', { ascending: false });
   if (error) throw new Error('admin_query_failed');
+  const { data: goldAccounts, error: goldError } = await client.from('gold_panel_accounts').select('managed_provider_id,gold_user_id,gold_package_name,gold_country,gold_expiration,gold_enabled,last_synced_at,route_mode,route_domain');
+  if (goldError && !isMissingGoldMetadataError(goldError)) throw new Error('admin_query_failed');
+  const goldByProvider = new Map((goldAccounts ?? []).map((account) => [account.managed_provider_id, account]));
   const providers = [];
   for (const provider of data ?? []) {
     const { count } = await client
@@ -124,9 +127,15 @@ async function loadPublicProviders(client: Awaited<ReturnType<typeof requireAdmi
       .select('id', { count: 'exact', head: true })
       .eq('managed_provider_id', provider.id)
       .eq('status', 'active');
-    providers.push({ ...provider, assignedDevices: count ?? 0 });
+    providers.push({ ...provider, assignedDevices: count ?? 0, goldAccount: goldByProvider.get(provider.id) ?? null });
   }
   return providers;
+}
+
+function isMissingGoldMetadataError(error: unknown) {
+  const value = error as { code?: string; message?: string };
+  const message = String(value?.message ?? '').toLowerCase();
+  return value?.code === '42P01' || value?.code === 'PGRST205' || message.includes('does not exist') || message.includes('schema cache') || message.includes('could not find the table');
 }
 
 async function loadProvider(client: Awaited<ReturnType<typeof requireAdmin>>['client'], id: string, withSecrets = false) {

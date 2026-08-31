@@ -51,3 +51,6 @@ verify_jwt = false
 
 [functions.admin-commands]
 verify_jwt = false
+
+[functions.admin-gold-panel]
+verify_jwt = false

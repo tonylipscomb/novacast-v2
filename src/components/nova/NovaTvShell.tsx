@@ -17,7 +17,11 @@ import { NovaScreen } from '@/components/nova/NovaScreen';
 import { getTvDensity } from '@/components/nova/tvDensity';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { noteFocusLifecycleEvent, recordFocusAudit } from '@/features/navigation/focusRequestAudit';
-import { shouldArmNavbarPreferredFocus } from '@/features/navigation/navbarInitialFocus';
+import {
+  isFullScreenLayout,
+  shouldArmNavbarPreferredFocus,
+  shouldRestoreStartupFocus,
+} from '@/features/navigation/navbarInitialFocus';
 import { markCatalogAuditFocus, markCatalogAuditRender } from '@/features/diagnostics/novaCastCatalogAudit';
 import { noteFocusLatencyFocus } from '@/features/diagnostics/focusLatencyAudit';
 import { useStartupVisualInteractive } from '@/features/startup/startupVisualGate';
@@ -120,6 +124,12 @@ type NovaTvShellProps = PropsWithChildren<{
   navigationNextFocusRight?: Partial<Record<NavigationId, number>>;
   /** When set, Down from every nav item jumps to this native handle. */
   navigationContentFocusHandle?: number;
+  startupFocusRestore?: {
+    providerBootstrapTerminal: boolean;
+    layout: { width: number; height: number } | null;
+    windowSize: { width: number; height: number };
+    userInteracted: boolean;
+  };
   showNavigationRail?: boolean;
   compactNavigationRail?: boolean;
 }>;
@@ -138,6 +148,7 @@ export function NovaTvShell({
   onNavigationItemFocus,
   navigationNextFocusRight,
   navigationContentFocusHandle,
+  startupFocusRestore,
   showNavigationRail = true,
   compactNavigationRail = false,
   children,
@@ -181,6 +192,10 @@ export function NovaTvShell({
   const lastNavHandlesJson = useRef('');
   const lastNavbarFocusGraphJson = useRef('');
   const preferredFocusConsumedRef = useRef(false);
+  const startupFocusRestoreRequestedRef = useRef(false);
+  const startupFocusSkipLoggedRef = useRef(false);
+  const startupFocusFinalLayoutLoggedRef = useRef(false);
+  const startupFocusUserInteractionLoggedRef = useRef(false);
   const navbarPreferredFocus = navigationFocusable && preferActiveNavigationFocus && !suppressNavbarPreferredFocus;
   useEffect(() => {
     const committedAt = Date.now();
@@ -233,6 +248,51 @@ export function NovaTvShell({
       }
     }
   }, [activeId, navbarPreferredFocus]);
+
+  useEffect(() => {
+    if (!startupFocusRestore || activeId !== 'home') return;
+    const fullScreenLayout = startupFocusRestore.layout
+      ? isFullScreenLayout({ ...startupFocusRestore.layout, windowWidth: startupFocusRestore.windowSize.width, windowHeight: startupFocusRestore.windowSize.height })
+      : false;
+    const details = {
+      activeId,
+      currentNativeFocusTarget: focusedId,
+      rootWidth: startupFocusRestore.layout?.width ?? null,
+      rootHeight: startupFocusRestore.layout?.height ?? null,
+      providerBootstrapTerminal: startupFocusRestore.providerBootstrapTerminal,
+      userInteracted: startupFocusRestore.userInteracted,
+      shellInstanceId,
+    };
+    if (startupFocusRestore.userInteracted && !startupFocusUserInteractionLoggedRef.current) {
+      startupFocusUserInteractionLoggedRef.current = true;
+      if (__DEV__) console.info('[NovaCast Startup Focus]', { event: 'startup-focus-user-interacted', ...details });
+    }
+    if (startupFocusRestore.providerBootstrapTerminal && fullScreenLayout && !startupFocusFinalLayoutLoggedRef.current) {
+      startupFocusFinalLayoutLoggedRef.current = true;
+      if (__DEV__) console.info('[NovaCast Startup Focus]', { event: 'startup-focus-final-layout-ready', ...details });
+    }
+    if (startupFocusRestore.userInteracted && fullScreenLayout && !startupFocusSkipLoggedRef.current) {
+      startupFocusSkipLoggedRef.current = true;
+      if (__DEV__) console.info('[NovaCast Startup Focus]', { event: 'startup-focus-restore-skipped', ...details, reason: 'user-interacted' });
+      return;
+    }
+    if (!shouldRestoreStartupFocus({
+      activeId,
+      providerBootstrapTerminal: startupFocusRestore.providerBootstrapTerminal,
+      fullScreenLayout,
+      userInteracted: startupFocusRestore.userInteracted,
+      restoreRequested: startupFocusRestoreRequestedRef.current,
+    })) return;
+    startupFocusRestoreRequestedRef.current = true;
+    if (__DEV__) console.info('[NovaCast Startup Focus]', { event: 'startup-focus-restore-requested', ...details });
+    const target = navItemRefs.current.home;
+    if (!target) {
+      if (__DEV__) console.info('[NovaCast Startup Focus]', { event: 'startup-focus-restore-skipped', ...details, reason: 'home-target-unavailable' });
+      return;
+    }
+    target.focus();
+    if (__DEV__) console.info('[NovaCast Startup Focus]', { event: 'startup-focus-restored', ...details, currentNativeFocusTarget: 'home' });
+  }, [activeId, focusedId, shellInstanceId, startupFocusRestore]);
   useEffect(() => {
     const surface = activeId === 'live' || activeId === 'movies' || activeId === 'series' ? activeId : 'other';
     setCatalogUiSurface(surface);
@@ -416,6 +476,7 @@ export function NovaTvShell({
           markCatalogAuditFocus(`nav:${item.id}`);
           noteFocusLatencyFocus(`nav:${item.id}`);
           setFocusedId(item.id);
+          logFocusVisualAudit({ event: 'focused-style-selected', activeId, focusedId: item.id, itemId: item.id });
           onNavigationItemFocus?.(item.id);
         }}
         onBlur={() => {

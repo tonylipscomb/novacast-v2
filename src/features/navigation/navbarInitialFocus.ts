@@ -7,6 +7,28 @@ export const NAVBAR_SURFACE_ALPHA = 0.74;
 export const NAVBAR_SURFACE_FILL = `rgba(7, 9, 22, ${NAVBAR_SURFACE_ALPHA})`;
 export const NAVBAR_FOCUS_RETRY_LIMIT = 4;
 
+export function isFullScreenLayout(input: {
+  width: number;
+  height: number;
+  windowWidth: number;
+  windowHeight: number;
+  tolerance?: number;
+}): boolean {
+  const tolerance = input.tolerance ?? 1;
+  return input.width >= input.windowWidth - tolerance && input.height >= input.windowHeight - tolerance;
+}
+
+export function shouldRestoreStartupFocus(input: {
+  activeId: string;
+  providerBootstrapTerminal: boolean;
+  fullScreenLayout: boolean;
+  userInteracted: boolean;
+  restoreRequested: boolean;
+}): boolean {
+  return input.activeId === 'home' && input.providerBootstrapTerminal && input.fullScreenLayout
+    && !input.userInteracted && !input.restoreRequested;
+}
+
 export function shouldArmNavbarPreferredFocus(input: {
   preferActiveNavigationFocus: boolean;
   suppressNavbarPreferredFocus: boolean;

@@ -321,10 +321,14 @@ export function StartupGate() {
         />;
   }
 
-  return <StartupHomeShell label="" showHome />;
+  return <StartupHomeShell label="" showHome startupProviderBootstrapTerminal={!bootstrapping && providerInitialized} />;
 }
 
-function StartupHomeShell({ label, showHome }: { label: string; showHome: boolean }) {
+function StartupHomeShell({ label, showHome, startupProviderBootstrapTerminal = false }: {
+  label: string;
+  showHome: boolean;
+  startupProviderBootstrapTerminal?: boolean;
+}) {
   useLayoutEffect(() => {
     if (showHome) {
       markCatalogInteractiveUiReady();
@@ -340,7 +344,7 @@ function StartupHomeShell({ label, showHome }: { label: string; showHome: boolea
 
   return (
     <View style={styles.startupShell}>
-      {showHome ? <MainMenuScreen /> : null}
+      {showHome ? <MainMenuScreen startupProviderBootstrapTerminal={startupProviderBootstrapTerminal} /> : null}
       <View pointerEvents="none" focusable={false} style={[styles.startupStatus, showHome && styles.startupStatusHome]}>
         {label ? <NovaSpaceLoader label={label} /> : null}
       </View>

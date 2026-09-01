@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { findNodeHandle, Pressable, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
+import { findNodeHandle, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import * as ReactNative from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -101,7 +101,7 @@ function logHomePresentationAudit(event: string, fields: Record<string, unknown>
   }
 }
 
-export function MainMenuScreen() {
+export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { startupProviderBootstrapTerminal?: boolean }) {
   markCatalogAuditRender('MainMenuScreen');
   const homeRenderCountRef = useRef(0);
   homeRenderCountRef.current += 1;
@@ -114,7 +114,8 @@ export function MainMenuScreen() {
   const router = useRouter();
   const navigationGateRef = useRef(createTvNavigationGate());
   const { selectedProvider } = useProviderStore();
-  const { bundle } = useActiveProviderBundle();
+  const { bundle, generation: providerBundleGeneration } = useActiveProviderBundle();
+  const windowSize = useWindowDimensions();
   const { isActive: playbackActive, isClosing: playbackClosing, launchPlayback } = useUnifiedPlayer();
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.hub.key);
   const exitConfirm = useExitConfirmOnBack(!playbackActive && !playbackClosing && !guide.visible);
@@ -131,6 +132,8 @@ export function MainMenuScreen() {
     favoriteSeries: [] as SeriesSummary[],
     recentlyWatched: [] as RecentItemRecord[],
   }));
+  const [startupFocusLayout, setStartupFocusLayout] = useState<{ width: number; height: number } | null>(null);
+  const [startupFocusUserInteracted, setStartupFocusUserInteracted] = useState(false);
   const watchlistItems = personalization.providerId === activeProviderId
     ? [
         ...personalization.watchlistMovies.map((item) => ({ kind: 'movie' as const, item })),
@@ -302,6 +305,9 @@ export function MainMenuScreen() {
   };
   const useTVEventHandler = reactNativeTv.useTVEventHandler ?? ((_handler: (event: { eventType?: string }) => void) => {});
   useTVEventHandler((event: { eventType?: string }) => {
+    if (event.eventType && event.eventType !== 'focus' && event.eventType !== 'blur') {
+      setStartupFocusUserInteracted(true);
+    }
     if (event.eventType !== 'right' && event.eventType !== 'swipeRight') {
       return;
     }
@@ -383,7 +389,7 @@ export function MainMenuScreen() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeProviderId, bundle]);
+  }, [activeProviderId, bundle, providerBundleGeneration]);
 
   useEffect(() => {
     let cancelled = false;
@@ -418,7 +424,7 @@ export function MainMenuScreen() {
       unsubscribeMedia();
       unsubscribePersonalization();
     };
-  }, [activeProviderId, bundle]);
+  }, [activeProviderId, bundle, providerBundleGeneration]);
 
   const navigateTo = (route: '/live' | '/movies' | '/series' | '/guide') => {
     if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
@@ -793,6 +799,7 @@ export function MainMenuScreen() {
       onLayout={(event) => {
         const { width, height } = event.nativeEvent.layout;
         homeRootLayoutRef.current = { width, height };
+        setStartupFocusLayout((previous) => previous?.width === width && previous.height === height ? previous : { width, height });
         logHomePresentationAudit('home-root-layout', {
           width,
           height,
@@ -814,6 +821,12 @@ export function MainMenuScreen() {
           preferActiveNavigationFocus
           onNavigationFocusHandles={setNavFocusHandles}
           onNavigationItemFocus={setNavbarFocusedId}
+          startupFocusRestore={{
+            providerBootstrapTerminal: startupProviderBootstrapTerminal,
+            layout: startupFocusLayout,
+            windowSize,
+            userInteracted: startupFocusUserInteracted,
+          }}
           navigationContentFocusHandle={navigationContentFocusHandle}
           navigationNextFocusRight={navigationNextFocusRight}
         >

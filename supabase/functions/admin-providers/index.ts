@@ -146,6 +146,13 @@ async function loadProvider(client: Awaited<ReturnType<typeof requireAdmin>>['cl
   return data as ManagedProviderRow;
 }
 
+async function hasGoldMetadata(client: Awaited<ReturnType<typeof requireAdmin>>['client'], providerId: string) {
+  const { data, error } = await client.from('gold_panel_accounts').select('managed_provider_id').eq('managed_provider_id', providerId).maybeSingle();
+  if (error && isMissingGoldMetadataError(error)) return false;
+  if (error) throw new Error('admin_query_failed');
+  return Boolean(data);
+}
+
 function canActivateRow(row: ManagedProviderRow) {
   return canActivateFromHealth({
     healthStatus: (row.health_status ?? 'unvalidated') as ProviderHealthStatus,
@@ -184,6 +191,7 @@ Deno.serve(async (request) => {
       const id = typeof body?.id === 'string' ? body.id : '';
       if (!id) throw new Error('invalid_request');
       const row = await loadProvider(client, id, true);
+      const isGoldManaged = await hasGoldMetadata(client, id);
       if (row.health_status === 'testing') throw new Error('validation_in_progress');
       const credentials = await decryptXtream(row);
       const testingAt = new Date().toISOString();
@@ -194,7 +202,7 @@ Deno.serve(async (request) => {
       if (testingError) throw new Error('admin_update_failed');
 
       try {
-        const summary = await runProviderHealthCheck(credentials);
+        const summary = await runProviderHealthCheck(credentials, { isGoldManaged });
         const patch = healthColumns(summary, credentials.username, credentials.password, row.last_successful_test_at ?? null);
         const { error } = await client.from('managed_providers').update(patch).eq('id', id);
         if (error) throw new Error('admin_update_failed');

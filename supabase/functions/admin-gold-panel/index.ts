@@ -127,7 +127,7 @@ Deno.serve(async (request) => {
       if (error || !account) return adminJsonResponse(request, { goldCreated, goldImported, novaCastProviderCreated: true, managedProviderId: provider.id, errorCategory: 'gold_metadata_create_failed' }, 502);
       let summary = null;
       if (body?.runDiagnostics === true) {
-        const health = await runProviderHealthCheck({ baseUrl: credentials.baseUrl, username: credentials.username, password: credentials.password });
+      const health = await runProviderHealthCheck({ baseUrl: credentials.baseUrl, username: credentials.username, password: credentials.password }, { isGoldManaged: true });
         summary = sanitizeHealthSummary(health, credentials.username, credentials.password);
         await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, last_successful_test_at: canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? health.testedAt : null, validation_stale: false, last_health_summary: summary, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString(), ...(body?.activateIfHealthy === true && canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? { status: 'active' } : {}) }).eq('id', provider.id);
       }
@@ -140,7 +140,7 @@ Deno.serve(async (request) => {
     if (action === 'account_info' || action === 'sync_account') return adminJsonResponse(request, { account: await syncAccount(client, account) });
     if (action === 'run_diagnostics') {
       const credentials = await providerCredentials(client, account.managed_provider_id);
-      const health = await runProviderHealthCheck(credentials);
+      const health = await runProviderHealthCheck(credentials, { isGoldManaged: true });
       const safeHealth = sanitizeHealthSummary(health, credentials.username, credentials.password);
       await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, validation_stale: false, last_health_summary: safeHealth, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString() }).eq('id', account.managed_provider_id);
       return adminJsonResponse(request, { summary: safeHealth, account });

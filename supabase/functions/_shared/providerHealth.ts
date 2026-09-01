@@ -50,6 +50,8 @@ export const NOVACAST_STREAM_PROBE_UA = 'ExoPlayerLib/2.18.1 (Linux; Android 12)
 export type ProviderHealthSummary = {
   overall: ProviderHealthStatus;
   overallLabel: string;
+  cloudPlaybackProbeRestricted?: boolean;
+  cloudPlaybackProbeReason?: 'gold_cloud_probe_restricted';
   testedAt: string;
   durationMs: number;
   checks: ProviderHealthCheck[];
@@ -544,6 +546,24 @@ export function aggregateStreamProbeCheck(input: {
     severity: 'noncritical',
     detail: `${counts} sampled streams responded.`,
   };
+}
+
+export function isGoldCloudProbeRestricted(input: {
+  isGoldManaged: boolean;
+  checks: ProviderHealthCheck[];
+  probes: StreamProbeResult[];
+  catalogs?: ProviderHealthSummary['catalogs'];
+}) {
+  if (!input.isGoldManaged || !input.probes.length || input.probes.some((probe) => probe.ok)) return false;
+  if (input.probes.some((probe) => probe.httpStatus !== 404 && probe.httpStatus !== 511)) return false;
+  const playback = input.checks.find((check) => check.id === 'playback');
+  if (!playback || playback.verdict !== 'fail') return false;
+  const coreIds = ['server', 'authentication', 'live-catalog', 'compatibility'];
+  if (coreIds.some((id) => input.checks.find((check) => check.id === id)?.verdict !== 'pass')) return false;
+  if (input.checks.some((check) => check.id !== 'playback' && check.verdict === 'fail')) return false;
+  const catalog = input.catalogs;
+  if (!catalog || (catalog.liveChannels ?? 0) + (catalog.movies ?? 0) + (catalog.series ?? 0) <= 0) return false;
+  return true;
 }
 
 export function catalogItemId(value: unknown) {

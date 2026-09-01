@@ -14,6 +14,8 @@ type Row = Record<string, unknown>;
 type Summary = {
   overall?: string;
   overallLabel?: string;
+  cloudPlaybackProbeRestricted?: boolean;
+  cloudPlaybackProbeReason?: string;
   testedAt?: string;
   durationMs?: number;
   checks?: Array<Record<string, unknown>>;
@@ -295,6 +297,7 @@ export function AdminProviders({
                 <p>Last successful: {formatTimestamp(provider.last_successful_test_at)}</p>
                 {provider.goldAccount ? <p className="providerNote">Gold: {String((provider.goldAccount as Row).gold_country ?? '—') === 'ALL' ? 'ALL — VPN / All Countries' : String((provider.goldAccount as Row).gold_country ?? '—')} · expires {String((provider.goldAccount as Row).gold_expiration ?? 'unknown')}</p> : null}
                 {summary?.overallLabel ? <p className="providerNote">{String(summary.overallLabel)}</p> : null}
+                {summary?.cloudPlaybackProbeRestricted ? <p className="providerNote">Cloud playback probe restricted. Device playback test recommended.</p> : null}
                 {testing ? <ProgressPanel elapsed={elapsed} /> : null}
                 <footer>
                   <button disabled={busy} onClick={() => void runTest(id)}>{testing ? 'Testing…' : 'Retest'}</button>
@@ -470,6 +473,7 @@ function DiagnosticsBody({ summary, compact = false }: { summary: Summary | null
         OVERALL {String(summary.overall ?? 'unknown').toUpperCase()}
       </div>
       {summary.overallLabel ? <p>{summary.overallLabel}</p> : null}
+      {summary.cloudPlaybackProbeRestricted ? <p>Xtream authentication and catalogs passed, but server-side playback probes were restricted. Device playback test recommended.</p> : null}
       <ul>
         {checks.map((check) => {
           const verdict = String(check.verdict ?? 'skip');

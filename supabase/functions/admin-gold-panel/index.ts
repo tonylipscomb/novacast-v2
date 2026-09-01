@@ -102,7 +102,10 @@ Deno.serve(async (request) => {
     if (action === 'create_account' || action === 'import_account') {
       let credentials: Credentials; let goldCreated = false;
       if (action === 'create_account') {
-        const sub = ['1', '3', '6', '12'].includes(String(body?.sub)) ? String(body.sub) : '';
+        const accountType = body?.accountType === 'demo' ? 'demo' : 'paid';
+        const sub = accountType === 'demo'
+          ? String(body?.sub) === '99' ? '99' : ''
+          : ['1', '3', '6', '12'].includes(String(body?.sub)) ? String(body.sub) : '';
         const pack = String(body?.packageId ?? '').trim(); const country = String(body?.country ?? 'US').trim().toUpperCase();
         if (!sub || !pack || !/^(?:ALL|[A-Z]{2})$/.test(country)) throw new GoldPanelError('invalid_request', 'Subscription, package, and country are required.', 400);
         const created = await createM3uAccount({ sub, pack, country, notes: String(body?.notes ?? '').slice(0, 500) });

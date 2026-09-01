@@ -2,21 +2,25 @@ import { assert, assertEquals, assertRejects, assertThrows } from 'jsr:@std/asse
 import { getPackages, getReseller, createM3uAccount, parseM3uUrl, GoldPanelError } from './goldPanelClient.ts';
 import { redactGoldSecrets } from './goldPanelSanitization.ts';
 
-async function withGoldResponse(payload: unknown, callback: () => Promise<void>, status = 200, action = 'bouquet') {
+async function withGoldResponse(payload: unknown, callback: (getUrl: () => URL) => Promise<void>, status = 200, action = 'bouquet') {
   const previousDeno = globalThis.Deno;
   const previousFetch = globalThis.fetch;
+  let requestedUrl: URL | null = null;
   Object.defineProperty(globalThis, 'Deno', {
     configurable: true,
     value: { env: { get: (name: string) => name === 'GOLD_PANEL_API_KEY' ? 'test-api-key' : undefined } },
   });
   globalThis.fetch = async (input) => {
-    const url = new URL(String(input));
-    assertEquals(url.searchParams.get('action'), action);
-    assertEquals(url.searchParams.get('api_key'), 'test-api-key');
+    requestedUrl = new URL(String(input));
+    assertEquals(requestedUrl.searchParams.get('action'), action);
+    assertEquals(requestedUrl.searchParams.get('api_key'), 'test-api-key');
     return new Response(JSON.stringify(payload), { status });
   };
   try {
-    await callback();
+    await callback(() => {
+      if (!requestedUrl) throw new Error('Gold request was not made');
+      return requestedUrl;
+    });
   } finally {
     Object.defineProperty(globalThis, 'Deno', { configurable: true, value: previousDeno });
     globalThis.fetch = previousFetch;
@@ -47,22 +51,22 @@ Deno.test('normalizes the documented bouquet response', async () => {
     { id: '132', name: 'SMALL - ARABIC' },
     { id: '152', name: 'Canada without adult' },
   ], async () => {
-    assertEquals(await getPackages(), [
+    assertEquals(await getPackages(), { packages: [
       { id: '132', name: 'SMALL - ARABIC' },
       { id: '152', name: 'Canada without adult' },
-    ]);
+    ] });
   });
 });
 
 Deno.test('normalizes numeric bouquet ids', async () => {
   await withGoldResponse([{ id: 132, name: 'Package' }], async () => {
-    assertEquals(await getPackages(), [{ id: '132', name: 'Package' }]);
+    assertEquals(await getPackages(), { packages: [{ id: '132', name: 'Package' }] });
   });
 });
 
 Deno.test('accepts an empty bouquet response', async () => {
   await withGoldResponse([], async () => {
-    assertEquals(await getPackages(), []);
+    assertEquals(await getPackages(), { packages: [] });
   });
 });
 
@@ -92,7 +96,7 @@ Deno.test('sanitizes Gold bouquet error objects', async () => {
 
 Deno.test('accepts bouquet packages without a status field', async () => {
   await withGoldResponse([{ id: '1', name: 'No status package' }], async () => {
-    assertEquals(await getPackages(), [{ id: '1', name: 'No status package' }]);
+    assertEquals(await getPackages(), { packages: [{ id: '1', name: 'No status package' }] });
   });
 });
 
@@ -145,6 +149,35 @@ Deno.test('retains create-account M3U normalization', async () => {
         upstreamUrl: 'https://gold.example:8443/get.php?password=p%26x&username=user%40x&output=ts',
         output: 'ts',
       });
+    },
+    200,
+    'new',
+  );
+});
+
+Deno.test('sends the explicit demo request with all bouquets', async () => {
+  await withGoldResponse(
+    { status: 'true', url: 'https://gold.example/get.php?username=demo&password=secret' },
+    async (getUrl) => {
+      await createM3uAccount({ sub: '99', pack: 'all', country: 'US' });
+      const url = getUrl();
+      assertEquals(url.searchParams.get('type'), 'm3u');
+      assertEquals(url.searchParams.get('sub'), '99');
+      assertEquals(url.searchParams.get('pack'), 'all');
+    },
+    200,
+    'new',
+  );
+});
+
+Deno.test('preserves paid subscription code instead of treating sub=1 as a demo', async () => {
+  await withGoldResponse(
+    { status: 'true', url: 'https://gold.example/get.php?username=paid&password=secret' },
+    async (getUrl) => {
+      await createM3uAccount({ sub: '1', pack: '132', country: 'US' });
+      const url = getUrl();
+      assertEquals(url.searchParams.get('sub'), '1');
+      assertEquals(url.searchParams.get('pack'), '132');
     },
     200,
     'new',

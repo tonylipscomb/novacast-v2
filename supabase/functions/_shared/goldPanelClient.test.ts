@@ -97,7 +97,7 @@ Deno.test('sanitizes Gold bouquet error objects', async () => {
 Deno.test('surfaces safe Gold result errors', async () => {
   await withGoldResponse({ status: 'error', result: 'Something is missing' }, async () => {
     await assertRejects(
-      () => createM3uAccount({ sub: '99', pack: 'all', country: 'US' }),
+      () => createM3uAccount({ sub: '1', pack: '132', country: 'US' }),
       (error) => error instanceof GoldPanelError && error.message === 'Something is missing',
     );
   }, 200, 'new');
@@ -126,7 +126,7 @@ Deno.test('preserves message, error, and msg Gold error extraction', async () =>
 Deno.test('uses the generic fallback for non-string Gold result errors', async () => {
   await withGoldResponse({ status: 'error', result: { reason: 'internal' } }, async () => {
     await assertRejects(
-      () => createM3uAccount({ sub: '99', pack: 'all', country: 'US' }),
+      () => createM3uAccount({ sub: '1', pack: '132', country: 'US' }),
       (error) => error instanceof GoldPanelError && error.message === 'Gold Panel request failed',
     );
   }, 200, 'new');
@@ -193,22 +193,7 @@ Deno.test('retains create-account M3U normalization', async () => {
   );
 });
 
-Deno.test('sends the explicit demo request with all bouquets', async () => {
-  await withGoldResponse(
-    { status: 'true', url: 'https://gold.example/get.php?username=demo&password=secret' },
-    async (getUrl) => {
-      await createM3uAccount({ sub: '99', pack: 'all', country: 'US' });
-      const url = getUrl();
-      assertEquals(url.searchParams.get('type'), 'm3u');
-      assertEquals(url.searchParams.get('sub'), '99');
-      assertEquals(url.searchParams.get('pack'), 'all');
-    },
-    200,
-    'new',
-  );
-});
-
-Deno.test('preserves paid subscription code instead of treating sub=1 as a demo', async () => {
+Deno.test('preserves documented paid subscription codes', async () => {
   await withGoldResponse(
     { status: 'true', url: 'https://gold.example/get.php?username=paid&password=secret' },
     async (getUrl) => {

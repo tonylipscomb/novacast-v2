@@ -100,19 +100,16 @@ Deno.serve(async (request) => {
 
     const accountId = typeof body?.accountId === 'string' ? body.accountId : '';
     if (action === 'create_account' || action === 'import_account') {
-      let credentials: Credentials; let goldCreated = false;
+      let credentials: Credentials; let goldCreated = false; let goldImported = false;
       if (action === 'create_account') {
-        const accountType = body?.accountType === 'demo' ? 'demo' : 'paid';
-        const sub = accountType === 'demo'
-          ? String(body?.sub) === '99' ? '99' : ''
-          : ['1', '3', '6', '12'].includes(String(body?.sub)) ? String(body.sub) : '';
+        const sub = ['1', '3', '6', '12'].includes(String(body?.sub)) ? String(body.sub) : '';
         const pack = String(body?.packageId ?? '').trim(); const country = String(body?.country ?? 'US').trim().toUpperCase();
-        if (!sub || !pack || !/^(?:ALL|[A-Z]{2})$/.test(country)) throw new GoldPanelError('invalid_request', 'Subscription, package, and country are required.', 400);
+        if (body?.accountType !== 'paid' || !sub || !pack || pack.toLowerCase() === 'all' || !/^(?:ALL|[A-Z]{2})$/.test(country)) throw new GoldPanelError('invalid_request', 'A paid subscription, custom package, and country are required.', 400);
         const created = await createM3uAccount({ sub, pack, country, notes: String(body?.notes ?? '').slice(0, 500) });
         credentials = created; goldCreated = true;
       } else {
         credentials = parseM3uUrl(body?.m3uUrl);
-        goldCreated = true;
+        goldImported = true;
       }
       const displayName = String(body?.displayName ?? `Gold ${credentials.username}`).trim().slice(0, 120) || `Gold ${credentials.username}`;
       let provider: any;
@@ -120,21 +117,21 @@ Deno.serve(async (request) => {
       catch (error) {
         const encrypted = await encryptSecret(JSON.stringify(credentials));
         const recovery = await client.from('gold_panel_recoveries').insert({ gold_user_id: String(body?.goldUserId ?? credentials.username), credentials_ciphertext: encrypted.ciphertext, credentials_iv: encrypted.iv, gold_package_id: body?.packageId ?? null, gold_package_name: body?.packageName ?? null, gold_country: body?.country ?? null, gold_notes: String(body?.notes ?? '').slice(0, 500) || null }).select('id,gold_user_id').single();
-        if (recovery.error || !recovery.data) return adminJsonResponse(request, { success: false, goldCreated, novaCastProviderCreated: false, recoveryRequired: false, errorCategory: 'recovery_persistence_failed' }, 502);
-        return adminJsonResponse(request, { success: false, goldCreated, novaCastProviderCreated: false, recoveryRequired: true, recoveryReference: recovery.data.id, goldUserId: recovery.data.gold_user_id, errorCategory: 'novacast_provider_create_failed', error: sanitizeGoldError(error instanceof Error ? error.message : 'Provider creation failed') }, 502);
+        if (recovery.error || !recovery.data) return adminJsonResponse(request, { success: false, goldCreated, goldImported, novaCastProviderCreated: false, recoveryRequired: false, errorCategory: 'recovery_persistence_failed' }, 502);
+        return adminJsonResponse(request, { success: false, goldCreated, goldImported, novaCastProviderCreated: false, recoveryRequired: true, recoveryReference: recovery.data.id, goldUserId: recovery.data.gold_user_id, errorCategory: 'novacast_provider_create_failed', error: sanitizeGoldError(error instanceof Error ? error.message : 'Provider creation failed') }, 502);
       }
       const info = await getDeviceInfo(credentials.username, credentials.password).catch(() => null);
       const { data: account, error } = await client.from('gold_panel_accounts').insert({
-        managed_provider_id: provider.id, gold_user_id: String(body?.goldUserId ?? info?.goldUserId ?? credentials.username), gold_package_id: body?.packageId ?? null, gold_package_name: body?.packageName ?? null, gold_country: body?.country ?? info?.country ?? null, gold_expiration: info?.expire?.slice(0, 10) ?? null, gold_enabled: info?.enabled ?? true, gold_notes: String(body?.notes ?? '').slice(0, 500) || null, gold_upstream_url: credentials.baseUrl, route_mode: body?.routeMode ?? null, route_domain: body?.routeDomain ?? null, last_synced_at: info ? new Date().toISOString() : null,
+        managed_provider_id: provider.id, gold_user_id: String(body?.goldUserId ?? info?.goldUserId ?? credentials.username), gold_package_id: body?.packageId ?? null, gold_package_name: body?.packageName ?? null, gold_country: action === 'import_account' ? (info?.country ?? null) : (body?.country ?? info?.country ?? null), gold_expiration: info?.expire?.slice(0, 10) ?? null, gold_enabled: action === 'import_account' ? (info?.enabled ?? null) : (info?.enabled ?? true), gold_notes: String(body?.notes ?? '').slice(0, 500) || null, gold_upstream_url: credentials.baseUrl, route_mode: body?.routeMode ?? null, route_domain: body?.routeDomain ?? null, last_synced_at: info ? new Date().toISOString() : null,
       }).select(ACCOUNT_SELECT).single();
-      if (error || !account) return adminJsonResponse(request, { goldCreated, novaCastProviderCreated: true, managedProviderId: provider.id, errorCategory: 'gold_metadata_create_failed' }, 502);
+      if (error || !account) return adminJsonResponse(request, { goldCreated, goldImported, novaCastProviderCreated: true, managedProviderId: provider.id, errorCategory: 'gold_metadata_create_failed' }, 502);
       let summary = null;
       if (body?.runDiagnostics === true) {
         const health = await runProviderHealthCheck({ baseUrl: credentials.baseUrl, username: credentials.username, password: credentials.password });
         summary = sanitizeHealthSummary(health, credentials.username, credentials.password);
         await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, last_successful_test_at: canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? health.testedAt : null, validation_stale: false, last_health_summary: summary, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString(), ...(body?.activateIfHealthy === true && canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? { status: 'active' } : {}) }).eq('id', provider.id);
       }
-      return adminJsonResponse(request, { success: true, goldCreated, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider, summary });
+      return adminJsonResponse(request, { success: true, goldCreated, goldImported, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider, summary });
     }
 
     if (!accountId) throw new GoldPanelError('invalid_request', 'Gold account is required.', 400);

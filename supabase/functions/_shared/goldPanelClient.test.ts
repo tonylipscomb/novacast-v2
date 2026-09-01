@@ -94,6 +94,44 @@ Deno.test('sanitizes Gold bouquet error objects', async () => {
   });
 });
 
+Deno.test('surfaces safe Gold result errors', async () => {
+  await withGoldResponse({ status: 'error', result: 'Something is missing' }, async () => {
+    await assertRejects(
+      () => createM3uAccount({ sub: '99', pack: 'all', country: 'US' }),
+      (error) => error instanceof GoldPanelError && error.message === 'Something is missing',
+    );
+  }, 200, 'new');
+});
+
+Deno.test('redacts credential-bearing Gold result errors', async () => {
+  await withGoldResponse({ status: 'error', result: 'api_key=test-api-key password=secret http://gold.example/get.php?username=u&password=p' }, async () => {
+    await assertRejects(
+      () => getPackages(),
+      (error) => error instanceof GoldPanelError && !error.message.includes('test-api-key') && !error.message.includes('password=secret') && !error.message.includes('get.php?'),
+    );
+  });
+});
+
+Deno.test('preserves message, error, and msg Gold error extraction', async () => {
+  for (const key of ['message', 'error', 'msg']) {
+    await withGoldResponse({ status: 'false', [key]: `failure from ${key}` }, async () => {
+      await assertRejects(
+        () => getReseller(),
+        (error) => error instanceof GoldPanelError && error.message === `failure from ${key}`,
+      );
+    }, 200, 'reseller');
+  }
+});
+
+Deno.test('uses the generic fallback for non-string Gold result errors', async () => {
+  await withGoldResponse({ status: 'error', result: { reason: 'internal' } }, async () => {
+    await assertRejects(
+      () => createM3uAccount({ sub: '99', pack: 'all', country: 'US' }),
+      (error) => error instanceof GoldPanelError && error.message === 'Gold Panel request failed',
+    );
+  }, 200, 'new');
+});
+
 Deno.test('accepts bouquet packages without a status field', async () => {
   await withGoldResponse([{ id: '1', name: 'No status package' }], async () => {
     assertEquals(await getPackages(), { packages: [{ id: '1', name: 'No status package' }] });

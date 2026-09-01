@@ -31,7 +31,8 @@ function success(payload: unknown): boolean {
 
 function responseText(payload: unknown, secrets: string[] = []): string {
   const row = asRecord(payload);
-  return sanitizeGoldError(row.message ?? row.error ?? row.msg ?? 'Gold Panel request failed', secrets);
+  const value = [row.message, row.error, row.msg, row.result].find((candidate): candidate is string => typeof candidate === 'string');
+  return sanitizeGoldError(value ?? 'Gold Panel request failed', secrets);
 }
 
 export class GoldPanelError extends Error {

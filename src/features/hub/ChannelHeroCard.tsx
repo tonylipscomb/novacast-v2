@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
 
@@ -10,6 +10,10 @@ import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
+const HOME_PRESENTATION_AUDIT_ENABLED =
+  Boolean(__DEV__) ||
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_HOME_PRESENTATION_AUDIT === '1');
+
 type ChannelHeroCardProps = {
   title: string;
   subtitle: string;
@@ -20,6 +24,15 @@ type ChannelHeroCardProps = {
   onFocusHandle?: (handle: number | null) => void;
   nextFocusUp?: number;
   onPress: () => void;
+  auditSectionType?: 'favorite-channels';
+  auditItemIndex?: number;
+  onAuditFocus?: (focused: boolean) => void;
+  onAuditMounted?: (sectionType: 'favorite-channels', index: number, focusable: boolean) => void;
+  getAuditState?: () => {
+    rootLayoutValid: boolean;
+    sectionLayoutValid: boolean;
+    visuallyPresented: boolean;
+  };
 };
 
 /**
@@ -41,12 +54,23 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
   onFocusHandle,
   nextFocusUp,
   onPress,
+  auditSectionType,
+  auditItemIndex,
+  onAuditFocus,
+  onAuditMounted,
+  getAuditState,
 }: ChannelHeroCardProps) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [focused, setFocused] = useState(false);
   const accentColor = categoryTypeAccentColor(categoryType);
   const displayTitle = displayStreamTitle(title);
+
+  useEffect(() => {
+    if (auditSectionType && auditItemIndex === 0) {
+      onAuditMounted?.(auditSectionType, auditItemIndex, true);
+    }
+  }, []);
 
   return (
     <View style={styles.wrap}>
@@ -56,8 +80,34 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
         focusable
         hasTVPreferredFocus={preferredFocus}
         {...(nextFocusUp != null ? { nextFocusUp } : null)}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
+        onFocus={() => {
+          if (auditSectionType && auditItemIndex === 0) {
+            onAuditFocus?.(true);
+            if (HOME_PRESENTATION_AUDIT_ENABLED) {
+              console.info('[NovaCast Home Presentation Audit]', JSON.stringify({
+                event: 'first-home-card-focus',
+                sectionType: auditSectionType,
+                index: auditItemIndex,
+                ...getAuditState?.(),
+              }));
+            }
+          }
+          setFocused(true);
+        }}
+        onBlur={() => {
+          if (auditSectionType && auditItemIndex === 0) {
+            onAuditFocus?.(false);
+            if (HOME_PRESENTATION_AUDIT_ENABLED) {
+              console.info('[NovaCast Home Presentation Audit]', JSON.stringify({
+                event: 'first-home-card-blur',
+                sectionType: auditSectionType,
+                index: auditItemIndex,
+                ...getAuditState?.(),
+              }));
+            }
+          }
+          setFocused(false);
+        }}
         onPress={onPress}
         style={[styles.card, novaTvFocus.base, styles.cardGlassBase, focused && styles.cardFocused]}>
           <View style={[styles.artwork, focused && styles.artworkFocused]}>

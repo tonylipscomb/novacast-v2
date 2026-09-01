@@ -8,9 +8,21 @@ export type CatalogUiSurface = 'live' | 'movies' | 'series' | 'other';
 let catalogUiSurface: CatalogUiSurface = 'other';
 let activeForegroundCatalogReads = 0;
 const foregroundCatalogReadDrainWaiters = new Set<() => void>();
+const catalogUiSurfaceListeners = new Set<(surface: CatalogUiSurface) => void>();
 
 export function setCatalogUiSurface(surface: CatalogUiSurface) {
+  if (catalogUiSurface === surface) {
+    return;
+  }
   catalogUiSurface = surface;
+  for (const listener of catalogUiSurfaceListeners) {
+    listener(surface);
+  }
+}
+
+export function subscribeCatalogUiSurface(listener: (surface: CatalogUiSurface) => void) {
+  catalogUiSurfaceListeners.add(listener);
+  return () => catalogUiSurfaceListeners.delete(listener);
 }
 
 export function getCatalogUiSurface(): CatalogUiSurface {

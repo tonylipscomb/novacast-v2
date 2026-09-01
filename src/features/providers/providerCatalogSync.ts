@@ -2,6 +2,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { MovieDataSource } from '../movies/data/MovieDataSource.ts';
 import { getMovieCatalogIndex } from '../movies/smart/movieCatalogIndex.ts';
 import {
+  reevaluateProviderCatalogNetworkGateSurface,
+} from './providerCatalogNetworkGate.ts';
+import {
   buildSmartCategoryContext,
   getActiveSmartCategoryDefinitions,
   querySmartCategoryOnIndex,
@@ -83,6 +86,8 @@ import {
   invalidateCatalogSyncForProvider,
   processTimeBudgeted,
   scheduleCatalogSync,
+  getCatalogUiSurface,
+  subscribeCatalogUiSurface,
   type CatalogProgressThrottle,
 } from '../catalog/index.ts';
 import {
@@ -213,6 +218,18 @@ let syncGeneration = 0;
 let lastReleasedBatchLabel: string | null = null;
 let checkpointWriteChain: Promise<void> = Promise.resolve();
 const mediaJobCompletion = new Map<string, { movie: boolean; series: boolean }>();
+const pendingSeriesRetryLatches = new Map<string, {
+  providerId: string;
+  runToken: number;
+  coordinatorKey: string;
+  coordinatorEpoch: number;
+  input: ProviderCatalogSyncInput;
+  runId?: string;
+  scheduled: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+}>();
+const moviesCriticalWindowLogged = new Set<string>();
+const SERIES_PREEMPTION_RETRY_DELAY_MS = 750;
 
 export type CatalogSyncPhase = 'idle' | 'syncing' | 'smart-building' | 'ready' | 'error';
 
@@ -237,6 +254,158 @@ function isCatalogSyncDebugEnabled() {
 function isSyncRunStale(runToken: number) {
   return runToken !== syncGeneration;
 }
+
+function seriesRetryKey(providerId: string, runToken: number, coordinatorKey: string, coordinatorEpoch: number) {
+  return `${providerId}:${runToken}:${coordinatorKey}:${coordinatorEpoch}:get_series`;
+}
+
+function logSeriesRetryEvent(
+  event: string,
+  latch: {
+    providerId: string;
+    runToken: number;
+    input: ProviderCatalogSyncInput;
+  },
+  extra: Record<string, unknown> = {},
+) {
+  console.info('[NovaCast Catalog Network Gate]', {
+    event,
+    providerId: latch.providerId,
+    generation: latch.runToken,
+    activeSurface: getCatalogUiSurface(),
+    readableMovieGenerationPresent: extra.readableMovieGenerationPresent ?? false,
+    reason: extra.reason ?? null,
+    waitMs: extra.waitMs ?? null,
+    ownerHeldMs: extra.ownerHeldMs ?? null,
+    thresholdMs: extra.thresholdMs ?? null,
+    retryDelayMs: extra.retryDelayMs ?? null,
+  });
+}
+
+function discardStaleSeriesRetryLatches() {
+  for (const [key, latch] of pendingSeriesRetryLatches) {
+    if (
+      isSyncRunStale(latch.runToken) ||
+      getCatalogSyncEpoch(latch.coordinatorKey) !== latch.coordinatorEpoch
+    ) {
+      if (latch.timer) clearTimeout(latch.timer);
+      pendingSeriesRetryLatches.delete(key);
+      logSeriesRetryEvent('series-retry-stale-discarded', latch, {
+        reason: isSyncRunStale(latch.runToken) ? 'provider-generation-stale' : 'series-work-item-stale',
+      });
+    }
+  }
+}
+
+function scheduleLatchedSeriesRetry(
+  latch: {
+    providerId: string;
+    runToken: number;
+    coordinatorKey: string;
+    coordinatorEpoch: number;
+    input: ProviderCatalogSyncInput;
+    runId?: string;
+    scheduled: boolean;
+    timer?: ReturnType<typeof setTimeout>;
+  },
+  reason: string,
+) {
+  if (latch.scheduled) {
+    return;
+  }
+  if (
+    isSyncRunStale(latch.runToken) ||
+    getCatalogSyncEpoch(latch.coordinatorKey) !== latch.coordinatorEpoch
+  ) {
+    if (latch.timer) clearTimeout(latch.timer);
+    pendingSeriesRetryLatches.delete(
+      seriesRetryKey(latch.providerId, latch.runToken, latch.coordinatorKey, latch.coordinatorEpoch),
+    );
+    logSeriesRetryEvent('series-retry-stale-discarded', latch, { reason: 'provider-generation-stale' });
+    return;
+  }
+  latch.scheduled = true;
+  logSeriesRetryEvent('series-retry-release-condition', latch, { reason });
+  const key = seriesRetryKey(
+    latch.providerId,
+    latch.runToken,
+    latch.coordinatorKey,
+    latch.coordinatorEpoch,
+  );
+  latch.timer = setTimeout(() => {
+    latch.timer = undefined;
+    if (
+      isSyncRunStale(latch.runToken) ||
+      getCatalogSyncEpoch(latch.coordinatorKey) !== latch.coordinatorEpoch
+    ) {
+      pendingSeriesRetryLatches.delete(key);
+      logSeriesRetryEvent('series-retry-stale-discarded', latch, { reason: 'provider-generation-stale-before-run' });
+      return;
+    }
+    pendingSeriesRetryLatches.delete(key);
+    logSeriesRetryEvent('series-retry-scheduled', latch, {
+      reason,
+      retryDelayMs: SERIES_PREEMPTION_RETRY_DELAY_MS,
+    });
+    void scheduleCatalogSync(
+      latch.coordinatorKey,
+      () => runSeriesCatalogSync(latch.input, latch.runToken, latch.coordinatorKey, latch.runId),
+    );
+    }, SERIES_PREEMPTION_RETRY_DELAY_MS);
+}
+
+function latchSeriesRetry(input: {
+  providerId: string;
+  runToken: number;
+  coordinatorKey: string;
+  coordinatorEpoch: number;
+  input: ProviderCatalogSyncInput;
+  runId?: string;
+}, ownerHeldMs: number) {
+  const key = seriesRetryKey(
+    input.providerId,
+    input.runToken,
+    input.coordinatorKey,
+    input.coordinatorEpoch,
+  );
+  if (pendingSeriesRetryLatches.has(key)) {
+    return;
+  }
+  const latch = { ...input, scheduled: false };
+  pendingSeriesRetryLatches.set(key, latch);
+  logSeriesRetryEvent('series-preemption-latched', latch, {
+    reason: 'foreground-movies-first-run',
+    ownerHeldMs,
+  });
+  logSeriesRetryEvent('series-retry-deferred', latch, {
+    reason: 'movies-critical-window-active',
+    ownerHeldMs,
+  });
+}
+
+function releaseSeriesRetries(reason: string) {
+  discardStaleSeriesRetryLatches();
+  for (const latch of pendingSeriesRetryLatches.values()) {
+    scheduleLatchedSeriesRetry(latch, reason);
+  }
+}
+
+subscribeCatalogUiSurface((surface) => {
+  reevaluateProviderCatalogNetworkGateSurface(surface);
+  if (surface !== 'movies') {
+    for (const latch of pendingSeriesRetryLatches.values()) {
+      console.info('[NovaCast Catalog Network Gate]', {
+        event: 'movies-critical-window-exit',
+        providerId: latch.providerId,
+        generation: latch.runToken,
+        activeSurface: surface,
+        readableMovieGenerationPresent: false,
+        reason: 'movies-surface-exited',
+      });
+    }
+    releaseSeriesRetries('movies-surface-exited');
+  }
+});
 
 function isCatalogJobCancelled(runToken: number, coordinatorKey: string) {
   return isSyncRunStale(runToken) || getCatalogSyncCancelToken(coordinatorKey).isStale();
@@ -515,6 +684,7 @@ function notifyMovieCatalogReady(providerId: string, generation: number) {
 export function publishMovieCatalogReady(providerId: string, generation: number) {
   notifyPhase(providerId, 'ready');
   notifyMovieCatalogReady(providerId, generation);
+  releaseSeriesRetries('movies-readable-generation');
 }
 
 export function subscribeMovieCategoriesUpdated(
@@ -580,6 +750,7 @@ type CatalogSyncSetup = {
   checkpointMatches: boolean;
   canResumeMovieCheckpoint: boolean;
   canResumeSeriesCheckpoint: boolean;
+  readableMovieGeneration: number;
   resumeMovieIndex: number;
   resumeSeriesIndex: number;
   progressThrottle: CatalogProgressThrottle;
@@ -784,6 +955,7 @@ async function buildCatalogSyncSetup(input: ProviderCatalogSyncInput, runToken: 
     checkpointMatches,
     canResumeMovieCheckpoint,
     canResumeSeriesCheckpoint,
+    readableMovieGeneration,
     resumeMovieIndex,
     resumeSeriesIndex,
     progressThrottle,
@@ -2776,6 +2948,22 @@ export async function runMovieCatalogSync(
             }
 
             if (useNative && requestUrl) {
+              const moviesCriticalKey = `${providerId}:${runToken}`;
+              if (
+                getCatalogUiSurface() === 'movies' &&
+                setup.readableMovieGeneration <= 0 &&
+                !moviesCriticalWindowLogged.has(moviesCriticalKey)
+              ) {
+                moviesCriticalWindowLogged.add(moviesCriticalKey);
+                console.info('[NovaCast Catalog Network Gate]', {
+                  event: 'movies-critical-window-enter',
+                  providerId,
+                  generation: runToken,
+                  activeSurface: 'movies',
+                  readableMovieGenerationPresent: false,
+                  reason: 'first-run-movie-category-request',
+                });
+              }
               let matched = 0;
               recordCatalogSqliteCategoryContext(sqliteHandle, {
                 categoryId: category.id,
@@ -2805,6 +2993,12 @@ export async function runMovieCatalogSync(
                 runId: runId ?? null,
                 catalogNetworkMediaType: 'movie',
                 catalogNetworkOperation: 'get_vod_streams:category',
+                catalogNetworkRequestSource: input.requestSource ?? null,
+                catalogNetworkBackground: true,
+                catalogNetworkCancellable: false,
+                catalogNetworkForeground: getCatalogUiSurface() === 'movies',
+                catalogNetworkActiveSurface: getCatalogUiSurface(),
+                catalogNetworkReadableGenerationPresent: setup.readableMovieGeneration > 0,
                 onBatch: async (records) => {
                   const sqliteCallbackStarted = Date.now();
                   try {
@@ -3586,6 +3780,7 @@ export async function runMovieCatalogSync(
     });
     markCatalogAuditSync('completed', { providerId, mediaType: 'movie', durationMs: Date.now() - started });
     notifyMovieCatalogReady(providerId, sqliteHandle?.generation ?? 0);
+    releaseSeriesRetries('movies-readable-generation');
     markMediaJobComplete(providerId, 'movie');
     setMovieReturnReason('completed-after-sqlite');
   } catch (error) {
@@ -3672,6 +3867,20 @@ export async function runMovieCatalogSync(
       movieFullDumpCompleted,
       movieCompletionProbeReached,
     });
+    if (threw || exitReason.startsWith('return-') || exitReason.startsWith('completed')) {
+      releaseSeriesRetries(threw ? 'movies-terminal-failure-or-cancellation' : 'movies-terminal-completion');
+      const moviesCriticalKey = `${providerId}:${runToken}`;
+      if (moviesCriticalWindowLogged.delete(moviesCriticalKey)) {
+        console.info('[NovaCast Catalog Network Gate]', {
+          event: 'movies-critical-window-exit',
+          providerId,
+          generation: runToken,
+          activeSurface: getCatalogUiSurface(),
+          readableMovieGenerationPresent: false,
+          reason: threw ? 'movies-terminal-failure-or-cancellation' : 'movies-terminal-completion',
+        });
+      }
+    }
     logMovieSyncProbe('runMovieCatalogSync', {
       providerId,
       coordinatorKey,
@@ -3732,6 +3941,18 @@ export async function runSeriesCatalogSync(
     return !isUiLifecycleCancelSource(cancelSource);
   };
   const setup = await ensureCatalogSyncSetup(input, runToken);
+  let seriesPreemptionRequested = false;
+  const requestSeriesPreemption = () => {
+    if (seriesPreemptionRequested || isSyncRunStale(runToken)) {
+      return false;
+    }
+    seriesPreemptionRequested = true;
+    cancelCatalogSync(providerId, 'series', {
+      cancelSource: 'network-gate-cancellation',
+      cancelCaller: 'providerCatalogNetworkGate.foregroundMovies',
+    });
+    return true;
+  };
 
   notifyPhase(providerId, 'syncing');
   markCatalogAuditSync('started', { providerId, mediaType: 'series' });
@@ -3943,6 +4164,25 @@ export async function runSeriesCatalogSync(
           isCancelled,
           runId: runId ?? null,
           streamDecode: streamXtreamCategoryDecode,
+          catalogNetworkRequestSource: input.requestSource ?? null,
+          catalogNetworkBackground: true,
+          catalogNetworkCancellable: true,
+          catalogNetworkForeground: false,
+          catalogNetworkActiveSurface: getCatalogUiSurface(),
+          catalogNetworkReadableGenerationPresent: setup.readableMovieGeneration > 0,
+          catalogNetworkOnPreemptionRequested: requestSeriesPreemption,
+          catalogNetworkOnPreemptionReleased: ({ ownerHeldMs }) => {
+            if (seriesPreemptionRequested) {
+              latchSeriesRetry({
+                providerId,
+                runToken,
+                coordinatorKey,
+                coordinatorEpoch: getCatalogSyncEpoch(coordinatorKey),
+                input,
+                runId,
+              }, ownerHeldMs);
+            }
+          },
         });
         completeness.noteDumpStats({
           rawCount: dump.rawCount,
@@ -4958,9 +5198,22 @@ export function cancelProviderCatalogSync(
   }
   syncGeneration += 1;
   if (providerId) {
+    for (const [key, latch] of pendingSeriesRetryLatches) {
+      if (latch.providerId === providerId) {
+        if (latch.timer) clearTimeout(latch.timer);
+        pendingSeriesRetryLatches.delete(key);
+        logSeriesRetryEvent('series-retry-stale-discarded', latch, {
+          reason: 'provider-generation-cancelled',
+        });
+      }
+    }
     pendingSyncInputs.delete(providerId);
     invalidateCatalogSyncForProvider(providerId, { cancelSource, cancelCaller });
   } else {
+    for (const [key, latch] of pendingSeriesRetryLatches) {
+      if (latch.timer) clearTimeout(latch.timer);
+      pendingSeriesRetryLatches.delete(key);
+    }
     pendingSyncInputs.clear();
     cancelCatalogSync(undefined, undefined, { cancelSource, cancelCaller });
   }
@@ -4994,6 +5247,8 @@ export async function hydrateProviderLibraryCaches(providerId: string) {
 }
 
 export function clearProviderCatalogSyncForTests() {
+  pendingSeriesRetryLatches.clear();
+  moviesCriticalWindowLogged.clear();
   syncInFlight.clear();
   syncAuditRuns.clear();
   syncAuditSequence = 0;

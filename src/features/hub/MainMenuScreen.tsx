@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { findNodeHandle, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { findNodeHandle, Pressable, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
 import * as ReactNative from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -79,8 +79,36 @@ function resolveChannelCategoryType(
   return byCategory ?? classifyProviderCategoryType(channel.name);
 }
 
+type HomeAuditSectionType = 'continue-watching' | 'watchlist' | 'favorite-channels' | 'favorites';
+
+type HomePresentationAuditState = {
+  rootLayoutValid: boolean;
+  sectionLayoutValid: boolean;
+  visuallyPresented: boolean;
+};
+
+const HOME_PRESENTATION_AUDIT_ENABLED =
+  Boolean(__DEV__) ||
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_HOME_PRESENTATION_AUDIT === '1');
+
+function logHomePresentationAudit(event: string, fields: Record<string, unknown>) {
+  if (HOME_PRESENTATION_AUDIT_ENABLED) {
+    console.info('[NovaCast Home Presentation Audit]', JSON.stringify({
+      event,
+      ...fields,
+      ...(event === 'instrumentation-version' ? { dev: Boolean(__DEV__) } : null),
+    }));
+  }
+}
+
 export function MainMenuScreen() {
   markCatalogAuditRender('MainMenuScreen');
+  const homeRenderCountRef = useRef(0);
+  homeRenderCountRef.current += 1;
+  const homeRootLayoutRef = useRef({ width: 0, height: 0 });
+  const firstHomeSectionLayoutRef = useRef({ width: 0, height: 0 });
+  const firstHomeSectionTypeRef = useRef<HomeAuditSectionType | null>(null);
+  const firstHomeFocusableCardRegisteredRef = useRef(false);
   const { theme } = useAppTheme();
   const styles = useMemo(() => createHomeStyles(theme), [theme]);
   const router = useRouter();
@@ -118,6 +146,86 @@ export function MainMenuScreen() {
   const continueWatchingCount = personalization.providerId === activeProviderId
     ? personalization.continueWatching.length
     : 0;
+
+  const homePresentationAuditState = (): HomePresentationAuditState => {
+    const rootLayoutValid = homeRootLayoutRef.current.width > 0 && homeRootLayoutRef.current.height > 0;
+    const sectionLayoutValid = firstHomeSectionLayoutRef.current.width > 0 && firstHomeSectionLayoutRef.current.height > 0;
+    return {
+      rootLayoutValid,
+      sectionLayoutValid,
+      visuallyPresented: rootLayoutValid && sectionLayoutValid && !playbackActive && !playbackClosing,
+    };
+  };
+
+  const registerFirstHomeSectionLayout = (sectionType: HomeAuditSectionType, width: number, height: number) => {
+    if (firstHomeSectionTypeRef.current && firstHomeSectionTypeRef.current !== sectionType) {
+      return;
+    }
+    firstHomeSectionTypeRef.current = sectionType;
+    firstHomeSectionLayoutRef.current = { width, height };
+  };
+
+  const registerFirstHomeFocusableCard = (sectionType: HomeAuditSectionType, index: number, focusable: boolean) => {
+    if (index !== 0 || firstHomeFocusableCardRegisteredRef.current) {
+      return;
+    }
+    firstHomeFocusableCardRegisteredRef.current = true;
+    logHomePresentationAudit('first-focusable-card-mounted', {
+      sectionType,
+      index,
+      focusable,
+      ...homePresentationAuditState(),
+    });
+  };
+
+  useEffect(() => {
+    logHomePresentationAudit('instrumentation-version', {
+      marker: 'home-presentation-runtime-v2',
+    });
+    logHomePresentationAudit('actual-home-render-branch', {
+      activeId: 'home',
+      component: 'MainMenuScreen',
+      shellInstanceId: null,
+    });
+  }, []);
+
+  useEffect(() => {
+    logHomePresentationAudit('mount', {
+      providerId: activeProviderId,
+      active: true,
+      renderCount: homeRenderCountRef.current,
+    });
+    return () => {
+      logHomePresentationAudit('unmount', {
+        providerId: activeProviderId,
+        active: false,
+        renderCount: homeRenderCountRef.current,
+      });
+    };
+  }, [activeProviderId]);
+
+  useEffect(() => {
+    logHomePresentationAudit('active-state', {
+      providerId: activeProviderId,
+      active: !playbackActive && !playbackClosing,
+      renderCount: homeRenderCountRef.current,
+    });
+  }, [activeProviderId, playbackActive, playbackClosing]);
+
+  useEffect(() => {
+    logHomePresentationAudit('data-readiness', {
+      providerId: activeProviderId,
+      heroItemPresent: false,
+      sectionCount: [continueWatchingCount, watchlistItems.length, personalization.favoriteChannels.length, favoriteItems.length]
+        .filter((count) => count > 0).length,
+      sections: {
+        continueWatching: continueWatchingCount,
+        watchlist: watchlistItems.length,
+        favoriteChannels: personalization.favoriteChannels.length,
+        favorites: favoriteItems.length,
+      },
+    });
+  }, [activeProviderId, continueWatchingCount, favoriteItems.length, personalization.favoriteChannels.length, watchlistItems.length]);
 
   // Temporary startup rendering audit; remove after the physical-TV regression is closed.
   useEffect(() => {
@@ -680,7 +788,26 @@ export function MainMenuScreen() {
   };
 
   return (
-    <View style={styles.root}>
+    <View
+      style={styles.root}
+      onLayout={(event) => {
+        const { width, height } = event.nativeEvent.layout;
+        homeRootLayoutRef.current = { width, height };
+        logHomePresentationAudit('home-root-layout', {
+          width,
+          height,
+          opacity: 1,
+          hidden: false,
+          transform: null,
+          ...homePresentationAuditState(),
+        });
+        if ((width === 0 || height === 0) && (continueWatchingCount || watchlistItems.length || personalization.favoriteChannels.length || favoriteItems.length)) {
+          logHomePresentationAudit('mismatch-zero-layout', {
+            scope: 'home-root',
+            reason: 'home-data-present-zero-layout',
+          });
+        }
+      }}>
       <View style={styles.browseLayer} pointerEvents={playbackActive || playbackClosing ? 'none' : 'auto'}>
         <NovaTvShell
           activeId="home"
@@ -697,8 +824,8 @@ export function MainMenuScreen() {
             nestedScrollEnabled>
         <View style={styles.rows}>
           {personalization.providerId === activeProviderId && personalization.continueWatching.length ? (
-            <HomeRow title="Continue Watching">
-              {personalization.continueWatching.map((item) => (
+            <HomeRow title="Continue Watching" sectionType="continue-watching" itemCount={continueWatchingCount} onAuditLayout={registerFirstHomeSectionLayout}>
+              {personalization.continueWatching.map((item, index) => (
                 <HomeMediaCard
                   key={`${item.mediaType}-${item.contentId}`}
                   title={item.title}
@@ -714,14 +841,18 @@ export function MainMenuScreen() {
                   }
                   onPress={() => void openContinueItem(item)}
                   onRemove={() => void removeContinueWatchingItem(activeProviderId, item.mediaType, item.contentId)}
+                  auditSectionType="continue-watching"
+                  auditItemIndex={index}
+                  onAuditMounted={registerFirstHomeFocusableCard}
+                  getAuditState={homePresentationAuditState}
                 />
               ))}
             </HomeRow>
           ) : null}
 
           {watchlistItems.length ? (
-            <HomeRow title="My Watchlist">
-              {watchlistItems.map((entry) => (
+            <HomeRow title="My Watchlist" sectionType="watchlist" itemCount={watchlistItems.length} onAuditLayout={registerFirstHomeSectionLayout}>
+              {watchlistItems.map((entry, index) => (
                 <HomeMediaCard
                   key={`watchlist-${entry.kind}-${entry.item.id}`}
                   title={entry.item.title}
@@ -776,14 +907,18 @@ export function MainMenuScreen() {
                     });
                     navigateTo('/series');
                   }}
+                  auditSectionType="watchlist"
+                  auditItemIndex={index}
+                  onAuditMounted={registerFirstHomeFocusableCard}
+                  getAuditState={homePresentationAuditState}
                 />
               ))}
             </HomeRow>
           ) : null}
 
           {personalization.providerId === activeProviderId && personalization.favoriteChannels.length ? (
-            <HomeRow title="My Channels">
-              {personalization.favoriteChannels.map((item) => (
+            <HomeRow title="My Channels" sectionType="favorite-channels" itemCount={personalization.favoriteChannels.length} onAuditLayout={registerFirstHomeSectionLayout}>
+              {personalization.favoriteChannels.map((item, index) => (
                 <ChannelHeroCard
                   key={item.id}
                   title={item.title}
@@ -799,14 +934,23 @@ export function MainMenuScreen() {
                       : undefined
                   }
                   onPress={() => void openRecentItem({ providerId: activeProviderId, mediaType: 'live', contentId: item.id, title: item.title, artworkUrl: item.artworkUrl, lastOpenedAt: Date.now() })}
+                  auditSectionType="favorite-channels"
+                  auditItemIndex={index}
+                  onAuditMounted={registerFirstHomeFocusableCard}
+                  getAuditState={homePresentationAuditState}
+                  onAuditFocus={(focused) => logHomePresentationAudit(focused ? 'first-card-focus' : 'first-card-blur', {
+                    sectionType: 'favorite-channels',
+                    itemIndex: index,
+                    visuallyPresented: true,
+                  })}
                 />
               ))}
             </HomeRow>
           ) : null}
 
           {favoriteItems.length ? (
-            <HomeRow title="My Favorites">
-              {favoriteItems.map((entry) => (
+            <HomeRow title="My Favorites" sectionType="favorites" itemCount={favoriteItems.length} onAuditLayout={registerFirstHomeSectionLayout}>
+              {favoriteItems.map((entry, index) => (
                 <HomeMediaCard
                   key={`favorite-${entry.kind}-${entry.item.id}`}
                   title={entry.item.title}
@@ -828,6 +972,10 @@ export function MainMenuScreen() {
                     rememberSeriesScreenMemory(activeProviderId, { openDiscoverZone: true, selectedSeriesId: entry.item.id });
                     navigateTo('/series');
                   }}
+                  auditSectionType="favorites"
+                  auditItemIndex={index}
+                  onAuditMounted={registerFirstHomeFocusableCard}
+                  getAuditState={homePresentationAuditState}
                 />
               ))}
             </HomeRow>
@@ -855,13 +1003,64 @@ export function MainMenuScreen() {
   );
 }
 
-type HomeRowProps = { title: string; children: ReactNode; compact?: boolean };
+type HomeRowProps = {
+  title: string;
+  children: ReactNode;
+  compact?: boolean;
+  sectionType: HomeAuditSectionType;
+  itemCount: number;
+  onAuditLayout?: (sectionType: HomeAuditSectionType, width: number, height: number) => void;
+};
 
-const HomeRow = memo(function HomeRow({ title, children, compact = false }: HomeRowProps) {
+const HomeRow = memo(function HomeRow({ title, children, compact = false, sectionType, itemCount, onAuditLayout }: HomeRowProps) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createHomeStyles(theme), [theme]);
+  const layoutRef = useRef('');
+  const layoutSeenRef = useRef(false);
+  useEffect(() => {
+    logHomePresentationAudit('section-mounted', {
+      sectionType,
+      itemCount,
+      intentionallyHidden: false,
+      hiddenReason: null,
+      opacity: 1,
+      pointerEvents: 'auto',
+    });
+    const timer = setTimeout(() => {
+      if (itemCount > 0 && !layoutSeenRef.current) {
+        logHomePresentationAudit('section-not-laid-out', { sectionType, itemCount });
+      }
+    }, 750);
+    return () => clearTimeout(timer);
+  }, [itemCount, sectionType]);
+  const handleLayout = (event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    const key = `${width}x${height}`;
+    layoutSeenRef.current = true;
+    onAuditLayout?.(sectionType, width, height);
+    if (layoutRef.current === key) {
+      return;
+    }
+    layoutRef.current = key;
+    logHomePresentationAudit('section-layout', {
+      sectionType,
+      itemCount,
+      width,
+      height,
+      zeroLayout: width === 0 || height === 0,
+      opacity: 1,
+      pointerEvents: 'auto',
+    });
+    if (itemCount > 0 && (width === 0 || height === 0)) {
+      logHomePresentationAudit('section-focus-visibility-mismatch', {
+        sectionType,
+        itemCount,
+        reason: 'zero-layout',
+      });
+    }
+  };
   return (
-    <View style={[styles.rowSection, compact && styles.rowSectionCompact]}>
+    <View onLayout={handleLayout} style={[styles.rowSection, compact && styles.rowSectionCompact]}>
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>{title}</Text>
       </View>
@@ -888,6 +1087,10 @@ type HomeMediaCardProps = {
   onFocusHandle?: (handle: number | null) => void;
   onPress: () => void;
   onRemove?: () => void;
+  auditSectionType?: HomeAuditSectionType;
+  auditItemIndex?: number;
+  onAuditMounted?: (sectionType: HomeAuditSectionType, index: number, focusable: boolean) => void;
+  getAuditState?: () => HomePresentationAuditState;
 };
 
 const HomeMediaCard = memo(function HomeMediaCard({
@@ -901,6 +1104,10 @@ const HomeMediaCard = memo(function HomeMediaCard({
   onFocusHandle,
   onPress,
   onRemove,
+  auditSectionType,
+  auditItemIndex,
+  onAuditMounted,
+  getAuditState,
 }: HomeMediaCardProps) {
   markCatalogAuditRender('HomeMediaCard');
   const { theme } = useAppTheme();
@@ -908,6 +1115,12 @@ const HomeMediaCard = memo(function HomeMediaCard({
   const [focused, setFocused] = useState(false);
   const [removeFocused, setRemoveFocused] = useState(false);
   const preferredFocusConsumedRef = useRef(false);
+
+  useEffect(() => {
+    if (auditSectionType && auditItemIndex === 0) {
+      onAuditMounted?.(auditSectionType, auditItemIndex, true);
+    }
+  }, []);
 
   return (
     <View style={styles.mediaCardWrap}>
@@ -921,9 +1134,25 @@ const HomeMediaCard = memo(function HomeMediaCard({
           preferredFocusConsumedRef.current = true;
           markCatalogAuditFocus('home-card');
           noteFocusLatencyFocus('home-card');
+          if (auditSectionType && auditItemIndex === 0) {
+            logHomePresentationAudit('first-home-card-focus', {
+              sectionType: auditSectionType,
+              itemIndex: auditItemIndex,
+              ...getAuditState?.(),
+            });
+          }
           setFocused(true);
         }}
-        onBlur={() => setFocused(false)}
+        onBlur={() => {
+          if (auditSectionType && auditItemIndex === 0) {
+            logHomePresentationAudit('first-home-card-blur', {
+              sectionType: auditSectionType,
+              itemIndex: auditItemIndex,
+              ...getAuditState?.(),
+            });
+          }
+          setFocused(false);
+        }}
         onPress={onPress}
         style={[styles.mediaCard, novaTvFocus.base, styles.mediaCardGlassBase, focused && styles.mediaCardFocused]}>
         <View style={[styles.mediaArtwork, focused && styles.mediaArtworkFocused]}>

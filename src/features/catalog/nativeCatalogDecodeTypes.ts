@@ -74,6 +74,14 @@ export type CatalogNetworkGateDecodeFields = {
   runId?: string | null;
   catalogNetworkMediaType?: 'movie' | 'series' | 'live';
   catalogNetworkOperation?: string;
+  catalogNetworkRequestSource?: string | null;
+  catalogNetworkBackground?: boolean;
+  catalogNetworkCancellable?: boolean;
+  catalogNetworkForeground?: boolean;
+  catalogNetworkActiveSurface?: 'live' | 'movies' | 'series' | 'other';
+  catalogNetworkReadableGenerationPresent?: boolean;
+  catalogNetworkOnPreemptionRequested?: () => boolean;
+  catalogNetworkOnPreemptionReleased?: (input: { ownerHeldMs: number }) => void;
   /** Set only when the caller already holds `withProviderCatalogNetworkGate`. */
   skipCatalogNetworkGate?: boolean;
 };

@@ -80,6 +80,16 @@ export function StartupGate() {
   const providerErrorSnapshotSignatureRef = useRef<string | null>(null);
   const activeBundle = getActiveRepositoryBundle();
   const providerInitialized = Boolean(activeBundle) && !providerSwitchError;
+  const providerResolutionTelemetryRef = useRef({
+    providerSwitchError,
+    selectedProvider,
+    effectiveAuthorized: device.authorization.effectiveAuthorized,
+  });
+  providerResolutionTelemetryRef.current = {
+    providerSwitchError,
+    selectedProvider,
+    effectiveAuthorized: device.authorization.effectiveAuthorized,
+  };
 
   useEffect(() => {
     const snapshot = {
@@ -93,7 +103,7 @@ export function StartupGate() {
       checking: device.state === 'checking',
       retrying: bootstrapping || isSwitchingProvider,
       startupState: device.state,
-      providerBootstrapRequested: bootstrapping,
+      bootstrapping,
       requiresProviderDownload: Boolean(device.status?.requiresProviderDownload),
     };
     const signature = JSON.stringify(snapshot);
@@ -207,6 +217,22 @@ export function StartupGate() {
       setLibraryMissing(false);
     }
     const result = await resolveStartupProvider({ source });
+    if (PROVIDER_RUNTIME_AUDIT_ENABLED) {
+      const bundle = getActiveRepositoryBundle();
+      console.info('[NovaCast Startup Gate]', JSON.stringify({
+        event: 'provider-resolution-returned',
+        resolverOk: result.ok,
+        resolverProviderBootstrapRequested: result.providerBootstrapRequested,
+        resolverErrorCode: result.errorCode,
+        bundlePresentImmediatelyAfterResolve: Boolean(bundle),
+        bundleProviderIdImmediatelyAfterResolve: bundle?.providerId ?? null,
+        providerSwitchErrorPresent: Boolean(providerResolutionTelemetryRef.current.providerSwitchError),
+        selectedProviderId: providerResolutionTelemetryRef.current.selectedProvider?.id ?? null,
+        bootstrappingBeforeApply: true,
+        effectiveAuthorized: providerResolutionTelemetryRef.current.effectiveAuthorized,
+        timestamp: Date.now(),
+      }));
+    }
     applyProviderResolution(result);
     return result;
   }, [applyProviderResolution]);

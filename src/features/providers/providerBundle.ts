@@ -45,6 +45,20 @@ export type ProviderRepositoryBundle = ProviderRepositories & {
 
 let activeBundle: ProviderRepositoryBundle | null = null;
 let bundleGeneration = 0;
+
+const PROVIDER_BUNDLE_AUDIT_ENABLED =
+  Boolean(__DEV__) ||
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_HOME_PRESENTATION_AUDIT === '1');
+
+function logProviderBundleAudit(
+  event: 'bundle-activated' | 'bundle-invalidated',
+  fields: Record<string, unknown>,
+) {
+  if (!PROVIDER_BUNDLE_AUDIT_ENABLED) {
+    return;
+  }
+  console.info('[NovaCast Provider Bundle Audit]', JSON.stringify({ event, ...fields, timestamp: Date.now() }));
+}
 const listeners = new Set<() => void>();
 const catalogBootstrapRequested = new WeakSet<ProviderRepositoryBundle>();
 let repositoryBundleFactoryOverride: ((provider: ProviderRecord, credentials?: ProviderCredentialRecord) => ProviderRepositoryBundle) | null = null;
@@ -365,6 +379,11 @@ export function activateRepositoryBundle(bundle: ProviderRepositoryBundle) {
   activeBundle = bundle;
   bundleGeneration = bundle.generation;
   notify();
+  logProviderBundleAudit('bundle-activated', {
+    providerId: bundle.providerId,
+    previousProviderId: previousBundle?.providerId ?? null,
+    bundlePresentAfter: true,
+  });
 
   logFreshProviderBootstrap('provider-ready', {
     providerId: bundle.providerId,
@@ -420,6 +439,10 @@ export function invalidateRepositoryBundle() {
   if (previousBundle) {
     bundleGeneration += 1;
     notify();
+    logProviderBundleAudit('bundle-invalidated', {
+      previousProviderId: previousBundle.providerId,
+      bundlePresentAfter: false,
+    });
   }
 }
 

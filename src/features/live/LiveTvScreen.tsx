@@ -290,6 +290,7 @@ export function LiveTvScreen() {
   const [fullscreenFrameStatus, setFullscreenFrameStatus] = useState<FullscreenFrameStatus>('pending');
   const [fullscreenChromeVisible, setFullscreenChromeVisible] = useState(true);
   const fullscreenFirstFrameObservedRef = useRef(false);
+  const liveSurfaceAuditEnabled = process.env.EXPO_PUBLIC_NOVACAST_BARE_VIDEO_AUDIT === '1' || isNovaCastTraceLoggingEnabled();
   const [focusedAction, setFocusedAction] = useState<'favorite' | 'fullscreen' | 'retry' | 'search' | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [discoverZoneOpen, setDiscoverZoneOpen] = useState(false);
@@ -988,9 +989,9 @@ export function LiveTvScreen() {
 
   const handleFullscreenFirstFrame = () => {
     fullscreenFirstFrameObservedRef.current = true;
-    if (isNovaCastTraceLoggingEnabled()) {
+    if (liveSurfaceAuditEnabled) {
       console.info('[NovaCast Live Surface Audit]', {
-        event: 'first-frame-render',
+        event: 'live-first-frame-render',
         playerStatus: liveStreamPlayer.status,
         playing: liveStreamPlayer.playing,
         currentTime: liveStreamPlayer.currentTime,
@@ -1004,7 +1005,7 @@ export function LiveTvScreen() {
     setFullscreenFrameStatus('ready');
   };
   const logLiveSurfaceAudit = useCallback((event: string, fields: Record<string, unknown> = {}) => {
-    if (!isNovaCastTraceLoggingEnabled()) {
+    if (!liveSurfaceAuditEnabled) {
       return;
     }
     let playerStatus: string | null = null;
@@ -1028,7 +1029,24 @@ export function LiveTvScreen() {
       timestamp: Date.now(),
       ...fields,
     });
-  }, [fullscreenFrameStatus, liveStreamPlayer]);
+  }, [fullscreenFrameStatus, liveSurfaceAuditEnabled, liveStreamPlayer]);
+  useEffect(() => {
+    if (!fullscreenChannel) {
+      return;
+    }
+    logLiveSurfaceAudit('live-surface-mounted', {
+      surfaceType: 'surfaceView',
+      layoutWidth: null,
+      layoutHeight: null,
+    });
+    return () => {
+      logLiveSurfaceAudit('live-surface-state', {
+        surfaceType: 'surfaceView',
+        layoutWidth: null,
+        layoutHeight: null,
+      });
+    };
+  }, [fullscreenChannel, logLiveSurfaceAudit]);
   const handleLivePlayerPlayingChange = useCallback(({ isPlaying }: PlayingChangeEventPayload) => {
     if (liveStateRef.current?.fullscreenChannelId && isPlaying && liveStreamPlayer.status === 'readyToPlay') {
       logProviderBoundary('[NovaCast Live Provider Request]', {
@@ -2591,18 +2609,18 @@ export function LiveTvScreen() {
             contentFit="cover"
             style={[styles.fullscreenPlayer, fullscreenFrameStatus !== 'ready' && styles.hiddenStreamSurface]}
             onFirstFrameRender={handleFullscreenFirstFrame}
-            onStatusChange={() => logLiveSurfaceAudit('player-status')}
+            onStatusChange={() => logLiveSurfaceAudit('live-player-status')}
             onPlayingChange={() => {
-              logLiveSurfaceAudit('playing-change');
+              logLiveSurfaceAudit('live-surface-state');
               handleLivePlayerPlayingChange({ isPlaying: liveStreamPlayer.playing });
             }}
             onTimeUpdate={() => {
-              logLiveSurfaceAudit('time-update');
+              logLiveSurfaceAudit('live-surface-state');
               handleLivePlayerTimeUpdate(liveStreamPlayer.currentTime);
             }}
             onLayout={(event) => {
               const { width, height } = event.nativeEvent.layout;
-              logLiveSurfaceAudit('video-layout', { layoutWidth: width, layoutHeight: height });
+              logLiveSurfaceAudit('live-surface-layout', { layoutWidth: width, layoutHeight: height });
             }}
           />
           ) : null}

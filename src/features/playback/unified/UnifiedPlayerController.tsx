@@ -5,6 +5,7 @@ import { BackHandler, Dimensions, Platform } from 'react-native';
 import * as Device from 'expo-device';
 
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
+import { isNovaCastTraceLoggingEnabled } from '@/features/diagnostics/novacastLogPolicy';
 import {
   BARE_VIDEO_AUDIT_SURFACE_TYPE,
   BareVideoAuditSurface,
@@ -623,6 +624,16 @@ export function UnifiedPlayerController() {
         setUnifiedPlayerMachineState(mapPlayerStatusToMachineState(player.status, player.playing));
       }
       const durationMs = secondsToMs(player.duration);
+      if (current.item?.mediaType === 'movie' && isNovaCastTraceLoggingEnabled()) {
+        console.info('[NovaCast Movie Playback Audit]', {
+          event: 'native-duration-correlated',
+          contentId: current.item.id,
+          providerId: current.item.providerId ?? null,
+          containerExtension: current.item.containerExtension ?? null,
+          nativeDurationSeconds: player.duration,
+          timestamp: Date.now(),
+        });
+      }
       if (durationMs > 0) {
         setUnifiedPlayerProgress(
           Math.min(secondsToMs(player.currentTime), durationMs),

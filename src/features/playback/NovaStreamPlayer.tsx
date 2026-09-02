@@ -18,7 +18,7 @@ import {
 } from './vodPlayerMemory.ts';
 import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import { type ComponentProps, useCallback, useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, View, type LayoutChangeEvent } from 'react-native';
+import { StyleSheet, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import { useEventListener } from 'expo';
 import { isVideoDecoderInitFailure, UNSUPPORTED_VIDEO_FORMAT_CATEGORY } from './unified/moviePlaybackCompatibility.ts';
 
@@ -418,6 +418,7 @@ export function BareVideoAuditSurface({
   surfaceType?: BareVideoAuditSurfaceType;
 }) {
   const firstFrameObservedRef = useRef(false);
+  const { width, height } = useWindowDimensions();
 
   useEffect(() => {
     logBareVideoAudit('bare-video-mounted', {
@@ -443,7 +444,7 @@ export function BareVideoAuditSurface({
 
   return (
     <View
-      style={styles.bareAuditRoot}
+      style={[styles.bareAuditRoot, { width, height }]}
       collapsable={false}
       onLayout={(event) => {
         const { width, height } = event.nativeEvent.layout;
@@ -453,6 +454,13 @@ export function BareVideoAuditSurface({
           layoutHeight: height,
           ...bareVideoAuditSnapshot(player, firstFrameObservedRef.current),
         });
+        if (width <= 0 || height <= 0) {
+          logBareVideoAudit('invalid-video-layout', {
+            surfaceType,
+            layoutWidth: width,
+            layoutHeight: height,
+          });
+        }
       }}>
       <VideoView
         player={player}
@@ -515,7 +523,9 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   bareAuditRoot: {
-    ...StyleSheet.absoluteFillObject,
+    position: 'absolute',
+    left: 0,
+    top: 0,
     backgroundColor: '#000000',
   },
   bareAuditVideo: {

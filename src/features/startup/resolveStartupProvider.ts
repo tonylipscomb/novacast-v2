@@ -15,7 +15,7 @@ import {
   hasSavedProvider,
   isProviderConnectionReady,
 } from '@/features/providers/providerModel';
-import { getProviderState, retryProviderInitialization } from '@/features/providers/providerStore';
+import { clearProviderSwitchError, getProviderState, retryProviderInitialization } from '@/features/providers/providerStore';
 import {
   STARTUP_BOOTSTRAP_TIMEOUT_MS,
   STARTUP_NETWORK_TIMEOUT_MS,
@@ -139,12 +139,14 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
 
   const providerState = await getProviderState();
   const selected = getSelectedProvider(providerState);
+  const activeBundle = getActiveRepositoryBundle();
   const alreadyActive =
     hasSavedProvider(providerState) &&
-    Boolean(getActiveRepositoryBundle()) &&
+    Boolean(activeBundle && selected && activeBundle.providerId === selected.id) &&
     Boolean(selected && isProviderConnectionReady(selected));
 
   if (alreadyActive) {
+    clearProviderSwitchError();
     logAssignmentResolved(current, flags, false);
     if (isRetry) {
       logRetry('retry-assignment-resolved', { ...retryBase, providerBootstrapRequested: false });

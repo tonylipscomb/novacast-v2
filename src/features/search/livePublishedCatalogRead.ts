@@ -13,6 +13,7 @@ export type PublishedLiveCatalogRow = {
   channel_number: number | string | null;
   stream_extension: string | null;
   direct_source?: string | null;
+  epg_channel_id?: string | null;
   tone: string | null;
 };
 
@@ -33,6 +34,14 @@ export function normalizePublishedCategoryCounts(counts: Record<string, number>)
 
 export function resolvePublishedLiveCategoryName(providerId: string, categoryId: string): string {
   return getLiveSearchCategoryName(providerId, categoryId) ?? derivedLiveCategoryName(categoryId);
+}
+
+export function resolvePersistedLiveCategoryName(
+  providerId: string,
+  categoryId: string,
+  persistedNames: Record<string, string>,
+): string {
+  return persistedNames[categoryId]?.trim() || resolvePublishedLiveCategoryName(providerId, categoryId);
 }
 
 export function buildPublishedLiveCategories(
@@ -97,6 +106,7 @@ export function publishedLiveRowToChannel(
     logoUrl: row.logo_url || undefined,
     containerExtension: row.stream_extension || undefined,
     streamUrl: row.direct_source?.trim() || undefined,
+    epgChannelId: row.epg_channel_id?.trim() || undefined,
   };
   const storedDirectSource = String(row.direct_source ?? '').trim();
   logSampledLiveStreamRow('hydrated-playback', {

@@ -283,6 +283,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
       generation: 0,
       channelCount: 0,
       counts: {},
+      categoryNames: {},
       status: null,
       stateRowPresent: false,
       buildingGeneration: 0,

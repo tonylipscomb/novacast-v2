@@ -17,6 +17,8 @@ export type NativeCatalogRecord = {
   streamExtension?: string | null;
   /** Live dump only. Exact provider direct_source when present. Never log. */
   directSource?: string | null;
+  /** Live dump only. Provider EPG identifier when present. */
+  epgChannelId?: string | null;
   providerSortOrder?: number | null;
   seriesId?: string | null;
 };

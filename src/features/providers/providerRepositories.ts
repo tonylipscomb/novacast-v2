@@ -12,6 +12,7 @@ import {
   endCatalogGuidePriority,
 } from './catalogSyncGuidePriority.ts';
 import { logContentSortAuditPayload } from '../media-browser/contentSortAudit.ts';
+import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import {
   buildContentSortPageMetadata,
   categoryHasValidRatings,
@@ -1913,7 +1914,18 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       },
       async getSeriesInfo(seriesId: string, signal) {
         const startedAt = Date.now();
-        return client.getSeriesInfo(seriesId, signal).catch((error) => {
+        return client.getSeriesInfo(seriesId, signal).then((info) => {
+          if (isNovaCastTraceLoggingEnabled()) {
+            console.info('[NovaCast Series Compatibility Audit]', {
+              event: info == null ? 'provider-returned-null' : 'repository-response',
+              action: 'get_series_info',
+              providerSeriesIdPresent: Boolean(String(seriesId).trim()),
+              normalizedResultNull: info == null,
+              timestamp: Date.now(),
+            });
+          }
+          return info;
+        }).catch((error) => {
           const classification = classifyProviderBoundaryError(error);
           logProviderBoundary('[NovaCast Series Provider Request]', {
             event: 'error',

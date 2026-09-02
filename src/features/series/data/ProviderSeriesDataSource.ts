@@ -271,6 +271,7 @@ export function createProviderSeriesDataSource(
           providerSeriesId: String(seriesId),
           datasource: 'ProviderSeriesDataSource',
           responseSource: 'provider',
+          boundary: info == null ? 'provider-returned-null' : 'normalized-object',
           httpStatus: 'ok',
           durationMs: Date.now() - startedAt,
           responseShape: info == null ? 'null' : Array.isArray(info) ? 'array' : typeof info,

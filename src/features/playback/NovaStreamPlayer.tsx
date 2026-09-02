@@ -18,7 +18,7 @@ import {
 } from './vodPlayerMemory.ts';
 import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import { type ComponentProps, useCallback, useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { StyleSheet, View, type LayoutChangeEvent } from 'react-native';
 import { useEventListener } from 'expo';
 import { isVideoDecoderInitFailure, UNSUPPORTED_VIDEO_FORMAT_CATEGORY } from './unified/moviePlaybackCompatibility.ts';
 
@@ -83,6 +83,7 @@ type NovaStreamSurfaceProps = {
   contentFit?: 'contain' | 'cover' | 'fill';
   surfaceType?: ComponentProps<typeof VideoView>['surfaceType'];
   style?: object;
+  onLayout?: (event: LayoutChangeEvent) => void;
 };
 
 type NovaStreamSurfaceEvents = {
@@ -90,6 +91,34 @@ type NovaStreamSurfaceEvents = {
   onPlayingChange?: (payload: PlayingChangeEventPayload) => void;
   onTimeUpdate?: (payload: TimeUpdateEventPayload) => void;
 };
+
+export type BareVideoAuditSurfaceType = 'surfaceView' | 'textureView';
+
+export const BARE_VIDEO_AUDIT_SURFACE_TYPE: BareVideoAuditSurfaceType = 'surfaceView';
+
+const BARE_VIDEO_AUDIT_FLAG =
+  typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_BARE_VIDEO_AUDIT === '1';
+
+function bareVideoAuditSnapshot(player: VideoPlayer, firstFrameObserved: boolean) {
+  try {
+    return {
+      playerStatus: player.status,
+      playing: player.playing,
+      currentTime: player.currentTime,
+      duration: player.duration,
+      firstFrameObserved,
+      timestamp: Date.now(),
+    };
+  } catch {
+    return { playerStatus: 'unavailable', playing: false, currentTime: 0, duration: 0, firstFrameObserved, timestamp: Date.now() };
+  }
+}
+
+function logBareVideoAudit(event: string, payload: Record<string, unknown>) {
+  if (BARE_VIDEO_AUDIT_FLAG) {
+    console.info('[NovaCast Bare Video Audit]', event, payload);
+  }
+}
 
 type NovaStreamPlayerProps = NovaStreamPlayerOptions & {
   streamUrl: string | null;
@@ -330,6 +359,7 @@ export function NovaStreamSurface({
   // Live TV relies on this default. VOD/episode passes textureView from UnifiedPlayerOverlay.
   surfaceType = 'surfaceView',
   style,
+  onLayout,
 }: NovaStreamSurfaceProps & NovaStreamSurfaceEvents) {
   const onFirstFrameRenderRef = useRef(onFirstFrameRender);
   const onStatusChangeRef = useRef(onStatusChange);
@@ -365,7 +395,8 @@ export function NovaStreamSurface({
       style={[styles.container, style]}
       collapsable={false}
       focusable={false}
-      importantForAccessibility="no-hide-descendants">
+      importantForAccessibility="no-hide-descendants"
+      onLayout={onLayout}>
       <VideoView
         player={player}
         style={styles.video}
@@ -374,6 +405,69 @@ export function NovaStreamSurface({
         useExoShutter={false}
         nativeControls={false}
         onFirstFrameRender={() => onFirstFrameRenderRef.current?.()}
+      />
+    </View>
+  );
+}
+
+export function BareVideoAuditSurface({
+  player,
+  surfaceType = BARE_VIDEO_AUDIT_SURFACE_TYPE,
+}: {
+  player: VideoPlayer;
+  surfaceType?: BareVideoAuditSurfaceType;
+}) {
+  const firstFrameObservedRef = useRef(false);
+
+  useEffect(() => {
+    logBareVideoAudit('bare-video-mounted', {
+      surfaceType,
+      ...bareVideoAuditSnapshot(player, false),
+    });
+
+    const statusSubscription = player.addListener('statusChange', () => {
+      logBareVideoAudit('player-status', {
+        surfaceType,
+        ...bareVideoAuditSnapshot(player, firstFrameObservedRef.current),
+      });
+    });
+
+    return () => {
+      statusSubscription.remove();
+      logBareVideoAudit('bare-video-unmounted', {
+        surfaceType,
+        ...bareVideoAuditSnapshot(player, firstFrameObservedRef.current),
+      });
+    };
+  }, [player, surfaceType]);
+
+  return (
+    <View
+      style={styles.bareAuditRoot}
+      collapsable={false}
+      onLayout={(event) => {
+        const { width, height } = event.nativeEvent.layout;
+        logBareVideoAudit('video-layout', {
+          surfaceType,
+          layoutWidth: width,
+          layoutHeight: height,
+          ...bareVideoAuditSnapshot(player, firstFrameObservedRef.current),
+        });
+      }}>
+      <VideoView
+        player={player}
+        style={styles.bareAuditVideo}
+        surfaceType={surfaceType}
+        contentFit="contain"
+        useExoShutter={false}
+        nativeControls={false}
+        onFirstFrameRender={() => {
+          firstFrameObservedRef.current = true;
+          logBareVideoAudit('first-frame-render', {
+            surfaceType,
+            ...bareVideoAuditSnapshot(player, true),
+          });
+        }}
       />
     </View>
   );
@@ -419,5 +513,12 @@ const styles = StyleSheet.create({
     flex: 1,
     width: '100%',
     height: '100%',
+  },
+  bareAuditRoot: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#000000',
+  },
+  bareAuditVideo: {
+    ...StyleSheet.absoluteFillObject,
   },
 });

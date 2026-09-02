@@ -942,7 +942,7 @@ export function SeriesScreen() {
     }
 
     seriesDetailRetryAttemptedRef.current = true;
-    void loadSeriesDetail(item);
+    void loadSeriesDetail(item, 'retry');
   }, [loadSeriesDetail]);
 
   const handleSelectCategory = useCallback(

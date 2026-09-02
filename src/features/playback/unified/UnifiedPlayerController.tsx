@@ -5,7 +5,11 @@ import { BackHandler, Dimensions, Platform } from 'react-native';
 import * as Device from 'expo-device';
 
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
-import { useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
+import {
+  BARE_VIDEO_AUDIT_SURFACE_TYPE,
+  BareVideoAuditSurface,
+  useNovaStreamPlayer,
+} from '@/features/playback/NovaStreamPlayer';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import {
   registerPlaybackActivity,
@@ -160,6 +164,7 @@ function useUnifiedPlayerSnapshot() {
 }
 
 export function UnifiedPlayerController() {
+  const bareVideoAuditEnabled = process.env.EXPO_PUBLIC_NOVACAST_BARE_VIDEO_AUDIT === '1';
   const snapshot = useUnifiedPlayerSnapshot();
   const devicePlaybackProfile = useMemo(() => resolveDevicePlaybackProfile(collectDevicePlaybackSignals()), []);
   const movieCompatSessionRef = useRef<{
@@ -2265,6 +2270,9 @@ export function UnifiedPlayerController() {
         getTimelineFocused={() => getTimelineFocusedRef.current()}
         getTimelineHandlePresent={() => getTimelineHandlePresentRef.current()}
       />
+      {bareVideoAuditEnabled && snapshot.item?.mediaType === 'movie' ? (
+        <BareVideoAuditSurface player={player} surfaceType={BARE_VIDEO_AUDIT_SURFACE_TYPE} />
+      ) : (
       <UnifiedPlayerOverlay
       player={player}
       state={snapshot}
@@ -2300,6 +2308,7 @@ export function UnifiedPlayerController() {
       )}
       onCancelUpNext={cancelUpNext}
     />
+      )}
     </>
   );
 }

@@ -20,13 +20,13 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getTvDensity, NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusChrome } from '@/components/nova';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { usePlaybackActivity } from '@/features/playback/usePlaybackActivity';
-import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
+import type { PlayingChangeEventPayload } from 'expo-video';
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
 import type { LivePlaybackSource } from '@/features/providers/providerPlayback';
 import type { PlaybackItem } from '@/features/playback/unified/types';
 import { playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
-import { novacastTrace } from '@/features/diagnostics/novacastLogPolicy';
+import { isNovaCastTraceLoggingEnabled, novacastTrace } from '@/features/diagnostics/novacastLogPolicy';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
@@ -289,6 +289,7 @@ export function LiveTvScreen() {
   const previewStreamUrl = previewStreamSource?.uri ?? null;
   const [fullscreenFrameStatus, setFullscreenFrameStatus] = useState<FullscreenFrameStatus>('pending');
   const [fullscreenChromeVisible, setFullscreenChromeVisible] = useState(true);
+  const fullscreenFirstFrameObservedRef = useRef(false);
   const [focusedAction, setFocusedAction] = useState<'favorite' | 'fullscreen' | 'retry' | 'search' | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [discoverZoneOpen, setDiscoverZoneOpen] = useState(false);
@@ -443,6 +444,7 @@ export function LiveTvScreen() {
   const fullscreenChannelIdRef = useRef<string | null>(null);
   useEffect(() => {
     fullscreenChannelIdRef.current = liveState?.fullscreenChannelId ?? null;
+    fullscreenFirstFrameObservedRef.current = false;
   }, [liveState?.fullscreenChannelId]);
   const { player: liveStreamPlayer, retry: retryLiveStream, hasStream: hasLiveStream } = useNovaStreamPlayer(
     previewStreamUrl,
@@ -985,9 +987,48 @@ export function LiveTvScreen() {
   }, [liveState?.fullscreenChannelId, fullscreenFrameStatus]);
 
   const handleFullscreenFirstFrame = () => {
+    fullscreenFirstFrameObservedRef.current = true;
+    if (isNovaCastTraceLoggingEnabled()) {
+      console.info('[NovaCast Live Surface Audit]', {
+        event: 'first-frame-render',
+        playerStatus: liveStreamPlayer.status,
+        playing: liveStreamPlayer.playing,
+        currentTime: liveStreamPlayer.currentTime,
+        fullscreenFrameStatus,
+        surfaceOpacity: 1,
+        firstFrameObserved: true,
+        timestamp: Date.now(),
+      });
+    }
     playbackAnalyticsTracker.firstFrame();
     setFullscreenFrameStatus('ready');
   };
+  const logLiveSurfaceAudit = useCallback((event: string, fields: Record<string, unknown> = {}) => {
+    if (!isNovaCastTraceLoggingEnabled()) {
+      return;
+    }
+    let playerStatus: string | null = null;
+    let playing: boolean | null = null;
+    let currentTime: number | null = null;
+    try {
+      playerStatus = liveStreamPlayer.status;
+      playing = liveStreamPlayer.playing;
+      currentTime = liveStreamPlayer.currentTime;
+    } catch {
+      // Player may be releasing during close.
+    }
+    console.info('[NovaCast Live Surface Audit]', {
+      event,
+      playerStatus,
+      playing,
+      currentTime,
+      fullscreenFrameStatus,
+      surfaceOpacity: fullscreenFrameStatus === 'ready' ? 1 : 0,
+      firstFrameObserved: fullscreenFirstFrameObservedRef.current,
+      timestamp: Date.now(),
+      ...fields,
+    });
+  }, [fullscreenFrameStatus, liveStreamPlayer]);
   const handleLivePlayerPlayingChange = useCallback(({ isPlaying }: PlayingChangeEventPayload) => {
     if (liveStateRef.current?.fullscreenChannelId && isPlaying && liveStreamPlayer.status === 'readyToPlay') {
       logProviderBoundary('[NovaCast Live Provider Request]', {
@@ -1007,7 +1048,7 @@ export function LiveTvScreen() {
       playbackAnalyticsTracker.firstFrame('playing_transition');
     }
   }, [activeProviderId, bundle?.connectionType, liveStreamPlayer, previewStreamUrl]);
-  const handleLivePlayerTimeUpdate = useCallback(({ currentTime }: TimeUpdateEventPayload) => {
+  const handleLivePlayerTimeUpdate = useCallback((currentTime: number) => {
     if (
       liveStateRef.current?.fullscreenChannelId &&
       currentTime > 0 &&
@@ -2550,8 +2591,19 @@ export function LiveTvScreen() {
             contentFit="cover"
             style={[styles.fullscreenPlayer, fullscreenFrameStatus !== 'ready' && styles.hiddenStreamSurface]}
             onFirstFrameRender={handleFullscreenFirstFrame}
-            onPlayingChange={handleLivePlayerPlayingChange}
-            onTimeUpdate={handleLivePlayerTimeUpdate}
+            onStatusChange={() => logLiveSurfaceAudit('player-status')}
+            onPlayingChange={() => {
+              logLiveSurfaceAudit('playing-change');
+              handleLivePlayerPlayingChange({ isPlaying: liveStreamPlayer.playing });
+            }}
+            onTimeUpdate={() => {
+              logLiveSurfaceAudit('time-update');
+              handleLivePlayerTimeUpdate(liveStreamPlayer.currentTime);
+            }}
+            onLayout={(event) => {
+              const { width, height } = event.nativeEvent.layout;
+              logLiveSurfaceAudit('video-layout', { layoutWidth: width, layoutHeight: height });
+            }}
           />
           ) : null}
           {visibleSurfOverlay ? (

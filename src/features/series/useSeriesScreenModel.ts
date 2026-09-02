@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { isNovaCastTraceLoggingEnabled } from '@/features/diagnostics/novacastLogPolicy';
 
 import { useProviderStore } from '@/features/providers/providerStore';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
@@ -923,7 +924,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
   const detailRequestIdRef = useRef(0);
 
   const loadSeriesDetail = useCallback(
-    async (series: SeriesSummary) => {
+    async (series: SeriesSummary, reason: 'select' | 'retry' = 'select') => {
       if (!resolvedDataSource) {
         return;
       }
@@ -931,6 +932,16 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       const requestId = ++detailRequestIdRef.current;
       setDetailLoading(true);
       setDetailError(null);
+      if (isNovaCastTraceLoggingEnabled()) {
+        console.info('[NovaCast Series Compatibility Audit]', {
+          event: 'detail-request',
+          reason,
+          action: 'get_series_info',
+          idFieldName: 'series_id',
+          providerSeriesIdPresent: Boolean(series.seriesId?.trim()),
+          timestamp: Date.now(),
+        });
+      }
 
       try {
         const detail = await resolvedDataSource.getSeriesInfo(series.seriesId);
@@ -939,6 +950,15 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
         }
 
         setSeriesDetail(detail);
+        if (isNovaCastTraceLoggingEnabled()) {
+          console.info('[NovaCast Series Compatibility Audit]', {
+            event: 'datasource-result',
+            reason,
+            providerSeriesIdPresent: Boolean(series.seriesId?.trim()),
+            normalizedResultNull: detail == null,
+            timestamp: Date.now(),
+          });
+        }
         if (!detail) {
           setDetailError('Detailed series information is unavailable.');
         }

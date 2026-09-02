@@ -39,6 +39,21 @@ import { DIAGNOSTICS_DISCLOSURE_KEY, DIAGNOSTICS_DISCLOSURE_VERSION } from '@/fe
 import { getSecureValue } from '@/features/providers/providerCredentialStore';
 import { resetPairingKeepDevice } from '@/features/pairing/resetPairing';
 
+const PROVIDER_RUNTIME_AUDIT_ENABLED =
+  Boolean(__DEV__) ||
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_HOME_PRESENTATION_AUDIT === '1');
+
+function logProviderErrorStateSnapshot(snapshot: Record<string, unknown>) {
+  if (!PROVIDER_RUNTIME_AUDIT_ENABLED) {
+    return;
+  }
+  console.info('[NovaCast Startup Gate]', JSON.stringify({
+    event: 'provider-error-state-snapshot',
+    ...snapshot,
+    timestamp: Date.now(),
+  }));
+}
+
 /**
  * Central closed-beta / production startup coordinator.
  * Preserves personal pairing as a fallback when closed-beta managed flow is off.
@@ -62,7 +77,42 @@ export function StartupGate() {
   const [libraryMissing, setLibraryMissing] = useState(false);
   const [diagnosticsDisclosure, setDiagnosticsDisclosure] = useState<boolean | null>(null);
   const initAttemptRef = useRef(0);
-  const providerInitialized = Boolean(getActiveRepositoryBundle()) && !providerSwitchError;
+  const providerErrorSnapshotSignatureRef = useRef<string | null>(null);
+  const activeBundle = getActiveRepositoryBundle();
+  const providerInitialized = Boolean(activeBundle) && !providerSwitchError;
+
+  useEffect(() => {
+    const snapshot = {
+      bundlePresent: Boolean(activeBundle),
+      bundleProviderId: activeBundle?.providerId ?? null,
+      selectedProviderId: selectedProvider?.id ?? null,
+      providerSwitchErrorPresent: Boolean(providerSwitchError),
+      providerSwitchErrorReason: providerSwitchError ? 'provider_runtime_error' : null,
+      providerInitialized,
+      effectiveAuthorized: device.authorization.effectiveAuthorized,
+      checking: device.state === 'checking',
+      retrying: bootstrapping || isSwitchingProvider,
+      startupState: device.state,
+      providerBootstrapRequested: bootstrapping,
+      requiresProviderDownload: Boolean(device.status?.requiresProviderDownload),
+    };
+    const signature = JSON.stringify(snapshot);
+    if (signature === providerErrorSnapshotSignatureRef.current) {
+      return;
+    }
+    providerErrorSnapshotSignatureRef.current = signature;
+    logProviderErrorStateSnapshot(snapshot);
+  }, [
+    activeBundle,
+    bootstrapping,
+    device.authorization.effectiveAuthorized,
+    device.state,
+    device.status?.requiresProviderDownload,
+    isSwitchingProvider,
+    providerInitialized,
+    providerSwitchError,
+    selectedProvider,
+  ]);
 
   useEffect(() => {
     let cancelled = false;

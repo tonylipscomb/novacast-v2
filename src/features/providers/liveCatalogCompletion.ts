@@ -178,6 +178,7 @@ export function nativeRecordToLiveChannel(
     artworkUrl?: string | null;
     streamExtension?: string | null;
     directSource?: string | null;
+    epgChannelId?: string | null;
     providerSortOrder?: number | null;
   },
   index: number,
@@ -201,6 +202,7 @@ export function nativeRecordToLiveChannel(
   logoUrl?: string;
   containerExtension?: string;
   streamUrl?: string;
+  epgChannelId?: string;
 } {
   const id = canonicalLiveStreamId(record);
   const categoryId = assignLiveStreamCategoryId(record.categoryId);
@@ -225,6 +227,9 @@ export function nativeRecordToLiveChannel(
     logoUrl: record.artworkUrl ?? undefined,
     containerExtension: record.streamExtension ?? undefined,
     streamUrl: record.directSource ?? undefined,
+    epgChannelId: typeof record.epgChannelId === 'string'
+      ? (record.epgChannelId.trim() || undefined)
+      : undefined,
   };
   logSampledLiveStreamRow('provider-channel', {
     stream_id: channel.id,

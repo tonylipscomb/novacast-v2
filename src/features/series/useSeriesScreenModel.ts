@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { isNovaCastTraceLoggingEnabled } from '@/features/diagnostics/novacastLogPolicy';
 
 import { useProviderStore } from '@/features/providers/providerStore';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
@@ -26,7 +27,7 @@ import {
 } from '@/features/catalog/catalogRepository';
 import { getSeriesScreenMemory, rememberSeriesScreenMemory } from './seriesScreenMemory';
 import { matchSeriesMetadata } from './metadata/seriesMetadataMatcher';
-import { emitSeriesStartup, logSeriesPerf } from './seriesDiagnostics';
+import { emitSeriesStartup, emitSeriesStateHandoff, logSeriesPerf } from './seriesDiagnostics';
 import {
   evaluateSeriesStartupBudgets,
   mergeSeriesCategoriesPreservingCounts,
@@ -409,6 +410,14 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
         ),
       );
       scheduleDeferredCategoryCounts(sanitizedNext);
+      emitSeriesStateHandoff('category-metadata-ready', {
+        providerId: activeProviderId,
+        selectedCategoryId: selectedCategoryIdRef.current || null,
+        categoryCount: sanitizedNext.length,
+        itemCount: visibleItemsRef.current.length,
+        startupMode,
+        source: 'categories-reconcile',
+      });
       if (!startup.durableCategoriesReady) {
         startup.durableCategoriesReady = true;
         startup.level = 'durable-categories';
@@ -629,6 +638,20 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
     const isStartupViewport = !isSearchMode && !startupStateRef.current.interactive;
     const pageLimit = isStartupViewport ? SERIES_STARTUP_VIEWPORT_LIMIT : 48;
 
+    if (retainVisible) {
+      // Same provider + same selected category => this run is a background
+      // categories/metadata/data-source reconcile, not a user category switch.
+      emitSeriesStateHandoff('reconciliation-start', {
+        providerId: activeProviderId,
+        generation,
+        selectedCategoryId,
+        itemCount: visibleItemsRef.current.length,
+        categoryCount: categoriesRef.current.length,
+        requestId: requestKey,
+        source: isSearchMode ? 'search' : 'category-page',
+      });
+    }
+
     const loadInitialPage = async () => {
       const pageStartedAt = Date.now();
       if (!retainVisible) {
@@ -639,6 +662,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       setBrowseLoadErrorMessage(null);
       setCategoryHasRatings(true);
       offsetRef.current = 0;
+
 
       logSeriesPerf('series_page_start', {
         providerId: activeProviderId,
@@ -686,6 +710,35 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
 
         offsetRef.current = page.items.length;
         startupStateRef.current.seriesReplacements += 1;
+
+        const preserveValidScreen =
+          retainVisible && page.items.length === 0 && visibleItemsRef.current.length > 0;
+        if (preserveValidScreen) {
+          // Series Release Startup Regression fix:
+          // This is a background reconcile (retainVisible => same provider + same
+          // selected category) that returned a transiently empty page — typically
+          // while the readable catalog generation is mid-promotion. Committing it
+          // would blank a screen that already holds a valid selection and non-empty
+          // items, and the items would only return unaided on a later reload.
+          // Preserve the valid state instead of clearing it.
+          offsetRef.current = visibleItemsRef.current.length;
+          if (loadStatusRef.current !== 'ready') {
+            setBrowseLoadStatus('ready');
+          }
+          emitSeriesStateHandoff('reconciliation-preserved-selection', {
+            providerId: activeProviderId,
+            generation,
+            selectedCategoryId,
+            itemCount: visibleItemsRef.current.length,
+            categoryCount: categoriesRef.current.length,
+            requestId: requestKey,
+            source: isSearchMode ? 'search' : 'category-page',
+            reason: 'empty-reconcile-page',
+            elapsedMs: Date.now() - pageStartedAt,
+          });
+          return;
+        }
+
         setVisibleItems((current) => {
           const next = page.items;
           visibleItemsRef.current = next;
@@ -694,6 +747,20 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
             previousLength: current.length,
             nextLength: next.length,
           });
+          emitSeriesStateHandoff(
+            next.length > 0 ? 'visible-items-committed' : 'visible-items-cleared',
+            {
+              providerId: activeProviderId,
+              generation,
+              selectedCategoryId,
+              itemCount: next.length,
+              previousItemCount: current.length,
+              categoryCount: categoriesRef.current.length,
+              requestId: requestKey,
+              source: isSearchMode ? 'search' : 'category-page',
+              reason: retainVisible ? 'reconcile-replace' : 'category-load',
+            },
+          );
           return next;
         });
         setHasMore(page.hasMore);
@@ -730,6 +797,16 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
               seriesId: startupFocus.seriesId,
               reason: startupFocus.reason,
               fallbackUsed: startupFocus.fallbackUsed,
+            });
+            emitSeriesStateHandoff('initial-items-ready', {
+              providerId: activeProviderId,
+              generation,
+              selectedCategoryId,
+              itemCount: page.items.length,
+              categoryCount: categoriesRef.current.length,
+              requestId: requestKey,
+              source: isSearchMode ? 'search' : 'category-page',
+              elapsedMs: startupStateRef.current.firstViewportElapsedMs,
             });
           }
           setFocusedItemId(startupFocus.seriesId);
@@ -923,7 +1000,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
   const detailRequestIdRef = useRef(0);
 
   const loadSeriesDetail = useCallback(
-    async (series: SeriesSummary) => {
+    async (series: SeriesSummary, reason: 'select' | 'retry' = 'select') => {
       if (!resolvedDataSource) {
         return;
       }
@@ -931,6 +1008,16 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       const requestId = ++detailRequestIdRef.current;
       setDetailLoading(true);
       setDetailError(null);
+      if (isNovaCastTraceLoggingEnabled()) {
+        console.info('[NovaCast Series Compatibility Audit]', {
+          event: 'detail-request',
+          reason,
+          action: 'get_series_info',
+          idFieldName: 'series_id',
+          providerSeriesIdPresent: Boolean(series.seriesId?.trim()),
+          timestamp: Date.now(),
+        });
+      }
 
       try {
         const detail = await resolvedDataSource.getSeriesInfo(series.seriesId);
@@ -939,6 +1026,15 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
         }
 
         setSeriesDetail(detail);
+        if (isNovaCastTraceLoggingEnabled()) {
+          console.info('[NovaCast Series Compatibility Audit]', {
+            event: 'datasource-result',
+            reason,
+            providerSeriesIdPresent: Boolean(series.seriesId?.trim()),
+            normalizedResultNull: detail == null,
+            timestamp: Date.now(),
+          });
+        }
         if (!detail) {
           setDetailError('Detailed series information is unavailable.');
         }

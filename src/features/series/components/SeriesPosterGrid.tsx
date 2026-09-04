@@ -10,7 +10,7 @@ import { NovaSpaceLoader } from '@/components/nova/NovaSpaceLoader';
 import { ContentSortControl, type ContentSortControlHandle } from '@/features/media-browser/ContentSortControl';
 import type { ContentSortOption } from '@/features/media-browser/contentSorting';
 import { shouldAutoFocusSortControl, shouldClaimPreferredPosterFocus, isLastPosterRow } from '@/features/media-browser/posterGridFocusPolicy';
-import { estimatePosterRowHeight, TV_POSTER_LIST_TUNING } from '@/features/media-browser/tvPosterListTuning';
+import { TV_POSTER_LIST_TUNING } from '@/features/media-browser/tvPosterListTuning';
 import { tvPerfRecordPosterRender, tvPerfSetVisiblePosters } from '@/features/perf/tvPerfStore';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { isNovaCastTraceLoggingEnabled } from '@/features/diagnostics/novacastLogPolicy';
@@ -19,9 +19,11 @@ import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
 import { SeriesPosterCard } from './SeriesPosterCard';
 
-const SERIES_GRID_COLUMN_GAP = 12;
-const SERIES_GRID_LEFT_PADDING = 6;
-const SERIES_GRID_RIGHT_PADDING = 18;
+const SERIES_GRID_COLUMN_GAP = 6;
+const SERIES_GRID_LEFT_PADDING = 2;
+const SERIES_GRID_RIGHT_PADDING = 2;
+const SERIES_GRID_ROW_GAP = 6;
+const SERIES_COMPACT_CARD_HEIGHT = 147;
 
 let seriesGridMountGeneration = 0;
 let seriesRouteMountId = 0;
@@ -463,23 +465,71 @@ export function SeriesPosterGrid({
     tvPerfSetVisiblePosters(Math.min(series.length, columns * TV_POSTER_LIST_TUNING.windowSize));
   }, [columns, series.length]);
 
+  // series-stage-fit-v1: size cells ONLY from the current measured stage.
+  // No 120px pre-measure fallback and no stale/session-cached width — either
+  // could produce cells wider than the live stage and clip the last column.
+  // Flooring the division guarantees columns*columnWidth + gaps + padding
+  // never exceeds the measured stage width.
+  const stageMeasured = gridWidth > 0;
   const columnWidth = useMemo(() => {
-    const sessionCachedWidth = lastKnownSeriesStageGeometry?.windowWidth === windowWidth
-      ? lastKnownSeriesStageGeometry.stageWidth
-      : 0;
-    const effectiveGridWidth = gridWidth > 0
-      ? gridWidth
-      : lastValidGridWidthRef.current > 0
-        ? lastValidGridWidthRef.current
-        : sessionCachedWidth;
+    if (gridWidth <= 0) {
+      return 0;
+    }
     const available =
-      effectiveGridWidth -
+      gridWidth -
       SERIES_GRID_LEFT_PADDING -
       SERIES_GRID_RIGHT_PADDING -
       SERIES_GRID_COLUMN_GAP * Math.max(0, columns - 1);
-    const measured = available / Math.max(1, columns);
-    return effectiveGridWidth > 0 ? Math.max(1, Math.floor(measured)) : 120;
-  }, [columns, gridWidth, windowWidth]);
+    return Math.max(1, Math.floor(available / Math.max(1, columns)));
+  }, [columns, gridWidth]);
+
+  const totalRowFootprint =
+    columns * columnWidth +
+    SERIES_GRID_COLUMN_GAP * Math.max(0, columns - 1) +
+    SERIES_GRID_LEFT_PADDING +
+    SERIES_GRID_RIGHT_PADDING;
+
+  // TEMP DEV telemetry — Series measurement lifecycle + 5-column fit on ONN. Remove after sign-off.
+  const wrapperSizeRef = useRef({ width: 0, height: 0 });
+  const logSeriesStageFit = useCallback(
+    (event: string, overrides?: Record<string, unknown>) => {
+      if (typeof __DEV__ === 'undefined' || !__DEV__) {
+        return;
+      }
+      console.info('[NovaCast Series Stage Fit]', {
+        event,
+        wrapperWidth: wrapperSizeRef.current.width,
+        wrapperHeight: wrapperSizeRef.current.height,
+        liveStageWidth: gridWidth,
+        gridWidth,
+        columnWidth,
+        columnCount: columns,
+        totalRowFootprint,
+        fitsCurrentStage: gridWidth > 0 && totalRowFootprint <= gridWidth,
+        stageMeasured,
+        widthSource: gridWidth > 0 ? 'current-measure' : 'unmeasured',
+        timestamp: Date.now(),
+        ...overrides,
+      });
+    },
+    [columns, columnWidth, gridWidth, stageMeasured, totalRowFootprint],
+  );
+
+  useEffect(() => {
+    logSeriesStageFit('stage-fit');
+  }, [logSeriesStageFit]);
+
+  useEffect(() => {
+    logSeriesStageFit('measurement-wrapper-mounted');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (stageMeasured) {
+      logSeriesStageFit('grid-render-enabled');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stageMeasured]);
 
   const logNativeLayoutAudit = useCallback((event: SeriesNativeLayoutAuditEvent, measuredWidth?: number) => {
     if (!isNovaCastTraceLoggingEnabled()) {
@@ -591,8 +641,10 @@ export function SeriesPosterGrid({
     };
   }, []);
 
-  const rowHeight = useMemo(() => estimatePosterRowHeight(columnWidth), [columnWidth]);
-
+  const rowHeight = useMemo(
+    () => SERIES_COMPACT_CARD_HEIGHT + SERIES_GRID_ROW_GAP,
+    [],
+  );
   const getItemLayout = useCallback(
     (_data: ArrayLike<SeriesSummary> | null | undefined, index: number) => {
       const rowIndex = Math.floor(index / Math.max(1, columns));
@@ -688,53 +740,64 @@ export function SeriesPosterGrid({
         </View>
       </View>
 
-      {showInitialLoader ? (
-        <View style={styles.loadingStage}>
-          <View style={styles.categoryLoaderContent}>
-            <Text style={styles.categoryLoaderLabel} numberOfLines={2}>
-              {loadingLabel}
-            </Text>
-            <NovaSpaceLoader label={loadingLabel} variant="hero" />
+      {/* series-stage-measure-v2: the onLayout-owning wrapper is ALWAYS mounted and
+          always contains one in-flow flex:1 child (loader / empty / placeholder /
+          FlatList). A content-less flex container never produced a non-zero
+          onLayout on device, which deadlocked the stageMeasured gate. */}
+      <View
+        style={styles.listStage}
+        onLayout={(event: LayoutChangeEvent) => {
+          const { x, width: measuredWidth, height: measuredHeight } = event.nativeEvent.layout;
+          const nextWidth = Number.isFinite(measuredWidth) ? Math.floor(measuredWidth) : 0;
+          const nextHeight = Number.isFinite(measuredHeight) ? Math.floor(measuredHeight) : 0;
+          wrapperSizeRef.current = { width: nextWidth, height: nextHeight };
+          stageLayoutRef.current = { x, width: nextWidth };
+          if (nextWidth > 0) {
+            lastValidGridWidthRef.current = nextWidth;
+            lastValidStageLayoutRef.current = { x, width: nextWidth };
+            lastKnownSeriesStageGeometry = {
+              windowWidth,
+              stageWidth: nextWidth,
+              stageX: x,
+            };
+          }
+          if (!freshLayoutLoggedRef.current && nextWidth > 0) {
+            freshLayoutLoggedRef.current = true;
+            auditEventRef.current('fresh-layout', nextWidth);
+          }
+          auditEventRef.current('stage-layout', nextWidth);
+          logSeriesStageFit('measurement-wrapper-layout', {
+            wrapperWidth: nextWidth,
+            wrapperHeight: nextHeight,
+          });
+          if (nextWidth > 0) {
+            setGridWidth((current) => (current === nextWidth ? current : nextWidth));
+          }
+        }}>
+        {showInitialLoader ? (
+          <View style={styles.loadingStage}>
+            <View style={styles.categoryLoaderContent}>
+              <Text style={styles.categoryLoaderLabel} numberOfLines={2}>
+                {loadingLabel}
+              </Text>
+              <NovaSpaceLoader label={loadingLabel} variant="hero" />
+            </View>
           </View>
-        </View>
-      ) : emptyNotice ? (
-        <View style={styles.emptyNotice}>
-          <MaterialCommunityIcons
-            name={emptyNotice.includes('display') ? 'cloud-off-outline' : 'television-off'}
-            size={22}
-            color={theme.colors.textMuted}
-          />
-          <Text style={styles.emptyNoticeText}>{emptyNotice}</Text>
-        </View>
-      ) : (
-        <View
-          style={styles.listStage}
-              onLayout={(event: LayoutChangeEvent) => {
-                const { x, width: measuredWidth } = event.nativeEvent.layout;
-                const nextWidth = Number.isFinite(measuredWidth) ? Math.floor(measuredWidth) : 0;
-                stageLayoutRef.current = { x, width: nextWidth };
-                if (nextWidth > 0) {
-                  lastValidGridWidthRef.current = nextWidth;
-                  lastValidStageLayoutRef.current = { x, width: nextWidth };
-                  lastKnownSeriesStageGeometry = {
-                    windowWidth,
-                    stageWidth: nextWidth,
-                    stageX: x,
-                  };
-                }
-                if (!freshLayoutLoggedRef.current && nextWidth > 0) {
-                  freshLayoutLoggedRef.current = true;
-                  auditEventRef.current('fresh-layout', nextWidth);
-                }
-                auditEventRef.current('stage-layout', nextWidth);
-                if (nextWidth > 0) {
-                  setGridWidth((current) => (current === nextWidth ? current : nextWidth));
-                }
-              }}>
+        ) : emptyNotice ? (
+          <View style={styles.emptyNotice}>
+            <MaterialCommunityIcons
+              name={emptyNotice.includes('display') ? 'cloud-off-outline' : 'television-off'}
+              size={22}
+              color={theme.colors.textMuted}
+            />
+            <Text style={styles.emptyNoticeText}>{emptyNotice}</Text>
+          </View>
+        ) : stageMeasured ? (
           <FlatList
             ref={registerListRef}
             data={series}
             key={columns}
+            extraData={columnWidth}
             numColumns={columns}
             keyExtractor={keyExtractor}
             scrollEnabled={!interactionLocked}
@@ -751,34 +814,41 @@ export function SeriesPosterGrid({
             getItemLayout={getItemLayout}
             renderItem={renderItem}
           />
-          {showLoadingOverlay ? (
-            <View
-              style={styles.loadingOverlay}
-              pointerEvents="none"
-              accessible={false}
-              focusable={false}>
-              <View style={styles.categoryLoaderDim} />
-              <View style={styles.categoryLoaderContent}>
-                <Text style={styles.categoryLoaderLabel} numberOfLines={2}>
-                  {loadingLabel}
-                </Text>
-                <NovaSpaceLoader label={loadingLabel} variant="hero" />
-              </View>
+        ) : (
+          <View
+            style={styles.loadingStage}
+            pointerEvents="none"
+            accessible={false}
+            focusable={false}
+          />
+        )}
+        {showLoadingOverlay ? (
+          <View
+            style={styles.loadingOverlay}
+            pointerEvents="none"
+            accessible={false}
+            focusable={false}>
+            <View style={styles.categoryLoaderDim} />
+            <View style={styles.categoryLoaderContent}>
+              <Text style={styles.categoryLoaderLabel} numberOfLines={2}>
+                {loadingLabel}
+              </Text>
+              <NovaSpaceLoader label={loadingLabel} variant="hero" />
             </View>
-          ) : null}
-          {showPaginationLoader ? (
-            <View
-              style={styles.paginationLoaderBar}
-              pointerEvents="none"
-              accessible={false}
-              focusable={false}>
-              <BlurView intensity={10} tint="dark" style={styles.paginationLoaderPill}>
-                <NovaSpaceLoader label="Loading more series..." variant="inline" />
-              </BlurView>
-            </View>
-          ) : null}
-        </View>
-      )}
+          </View>
+        ) : null}
+        {showPaginationLoader ? (
+          <View
+            style={styles.paginationLoaderBar}
+            pointerEvents="none"
+            accessible={false}
+            focusable={false}>
+            <BlurView intensity={10} tint="dark" style={styles.paginationLoaderPill}>
+              <NovaSpaceLoader label="Loading more series..." variant="inline" />
+            </BlurView>
+          </View>
+        ) : null}
+      </View>
     </View>
   );
 }
@@ -829,7 +899,7 @@ function createStyles(theme: NovaTheme) {
     },
     row: {
       columnGap: SERIES_GRID_COLUMN_GAP,
-      marginBottom: 6,
+      marginBottom: SERIES_GRID_ROW_GAP,
       alignItems: 'flex-start',
       justifyContent: 'flex-start',
     },

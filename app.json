@@ -30,6 +30,7 @@
                                  "expo-router",
                                  "./plugins/withNovacastFeatureFlags.js",
                                  "./plugins/withNovacastTvManifest.js",
+                                 "./plugins/withNovacastNativeTvKeyEvents.js",
                                  [
                                      "expo-splash-screen",
                                      {

@@ -3,6 +3,7 @@ import { Modal, Platform, StyleSheet, View } from 'react-native';
 
 import { noteMoviePlaybackPlayerMounted } from '@/features/movies/moviesPlaybackAudit';
 
+import { PlaybackKeepAwake } from '../PlaybackKeepAwake.tsx';
 import { isUnifiedPlaybackActive } from './unifiedPlayerLogic.ts';
 import {
   closeUnifiedPlayback,
@@ -52,11 +53,17 @@ export function UnifiedPlayerHost() {
   }, [item, mounted]);
 
   if (!mounted) {
-    return <PlaybackResumeDialog />;
+    return (
+      <>
+        <PlaybackKeepAwake />
+        <PlaybackResumeDialog />
+      </>
+    );
   }
 
   return (
     <>
+    <PlaybackKeepAwake />
     <PlaybackResumeDialog />
     <Modal
       visible

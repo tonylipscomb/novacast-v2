@@ -284,6 +284,14 @@ export async function decodeUnfilteredSeriesDump(input: {
     skipCatalogNetworkGate?: boolean;
     catalogNetworkMediaType?: 'movie' | 'series' | 'live';
     catalogNetworkOperation?: string;
+    catalogNetworkRequestSource?: string | null;
+    catalogNetworkBackground?: boolean;
+    catalogNetworkCancellable?: boolean;
+    catalogNetworkForeground?: boolean;
+    catalogNetworkActiveSurface?: 'live' | 'movies' | 'series' | 'other';
+    catalogNetworkReadableGenerationPresent?: boolean;
+    catalogNetworkOnPreemptionRequested?: () => boolean;
+    catalogNetworkOnPreemptionReleased?: (input: { ownerHeldMs: number }) => void;
     runId?: string | null;
     onBatch: (records: NativeCatalogRecord[]) => Promise<void>;
   }) => Promise<StreamXtreamCategoryDecodeResult>;
@@ -354,6 +362,14 @@ export async function decodeSeriesFullDumpUnique(input: {
   requestUrl: string;
   isCancelled?: () => boolean;
   runId?: string | null;
+  catalogNetworkRequestSource?: string | null;
+  catalogNetworkBackground?: boolean;
+  catalogNetworkCancellable?: boolean;
+  catalogNetworkForeground?: boolean;
+  catalogNetworkActiveSurface?: 'live' | 'movies' | 'series' | 'other' | null;
+  catalogNetworkReadableGenerationPresent?: boolean;
+  catalogNetworkOnPreemptionRequested?: () => boolean;
+  catalogNetworkOnPreemptionReleased?: (input: { ownerHeldMs: number }) => void;
   streamDecode: (options: {
     requestUrl: string;
     mediaType: 'series';
@@ -368,6 +384,14 @@ export async function decodeSeriesFullDumpUnique(input: {
     skipCatalogNetworkGate?: boolean;
     catalogNetworkMediaType?: 'movie' | 'series' | 'live';
     catalogNetworkOperation?: string;
+    catalogNetworkRequestSource?: string | null;
+    catalogNetworkBackground?: boolean;
+    catalogNetworkCancellable?: boolean;
+    catalogNetworkForeground?: boolean;
+    catalogNetworkActiveSurface?: 'live' | 'movies' | 'series' | 'other';
+    catalogNetworkReadableGenerationPresent?: boolean;
+    catalogNetworkOnPreemptionRequested?: () => boolean;
+    catalogNetworkOnPreemptionReleased?: (input: { ownerHeldMs: number }) => void;
     runId?: string | null;
     onBatch: (records: NativeCatalogRecord[]) => Promise<void>;
   }) => Promise<StreamXtreamCategoryDecodeResult>;
@@ -466,7 +490,18 @@ export async function decodeSeriesFullDumpUnique(input: {
       };
     },
   }),
-    { isCancelled: input.isCancelled, runId: input.runId ?? null },
+    {
+      isCancelled: input.isCancelled,
+      runId: input.runId ?? null,
+      requestSource: input.catalogNetworkRequestSource ?? null,
+      background: input.catalogNetworkBackground ?? false,
+      cancellable: input.catalogNetworkCancellable ?? false,
+      foreground: input.catalogNetworkForeground ?? false,
+      activeSurface: input.catalogNetworkActiveSurface ?? null,
+      readableGenerationPresent: input.catalogNetworkReadableGenerationPresent ?? false,
+      onPreemptionRequested: input.catalogNetworkOnPreemptionRequested,
+      onPreemptionReleased: input.catalogNetworkOnPreemptionReleased,
+    },
   );
 }
 

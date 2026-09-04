@@ -15,7 +15,6 @@ import type { LiveTvChannelEpgData, LiveTvChannelRowShellData } from './liveTvCh
 import { notifyLiveTvChannelFocusMove } from './liveTvFocusIdle';
 import { getLiveTvRowVisualFlags } from './liveTvUiPerfMode';
 import { recordLiveTvChannelFocus, recordLiveTvChannelRowRender } from './liveTvScrollPerf';
-
 const rowVisualFlags = getLiveTvRowVisualFlags();
 
 export type LiveTvChannelRowProps = {
@@ -36,6 +35,8 @@ export type LiveTvChannelRowProps = {
   playEnabled: boolean;
   registerFavoriteActionRef?: (channelId: string, instance: ElementRef<typeof View> | null) => void;
   registerPlayActionRef?: (channelId: string, instance: ElementRef<typeof View> | null) => void;
+  consumeFavoriteHoldSuppression?: (channelId: string) => boolean;
+  onActionFocusChange?: (channelId: string, focused: boolean) => void;
   registerRef: (channelId: string, instance: ElementRef<typeof View> | null) => void;
 };
 
@@ -58,6 +59,8 @@ function channelRowPropsAreEqual(previous: LiveTvChannelRowProps, next: LiveTvCh
     previous.playEnabled === next.playEnabled &&
     previous.registerFavoriteActionRef === next.registerFavoriteActionRef &&
     previous.registerPlayActionRef === next.registerPlayActionRef &&
+    previous.consumeFavoriteHoldSuppression === next.consumeFavoriteHoldSuppression &&
+    previous.onActionFocusChange === next.onActionFocusChange &&
     previous.registerRef === next.registerRef
   );
 }
@@ -80,6 +83,8 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   playEnabled,
   registerFavoriteActionRef,
   registerPlayActionRef,
+  consumeFavoriteHoldSuppression,
+  onActionFocusChange,
   registerRef,
 }: LiveTvChannelRowProps) {
   recordLiveTvChannelRowRender();
@@ -88,6 +93,9 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   const [isFocused, setIsFocused] = useState(false);
   const [focusedAction, setFocusedAction] = useState<'favorite' | 'play' | null>(null);
   const longPressHandledRef = useRef(false);
+  const isFocusedRef = useRef(false);
+  const focusedActionRef = useRef<'favorite' | 'play' | null>(null);
+  const isTvRow = Platform.OS === 'android' && Platform.isTV;
   // Edge trap handles must be in state so nextFocus* props update after layout.
   const [focusTrapHandle, setFocusTrapHandle] = useState<number | undefined>(undefined);
 
@@ -121,13 +129,21 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
       {...(Platform.OS === 'android' && nextFocusLeft ? { nextFocusLeft } : null)}
       {...(Platform.OS === 'android' && nextFocusRight ? { nextFocusRight } : null)}
       onFocus={() => {
+        isFocusedRef.current = true;
         setIsFocused(true);
         recordLiveTvChannelFocus();
         notifyLiveTvChannelFocusMove();
         onFocus(data.id);
       }}
-      onBlur={() => setIsFocused(false)}
+      onBlur={() => {
+        isFocusedRef.current = false;
+        focusedActionRef.current = null;
+        setFocusedAction(null);
+        onActionFocusChange?.(data.id, false);
+        setIsFocused(false);
+      }}
       onLongPress={() => {
+        if (isTvRow) return;
         longPressHandledRef.current = true;
         onFavorite(data.id);
       }}
@@ -137,7 +153,9 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
         longPressHandledRef.current = false;
       }}
       onPress={() => {
-        if (longPressHandledRef.current) {
+        const suppressionArmed = longPressHandledRef.current;
+        const suppressed = suppressionArmed || Boolean(consumeFavoriteHoldSuppression?.(data.id));
+        if (suppressed) {
           longPressHandledRef.current = false;
           return;
         }
@@ -171,8 +189,16 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
             focusable
             accessibilityRole="button"
             accessibilityLabel={isFavorite ? 'Favorited' : 'Favorite'}
-            onFocus={() => setFocusedAction('favorite')}
-            onBlur={() => setFocusedAction(null)}
+            onFocus={() => {
+              focusedActionRef.current = 'favorite';
+              setFocusedAction('favorite');
+              onActionFocusChange?.(data.id, true);
+            }}
+            onBlur={() => {
+              focusedActionRef.current = null;
+              setFocusedAction(null);
+              onActionFocusChange?.(data.id, false);
+            }}
             onPress={() => onFavorite(data.id)}
             style={[styles.rowAction, novaTvFocus.base, focusedAction === 'favorite' && novaTvFocus.active]}>
             <MaterialCommunityIcons name={isFavorite ? 'heart' : 'heart-outline'} size={20} color={theme.colors.textPrimary} />
@@ -182,8 +208,16 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
             focusable={playEnabled}
             accessibilityRole="button"
             accessibilityLabel="Play channel"
-            onFocus={() => setFocusedAction('play')}
-            onBlur={() => setFocusedAction(null)}
+            onFocus={() => {
+              focusedActionRef.current = 'play';
+              setFocusedAction('play');
+              onActionFocusChange?.(data.id, true);
+            }}
+            onBlur={() => {
+              focusedActionRef.current = null;
+              setFocusedAction(null);
+              onActionFocusChange?.(data.id, false);
+            }}
             onPress={() => onPlay(data.id)}
             style={[styles.rowAction, novaTvFocus.base, focusedAction === 'play' && novaTvFocus.active, !playEnabled && styles.rowActionDisabled]}>
             <MaterialCommunityIcons name="play" size={20} color={theme.colors.textPrimary} />
@@ -192,7 +226,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
       ) : null}
     </Pressable>
   );
-}, channelRowPropsAreEqual);
+  }, channelRowPropsAreEqual);
 
 function createStyles(theme: NovaTheme) {
   const focusText = createNovaTvFocusTextStyles(theme);

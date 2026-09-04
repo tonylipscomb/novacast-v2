@@ -1,5 +1,10 @@
 const TRAILING_NOISE = /\s*[-:|▎▏│]+[\s|▎▏│:]*$/;
 const TITLE_DELIMITERS = /[\s|｜¦┃·•–—\-▎▏│┆┊]+/;
+// Anchored variants of TITLE_DELIMITERS, compiled once. Building these with
+// `new RegExp` inside cleanDisplayTitle recompiled two patterns on every
+// category during cold Live loads (~913 categories → ~1826 compilations).
+const LEADING_TITLE_DELIMITERS = new RegExp(`^${TITLE_DELIMITERS.source}`);
+const TRAILING_TITLE_DELIMITERS = new RegExp(`${TITLE_DELIMITERS.source}$`);
 
 /** Strip from display entirely — never show a country badge for these. */
 const STRIP_ONLY_PREFIX_TOKENS = new Set([
@@ -127,8 +132,8 @@ function cleanDisplayTitle(title: string, fallback: string) {
   }
 
   cleaned = cleaned
-    .replace(new RegExp(`^${TITLE_DELIMITERS.source}`), '')
-    .replace(new RegExp(`${TITLE_DELIMITERS.source}$`), '')
+    .replace(LEADING_TITLE_DELIMITERS, '')
+    .replace(TRAILING_TITLE_DELIMITERS, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
 

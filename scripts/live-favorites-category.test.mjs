@@ -130,15 +130,15 @@ test('3. saved legacy favorites selectedCategoryId falls back safely', () => {
 test('4. synthetic favorites id never reaches provider category repository', () => {
   assert.equal(isRealProviderLiveCategoryId('favorites'), false);
   assert.match(liveModel, /if \(!isRealProviderLiveCategoryId\(categoryId\)\)/);
-  assert.match(repositories, /if \(isSyntheticLiveFavoritesCategoryId\(categoryId\)\)/);
+  assert.match(repositories, /if \(isSyntheticLiveCategoryId\(categoryId\)\)/);
   assert.match(repositories, /reason: 'provider-repository-guard'/);
-  assert.match(liveModel, /getPublishedLiveChannels\(bundle\.providerId, categoryId\)/);
+  assert.match(liveModel, /getPublishedLiveChannels\(bundle\.providerId, categoryId,/);
   assert.match(liveModel, /bundle\.live\.getChannels\(categoryId, signal\)/);
   assert.doesNotMatch(liveModel, /bundle\.live\.getChannel\(/);
 });
 
 test('5. synthetic favorites id never reaches category EPG\/Guide probing', () => {
-  assert.match(repositories, /isSyntheticLiveFavoritesCategoryId\(categoryId\)/);
+  assert.match(repositories, /isSyntheticLiveCategoryId\(categoryId\)/);
   assert.match(repositories, /typeof __DEV__ === 'undefined' \|\| !__DEV__/);
   assert.match(liveModel, /prefetchChannelEpg\(requestId, nextChannels, resolvedCategoryId\)/);
   assert.match(liveModel, /caller: 'useLiveTvScreenModel.prefetchChannelEpg'/);
@@ -281,10 +281,11 @@ test('17. Live initial browse does not wait on EPG', () => {
 
 test('18. Live initial browse does not wait on Discover Zone hydration', () => {
   assert.doesNotMatch(liveModel, /loadDiscoverZoneSnapshot/);
-  assert.doesNotMatch(liveModel, /hydrateFavoriteLiveChannels/);
   assert.doesNotMatch(liveModel, /getLiveFavoriteEntries/);
-  assert.doesNotMatch(liveModel, /usePersonalizationStore/);
   assert.doesNotMatch(liveModel, /getCategoryCounts/);
+  // Reactive personalization state (My Channels / Recents) is read synchronously
+  // from the store hook — initial provider browse never awaits it.
+  assert.doesNotMatch(liveModel, /await[^\n]*usePersonalizationStore/);
 });
 
 test('Live FocusRouter and Movies\/Series Discover Zone stay closed', () => {

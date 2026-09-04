@@ -16,6 +16,7 @@ export {
 export {
   getCatalogBackgroundWriteYield,
   getCatalogUiSurface,
+  subscribeCatalogUiSurface,
   hasActiveCatalogForegroundRead,
   resetCatalogForegroundPriorityForTests,
 } from './catalogForegroundPriority.ts';

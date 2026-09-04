@@ -153,8 +153,7 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
           isFocused && styles.posterShellFocused,
           { transform: [{ scale: focusScale }] },
         ]}>
-        <View
-          style={[
+          <View style={[
             styles.poster,
             showPosterArt ? styles.posterWithArt : { backgroundColor: posterColors.background },
             isFocused && styles.posterFocused,
@@ -199,14 +198,9 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
         </View>
       </Animated.View>
 
-      <Text numberOfLines={1} style={[styles.title, isFocused && styles.titleFocused]}>
+      <Text numberOfLines={2} style={[styles.title, isFocused && styles.titleFocused]}>
         {displayStreamTitle(series.title)}
       </Text>
-      <View style={styles.metaRow}>
-        {metaPrimary ? <Text style={[styles.meta, isFocused && styles.metaFocused]}>{metaPrimary}</Text> : null}
-        {metaPrimary && series.genres[0] ? <View style={styles.metaDot} /> : null}
-        <Text style={styles.meta}>{series.genres[0] ?? 'Series'}</Text>
-      </View>
     </Pressable>
   );
 }, seriesPosterCardPropsAreEqual);
@@ -218,9 +212,24 @@ function createStyles(theme: NovaTheme) {
     card: {
       ...focusChrome.card,
       width: '100%',
+      flex: 0,
       flexGrow: 0,
       flexShrink: 0,
       minWidth: 0,
+      alignItems: 'center',
+      padding: 0,
+    },
+    posterShell: {
+      width: 80,
+      height: 120,
+      alignSelf: 'center',
+    },
+    poster: {
+      ...focusChrome.poster,
+      width: 80,
+      height: 120,
+      aspectRatio: 2 / 3,
+      padding: 4,
     },
     posterFrame: {
       position: 'absolute',
@@ -292,24 +301,15 @@ function createStyles(theme: NovaTheme) {
       fontSize: 10,
       fontWeight: '800',
     },
-    title: focusChrome.title,
+    title: {
+      ...focusChrome.title,
+      width: '100%',
+      marginTop: 3,
+      fontSize: 10,
+      lineHeight: 12,
+      minHeight: 24,
+      textAlign: 'center',
+    },
     titleFocused: focusChrome.titleFocused,
-    metaRow: {
-      marginTop: 1,
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 5,
-    },
-    meta: focusChrome.meta,
-    metaFocused: {
-      color: theme.colors.textSecondary,
-      fontWeight: '800',
-    },
-    metaDot: {
-      width: 3,
-      height: 3,
-      borderRadius: 99,
-      backgroundColor: theme.colors.textMuted,
-    },
   });
 }

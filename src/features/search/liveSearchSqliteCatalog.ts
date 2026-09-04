@@ -6,8 +6,9 @@ import {
   buildPublishedLiveCategories,
   countPersistedLiveDirectSources,
   publishedLiveRowToChannel,
-  resolvePublishedLiveCategoryName,
+  resolvePersistedLiveCategoryName,
 } from './livePublishedCatalogRead.ts';
+import type { CategoryRegionalSortMetrics } from '../providers/categoryRegionalPipeline.ts';
 import {
   beginCatalogForegroundRead,
   getCachedCatalogJournalMode,
@@ -61,6 +62,7 @@ type LiveSearchCatalogRow = {
   channel_number: number | string | null;
   stream_extension: string | null;
   direct_source?: string | null;
+  epg_channel_id?: string | null;
   tone: string | null;
 };
 
@@ -82,6 +84,7 @@ export type PublishedLiveCatalogState = {
   buildingGeneration: number;
   stateChannelCount: number;
   unreadinessReason: string | null;
+  categoryNames: Record<string, string>;
 };
 
 type PublishedLivePointer = {
@@ -97,6 +100,22 @@ type PublishedLivePointer = {
 const publishedStateCache = new Map<string, PublishedLiveCatalogState>();
 const publishedStateInflight = new Map<string, Promise<PublishedLiveCatalogState>>();
 const publishedPointerCache = new Map<string, PublishedLivePointer>();
+const publishedLiveCategoryCache = new Map<string, ProviderLiveCategory[]>();
+const publishedLiveCategoryInflight = new Map<string, Promise<ProviderLiveCategory[]>>();
+
+function invalidatePublishedLiveCategoryCache(providerId?: string) {
+  const prefix = providerId ? `${providerId}:` : null;
+  for (const key of [...publishedLiveCategoryCache.keys()]) {
+    if (!prefix || key.startsWith(prefix)) {
+      publishedLiveCategoryCache.delete(key);
+    }
+  }
+  for (const key of [...publishedLiveCategoryInflight.keys()]) {
+    if (!prefix || key.startsWith(prefix)) {
+      publishedLiveCategoryInflight.delete(key);
+    }
+  }
+}
 
 export function resetLiveSearchCatalogForTests() {
   inFlightBuilds.clear();
@@ -104,6 +123,7 @@ export function resetLiveSearchCatalogForTests() {
   publishedStateCache.clear();
   publishedStateInflight.clear();
   publishedPointerCache.clear();
+  invalidatePublishedLiveCategoryCache();
   schemaPromise = null;
 }
 
@@ -185,6 +205,7 @@ async function ensureLiveSearchSchema() {
         channel_number INTEGER,
         stream_extension TEXT,
         direct_source TEXT,
+        epg_channel_id TEXT,
         tone TEXT,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (provider_id, generation, channel_id)
@@ -203,11 +224,17 @@ async function ensureLiveSearchSchema() {
         provider_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
         category_id TEXT NOT NULL,
+        category_name TEXT,
         item_count INTEGER NOT NULL,
         PRIMARY KEY (provider_id, generation, category_id)
       );
     `);
     await ensureLiveSearchDirectSourceColumn(db);
+    const epgColumnAdded = await ensureLiveSearchColumn(db, 'live_search_channels', 'epg_channel_id', 'TEXT');
+    const categoryNameColumnAdded = await ensureLiveSearchColumn(db, 'live_search_category_counts', 'category_name', 'TEXT');
+    if (epgColumnAdded || categoryNameColumnAdded) {
+      await db.run(`UPDATE live_search_state SET status = 'stale', error_code = 'live_metadata_schema_upgrade'`);
+    }
   })().catch((error) => {
     schemaPromise = null;
     throw error;
@@ -222,6 +249,18 @@ async function ensureLiveSearchDirectSourceColumn(db: Awaited<ReturnType<typeof 
     return;
   }
   await db.exec('ALTER TABLE live_search_channels ADD COLUMN direct_source TEXT');
+}
+
+async function ensureLiveSearchColumn(
+  db: Awaited<ReturnType<typeof getCatalogDatabase>>,
+  table: 'live_search_channels' | 'live_search_category_counts',
+  column: 'epg_channel_id' | 'category_name',
+  type: 'TEXT',
+) {
+  const columns = await db.getAll<{ name: string }>(`PRAGMA table_info(${table})`);
+  if (columns.some((item) => item.name === column)) return false;
+  await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  return true;
 }
 
 async function readState(providerId: string): Promise<LiveSearchCatalogStateRow | null> {
@@ -239,14 +278,14 @@ async function readState(providerId: string): Promise<LiveSearchCatalogStateRow 
 async function readPersistedCategoryCounts(
   providerId: string,
   generation: number,
-): Promise<Record<string, number> | null> {
+): Promise<{ counts: Record<string, number>; names: Record<string, string> } | null> {
   if (generation <= 0) {
     return null;
   }
   await ensureLiveSearchSchema();
   const db = await getCatalogReadDatabase();
-  const rows = await db.getAll<{ category_id: string; item_count: number | string }>(
-    `SELECT category_id, item_count
+  const rows = await db.getAll<{ category_id: string; category_name: string | null; item_count: number | string }>(
+    `SELECT category_id, category_name, item_count
        FROM live_search_category_counts
       WHERE provider_id = ? AND generation = ?`,
     [providerId, generation],
@@ -255,23 +294,27 @@ async function readPersistedCategoryCounts(
     return null;
   }
   const counts: Record<string, number> = {};
+  const names: Record<string, string> = {};
   for (const row of rows) {
     const categoryId = String(row.category_id ?? '').trim() || LIVE_UNKNOWN_CATEGORY_ID;
     counts[categoryId] = (counts[categoryId] ?? 0) + asNumber(row.item_count);
+    if (row.category_name?.trim()) names[categoryId] = row.category_name.trim();
   }
-  return counts;
+  return { counts, names };
 }
 
 async function persistCategoryCounts(
   providerId: string,
   generation: number,
   counts: Record<string, number>,
+  categories?: readonly ProviderLiveCategory[],
 ): Promise<void> {
   if (generation <= 0) {
     return;
   }
   await ensureLiveSearchSchema();
   const db = await getCatalogDatabase();
+  const names = new Map((categories ?? []).map((category) => [category.id.trim(), category.name.trim()]));
   await withCatalogTransaction(async () => {
     await db.run(
       `DELETE FROM live_search_category_counts
@@ -282,9 +325,9 @@ async function persistCategoryCounts(
       const id = String(categoryId ?? '').trim() || LIVE_UNKNOWN_CATEGORY_ID;
       await db.run(
         `INSERT OR REPLACE INTO live_search_category_counts (
-           provider_id, generation, category_id, item_count
-         ) VALUES (?, ?, ?, ?)`,
-        [providerId, generation, id, asNumber(itemCount)],
+           provider_id, generation, category_id, category_name, item_count
+         ) VALUES (?, ?, ?, ?, ?)`,
+        [providerId, generation, id, names.get(id) || null, asNumber(itemCount)],
       );
     }
   });
@@ -294,22 +337,22 @@ async function readGenerationSummary(
   providerId: string,
   generation: number,
   options?: { allowScan?: boolean },
-): Promise<{ channelCount: number; counts: Record<string, number>; scannedAllChannels: boolean }> {
+): Promise<{ channelCount: number; counts: Record<string, number>; categoryNames: Record<string, string>; scannedAllChannels: boolean }> {
   if (generation <= 0) {
-    return { channelCount: 0, counts: {}, scannedAllChannels: false };
+    return { channelCount: 0, counts: {}, categoryNames: {}, scannedAllChannels: false };
   }
 
   const persisted = await readPersistedCategoryCounts(providerId, generation);
   if (persisted) {
     let channelCount = 0;
-    for (const total of Object.values(persisted)) {
+    for (const total of Object.values(persisted.counts)) {
       channelCount += total;
     }
-    return { channelCount, counts: persisted, scannedAllChannels: false };
+    return { channelCount, counts: persisted.counts, categoryNames: persisted.names, scannedAllChannels: false };
   }
 
   if (options?.allowScan === false) {
-    return { channelCount: 0, counts: {}, scannedAllChannels: false };
+    return { channelCount: 0, counts: {}, categoryNames: {}, scannedAllChannels: false };
   }
 
   await ensureLiveSearchSchema();
@@ -339,6 +382,7 @@ async function readGenerationSummary(
   const summary = {
     channelCount: asNumber(totalRow?.total),
     counts,
+      categoryNames: {},
     scannedAllChannels: true,
   };
   if (summary.channelCount > 0) {
@@ -390,6 +434,7 @@ async function markBuildFailed(providerId: string, generation: number, errorCode
   });
   publishedStateCache.delete(providerId);
   publishedPointerCache.delete(providerId);
+  invalidatePublishedLiveCategoryCache(providerId);
 }
 
 async function activateGeneration(
@@ -397,6 +442,7 @@ async function activateGeneration(
   generation: number,
   channelCount: number,
   counts?: Record<string, number>,
+  categories?: readonly ProviderLiveCategory[],
 ) {
   const completedAt = Date.now();
   const db = await getCatalogDatabase();
@@ -419,10 +465,11 @@ async function activateGeneration(
     );
   });
   if (counts && Object.keys(counts).length) {
-    await persistCategoryCounts(providerId, generation, counts).catch(() => undefined);
+    await persistCategoryCounts(providerId, generation, counts, categories).catch(() => undefined);
   }
   publishedStateCache.delete(providerId);
   publishedPointerCache.delete(providerId);
+  invalidatePublishedLiveCategoryCache(providerId);
 }
 
 function rowForChannel(
@@ -446,6 +493,7 @@ function rowForChannel(
     channelNumber: Number.isFinite(channel.number) ? channel.number : null,
     streamExtension: channel.containerExtension ?? null,
     directSource: persistableLiveDirectSource(channel.streamUrl),
+    epgChannelId: channel.epgChannelId ?? null,
     tone: channel.tone ?? null,
     updatedAt: Date.now(),
   };
@@ -553,7 +601,7 @@ async function writeChannelRows(
       break;
     }
     const batch = uniqueRows.slice(offset, offset + LIVE_SEARCH_WRITE_BATCH_SIZE);
-    const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+    const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
     const params: Array<string | number | null> = [];
 
     for (const row of batch) {
@@ -570,6 +618,7 @@ async function writeChannelRows(
         row.channelNumber,
         row.streamExtension,
         row.directSource,
+        row.epgChannelId,
         row.tone,
         row.updatedAt,
       );
@@ -580,7 +629,7 @@ async function writeChannelRows(
         `INSERT OR IGNORE INTO live_search_channels (
            provider_id, generation, channel_id, category_id,
            title, normalized_title, current_program, normalized_current,
-           logo_url, channel_number, stream_extension, direct_source, tone, updated_at
+           logo_url, channel_number, stream_extension, direct_source, epg_channel_id, tone, updated_at
          ) VALUES ${placeholders}`,
         params,
       );
@@ -683,7 +732,7 @@ async function buildLiveSearchCatalog(input: {
       if (dumpSummary.channelCount <= 0) {
         throw new Error('live_search_catalog_empty_generation');
       }
-      await activateGeneration(providerId, generation, dumpSummary.channelCount, dumpSummary.counts);
+      await activateGeneration(providerId, generation, dumpSummary.channelCount, dumpSummary.counts, categories);
       patchLiveTvWorkload(
         { searchIndexBuildActive: false, searchIndexPendingCategories: 0 },
         { log: true, reason: 'search-index-completed-full-dump' },
@@ -822,7 +871,7 @@ async function buildLiveSearchCatalog(input: {
     logLivePublicationStage('live-subscriber-notify-start', seenChannelIds.size, subscriberStartedAt, {
       listenerStrategy: 'generation-pointer-publication',
     });
-    await activateGeneration(providerId, generation, summary.channelCount, summary.counts);
+    await activateGeneration(providerId, generation, summary.channelCount, summary.counts, categories);
     logLivePublicationStage('live-subscriber-notify-complete', seenChannelIds.size, subscriberStartedAt, {
       listenerStrategy: 'generation-pointer-publication',
     });
@@ -1001,7 +1050,7 @@ export async function publishLiveSearchCatalogFromDump(input: {
     if (summary.channelCount <= 0) {
       throw new Error('live_search_catalog_empty_generation');
     }
-    await activateGeneration(providerId, generation, summary.channelCount, summary.counts);
+    await activateGeneration(providerId, generation, summary.channelCount, summary.counts, input.categories);
     logLivePublicationTrace('live-publication-activated', {
       providerId,
       requestSource: input.requestSource ?? null,
@@ -1158,7 +1207,7 @@ export async function searchLiveSqliteCatalog(input: {
   const startedAt = Date.now();
   const rows = await db.getAll<LiveSearchCatalogRow>(
     `SELECT channel_id, category_id, title, current_program, logo_url,
-            channel_number, stream_extension, direct_source, tone
+            channel_number, stream_extension, direct_source, epg_channel_id, tone
        FROM live_search_channels
       WHERE ${where}
       ORDER BY
@@ -1270,6 +1319,7 @@ function emptyPublishedLiveCatalogState(unreadinessReason: string): PublishedLiv
     generation: 0,
     channelCount: 0,
     counts: {},
+    categoryNames: {},
     status: null,
     stateRowPresent: false,
     buildingGeneration: 0,
@@ -1309,6 +1359,8 @@ async function resolvePublishedLivePointer(providerId: string): Promise<Publishe
       sqliteMs: Date.now() - startedAt,
       rowCount: 1,
       usedCache: true,
+      pointerCacheHit: true,
+      stateReadRequired: true,
       elapsedMs: Date.now() - startedAt,
     });
     return cached;
@@ -1337,6 +1389,8 @@ async function resolvePublishedLivePointer(providerId: string): Promise<Publishe
     sqliteMs: Date.now() - startedAt,
     rowCount: 1,
     usedCache: false,
+    pointerCacheHit: false,
+    stateReadRequired: true,
     elapsedMs: Date.now() - startedAt,
   });
   return pointer;
@@ -1369,6 +1423,7 @@ async function loadPublishedLiveCatalogState(
     generation: pointer.generation,
     channelCount: summary.channelCount || pointer.channelCount,
     counts: summary.counts,
+    categoryNames: summary.categoryNames,
     status: pointer.status,
     stateRowPresent: true,
     buildingGeneration: pointer.buildingGeneration,
@@ -1383,6 +1438,7 @@ export function clearPublishedLiveCatalogStateCacheForTests(): void {
   publishedStateCache.clear();
   publishedStateInflight.clear();
   publishedPointerCache.clear();
+  invalidatePublishedLiveCategoryCache();
 }
 
 export async function getPublishedLiveCatalogState(providerId: string): Promise<PublishedLiveCatalogState> {
@@ -1472,7 +1528,7 @@ export async function getPublishedLiveChannelById(
   const db = await getCatalogReadDatabase();
   const row = await db.getFirst<LiveSearchCatalogRow>(
     `SELECT channel_id, category_id, title, current_program, logo_url,
-            channel_number, stream_extension, direct_source, tone
+            channel_number, stream_extension, direct_source, epg_channel_id, tone
        FROM live_search_channels
       WHERE provider_id = ? AND generation = ? AND channel_id = ?
       LIMIT 1`,
@@ -1535,38 +1591,114 @@ export async function getPublishedLiveCategories(
     return [];
   }
 
-  const normalizeStartedAt = Date.now();
-  const categories = buildPublishedLiveCategories(state.counts, (categoryId) =>
-    resolvePublishedLiveCategoryName(providerId, categoryId),
-  );
-  const normalizeMs = Date.now() - normalizeStartedAt;
-  logLiveReadTiming({
-    event: 'getPublishedLiveCategories-timing',
-    providerId,
-    readableGeneration: state.generation,
-    publishedGeneration: state.generation,
-    publishedTotal: state.channelCount,
-    categoryCount: categories.length,
-    rowCount: categories.length,
-    stateMs,
-    sqliteMs: 0,
-    normalizeMs,
-    sortMs: normalizeMs,
-    scannedAllChannels: Boolean((state as { scannedAllChannels?: boolean }).scannedAllChannels),
-    source: 'published-sqlite',
-    elapsedMs: Date.now() - startedAt,
+  const cacheKey = `${providerId.trim()}:${state.generation}`;
+  const cached = publishedLiveCategoryCache.get(cacheKey);
+  if (cached) {
+    logLiveReadTiming({
+      event: 'getPublishedLiveCategories-timing',
+      providerId,
+      readableGeneration: state.generation,
+      publishedGeneration: state.generation,
+      publishedTotal: state.channelCount,
+      categoryCount: cached.length,
+      rowCount: cached.length,
+      stateMs,
+      sqliteMs: 0,
+      normalizeMs: 0,
+      sortMs: 0,
+      scannedAllChannels: false,
+      source: 'memory-cache',
+      usedCache: true,
+      elapsedMs: Date.now() - startedAt,
+    });
+    return cached;
+  }
+  const inflight = publishedLiveCategoryInflight.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const pending = Promise.resolve().then(() => {
+    const normalizeStartedAt = Date.now();
+    const metrics: CategoryRegionalSortMetrics = { profileBuildMs: 0, actualSortMs: 0, profileBuildCount: 0, comparatorCalls: 0 };
+    const categories = buildPublishedLiveCategories(state.counts, (categoryId) =>
+      resolvePersistedLiveCategoryName(providerId, categoryId, state.categoryNames),
+      metrics,
+    );
+    const normalizeMs = Date.now() - normalizeStartedAt;
+    publishedLiveCategoryCache.set(cacheKey, categories);
+    logLiveReadTiming({
+      event: 'getPublishedLiveCategories-timing',
+      providerId,
+      readableGeneration: state.generation,
+      publishedGeneration: state.generation,
+      publishedTotal: state.channelCount,
+      categoryCount: categories.length,
+      rowCount: categories.length,
+      stateMs,
+      sqliteMs: 0,
+      normalizeMs,
+      sortMs: metrics.actualSortMs,
+      profileBuildMs: metrics.profileBuildMs,
+      actualSortMs: metrics.actualSortMs,
+      totalCategoryTransformMs: normalizeMs,
+      profileBuildCount: metrics.profileBuildCount,
+      comparatorCalls: metrics.comparatorCalls,
+      scannedAllChannels: Boolean((state as { scannedAllChannels?: boolean }).scannedAllChannels),
+      source: 'published-sqlite',
+      usedCache: false,
+      elapsedMs: Date.now() - startedAt,
+    });
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      console.info('[NovaCast Live Category CPU Audit]', {
+        providerId,
+        generation: state.generation,
+        categoryCount: categories.length,
+        // Independently measured. profileBuild + actualSort are subsets of the
+        // total; the remainder is category-record construction/name resolution.
+        totalCategoryTransformMs: normalizeMs,
+        profileBuildMs: metrics.profileBuildMs,
+        actualSortMs: metrics.actualSortMs,
+        profileBuildCount: metrics.profileBuildCount,
+        comparatorCalls: metrics.comparatorCalls,
+        // Per-stage breakdown inside profile building.
+        titleParseMs: metrics.titleParseMs ?? 0,
+        scriptDetectMs: metrics.scriptDetectMs ?? 0,
+        regionClassifyMs: metrics.regionClassifyMs ?? 0,
+        displayNameMs: metrics.displayNameMs ?? 0,
+        sortKeyMs: metrics.sortKeyMs ?? 0,
+        titleParseCount: metrics.titleParseCount ?? 0,
+        scriptDetectCount: metrics.scriptDetectCount ?? 0,
+        regionClassifyCount: metrics.regionClassifyCount ?? 0,
+      });
+    }
+    return categories;
+  }).finally(() => {
+    publishedLiveCategoryInflight.delete(cacheKey);
   });
-  return categories;
+  publishedLiveCategoryInflight.set(cacheKey, pending);
+  return pending;
 }
 
 export async function getPublishedLiveChannels(
   providerId: string,
   categoryId?: string,
-  options?: { offset?: number; limit?: number },
+  options?: { offset?: number; limit?: number; publishedGeneration?: number; publishedChannelCount?: number },
 ): Promise<ProviderLiveChannel[]> {
   const startedAt = Date.now();
   const pointerStartedAt = Date.now();
-  const pointer = await resolvePublishedLivePointer(providerId);
+  const verifiedGeneration = options?.publishedGeneration;
+  const pointer = verifiedGeneration != null
+    ? {
+        ready: verifiedGeneration > 0,
+        generation: verifiedGeneration,
+        channelCount: options?.publishedChannelCount ?? 0,
+        status: 'ready',
+        stateRowPresent: true,
+        buildingGeneration: 0,
+        unreadinessReason: verifiedGeneration > 0 ? null : 'active-generation-not-positive',
+      }
+    : await resolvePublishedLivePointer(providerId);
   const stateMs = Date.now() - pointerStartedAt;
   if (!pointer.ready) {
     logLiveReadTiming({
@@ -1580,6 +1712,7 @@ export async function getPublishedLiveChannels(
       scannedAllChannels: false,
       elapsedMs: Date.now() - startedAt,
       returnReason: pointer.unreadinessReason,
+      usedVerifiedGeneration: verifiedGeneration != null,
     });
     return [];
   }
@@ -1624,7 +1757,7 @@ export async function getPublishedLiveChannels(
   }
 
   let sql = `SELECT channel_id, category_id, title, current_program, logo_url,
-                    channel_number, stream_extension, direct_source, tone
+                    channel_number, stream_extension, direct_source, epg_channel_id, tone
                FROM live_search_channels
               WHERE ${where.join(' AND ')}
               ORDER BY channel_number ASC, normalized_title ASC, channel_id ASC`;
@@ -1661,6 +1794,7 @@ export async function getPublishedLiveChannels(
     rowCount: channels.length,
     ...pageStats,
     stateMs,
+    usedVerifiedGeneration: verifiedGeneration != null,
     sqliteMs,
     sqliteExecutionMs: sqliteMs,
     queueWaitMs,

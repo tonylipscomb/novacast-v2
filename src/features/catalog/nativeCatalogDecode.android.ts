@@ -109,6 +109,7 @@ async function streamXtreamCategoryDecodeUnlocked(
     categoryPosition: input.categoryPosition,
     totalCategoryCount: input.totalCategoryCount,
     requestAttempt: input.requestAttempt ?? 1,
+    preserveLiveEpgChannelId: input.catalogNetworkMediaType === 'live',
   });
   const seriesFullDump =
     input.mediaType === 'series' &&

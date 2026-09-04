@@ -1,7 +1,7 @@
 import { derivedLiveCategoryName, LIVE_UNKNOWN_CATEGORY_ID } from '../providers/liveCatalogCompletion.ts';
 import { logSampledLiveStreamRow } from '../providers/liveStreamRowDiagnostics.ts';
 import type { ProviderLiveCategory, ProviderLiveChannel } from '../providers/providerRepositories.ts';
-import { sortLiveCategoriesUsFirst } from '../providers/usAmericanSort.ts';
+import { sortLiveCategoriesUsFirst, type CategoryRegionalSortMetrics } from '../providers/usAmericanSort.ts';
 import { getLiveSearchCategoryName } from './liveChannelIndex.ts';
 
 export type PublishedLiveCatalogRow = {
@@ -13,6 +13,7 @@ export type PublishedLiveCatalogRow = {
   channel_number: number | string | null;
   stream_extension: string | null;
   direct_source?: string | null;
+  epg_channel_id?: string | null;
   tone: string | null;
 };
 
@@ -35,9 +36,18 @@ export function resolvePublishedLiveCategoryName(providerId: string, categoryId:
   return getLiveSearchCategoryName(providerId, categoryId) ?? derivedLiveCategoryName(categoryId);
 }
 
+export function resolvePersistedLiveCategoryName(
+  providerId: string,
+  categoryId: string,
+  persistedNames: Record<string, string>,
+): string {
+  return persistedNames[categoryId]?.trim() || resolvePublishedLiveCategoryName(providerId, categoryId);
+}
+
 export function buildPublishedLiveCategories(
   counts: Record<string, number>,
   resolveName: (categoryId: string) => string,
+  metrics?: CategoryRegionalSortMetrics,
 ): ProviderLiveCategory[] {
   const normalized = normalizePublishedCategoryCounts(counts);
   const categories = Object.entries(normalized).map(([id, count], index) => {
@@ -51,7 +61,7 @@ export function buildPublishedLiveCategories(
       icon: 'flag-outline' as const,
     };
   });
-  return sortLiveCategoriesUsFirst(categories);
+  return sortLiveCategoriesUsFirst(categories, { metrics });
 }
 
 export function countPersistedLiveDirectSources(
@@ -97,6 +107,7 @@ export function publishedLiveRowToChannel(
     logoUrl: row.logo_url || undefined,
     containerExtension: row.stream_extension || undefined,
     streamUrl: row.direct_source?.trim() || undefined,
+    epgChannelId: row.epg_channel_id?.trim() || undefined,
   };
   const storedDirectSource = String(row.direct_source ?? '').trim();
   logSampledLiveStreamRow('hydrated-playback', {

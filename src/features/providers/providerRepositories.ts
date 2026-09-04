@@ -12,6 +12,7 @@ import {
   endCatalogGuidePriority,
 } from './catalogSyncGuidePriority.ts';
 import { logContentSortAuditPayload } from '../media-browser/contentSortAudit.ts';
+import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import {
   buildContentSortPageMetadata,
   categoryHasValidRatings,
@@ -38,7 +39,7 @@ import {
   normalizeProviderCategoryId,
   type ProviderCategoryType,
 } from './categoryNormalization.ts';
-import { isSyntheticLiveFavoritesCategoryId } from './liveCategoryIdSafety.ts';
+import { isSyntheticLiveFavoritesCategoryId, isSyntheticLiveCategoryId } from './liveCategoryIdSafety.ts';
 import {
   assignLiveStreamCategoryId,
   LIVE_UNKNOWN_CATEGORY_ID,
@@ -1278,7 +1279,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
   }
 
   function startGuideEpgProbe(categoryId: string, categoryStreams: XtreamLiveStreamResponse[]) {
-    if (guideEpgProbeStarted || !categoryId || categoryId === 'all' || isSyntheticLiveFavoritesCategoryId(categoryId)) {
+    if (guideEpgProbeStarted || !categoryId || categoryId === 'all' || isSyntheticLiveCategoryId(categoryId)) {
       return;
     }
     // Full-catalog dump + sync scan of every live stream. Release Live browse must not run this.
@@ -1819,7 +1820,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       return client.buildPlayerApiUrl('get_live_streams', { category_id: categoryId });
     },
     async getChannels(categoryId: string, signal) {
-      if (isSyntheticLiveFavoritesCategoryId(categoryId)) {
+      if (isSyntheticLiveCategoryId(categoryId)) {
         console.info('[NovaCast Live Category]', {
           event: 'selection-rejected',
           categoryId,
@@ -1913,7 +1914,18 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       },
       async getSeriesInfo(seriesId: string, signal) {
         const startedAt = Date.now();
-        return client.getSeriesInfo(seriesId, signal).catch((error) => {
+        return client.getSeriesInfo(seriesId, signal).then((info) => {
+          if (isNovaCastTraceLoggingEnabled()) {
+            console.info('[NovaCast Series Compatibility Audit]', {
+              event: info == null ? 'provider-returned-null' : 'repository-response',
+              action: 'get_series_info',
+              providerSeriesIdPresent: Boolean(String(seriesId).trim()),
+              normalizedResultNull: info == null,
+              timestamp: Date.now(),
+            });
+          }
+          return info;
+        }).catch((error) => {
           const classification = classifyProviderBoundaryError(error);
           logProviderBoundary('[NovaCast Series Provider Request]', {
             event: 'error',

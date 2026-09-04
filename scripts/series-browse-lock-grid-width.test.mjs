@@ -12,7 +12,7 @@ test('Series poster width is measured from the rendered grid', () => {
   assert.match(grid, /onLayout=\{\(event: LayoutChangeEvent\) =>/);
   assert.match(grid, /SERIES_GRID_LEFT_PADDING/);
   assert.match(grid, /SERIES_GRID_RIGHT_PADDING/);
-  assert.match(grid, /SERIES_GRID_COLUMN_GAP = 12/);
+  assert.match(grid, /SERIES_GRID_COLUMN_GAP = 6/);
   assert.match(grid, /isNovaCastTraceLoggingEnabled\(\)/);
   assert.match(grid, /\[Series Native Layout Audit\]/);
   for (const event of [
@@ -33,7 +33,16 @@ test('Series poster width is measured from the rendered grid', () => {
   assert.match(grid, /justifyContent: 'flex-start'/);
   assert.match(grid, /flexGrow: 0/);
   assert.doesNotMatch(grid, /Math\.min\(190/);
-  assert.match(grid, /Math\.floor\(measured\)/);
+  // Current approved sizing: measured-stage only, neutral gate, guaranteed fit.
+  assert.match(grid, /const stageMeasured = gridWidth > 0/);
+  assert.match(grid, /if \(gridWidth <= 0\) \{\s*return 0;/);
+  assert.match(grid, /Math\.floor\(available \/ Math\.max\(1, columns\)\)/);
+  // Measurement wrapper is always mounted; the FlatList is gated inside it.
+  assert.match(grid, /stageMeasured \? \(/);
+  assert.match(grid, /style=\{styles\.listStage\}\s*\n\s*onLayout=/);
+  assert.match(grid, /'measurement-wrapper-layout'/);
+  assert.match(grid, /\[NovaCast Series Stage Fit\]/);
+  assert.match(grid, /widthSource: gridWidth > 0 \? 'current-measure' : 'unmeasured'/);
   assert.match(grid, /effectiveCardWidth/);
   assert.match(grid, /lastValidGridWidthRef/);
   assert.match(grid, /lastValidStageLayoutRef/);
@@ -50,47 +59,45 @@ test('Series poster width is measured from the rendered grid', () => {
   assert.match(fs.readFileSync('src/features/series/components/SeriesPosterCard.tsx', 'utf8'), /toValue: 1\.025/);
 });
 
-test('Series geometry retains the last valid width across transient zero layouts', () => {
-  const widthForSizing = (current, lastValid) => current > 0 ? current : lastValid;
-  const cardWidth = (width) => width > 0
-    ? Math.floor((width - 6 - 18 - 12 * 4) / 5)
-    : 120;
-  let currentWidth = 0;
-  let lastValidWidth = 0;
+test('Series sizes cells only from the current measured stage', () => {
+  const LEFT = 2, RIGHT = 2, GAP = 6, COLS = 5;
+  // Approved fix: no 120px pre-measure fallback — unmeasured stage sizes to 0.
+  const columnWidth = (stage) => stage > 0
+    ? Math.max(1, Math.floor((stage - LEFT - RIGHT - GAP * (COLS - 1)) / COLS))
+    : 0;
 
-  assert.equal(cardWidth(widthForSizing(currentWidth, lastValidWidth)), 120);
+  assert.equal(columnWidth(0), 0);
 
-  currentWidth = 580;
-  lastValidWidth = currentWidth;
-  assert.equal(cardWidth(widthForSizing(currentWidth, lastValidWidth)), 101);
-  assert.ok(101 * 5 + 12 * 4 + 6 + 18 <= 580);
+  // ONN measured stage: five cells + gaps + padding fit inside the stage.
+  const stage = 580;
+  const cw = columnWidth(stage);
+  assert.equal(cw, 110);
+  const footprint = cw * COLS + GAP * (COLS - 1) + LEFT + RIGHT;
+  assert.equal(footprint, 578);
+  assert.ok(footprint <= stage);
 
-  currentWidth = 0;
-  assert.equal(widthForSizing(currentWidth, lastValidWidth), 580);
-  assert.equal(cardWidth(widthForSizing(currentWidth, lastValidWidth)), 101);
-
-  currentWidth = 700;
-  lastValidWidth = currentWidth;
-  assert.equal(widthForSizing(currentWidth, lastValidWidth), 700);
-  assert.equal(cardWidth(widthForSizing(currentWidth, lastValidWidth)), 125);
+  // Wider stage scales cell width up while still guaranteeing fit.
+  const wide = 700;
+  const cwWide = columnWidth(wide);
+  assert.equal(cwWide, 134);
+  assert.ok(cwWide * COLS + GAP * (COLS - 1) + LEFT + RIGHT <= wide);
 });
 
-test('Series route re-entry uses session geometry only for the same viewport', () => {
-  const cache = { windowWidth: 960, stageWidth: 580 };
-  const cardWidth = (width) => width > 0
-    ? Math.floor((width - 6 - 18 - 12 * 4) / 5)
-    : 120;
-  const effectiveWidth = (current, localLastValid, windowWidth) => {
-    if (current > 0) return current;
-    if (localLastValid > 0) return localLastValid;
-    return cache.windowWidth === windowWidth ? cache.stageWidth : 0;
-  };
+test('Series does not reuse stale cached width to size the current render', () => {
+  const LEFT = 2, RIGHT = 2, GAP = 6, COLS = 5;
+  // Sizing depends ONLY on the current measured stage — never a cached value.
+  const columnWidth = (currentStage) => currentStage > 0
+    ? Math.max(1, Math.floor((currentStage - LEFT - RIGHT - GAP * (COLS - 1)) / COLS))
+    : 0;
 
-  assert.equal(effectiveWidth(0, 0, 960), 580);
-  assert.equal(cardWidth(effectiveWidth(0, 0, 960)), 101);
-  assert.equal(effectiveWidth(0, 0, 1080), 0);
-  assert.equal(cardWidth(effectiveWidth(0, 0, 1080)), 120);
-  assert.equal(effectiveWidth(700, 0, 1080), 700);
+  const staleWiderCache = 700; // a previously seen, wider viewport
+  // An unmeasured current stage sizes to the neutral gate (0), not the stale cache.
+  assert.equal(columnWidth(0), 0);
+  assert.notEqual(columnWidth(0), columnWidth(staleWiderCache));
+
+  // The live 580 stage sizes five fitting columns regardless of the old cache.
+  assert.equal(columnWidth(580), 110);
+  assert.ok(columnWidth(580) * COLS + GAP * (COLS - 1) + LEFT + RIGHT <= 580);
 });
 
 test('Series browse is natively locked while detail owns interaction', () => {

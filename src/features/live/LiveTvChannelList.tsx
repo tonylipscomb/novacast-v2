@@ -1,6 +1,6 @@
 import type { ElementRef, RefObject } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
-import { FlatList, StyleSheet, type ListRenderItemInfo, type ViewToken } from 'react-native';
+import { FlatList, StyleSheet, type LayoutChangeEvent, type ListRenderItemInfo, type ViewToken } from 'react-native';
 import { View } from 'react-native';
 
 import type { ProviderLiveChannel } from '@/features/providers/providerRepositories';
@@ -43,6 +43,9 @@ type LiveTvChannelListProps = {
   playEnabled: boolean;
   registerFavoriteActionRef?: (channelId: string, instance: ElementRef<typeof View> | null) => void;
   registerPlayActionRef?: (channelId: string, instance: ElementRef<typeof View> | null) => void;
+  consumeFavoriteHoldSuppression?: (channelId: string) => boolean;
+  onActionFocusChange?: (channelId: string, focused: boolean) => void;
+  onLayout?: (event: LayoutChangeEvent) => void;
   /** When true, allow one programmatic scroll for restore / category jump. */
   allowRestoreScroll?: boolean;
   onTuneChannel: (channelId: string) => void;
@@ -63,6 +66,9 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   playEnabled,
   registerFavoriteActionRef,
   registerPlayActionRef,
+  consumeFavoriteHoldSuppression,
+  onActionFocusChange,
+  onLayout,
   allowRestoreScroll = false,
   onTuneChannel,
   onChannelFocus,
@@ -190,6 +196,8 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
           playEnabled={playEnabled}
           registerFavoriteActionRef={registerFavoriteActionRef}
           registerPlayActionRef={registerPlayActionRef}
+          consumeFavoriteHoldSuppression={consumeFavoriteHoldSuppression}
+          onActionFocusChange={onActionFocusChange}
           onFocus={handleChannelFocus}
           onTune={onTune}
           registerRef={onRegister}
@@ -208,6 +216,8 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       playEnabled,
       registerFavoriteActionRef,
       registerPlayActionRef,
+      consumeFavoriteHoldSuppression,
+      onActionFocusChange,
       preferFocusChannelId,
       previewChannelId,
       rowShells.length,
@@ -251,6 +261,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       viewabilityConfig={VIEWABILITY_CONFIG}
       onScrollToIndexFailed={onScrollToIndexFailed}
       renderItem={renderItem}
+      onLayout={onLayout}
     />
   );
 });

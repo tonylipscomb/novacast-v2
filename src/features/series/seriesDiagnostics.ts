@@ -33,6 +33,40 @@ export function emitSeriesStartup(
   console.info('[NovaCast Series Startup] ' + JSON.stringify(body));
 }
 
+export const SERIES_STATE_HANDOFF_MARKER = 'series-state-handoff-audit-v1';
+
+export type SeriesStateHandoffEvent =
+  | 'initial-items-ready'
+  | 'category-metadata-ready'
+  | 'reconciliation-start'
+  | 'reconciliation-preserved-selection'
+  | 'reconciliation-replaced-selection'
+  | 'visible-items-cleared'
+  | 'visible-items-committed';
+
+/**
+ * Series Release Startup Regression audit trail.
+ *
+ * Intentionally RELEASE-SAFE (ungated — not behind isNovaCastTraceLoggingEnabled and
+ * not __DEV__-only): this is the evidence trail for the startup state-handoff regression
+ * where a valid selected-category + non-empty item screen was transiently blanked by a
+ * background categories/metadata reconcile. It must survive in production logcat.
+ * Never emits credentials or provider secrets.
+ */
+export function emitSeriesStateHandoff(
+  event: SeriesStateHandoffEvent,
+  fields: Record<string, unknown> = {},
+): void {
+  try {
+    console.info(
+      '[NovaCast Series State Handoff Audit] ' +
+        JSON.stringify({ event, marker: SERIES_STATE_HANDOFF_MARKER, ...fields }),
+    );
+  } catch {
+    // Telemetry must never throw into the render/data path.
+  }
+}
+
 let gridInstanceSeq = 0;
 let activeGridInstanceId: string | null = null;
 let gridMounted = false;

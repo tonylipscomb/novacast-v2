@@ -1,4 +1,4 @@
-import { isSyntheticLiveFavoritesCategoryId, sanitizePersistedLiveCategoryId } from '../providers/liveCategoryIdSafety.ts';
+import { isSyntheticLiveCategoryId, sanitizePersistedLiveCategoryId } from '../providers/liveCategoryIdSafety.ts';
 
 export type LiveTvMemory = {
   selectedCategoryId: string;
@@ -35,7 +35,7 @@ function getMemoryForProvider(providerId: string) {
 function sanitizeLiveTvMemory(memory: LiveTvMemory): LiveTvMemory {
   const selectedCategoryId = sanitizePersistedLiveCategoryId(memory.selectedCategoryId);
   const focusedCategoryId =
-    memory.focusedCategoryId && !isSyntheticLiveFavoritesCategoryId(memory.focusedCategoryId)
+    memory.focusedCategoryId && !isSyntheticLiveCategoryId(memory.focusedCategoryId)
       ? memory.focusedCategoryId
       : selectedCategoryId || null;
 

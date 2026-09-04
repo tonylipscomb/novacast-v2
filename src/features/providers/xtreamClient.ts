@@ -7,6 +7,7 @@ import {
   logAccountOutputFormatPropagation,
 } from './accountOutputFormats.ts';
 import { markCatalogAuditHttp, getActiveVodCategoryPhaseProfile, addVodCategoryPhaseMs } from '../diagnostics/novaCastCatalogAudit.ts';
+import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import {
   classifyNonJsonBody,
   classifyXtreamHttpStatus,
@@ -226,7 +227,14 @@ export function resolvePreferredOutputFormat(userInfo: XtreamUserInfo | Record<s
   return inspection.preferredOutputFormat ?? undefined;
 }
 
-async function parseJsonResponse<T>(response: Response) {
+type XtreamResponseAudit = (payload: {
+  stage: 'http-response' | 'json-parsed';
+  response: Response;
+  bodyLength?: number;
+  parsed?: unknown;
+}) => void;
+
+async function parseJsonResponse<T>(response: Response, audit?: XtreamResponseAudit) {
   const contentType = response.headers.get('content-type');
   const contentLengthHeader = Number(response.headers.get('content-length') ?? 0);
   if (contentLengthHeader > MAX_XTREAM_RESPONSE_BYTES) {
@@ -270,6 +278,7 @@ async function parseJsonResponse<T>(response: Response) {
   }
   try {
     const parsed = JSON.parse(text) as T;
+    audit?.({ stage: 'json-parsed', response, bodyLength: text.length, parsed });
     const jsonParseMs = Date.now() - parseStarted;
     if (profile) {
       addVodCategoryPhaseMs('jsonParseMs', jsonParseMs);
@@ -334,7 +343,7 @@ export class XtreamClient {
     return this.buildUrl(action, query).toString();
   }
 
-  private async request<T>(url: URL, init: XtreamRequestInit = {}) {
+  private async request<T>(url: URL, init: XtreamRequestInit = {}, audit?: XtreamResponseAudit) {
     const action = url.searchParams.get('action') ?? 'account';
     const startedAt = Date.now();
     markCatalogAuditHttp('start', { action });
@@ -356,6 +365,7 @@ export class XtreamClient {
         ...init,
         signal: controller.signal,
       });
+      audit?.({ stage: 'http-response', response });
       const fetchHeadersMs = Date.now() - fetchStarted;
       const profile = getActiveVodCategoryPhaseProfile();
       if (profile && action === 'get_vod_streams') {
@@ -372,7 +382,7 @@ export class XtreamClient {
         });
       }
 
-      const payload = await parseJsonResponse<T>(response);
+      const payload = await parseJsonResponse<T>(response, audit);
       const httpWallMs = Date.now() - startedAt;
       if (profile && action === 'get_vod_streams') {
         profile.httpWallMs = httpWallMs;
@@ -467,9 +477,29 @@ export class XtreamClient {
   }
 
   async getSeriesInfo(seriesId: string | number, signal?: AbortSignal) {
+    const audit: XtreamResponseAudit = ({ stage, response, bodyLength, parsed }) => {
+      if (!isNovaCastTraceLoggingEnabled()) {
+        return;
+      }
+      console.info('[NovaCast Series Compatibility Audit]', {
+        event: stage,
+        action: 'get_series_info',
+        idFieldName: 'series_id',
+        providerSeriesIdPresent: Boolean(String(seriesId).trim()),
+        httpStatus: response.status,
+        contentType: response.headers.get('content-type'),
+        rawBodyKind: stage === 'http-response' ? 'pending' : parsed === null ? 'null' : 'json',
+        rawTopLevelType: stage === 'http-response' ? null : parsed === null ? 'null' : Array.isArray(parsed) ? 'array' : typeof parsed,
+        rawTopLevelKeys: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.keys(parsed) : [],
+        bodyLength: bodyLength ?? null,
+        parsedNull: parsed === null,
+        timestamp: Date.now(),
+      });
+    };
     return this.request<XtreamSeriesInfoResponse>(
       this.buildUrl('get_series_info', { series_id: seriesId }),
       { signal },
+      audit,
     );
   }
 

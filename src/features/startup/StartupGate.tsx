@@ -39,6 +39,21 @@ import { DIAGNOSTICS_DISCLOSURE_KEY, DIAGNOSTICS_DISCLOSURE_VERSION } from '@/fe
 import { getSecureValue } from '@/features/providers/providerCredentialStore';
 import { resetPairingKeepDevice } from '@/features/pairing/resetPairing';
 
+const PROVIDER_RUNTIME_AUDIT_ENABLED =
+  Boolean(__DEV__) ||
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_HOME_PRESENTATION_AUDIT === '1');
+
+function logProviderErrorStateSnapshot(snapshot: Record<string, unknown>) {
+  if (!PROVIDER_RUNTIME_AUDIT_ENABLED) {
+    return;
+  }
+  console.info('[NovaCast Startup Gate]', JSON.stringify({
+    event: 'provider-error-state-snapshot',
+    ...snapshot,
+    timestamp: Date.now(),
+  }));
+}
+
 /**
  * Central closed-beta / production startup coordinator.
  * Preserves personal pairing as a fallback when closed-beta managed flow is off.
@@ -62,7 +77,52 @@ export function StartupGate() {
   const [libraryMissing, setLibraryMissing] = useState(false);
   const [diagnosticsDisclosure, setDiagnosticsDisclosure] = useState<boolean | null>(null);
   const initAttemptRef = useRef(0);
-  const providerInitialized = Boolean(getActiveRepositoryBundle()) && !providerSwitchError;
+  const providerErrorSnapshotSignatureRef = useRef<string | null>(null);
+  const activeBundle = getActiveRepositoryBundle();
+  const providerInitialized = Boolean(activeBundle) && !providerSwitchError;
+  const providerResolutionTelemetryRef = useRef({
+    providerSwitchError,
+    selectedProvider,
+    effectiveAuthorized: device.authorization.effectiveAuthorized,
+  });
+  providerResolutionTelemetryRef.current = {
+    providerSwitchError,
+    selectedProvider,
+    effectiveAuthorized: device.authorization.effectiveAuthorized,
+  };
+
+  useEffect(() => {
+    const snapshot = {
+      bundlePresent: Boolean(activeBundle),
+      bundleProviderId: activeBundle?.providerId ?? null,
+      selectedProviderId: selectedProvider?.id ?? null,
+      providerSwitchErrorPresent: Boolean(providerSwitchError),
+      providerSwitchErrorReason: providerSwitchError ? 'provider_runtime_error' : null,
+      providerInitialized,
+      effectiveAuthorized: device.authorization.effectiveAuthorized,
+      checking: device.state === 'checking',
+      retrying: bootstrapping || isSwitchingProvider,
+      startupState: device.state,
+      bootstrapping,
+      requiresProviderDownload: Boolean(device.status?.requiresProviderDownload),
+    };
+    const signature = JSON.stringify(snapshot);
+    if (signature === providerErrorSnapshotSignatureRef.current) {
+      return;
+    }
+    providerErrorSnapshotSignatureRef.current = signature;
+    logProviderErrorStateSnapshot(snapshot);
+  }, [
+    activeBundle,
+    bootstrapping,
+    device.authorization.effectiveAuthorized,
+    device.state,
+    device.status?.requiresProviderDownload,
+    isSwitchingProvider,
+    providerInitialized,
+    providerSwitchError,
+    selectedProvider,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -157,6 +217,22 @@ export function StartupGate() {
       setLibraryMissing(false);
     }
     const result = await resolveStartupProvider({ source });
+    if (PROVIDER_RUNTIME_AUDIT_ENABLED) {
+      const bundle = getActiveRepositoryBundle();
+      console.info('[NovaCast Startup Gate]', JSON.stringify({
+        event: 'provider-resolution-returned',
+        resolverOk: result.ok,
+        resolverProviderBootstrapRequested: result.providerBootstrapRequested,
+        resolverErrorCode: result.errorCode,
+        bundlePresentImmediatelyAfterResolve: Boolean(bundle),
+        bundleProviderIdImmediatelyAfterResolve: bundle?.providerId ?? null,
+        providerSwitchErrorPresent: Boolean(providerResolutionTelemetryRef.current.providerSwitchError),
+        selectedProviderId: providerResolutionTelemetryRef.current.selectedProvider?.id ?? null,
+        bootstrappingBeforeApply: true,
+        effectiveAuthorized: providerResolutionTelemetryRef.current.effectiveAuthorized,
+        timestamp: Date.now(),
+      }));
+    }
     applyProviderResolution(result);
     return result;
   }, [applyProviderResolution]);
@@ -321,10 +397,14 @@ export function StartupGate() {
         />;
   }
 
-  return <StartupHomeShell label="" showHome />;
+  return <StartupHomeShell label="" showHome startupProviderBootstrapTerminal={!bootstrapping && providerInitialized} />;
 }
 
-function StartupHomeShell({ label, showHome }: { label: string; showHome: boolean }) {
+function StartupHomeShell({ label, showHome, startupProviderBootstrapTerminal = false }: {
+  label: string;
+  showHome: boolean;
+  startupProviderBootstrapTerminal?: boolean;
+}) {
   useLayoutEffect(() => {
     if (showHome) {
       markCatalogInteractiveUiReady();
@@ -340,7 +420,7 @@ function StartupHomeShell({ label, showHome }: { label: string; showHome: boolea
 
   return (
     <View style={styles.startupShell}>
-      {showHome ? <MainMenuScreen /> : null}
+      {showHome ? <MainMenuScreen startupProviderBootstrapTerminal={startupProviderBootstrapTerminal} /> : null}
       <View pointerEvents="none" focusable={false} style={[styles.startupStatus, showHome && styles.startupStatusHome]}>
         {label ? <NovaSpaceLoader label={label} /> : null}
       </View>

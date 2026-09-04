@@ -132,6 +132,109 @@ export function logLivePerformance(fields: {
   });
 }
 
+export type LiveCategoryOrderAuditEvent =
+  | 'raw-categories-ready'
+  | 'sorted-categories-ready'
+  | 'categories-state-committed'
+  | 'initial-category-resolved'
+  | 'category-focus-target-chosen'
+  | 'first-category-focus-received';
+
+export type LiveCategorySelectionSource = 'route' | 'persisted-user' | 'auto-default' | 'provisional';
+
+export type LiveCategoryNameSource = 'published-category-name' | 'provider-category-name' | 'synthetic-fallback';
+
+export type LiveCategoryOrderAuditSampleItem = {
+  id: string;
+  name?: string | null;
+  categoryNameUsedForSort?: string | null;
+  categoryNameSource?: LiveCategoryNameSource | null;
+  regionBucket?: string | null;
+  sortLabel?: string | null;
+};
+
+declare const __DEV__: boolean | undefined;
+
+// TEMP DEV-only category ordering/selection/focus race audit. Caps the sample
+// so a 913-category catalog never floods logs.
+export function logLiveCategoryOrderAudit(
+  event: LiveCategoryOrderAuditEvent,
+  fields: {
+    providerId?: string | null;
+    generation?: number | null;
+    categoryCount?: number | null;
+    sample?: ReadonlyArray<LiveCategoryOrderAuditSampleItem>;
+    finalSortedNames?: readonly string[];
+    selectedCategoryId?: string | null;
+    selectedCategoryName?: string | null;
+    selectionSource?: LiveCategorySelectionSource | null;
+    orderReady?: boolean;
+    orderToken?: string | number | null;
+  } = {},
+) {
+  if (typeof __DEV__ === 'undefined' || !__DEV__) {
+    return;
+  }
+  console.info('[NovaCast Live Category Order Audit]', {
+    event,
+    providerId: fields.providerId ?? null,
+    generation: fields.generation ?? null,
+    categoryCount: fields.categoryCount ?? null,
+    first10: (fields.sample ?? []).slice(0, 10).map((category) => ({
+      categoryId: category.id,
+      name: category.name ?? null,
+      categoryNameUsedForSort: category.categoryNameUsedForSort ?? category.name ?? null,
+      categoryNameSource: category.categoryNameSource ?? null,
+      regionBucket: category.regionBucket ?? null,
+      sortLabel: category.sortLabel ?? null,
+    })),
+    ...(fields.finalSortedNames ? { finalSortedNames: fields.finalSortedNames.slice(0, 20) } : {}),
+    selectedCategoryId: fields.selectedCategoryId ?? null,
+    selectedCategoryName: fields.selectedCategoryName ?? null,
+    selectionSource: fields.selectionSource ?? null,
+    orderReady: fields.orderReady ?? null,
+    orderToken: fields.orderToken ?? null,
+  });
+}
+
+export type LiveStabilityLoaderEvent =
+  | 'shown'
+  | 'categories-named'
+  | 'categories-sorted'
+  | 'selection-resolved'
+  | 'focus-target-ready'
+  | 'hidden';
+
+// TEMP DEV-only Live startup stability-loader lifecycle audit.
+export function logLiveStabilityLoader(
+  event: LiveStabilityLoaderEvent,
+  fields: {
+    elapsedMs?: number | null;
+    namesResolved?: boolean;
+    categoryOrderReady?: boolean;
+    selectionResolved?: boolean;
+    focusTargetReady?: boolean;
+    categoryCount?: number | null;
+    selectedCategoryId?: string | null;
+  } = {},
+) {
+  if (typeof __DEV__ === 'undefined' || !__DEV__) {
+    return;
+  }
+  console.info('[NovaCast Live Stability Loader]', {
+    event,
+    elapsedMs: fields.elapsedMs ?? null,
+    readiness: {
+      namesResolved: fields.namesResolved ?? null,
+      categoryOrderReady: fields.categoryOrderReady ?? null,
+      selectionResolved: fields.selectionResolved ?? null,
+      focusTargetReady: fields.focusTargetReady ?? null,
+    },
+    categoryCount: fields.categoryCount ?? null,
+    selectedCategoryId: fields.selectedCategoryId ?? null,
+  });
+}
+
 export function logLiveStallAudit(operation: string, inputCount: number, startedAt: number) {
   const elapsedMs = Date.now() - startedAt;
   if (elapsedMs < 50) {

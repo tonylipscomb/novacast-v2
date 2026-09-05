@@ -7,6 +7,7 @@ import {
 } from './liveSearchMatching.ts';
 import { normalizeSearchQuery } from './searchQuery.ts';
 import type { LiveSearchResult } from './searchTypes.ts';
+import { isCurrentProgramFresh } from '../live/liveProgramFreshness.ts';
 
 export type LiveSearchMatchMode = 'global' | 'live';
 
@@ -18,6 +19,9 @@ export type LiveChannelIndexEntry = {
   name: string;
   number: number;
   current?: string;
+  currentProgramFetchedAt?: number;
+  currentStartAt?: number;
+  currentEndAt?: number;
   tone?: string;
   logoUrl?: string;
   containerExtension?: string;
@@ -119,6 +123,9 @@ export function ingestLiveChannels(providerId: string, channels: ProviderLiveCha
       name: channel.name,
       number: channel.number,
       current: channel.current,
+      currentProgramFetchedAt: channel.currentProgramFetchedAt,
+      currentStartAt: channel.currentStartAt,
+      currentEndAt: channel.currentEndAt,
       tone: channel.tone,
       logoUrl: channel.logoUrl,
       containerExtension: channel.containerExtension,
@@ -131,6 +138,30 @@ export function ingestLiveChannels(providerId: string, channels: ProviderLiveCha
       currentTokens: tokenizeLiveSearchText(normalizedCurrent),
     });
   }
+}
+
+export function updateLiveChannelCurrentProgram(
+  providerId: string,
+  channelId: string,
+  update: Pick<LiveChannelIndexEntry, 'current' | 'currentProgramFetchedAt' | 'currentStartAt' | 'currentEndAt'>,
+) {
+  const entry = indexes.get(providerId)?.get(channelId);
+  if (!entry) return false;
+  entry.current = update.current;
+  entry.currentProgramFetchedAt = update.currentProgramFetchedAt;
+  entry.currentStartAt = update.currentStartAt;
+  entry.currentEndAt = update.currentEndAt;
+  entry.normalizedCurrent = normalizeSearchQuery(update.current ?? '');
+  entry.currentTokens = tokenizeLiveSearchText(entry.normalizedCurrent);
+  return true;
+}
+
+function searchableCurrent(entry: LiveChannelIndexEntry) {
+  return isCurrentProgramFresh({
+    fetchedAt: entry.currentProgramFetchedAt,
+    startAt: entry.currentStartAt,
+    endAt: entry.currentEndAt,
+  }) ? entry.current : undefined;
 }
 
 export function getLiveChannelIndexEntry(providerId: string, channelId: string) {
@@ -149,18 +180,19 @@ export function resetLiveChannelIndex(providerId?: string) {
 }
 
 function toLiveSearchResult(providerId: string, entry: LiveChannelIndexEntry): LiveSearchResult {
+  const current = searchableCurrent(entry);
   return {
     type: 'live',
     id: entry.id,
     providerId,
     title: entry.name,
-    subtitle: entry.current,
+    subtitle: current,
     channelNumber: entry.number,
     logoUrl: entry.logoUrl,
     tone: entry.tone,
     categoryId: entry.categoryId,
     categoryName: entry.categoryName,
-    currentProgram: entry.current,
+    currentProgram: current,
     containerExtension: entry.containerExtension,
     streamUrl: entry.streamUrl,
   };
@@ -183,6 +215,7 @@ export function searchLiveChannelIndex(
   const matches: LiveSearchResult[] = [];
 
   for (const entry of map.values()) {
+    const current = allowProgram ? searchableCurrent(entry) : undefined;
     if (
       !liveSearchCandidateMatches(
         query,
@@ -190,7 +223,7 @@ export function searchLiveChannelIndex(
           id: entry.id,
           name: entry.name,
           number: entry.number,
-          currentProgram: entry.current,
+          currentProgram: current,
           categoryName: entry.categoryName,
         },
         { allowProgram, allowCategory },

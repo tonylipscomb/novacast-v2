@@ -707,6 +707,7 @@ export function GuideScreen() {
           </View>
         </View>
 
+        <View style={styles.guideColumns}>
         <GuideCategoryRail
           categories={categories}
           selectedCategoryId={selectedCategoryId}
@@ -1052,6 +1053,7 @@ export function GuideScreen() {
             </Text>
           </Pressable>
         </View>
+        </View>
 
         <WalkthroughOverlay
           key={guide.visible ? 'guide-guide-open' : 'guide-guide-closed'}
@@ -1075,6 +1077,7 @@ function createStyles(theme: NovaTheme) {
 
   return StyleSheet.create({
     screen: { flex: 1, minHeight: 0, gap: 6 },
+    guideColumns: { flex: 1, minHeight: 0, flexDirection: 'row', gap: 6 },
     toolbar: { minHeight: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
     dateBlock: { gap: 2, flex: 1 },
     dateEyebrow: { color: theme.colors.accentHover, fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
@@ -1236,9 +1239,10 @@ function createStyles(theme: NovaTheme) {
     noProgramCell: { height: 48, justifyContent: 'center', paddingHorizontal: 10 },
     noProgramText: { color: theme.colors.textMuted, fontSize: 12, fontStyle: 'italic' },
     detailsPanel: {
-      minHeight: 54,
-      flexDirection: 'row',
-      alignItems: 'center',
+      width: '20%',
+      minHeight: 0,
+      flexDirection: 'column',
+      alignItems: 'stretch',
       justifyContent: 'space-between',
       gap: 12,
       borderRadius: 0,
@@ -1247,7 +1251,7 @@ function createStyles(theme: NovaTheme) {
       borderTopColor: theme.colors.borderSubtle,
       backgroundColor: 'transparent',
       paddingHorizontal: 12,
-      paddingVertical: 6,
+      paddingVertical: 12,
     },
     detailsCopy: { flex: 1, minWidth: 0 },
     detailsEyebrow: { color: theme.colors.accentHover, fontSize: 9, fontWeight: '900', letterSpacing: 1 },

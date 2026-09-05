@@ -158,6 +158,10 @@ export type ProviderLiveChannel = {
   streamUrl?: string;
   logoUrl?: string;
   epgChannelId?: string;
+  currentProgramFetchedAt?: number;
+  currentStartAt?: number;
+  currentEndAt?: number;
+  epgSource?: string;
   containerExtension?: string;
   countryCode?: string;
 };
@@ -257,6 +261,8 @@ export interface ProviderGuideRepository {
 export type ProviderGuideQuery = {
   /** Scopes paging to a single provider category. Omitted or `'all'` pages across every channel. */
   categoryId?: string;
+  /** Optional bounded channel selection used by Favorites. */
+  channelIds?: readonly string[];
   channelOffset?: number;
   channelLimit?: number;
   epgLimit?: number;
@@ -1957,7 +1963,11 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
           streamsWithEpgId: guideEpgIdDiagnostics(streams).streamsWithEpgId,
           durationMs: Date.now() - resolveStartedAt,
         });
-        const mappedChannels = streams
+        const requestedChannelIds = new Set((options?.channelIds ?? []).map((id) => String(id).trim()).filter(Boolean));
+        const selectedStreams = requestedChannelIds.size
+          ? streams.filter((stream) => requestedChannelIds.has(String(stream.stream_id).trim()))
+          : streams;
+        const mappedChannels = selectedStreams
           .slice(channelOffset, channelOffset + channelLimit)
           .map((stream, index) => mapLiveStream(stream, channelOffset + index, assignLiveStreamCategoryId(stream.category_id)));
         guideDevLog('mapped-channels', {
@@ -2106,7 +2116,21 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
         }
 
         const rows = mapGuideRowsFromChannels(resolvedMappedChannels, epgByChannel);
+        const epgProgramsLoaded = rows.reduce((total, row) => total + row.programs.length, 0);
+        const invalidTimestampCount = rows.reduce((total, row) => total + row.programs.filter((program) => program.startAt == null || program.endAt == null || program.endAt <= program.startAt).length, 0);
         guideDevLog('getRows-ready', {
+          providerId: client.providerId,
+          categoryId: categoryId ?? 'all',
+          loadedChannelCount: rows.length,
+          rowsWithPrograms: rows.filter((row) => row.programs.length > 0).length,
+          rowsWithoutPrograms: rows.filter((row) => row.programs.length === 0).length,
+          epgSource: 'xmltv-local-sqlite',
+          epgLastRefreshAt: null,
+          epgProgramsLoaded,
+          epgChannelMatches: resolvedXmltvIdCount,
+          epgChannelMisses: resolvedMappedChannels.length - resolvedXmltvIdCount,
+          invalidTimestampCount,
+          staleProgramsRejected: 0,
           rowCount: rows.length,
           xmltvChannelIdCount: xmltvChannelIds.length,
           durationMs: Date.now() - guideStartedAt,

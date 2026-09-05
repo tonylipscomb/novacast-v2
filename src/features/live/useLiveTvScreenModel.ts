@@ -44,6 +44,8 @@ import {
   getPublishedLiveChannels,
 } from '@/features/search/liveSearchSqliteCatalog';
 import { ingestLiveChannels, ingestLiveSearchCategories } from '@/features/search/repositories/liveSearchRepository';
+import { updateLiveChannelCurrentProgram } from '@/features/search/liveChannelIndex';
+import { updateLiveSearchCurrentProgram } from '@/features/search/liveSearchSqliteCatalog';
 import { resetLiveTvFocusIdle } from './liveTvFocusIdle';
 import { computeLiveStartupKey, shouldRestartLiveStartup } from './liveTvStartupGate';
 import { clearLiveTvChannelRowDataPool, mergeLiveTvChannelEpg } from './liveTvChannelRowData';
@@ -333,13 +335,32 @@ export function useLiveTvScreenModel(
       return;
     }
 
+    updateLiveChannelCurrentProgram(bundle?.providerId ?? '', enriched.id, {
+      current: enriched.current,
+      currentProgramFetchedAt: enriched.currentProgramFetchedAt,
+      currentStartAt: enriched.currentStartAt,
+      currentEndAt: enriched.currentEndAt,
+    });
+    if (bundle?.providerId && enriched.currentProgramFetchedAt != null) {
+      void updateLiveSearchCurrentProgram({
+        providerId: bundle.providerId,
+        channelId: enriched.id,
+        current: enriched.current,
+        fetchedAt: enriched.currentProgramFetchedAt,
+        startAt: enriched.currentStartAt,
+        endAt: enriched.currentEndAt,
+        source: enriched.epgSource,
+        epgChannelId: enriched.epgChannelId,
+      }).catch(() => undefined);
+    }
+
     setChannels((current) => {
       const baseline = current.length >= channelsBaselineRef.current.length ? current : channelsBaselineRef.current;
       const merged = mergeLiveTvChannelEpg(baseline, [enriched]);
       channelsBaselineRef.current = merged;
       return merged;
     });
-  }, []);
+  }, [bundle]);
 
   const prefetchChannelEpg = useCallback(
     (requestId: number, nextChannels: ProviderLiveChannel[], categoryId: string, focusedChannelId?: string | null) => {

@@ -8,7 +8,6 @@ import {
   XTREAM_GUIDE_MAX_LOADED_CHANNELS,
   type ProviderGuideRow,
   type ProviderLiveCategory,
-  type ProviderLiveChannel,
 } from '@/features/providers/providerRepositories';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 import type { ProviderRepositoryBundle } from '@/features/providers/providerBundle';
@@ -27,7 +26,10 @@ type GuideCacheEntry = {
   rows: NormalizedGuideRow[];
   hasMore: boolean;
   totalCount: number | null;
+  cachedAt: number;
 };
+
+export const GUIDE_EPG_CACHE_TTL_MS = 5 * 60 * 1000;
 
 const guideCache = new Map<string, GuideCacheEntry>();
 
@@ -58,19 +60,10 @@ async function loadFavoriteGuideRows(bundle: ProviderRepositoryBundle, signal?: 
     return [];
   }
 
-  // getChannel shares the all-streams cache, so parallel lookups only download the catalog once.
-  const channels = (
-    await Promise.all(entries.map((entry) => bundle.live.getChannel(entry.contentId, signal).catch(() => null)))
-  ).filter((channel): channel is ProviderLiveChannel => Boolean(channel));
-
-  if (!channels.length) {
-    return [];
-  }
-
-  // Cap favorites so a huge favorites list cannot flood the Guide grid.
-  // NOVACAST_GUIDE_V2_FOUNDATION_V1: return channels immediately; EPG hydrates after first paint.
-  const capped = channels.slice(0, XTREAM_GUIDE_MAX_LOADED_CHANNELS);
-  return capped.map((channel) => ({ channel, programs: [] }));
+  // Cap favorites so a huge favorites list cannot flood the Guide grid. The
+  // provider repository applies the same local XMLTV path as normal categories.
+  const ids = entries.slice(0, XTREAM_GUIDE_MAX_LOADED_CHANNELS).map((entry) => entry.contentId);
+  return bundle.guide.getRows(signal, { channelIds: ids, channelLimit: ids.length }).catch(() => []);
 }
 
 export function useGuideScreenModel() {
@@ -147,7 +140,7 @@ export function useGuideScreenModel() {
       }
 
       rowsRef.current = result.rows;
-      guideCache.set(cacheKey(providerId, categoryId), { rows: result.rows, hasMore: result.hasMore, totalCount: result.totalCount });
+      guideCache.set(cacheKey(providerId, categoryId), { rows: result.rows, hasMore: result.hasMore, totalCount: result.totalCount, cachedAt: Date.now() });
       setRows(result.rows);
       setHasMore(result.hasMore);
       setSelectedCategoryTotalCount(result.totalCount);
@@ -256,7 +249,8 @@ export function useGuideScreenModel() {
       rememberGuideMemory(providerId, { selectedCategoryId: categoryId });
 
       const cached = guideCache.get(cacheKey(providerId, categoryId));
-      if (cached?.rows.length) {
+      const cachedIsFresh = cached && Date.now() - cached.cachedAt < GUIDE_EPG_CACHE_TTL_MS;
+      if (cached?.rows.length && cachedIsFresh) {
         // Prefer cached pages for large catalogs — avoid re-downloading / re-EPG on every category revisit.
         rowsRef.current = cached.rows;
         setRows(cached.rows);
@@ -268,10 +262,19 @@ export function useGuideScreenModel() {
         return;
       }
 
-      rowsRef.current = [];
-      setRows([]);
-      setHasMore(false);
-      setSelectedCategoryTotalCount(null);
+      if (!cached?.rows.length) {
+        rowsRef.current = [];
+        setRows([]);
+        setHasMore(false);
+        setSelectedCategoryTotalCount(null);
+      } else {
+        // Refresh stale EPG in place; channels and focus remain usable while XMLTV is refreshed.
+        rowsRef.current = cached.rows;
+        setRows(cached.rows);
+        setHasMore(cached.hasMore);
+        setSelectedCategoryTotalCount(cached.totalCount);
+        setIsRefreshing(true);
+      }
       setStatus('loading');
       setErrorMessage(null);
       setIsRefreshing(false);

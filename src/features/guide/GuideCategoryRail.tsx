@@ -154,7 +154,6 @@ export function GuideCategoryRail({ categories, selectedCategoryId, onSelect, on
 
   return (
     <FlatList
-      horizontal
       data={categories}
       keyExtractor={(category) => category.renderKey}
       renderItem={renderCategoryChip}
@@ -177,14 +176,14 @@ function createStyles(theme: NovaTheme) {
   const focusChrome = createNovaTvFocusChrome(theme);
   const categoryChrome = createNovaCategoryChrome();
   return StyleSheet.create({
-    rail: { minHeight: 36, maxHeight: 36 },
-    railContent: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 2 },
+    rail: { width: '18%', minHeight: 0 },
+    railContent: { gap: 4, paddingVertical: 2 },
     chipInner: {
-      minHeight: 32,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
-      flexShrink: 0,
+      width: '100%',
+      minHeight: 38,
       backgroundColor: 'transparent',
       paddingHorizontal: 8,
       paddingVertical: 4,

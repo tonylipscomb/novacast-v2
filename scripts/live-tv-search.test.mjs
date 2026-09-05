@@ -64,6 +64,9 @@ function channel(id, name, extra = {}) {
     currentEnd: '',
     logoUrl: extra.logoUrl,
     containerExtension: extra.containerExtension,
+    currentProgramFetchedAt: extra.currentProgramFetchedAt,
+    currentStartAt: extra.currentStartAt,
+    currentEndAt: extra.currentEndAt,
   };
 }
 
@@ -74,7 +77,7 @@ function ingestEspnFamily(providerId = 'p1') {
     { id: 'news', name: 'News' },
   ]);
   ingestLiveChannels(providerId, [
-    channel('espn', 'ESPN', { number: 206, current: 'SportsCenter' }),
+    channel('espn', 'ESPN', { number: 206, current: 'SportsCenter', currentProgramFetchedAt: Date.now(), currentStartAt: Date.now() - 60_000, currentEndAt: Date.now() + 60_000 }),
     channel('espn2', 'ESPN 2', { number: 207 }),
     channel('espn-news', 'ESPN NEWS'),
     channel('espn-deportes', 'ESPN DEPORTES'),
@@ -304,6 +307,31 @@ test('26. no EPG available → channel search still works', () => {
   const result = searchLiveChannelIndex('p2', 'espn', 0, 10);
   assert.equal(result.items[0]?.id, 'espn');
   resetLiveChannelIndex('p2');
+});
+
+test('current-program search rejects ended and future EPG but accepts airing EPG', () => {
+  const now = Date.now();
+  resetLiveChannelIndex('freshness');
+  ingestLiveChannels('freshness', [
+    channel('ended', 'Sports', { current: 'Game A', currentProgramFetchedAt: now, currentStartAt: now - 120_000, currentEndAt: now - 60_000 }),
+    channel('airing', 'Sports', { current: 'Game B', currentProgramFetchedAt: now, currentStartAt: now - 60_000, currentEndAt: now + 60_000 }),
+    channel('future', 'Sports', { current: 'Game C', currentProgramFetchedAt: now, currentStartAt: now + 60_000, currentEndAt: now + 120_000 }),
+  ]);
+  assert.equal(searchLiveChannelIndex('freshness', 'Game A', 0, 10).totalCount, 0);
+  assert.equal(searchLiveChannelIndex('freshness', 'Game B', 0, 10).items[0]?.id, 'airing');
+  assert.equal(searchLiveChannelIndex('freshness', 'Game C', 0, 10).totalCount, 0);
+  resetLiveChannelIndex('freshness');
+});
+
+test('fresh EPG overlay replaces the indexed current program without catalog rebuild', async () => {
+  const { updateLiveChannelCurrentProgram } = await import('../src/features/search/liveChannelIndex.ts');
+  const now = Date.now();
+  resetLiveChannelIndex('overlay');
+  ingestLiveChannels('overlay', [channel('sports', 'Sports', { current: 'Game A', currentProgramFetchedAt: now, currentStartAt: now - 1_000, currentEndAt: now + 60_000 })]);
+  updateLiveChannelCurrentProgram('overlay', 'sports', { current: 'Game B', currentProgramFetchedAt: now, currentStartAt: now - 1_000, currentEndAt: now + 60_000 });
+  assert.equal(searchLiveChannelIndex('overlay', 'Game A', 0, 10).totalCount, 0);
+  assert.equal(searchLiveChannelIndex('overlay', 'Game B', 0, 10).items[0]?.id, 'sports');
+  resetLiveChannelIndex('overlay');
 });
 
 test('27. typing does not fetch provider EPG', () => {

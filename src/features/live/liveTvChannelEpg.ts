@@ -2,6 +2,7 @@ import type { ProviderRepositoryBundle } from '../providers/providerBundle.ts';
 import type { ProviderGuideProgram, ProviderLiveChannel } from '../providers/providerRepositories.ts';
 import { displayStreamTitle } from '../series/metadata/titleNormalization.ts';
 import { displayLiveProgramText } from './liveTvProgramText.ts';
+import { CURRENT_PROGRAM_OVERLAY_TTL_MS, selectCurrentEpgProgram } from './liveProgramFreshness.ts';
 import {
   getLiveTvWorkload,
   noteLiveEpgRequestCancelled,
@@ -13,7 +14,7 @@ import {
 export const LIVE_EPG_WINDOW_RADIUS = 3;
 export const LIVE_EPG_FOCUS_DEBOUNCE_MS = 280;
 export const LIVE_EPG_FETCH_CONCURRENCY = 1;
-export const EPG_CACHE_TTL_MS = 5 * 60 * 1000;
+export const EPG_CACHE_TTL_MS = CURRENT_PROGRAM_OVERLAY_TTL_MS;
 
 type CachedEpgEntry = {
   programs: ProviderGuideProgram[];
@@ -47,32 +48,43 @@ function epgProgressFromProgram(program: ProviderGuideProgram) {
   return program.meta.includes('left') ? 50 : 0;
 }
 
-export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: ProviderGuideProgram[]): ProviderLiveChannel {
+export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: ProviderGuideProgram[], fetchedAt = Date.now()): ProviderLiveChannel {
+  const selection = selectCurrentEpgProgram(programs);
   if (!programs.length) {
-    const title = displayLiveProgramText(channel.current, '');
-    const channelLabel = displayStreamTitle(channel.name);
     return {
       ...channel,
-      current: title && title !== channelLabel && title !== channel.name.trim() ? title : '',
+      current: '',
+      currentProgramFetchedAt: fetchedAt,
+      currentStartAt: undefined,
+      currentEndAt: undefined,
+      epgSource: 'xtream-short-epg',
     };
   }
 
-  const now = programs[0];
-  const next = programs[1];
-  const following = programs[2];
-  const programTitle = displayLiveProgramText(now.title, '');
+  const now = selection.program;
+  const future = programs.filter((program) => program.startAt == null || program.startAt > Date.now());
+  const next = future[0];
+  const following = future[1];
+  if (!now) {
+    logLiveEpg('stale-program-rejected', { channelId: channel.id, epgChannelId: channel.epgChannelId ?? null, epgSource: 'xtream-short-epg', fetchedAt, ageMs: Date.now() - fetchedAt, staleProgramRejected: selection.staleProgramRejected });
+  }
+  const programTitle = displayLiveProgramText(now?.title, '');
   const channelLabel = displayStreamTitle(channel.name);
 
   return {
     ...channel,
-    current: programTitle && programTitle !== channelLabel && programTitle !== channel.name.trim() ? programTitle : '',
+    current: now && programTitle && programTitle !== channelLabel && programTitle !== channel.name.trim() ? programTitle : '',
     next: next?.title ? displayLiveProgramText(next.title, channel.next) : channel.next,
     following: following?.title ? displayLiveProgramText(following.title, channel.following) : channel.following,
-    currentStart: now.start ?? channel.currentStart,
-    currentEnd: now.end ?? channel.currentEnd,
-    remaining: now.meta.includes('left') ? now.meta : channel.remaining,
-    progress: epgProgressFromProgram(now),
-    description: displayLiveProgramText(now.description, 'No program information available.'),
+    currentStart: now?.start ?? channel.currentStart,
+    currentEnd: now?.end ?? channel.currentEnd,
+    currentProgramFetchedAt: fetchedAt,
+    currentStartAt: now?.startAt,
+    currentEndAt: now?.endAt,
+    epgSource: 'xtream-short-epg',
+    remaining: now?.meta.includes('left') ? now.meta : channel.remaining,
+    progress: now ? epgProgressFromProgram(now) : 0,
+    description: now ? displayLiveProgramText(now.description, 'No program information available.') : channel.description,
   };
 }
 

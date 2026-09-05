@@ -32,6 +32,7 @@ import {
 import { liveSearchSqlRankCase } from './liveSearchMatching.ts';
 import type { LiveSearchResult, SearchPageResult } from './searchTypes.ts';
 import { processTimeBudgeted, type TimeBudgetResult } from '../catalog/jsChunkBudget.ts';
+import { isCurrentProgramFresh } from '../live/liveProgramFreshness.ts';
 
 export const LIVE_SEARCH_SQLITE_CATALOG_MARKER = 'live-search-sqlite-v1_1';
 export { LIVE_SEARCH_BUILD_CONCURRENCY, LIVE_SEARCH_WRITE_BATCH_SIZE } from './liveSearchCatalogPolicy.ts';
@@ -64,6 +65,9 @@ type LiveSearchCatalogRow = {
   direct_source?: string | null;
   epg_channel_id?: string | null;
   tone: string | null;
+  current_program_fetched_at?: number | string | null;
+  current_start_at?: number | string | null;
+  current_end_at?: number | string | null;
 };
 
 export type LiveSearchCatalogBuildResult = {
@@ -86,6 +90,37 @@ export type PublishedLiveCatalogState = {
   unreadinessReason: string | null;
   categoryNames: Record<string, string>;
 };
+
+export async function updateLiveSearchCurrentProgram(input: {
+  providerId: string;
+  channelId: string;
+  current: string;
+  fetchedAt: number;
+  startAt?: number;
+  endAt?: number;
+  source?: string;
+  epgChannelId?: string;
+}) {
+  await ensureLiveSearchSchema();
+  const db = await getCatalogDatabase();
+  const state = await readState(input.providerId);
+  if (!state || Number(state.active_generation) <= 0) return false;
+  const current = isCurrentProgramFresh({ fetchedAt: input.fetchedAt, startAt: input.startAt, endAt: input.endAt }) ? input.current.trim() : '';
+  await db.run(
+    `UPDATE live_search_channels
+        SET current_program = ?, normalized_current = ?, current_program_fetched_at = ?,
+            current_start_at = ?, current_end_at = ?, updated_at = ?, epg_channel_id = COALESCE(?, epg_channel_id)
+      WHERE provider_id = ? AND generation = ? AND channel_id = ?`,
+    [current || null, normalizeSearchQuery(current), input.fetchedAt, input.startAt ?? null, input.endAt ?? null, Date.now(), input.epgChannelId ?? null, input.providerId, Number(state.active_generation), input.channelId],
+  );
+  console.info('[NovaCast Live EPG]', {
+    event: 'searchProgramUpdated', providerId: input.providerId, channelId: input.channelId,
+    epgChannelId: input.epgChannelId ?? null, epgSource: input.source ?? null,
+    fetchedAt: input.fetchedAt, startAt: input.startAt ?? null, endAt: input.endAt ?? null,
+    ageMs: Date.now() - input.fetchedAt, staleProgramRejected: !current,
+  });
+  return true;
+}
 
 type PublishedLivePointer = {
   ready: boolean;
@@ -230,6 +265,9 @@ async function ensureLiveSearchSchema() {
       );
     `);
     await ensureLiveSearchDirectSourceColumn(db);
+    await ensureLiveSearchColumn(db, 'live_search_channels', 'current_program_fetched_at', 'INTEGER');
+    await ensureLiveSearchColumn(db, 'live_search_channels', 'current_start_at', 'INTEGER');
+    await ensureLiveSearchColumn(db, 'live_search_channels', 'current_end_at', 'INTEGER');
     const epgColumnAdded = await ensureLiveSearchColumn(db, 'live_search_channels', 'epg_channel_id', 'TEXT');
     const categoryNameColumnAdded = await ensureLiveSearchColumn(db, 'live_search_category_counts', 'category_name', 'TEXT');
     if (epgColumnAdded || categoryNameColumnAdded) {
@@ -254,8 +292,8 @@ async function ensureLiveSearchDirectSourceColumn(db: Awaited<ReturnType<typeof 
 async function ensureLiveSearchColumn(
   db: Awaited<ReturnType<typeof getCatalogDatabase>>,
   table: 'live_search_channels' | 'live_search_category_counts',
-  column: 'epg_channel_id' | 'category_name',
-  type: 'TEXT',
+  column: 'epg_channel_id' | 'category_name' | 'current_program_fetched_at' | 'current_start_at' | 'current_end_at',
+  type: 'TEXT' | 'INTEGER',
 ) {
   const columns = await db.getAll<{ name: string }>(`PRAGMA table_info(${table})`);
   if (columns.some((item) => item.name === column)) return false;
@@ -479,7 +517,11 @@ function rowForChannel(
   channel: ProviderLiveChannel,
 ) {
   const title = channel.name?.trim() || `Channel ${channel.id}`;
-  const currentProgram = channel.current?.trim() || '';
+  const currentProgram = isCurrentProgramFresh({
+    fetchedAt: channel.currentProgramFetchedAt,
+    startAt: channel.currentStartAt,
+    endAt: channel.currentEndAt,
+  }) ? channel.current?.trim() || '' : '';
   return {
     providerId,
     generation,
@@ -496,6 +538,9 @@ function rowForChannel(
     epgChannelId: channel.epgChannelId ?? null,
     tone: channel.tone ?? null,
     updatedAt: Date.now(),
+    currentProgramFetchedAt: channel.currentProgramFetchedAt ?? null,
+    currentStartAt: channel.currentStartAt ?? null,
+    currentEndAt: channel.currentEndAt ?? null,
   };
 }
 
@@ -601,7 +646,7 @@ async function writeChannelRows(
       break;
     }
     const batch = uniqueRows.slice(offset, offset + LIVE_SEARCH_WRITE_BATCH_SIZE);
-    const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+    const placeholders = batch.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
     const params: Array<string | number | null> = [];
 
     for (const row of batch) {
@@ -621,6 +666,9 @@ async function writeChannelRows(
         row.epgChannelId,
         row.tone,
         row.updatedAt,
+        row.currentProgramFetchedAt,
+        row.currentStartAt,
+        row.currentEndAt,
       );
     }
 
@@ -629,7 +677,8 @@ async function writeChannelRows(
         `INSERT OR IGNORE INTO live_search_channels (
            provider_id, generation, channel_id, category_id,
            title, normalized_title, current_program, normalized_current,
-           logo_url, channel_number, stream_extension, direct_source, epg_channel_id, tone, updated_at
+           logo_url, channel_number, stream_extension, direct_source, epg_channel_id, tone, updated_at,
+           current_program_fetched_at, current_start_at, current_end_at
          ) VALUES ${placeholders}`,
         params,
       );
@@ -1186,12 +1235,18 @@ export async function searchLiveSqliteCatalog(input: {
   ];
 
   if (matchMode === 'live') {
-    whereParts.push(`normalized_current LIKE ? ESCAPE '\\'`);
-    whereParams.push(`%${escaped}%`);
+    const now = Date.now();
+    const currentMatchParts = [`normalized_current LIKE ? ESCAPE '\\'`];
+    const currentMatchParams: Array<string | number> = [`%${escaped}%`];
     if (currentTokens.sql) {
-      whereParts.push(currentTokens.sql);
-      whereParams.push(...currentTokens.params);
+      currentMatchParts.push(currentTokens.sql);
+      currentMatchParams.push(...currentTokens.params);
     }
+    whereParts.push(`(current_program_fetched_at IS NOT NULL AND current_program_fetched_at >= ? AND
+      (current_start_at IS NULL OR current_start_at <= ?) AND (current_end_at IS NULL OR current_end_at > ?) AND
+      (${currentMatchParts.join(' OR ')}))`);
+    whereParams.push(now - 5 * 60 * 1000, now, now);
+    whereParams.push(...currentMatchParams);
     if (matchingCategoryIds.length) {
       whereParts.push(`category_id IN (${matchingCategoryIds.map(() => '?').join(', ')})`);
       whereParams.push(...matchingCategoryIds);
@@ -1206,7 +1261,8 @@ export async function searchLiveSqliteCatalog(input: {
 
   const startedAt = Date.now();
   const rows = await db.getAll<LiveSearchCatalogRow>(
-    `SELECT channel_id, category_id, title, current_program, logo_url,
+    `SELECT channel_id, category_id, title, current_program, current_program_fetched_at,
+            current_start_at, current_end_at, logo_url,
             channel_number, stream_extension, direct_source, epg_channel_id, tone
        FROM live_search_channels
       WHERE ${where}
@@ -1218,6 +1274,7 @@ export async function searchLiveSqliteCatalog(input: {
       LIMIT ? OFFSET ?`,
     [
       ...baseParams,
+      normalized,
       normalized,
       `${escaped}%`,
       `%${escaped}%`,
@@ -1246,8 +1303,8 @@ export async function searchLiveSqliteCatalog(input: {
     id: row.channel_id,
     providerId: input.providerId,
     title: row.title,
-    subtitle: row.current_program || undefined,
-    currentProgram: row.current_program || undefined,
+    subtitle: isCurrentProgramFresh({ fetchedAt: Number(row.current_program_fetched_at), startAt: Number(row.current_start_at), endAt: Number(row.current_end_at) }) ? row.current_program || undefined : undefined,
+    currentProgram: isCurrentProgramFresh({ fetchedAt: Number(row.current_program_fetched_at), startAt: Number(row.current_start_at), endAt: Number(row.current_end_at) }) ? row.current_program || undefined : undefined,
     channelNumber: row.channel_number == null ? undefined : asNumber(row.channel_number),
     logoUrl: row.logo_url || undefined,
     tone: row.tone || undefined,

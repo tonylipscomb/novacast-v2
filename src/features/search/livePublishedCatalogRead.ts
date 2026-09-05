@@ -3,6 +3,7 @@ import { logSampledLiveStreamRow } from '../providers/liveStreamRowDiagnostics.t
 import type { ProviderLiveCategory, ProviderLiveChannel } from '../providers/providerRepositories.ts';
 import { sortLiveCategoriesUsFirst, type CategoryRegionalSortMetrics } from '../providers/usAmericanSort.ts';
 import { getLiveSearchCategoryName } from './liveChannelIndex.ts';
+import { isCurrentProgramFresh } from '../live/liveProgramFreshness.ts';
 
 export type PublishedLiveCatalogRow = {
   channel_id: string;
@@ -15,6 +16,9 @@ export type PublishedLiveCatalogRow = {
   direct_source?: string | null;
   epg_channel_id?: string | null;
   tone: string | null;
+  current_program_fetched_at?: number | string | null;
+  current_start_at?: number | string | null;
+  current_end_at?: number | string | null;
 };
 
 function asNumber(value: unknown, fallback = 0) {
@@ -93,7 +97,7 @@ export function publishedLiveRowToChannel(
     number,
     name,
     shortName: name.slice(0, 2).toUpperCase() || name,
-    current: row.current_program?.trim() || '',
+    current: isCurrentProgramFresh({ fetchedAt: Number(row.current_program_fetched_at), startAt: Number(row.current_start_at), endAt: Number(row.current_end_at) }) ? row.current_program?.trim() || '' : '',
     next: 'Next program unavailable',
     following: 'Following program unavailable',
     description: 'No program information available.',
@@ -108,6 +112,9 @@ export function publishedLiveRowToChannel(
     containerExtension: row.stream_extension || undefined,
     streamUrl: row.direct_source?.trim() || undefined,
     epgChannelId: row.epg_channel_id?.trim() || undefined,
+    currentProgramFetchedAt: row.current_program_fetched_at == null ? undefined : Number(row.current_program_fetched_at),
+    currentStartAt: row.current_start_at == null ? undefined : Number(row.current_start_at),
+    currentEndAt: row.current_end_at == null ? undefined : Number(row.current_end_at),
   };
   const storedDirectSource = String(row.direct_source ?? '').trim();
   logSampledLiveStreamRow('hydrated-playback', {

@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const read = (path) => readFileSync(join(root, path), 'utf8');
+const guideModelSource = read('src/features/guide/useGuideScreenModel.ts');
 
 import { filterGuideRows } from '../src/features/guide/guideSearch.ts';
 import { getGuideMemory, rememberGuideMemory, resetGuideMemory } from '../src/features/guide/guideMemory.ts';
@@ -77,7 +84,18 @@ test('Guide normalization trims overlapping EPG windows instead of rendering col
 
   assert.equal(normalized[0].programs.length, 2);
   assert.equal(normalized[0].programs[1].startAt, now + 60 * 60 * 1000);
-  assert.equal(getProgramOffset(normalized[0].programs[1], now - 60 * 60 * 1000), 180);
+  assert.equal(getProgramOffset(normalized[0].programs[1], now - 60 * 60 * 1000), 138);
+});
+
+test('Guide refreshes stale EPG without clearing channels', () => {
+  assert.match(guideModelSource, /GUIDE_EPG_CACHE_TTL_MS = 5 \* 60 \* 1000/);
+  assert.match(guideModelSource, /cachedIsFresh/);
+  assert.match(guideModelSource, /setIsRefreshing\(true\)/);
+});
+
+test('Favorites use the bounded shared Guide repository path', () => {
+  assert.match(guideModelSource, /channelIds: ids/);
+  assert.doesNotMatch(guideModelSource, /bundle\.live\.getShortEpg/);
 });
 
 test('Guide timeline widths and current status use real program duration', () => {
@@ -85,8 +103,8 @@ test('Guide timeline widths and current status use real program duration', () =>
   assert.equal(getProgramStatus(rows[0].programs[0], now), 'past');
   assert.equal(getProgramStatus(live, now), 'live');
   assert.equal(getProgramStatus(rows[1].programs[0], now), 'upcoming');
-  assert.equal(getProgramWidth(live), 180);
-  assert.equal(timeToTimelinePixels(now, now - 60 * 60 * 1000), 90);
+  assert.equal(getProgramWidth(live), 138);
+  assert.equal(timeToTimelinePixels(now, now - 60 * 60 * 1000), 69);
   assert.equal(formatRelativeGuideTime(live, now), '60 min remaining');
 });
 
@@ -138,7 +156,7 @@ test('One channel with no EPG does not force the whole category into a no-EPG st
   const allMissing = [makeRow('c', false), makeRow('d', false)];
 
   assert.equal(statusForRows('news', mixed, false), 'ready');
-  assert.equal(statusForRows('news', allMissing, false), 'no-epg');
+  assert.equal(statusForRows('news', allMissing, false), 'ready');
   assert.equal(statusForRows('news', [], false), 'empty');
 });
 

@@ -23,12 +23,12 @@ export type LiveSearchCandidate = {
 };
 
 const TIER_ORDER: Record<LiveSearchMatchTier, number> = {
-  exact: 0,
-  prefix: 1,
-  token: 2,
-  contains: 3,
-  number: 4,
-  program: 5,
+  program: 0,
+  exact: 1,
+  prefix: 2,
+  token: 3,
+  contains: 4,
+  number: 5,
   category: 6,
   none: 7,
 };
@@ -60,6 +60,17 @@ export function computeLiveSearchMatchTier(
   const queryTokens = tokenizeLiveSearchText(normalizedQuery);
   const nameTokens = tokenizeLiveSearchText(normalizedName);
 
+  if (allowProgram) {
+    const normalizedProgram = normalizeSearchQuery(candidate.currentProgram ?? '');
+    const programTokens = tokenizeLiveSearchText(normalizedProgram);
+    if (normalizedProgram === normalizedQuery || (normalizedProgram && normalizedProgram.includes(normalizedQuery))) {
+      return 'program';
+    }
+    if (normalizedProgram && tokensMatchQuery(queryTokens, programTokens)) {
+      return 'program';
+    }
+  }
+
   if (normalizedName && normalizedName === normalizedQuery) {
     return 'exact';
   }
@@ -79,17 +90,6 @@ export function computeLiveSearchMatchTier(
   const numberText = candidate.number == null ? '' : String(candidate.number).trim();
   if (numberText && numberText === normalizedQuery) {
     return 'number';
-  }
-
-  if (allowProgram) {
-    const normalizedProgram = normalizeSearchQuery(candidate.currentProgram ?? '');
-    const programTokens = tokenizeLiveSearchText(normalizedProgram);
-    if (
-      normalizedProgram &&
-      (normalizedProgram.includes(normalizedQuery) || tokensMatchQuery(queryTokens, programTokens))
-    ) {
-      return 'program';
-    }
   }
 
   if (allowCategory) {
@@ -132,12 +132,13 @@ export function liveSearchCandidateMatches(
 }
 
 export function liveSearchSqlRankCase() {
-  return `CASE
-          WHEN normalized_title = ? THEN 0
-          WHEN normalized_title LIKE ? ESCAPE '\\' THEN 1
-          WHEN normalized_title LIKE ? ESCAPE '\\' THEN 3
-          WHEN CAST(channel_number AS TEXT) = ? THEN 4
-          WHEN normalized_current LIKE ? ESCAPE '\\' THEN 5
-          ELSE 6
+    return `CASE
+          WHEN normalized_current = ? THEN 0
+          WHEN normalized_title = ? THEN 1
+          WHEN normalized_title LIKE ? ESCAPE '\\' THEN 2
+          WHEN normalized_title LIKE ? ESCAPE '\\' THEN 4
+          WHEN CAST(channel_number AS TEXT) = ? THEN 5
+          WHEN normalized_current LIKE ? ESCAPE '\\' THEN 6
+          ELSE 7
         END`;
 }

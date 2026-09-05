@@ -571,7 +571,7 @@ function ProviderCard({
   );
 }
 
-export function NovaPortalScreen() {
+export function NovaPortalScreen({ initialPanel, returnRoute }: { initialPanel?: PortalPanel; returnRoute?: string } = {}) {
   const router = useRouter();
   const { width, height } = useWindowDimensions();
   const scale = Math.max(0.66, Math.min(1.08, Math.min(width / 1920, height / 1080)));
@@ -586,7 +586,7 @@ export function NovaPortalScreen() {
   } = useProviderStore();
   const { state: onboardingState, ready: onboardingReady } = useOnboardingStore();
   const device = useDeviceState();
-  const [panel, setPanel] = useState<PortalPanel>(null);
+  const [panel, setPanel] = useState<PortalPanel>(initialPanel ?? null);
   const [pairingVisible, setPairingVisible] = useState(false);
   const [exitConfirmVisible, setExitConfirmVisible] = useState(false);
   const providerCardRef = useRef<View | null>(null);
@@ -676,6 +676,14 @@ export function NovaPortalScreen() {
     }
   }, [isSwitchingProvider, providerInitialized, router, selectedProvider]);
 
+  const closePanel = useCallback(() => {
+    if (returnRoute) {
+      router.replace(returnRoute as never);
+      return;
+    }
+    setPanel(null);
+  }, [returnRoute, router]);
+
   const closePairing = useCallback(() => {
     setPairingVisible(false);
     completeLaunchOverlay();
@@ -696,7 +704,7 @@ export function NovaPortalScreen() {
             return true;
           }
           if (panel) {
-            setPanel(null);
+            closePanel();
             return true;
           }
           if (exitConfirmVisible) {
@@ -715,7 +723,7 @@ export function NovaPortalScreen() {
     );
 
     return () => subscription.remove();
-  }, [closePairing, exitConfirmVisible, pairingVisible, panel]);
+  }, [closePairing, closePanel, exitConfirmVisible, pairingVisible, panel]);
 
   const openPairing = useCallback(() => {
     if (isClosedBetaManagedFlow() || !deviceFeatureFlags.personalProviderPairingEnabled) {
@@ -880,7 +888,7 @@ export function NovaPortalScreen() {
                 </Text>
                 <PortalPanelCloseButton
                   focusRef={panel === 'diagnostics' || providers.length === 0 ? panelCloseRef : undefined}
-                  onPress={() => setPanel(null)}
+                  onPress={closePanel}
                 />
               </View>
               {panel === 'switch' ? (

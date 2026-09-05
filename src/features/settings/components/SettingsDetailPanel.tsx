@@ -64,6 +64,7 @@ type SettingsDetailPanelProps = {
   onToggleSmartCategories: () => void;
   onReplayGuides: () => void;
   onSuppressGuides: () => void;
+  onManageProviders: () => void;
   onFocusHandleReady?: (handle: number | undefined) => void;
   nextFocusLeftHandle?: number;
 };
@@ -90,6 +91,7 @@ export function SettingsDetailPanel({
   onClearPin,
   onReplayGuides,
   onSuppressGuides,
+  onManageProviders,
   onFocusHandleReady,
   nextFocusLeftHandle,
 }: SettingsDetailPanelProps) {
@@ -112,18 +114,8 @@ export function SettingsDetailPanel({
     firstControlNodeRef.current = null;
   }
 
-  // Account is read-only — never hand focus into the detail pane.
-  useEffect(() => {
-    if (sectionId === 'account') {
-      onFocusHandleReady?.(undefined);
-    }
-  }, [sectionId, onFocusHandleReady]);
-
   // Publish the first real control handle after layout so Right from the rail is reliable.
   useEffect(() => {
-    if (sectionId === 'account') {
-      return;
-    }
     const frame = requestAnimationFrame(() => {
       const node = firstControlNodeRef.current;
       if (!node) {
@@ -135,9 +127,6 @@ export function SettingsDetailPanel({
   }, [sectionId, onFocusHandleReady]);
 
   const bindFirstControlRef = (instance: ElementRef<typeof Pressable> | null) => {
-    if (sectionId === 'account') {
-      return;
-    }
     firstControlNodeRef.current = instance;
     if (!instance || firstControlAssignedRef.current) {
       return;
@@ -300,7 +289,7 @@ export function SettingsDetailPanel({
   );
 
   const renderAccount = () => (
-    <View style={styles.section} pointerEvents="none">
+    <View style={styles.section}>
       <Text style={styles.sectionTitle}>Account</Text>
       <Text style={styles.sectionCopy}>Provider connection and library snapshot.</Text>
       <View style={styles.infoGrid}>
@@ -316,6 +305,16 @@ export function SettingsDetailPanel({
         <StatChip label="Series" value={account.seriesCount} styles={styles} />
         <StatChip label="Channels" value={account.liveChannelCount} styles={styles} />
       </View>
+      <Pressable
+        ref={bindFirstControlRef}
+        focusable
+        {...leftFocusProps}
+        onFocus={() => setFocusedControl('manage-providers')}
+        onBlur={() => setFocusedControl((current) => (current === 'manage-providers' ? null : current))}
+        onPress={onManageProviders}
+        style={[styles.inlineButton, novaTvFocus.base, focusedControl === 'manage-providers' && styles.rowFocused]}>
+        <Text style={[styles.inlineButtonText, focusedControl === 'manage-providers' && styles.rowTitleFocused]}>Manage Providers</Text>
+      </Pressable>
     </View>
   );
 

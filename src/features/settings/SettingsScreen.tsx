@@ -299,6 +299,7 @@ export function SettingsScreen() {
             onToggleSmartCategories={() => void toggleSmartCategories()}
             onReplayGuides={() => void replayGuides()}
             onSuppressGuides={() => void suppressGuides()}
+            onManageProviders={() => router.push('/provider-management')}
             onFocusHandleReady={setDetailFocusHandle}
             nextFocusLeftHandle={railFocusHandle}
           />

@@ -1,6 +1,7 @@
 import {
   getCachedXmltvPrograms,
   getXmltvChannelIndexData,
+  getXmltvCacheMeta,
   getXmltvChannelNameIndex,
   ensureXmltvChannelNameIndex,
   normalizeXmltvChannelId,
@@ -2086,6 +2087,53 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
 
           epgByChannel.set(channel.id, programs);
         }
+
+        const rowsInvalidTimestampCount = [...epgByChannel.values()].reduce((total, programs) => total + programs.filter((program) =>
+          program.startAt == null || program.endAt == null || program.endAt <= program.startAt,
+        ).length, 0);
+        const xmltvChannelIdsSet = new Set(xmltvChannelIds.map((id) => normalizeXmltvChannelId(id)));
+        const xmltvMeta = await getXmltvCacheMeta(providerEpgKey).catch(() => null);
+        const idMatchedChannels = resolvedMappedChannels.filter((channel) =>
+          Boolean(channel.epgChannelId?.trim()) && indexData?.namesByChannelId.has(normalizeXmltvChannelId(channel.epgChannelId)),
+        );
+        const exactMatches = idMatchedChannels.filter((channel) =>
+          String(channel.epgChannelId).trim() === normalizeXmltvChannelId(channel.epgChannelId),
+        ).length;
+        const normalizedMatches = Math.max(0, idMatchedChannels.length - exactMatches);
+        const matchedChannels = resolvedMappedChannels.filter((channel) => epgByChannel.get(channel.id)?.length).length;
+        const matchedWithCurrentProgram = [...epgByChannel.values()].filter((programs) =>
+          programs.some((program) => program.startAt != null && program.endAt != null && program.startAt <= now && program.endAt > now),
+        ).length;
+        const matchedWithFuturePrograms = [...epgByChannel.values()].filter((programs) =>
+          programs.some((program) => program.startAt != null && program.startAt > now),
+        ).length;
+        console.info('[NovaCast EPG_MAPPING_SUMMARY]', {
+          providerId: client.providerId,
+          liveChannels: resolvedMappedChannels.length,
+          channelsWithEpgId: resolvedMappedChannels.filter((channel) => Boolean(channel.epgChannelId?.trim())).length,
+          xmltvChannels: xmltvMeta?.channelCount ?? indexData?.diagnostics.xmltvChannelElementCount ?? xmltvChannelIdsSet.size,
+          xmltvPrograms: xmltvMeta?.programmeCount ?? [...cachedXmltv.values()].reduce((total, programs) => total + programs.length, 0),
+          exactMatches,
+          normalizedMatches,
+          nameFallbackMatches: exactNameMatchCount,
+          ambiguousMatches: ambiguousNameCount,
+          unmatched: Math.max(0, resolvedMappedChannels.length - idMatchedChannels.length - exactNameMatchCount),
+          matchedWithCurrentProgram,
+          matchedWithFuturePrograms,
+          invalidTimestampCount: rowsInvalidTimestampCount,
+          epgCacheAgeMs: xmltvMeta?.importedAt ? Math.max(0, Date.now() - xmltvMeta.importedAt) : null,
+          epgLastRefreshAt: xmltvMeta?.importedAt ?? null,
+        });
+        console.info('[NovaCast EPG_MAPPING_SAMPLE]', {
+          providerId: client.providerId,
+          unmatched: resolvedMappedChannels
+            .filter((channel) => !channel.epgChannelId?.trim() || !indexData?.namesByChannelId.has(normalizeXmltvChannelId(channel.epgChannelId)))
+            .slice(0, 5)
+            .map((channel) => ({ channelName: channel.name, epgChannelId: channel.epgChannelId ?? null })),
+          xmltv: [...(indexData?.namesByChannelId ?? new Map())]
+            .slice(0, 5)
+            .map(([channelId, names]) => ({ xmltvChannelId: channelId, xmltvDisplayName: names[0] ?? '' })),
+        });
 
         // NOVACAST_GUIDE_V2_3D_CATALOG_PRIORITY_V1
         //

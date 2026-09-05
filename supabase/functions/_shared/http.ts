@@ -11,11 +11,31 @@ const APPROVED_ADMIN_ORIGINS = new Set([
   'https://beta-rolling-download--novacast-connect.netlify.app',
 ]);
 
+function isLocalAdminOrigin(origin: string) {
+  try {
+    const url = new URL(origin);
+    return (
+      url.protocol === 'http:' &&
+      (url.hostname === 'localhost' || url.hostname === '127.0.0.1')
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function adminCorsHeaders(request: Request) {
   const headers: Record<string, string> = { ...corsHeaders, Vary: 'Origin' };
   delete headers['Access-Control-Allow-Origin'];
+
   const origin = request.headers.get('origin');
-  if (origin && APPROVED_ADMIN_ORIGINS.has(origin)) headers['Access-Control-Allow-Origin'] = origin;
+
+  if (
+    origin &&
+    (APPROVED_ADMIN_ORIGINS.has(origin) || isLocalAdminOrigin(origin))
+  ) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+
   return headers;
 }
 

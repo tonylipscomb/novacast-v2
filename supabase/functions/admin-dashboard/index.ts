@@ -18,7 +18,7 @@ Deno.serve(async (request) => {
       pendingCommands,
       recentErrors,
     ] = await Promise.all([
-      client.from('devices').select('id,status,activation_status,last_seen_at,app_version'),
+      client.from('devices').select('id,status,activation_status,last_seen_at,app_version,app_build'),
       client.from('device_activations').select('id,status,expires_at').eq('status', 'active'),
       client.from('beta_invites').select('id,status'),
       client.from('managed_providers').select('id,status'),
@@ -43,13 +43,38 @@ Deno.serve(async (request) => {
     const pendingActivations = deviceRows.filter((row) => row.activation_status === 'inactive').length;
     const activeInvites = (invites.data ?? []).filter((row) => row.status === 'active').length;
     const activeProviders = (providers.data ?? []).filter((row) => row.status === 'active').length;
+    const reportedBuilds = deviceRows
+      .map((row) => {
+        const version =
+          typeof row.app_version === 'string' && row.app_version.trim()
+            ? row.app_version.trim()
+            : null;
 
-    const builds = new Map<string, number>();
-    for (const row of deviceRows) {
-      const version = typeof row.app_version === 'string' && row.app_version ? row.app_version : 'unknown';
-      builds.set(version, (builds.get(version) ?? 0) + 1);
-    }
-    const currentBetaBuild = [...builds.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+        const rawBuild =
+          typeof row.app_build === 'string' || typeof row.app_build === 'number'
+            ? String(row.app_build).trim()
+            : '';
+
+        const build = /^\d+$/.test(rawBuild) ? Number(rawBuild) : null;
+        const lastSeen =
+          typeof row.last_seen_at === 'string'
+            ? Date.parse(row.last_seen_at)
+            : 0;
+
+        return { version, build, rawBuild, lastSeen };
+      })
+      .filter((row) => row.version || row.build !== null);
+
+    reportedBuilds.sort((a, b) => {
+      const buildDelta = (b.build ?? -1) - (a.build ?? -1);
+      if (buildDelta !== 0) return buildDelta;
+      return b.lastSeen - a.lastSeen;
+    });
+
+    const latestReported = reportedBuilds[0] ?? null;
+    const currentBetaBuild = latestReported
+      ? `${latestReported.version ?? 'Unknown'}${latestReported.rawBuild ? ` (${latestReported.rawBuild})` : ''}`
+      : null;
 
     return adminJsonResponse(request, {
       serverTime: nowIso,

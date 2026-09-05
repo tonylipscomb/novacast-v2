@@ -574,6 +574,12 @@ a.downloadButton {
 .providerCard > p, .providerNote { margin: 0; color: #93a7c6; font-size: 12px; }
 .providerCard footer { display: flex; flex-wrap: wrap; gap: 8px; }
 .providerCard footer button { min-height: 36px; padding: 0 12px; font-size: 11px; }
+.goldExpirationCenter,.goldActivity{display:grid;gap:12px;padding:16px;border:1px solid rgba(74,124,205,.24);border-radius:10px;background:rgba(5,16,33,.88)}
+.goldExpirationCenter>header,.goldActivity>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.goldExpirationCenter header small,.goldActivity header small{display:block;margin-top:5px;color:#8499b9;font-size:11px}.goldExpirationCenter header button{min-height:34px;padding:0 11px;border:1px solid rgba(74,124,205,.3);border-radius:6px;color:#bcd0ee;background:rgba(10,30,57,.86)}.goldExpirationCenter header button.selected{border-color:#18d7ff;color:#fff}
+.goldExpirationBuckets{display:grid;grid-template-columns:repeat(7,minmax(100px,1fr));gap:8px}.goldExpirationBucket{display:grid;gap:7px;min-height:74px;padding:10px;text-align:left;border:1px solid rgba(74,124,205,.2);border-radius:8px;color:#a8b9d7;background:rgba(6,20,48,.6);cursor:pointer}.goldExpirationBucket strong{color:#f5f8ff;font-size:24px}.goldExpirationBucket.selected{border-color:#18d7ff;box-shadow:0 0 0 1px rgba(24,215,255,.25)}.goldExpirationBucket.bucket-expired{border-color:rgba(239,68,68,.45)}.goldExpirationBucket.bucket-today,.goldExpirationBucket.bucket-tomorrow,.goldExpirationBucket.bucket-next7{border-color:rgba(245,158,11,.45)}
+.goldActivityList{display:grid;gap:0}.goldActivityList article{position:relative;display:flex;align-items:center;gap:12px;min-height:62px;padding:8px 0 8px 18px;border-bottom:1px solid rgba(74,124,205,.13)}.goldActivityList article:last-child{border-bottom:0}.goldActivityList article>i{position:absolute;left:1px;width:7px;height:7px;border-radius:50%;background:#18d7ff;box-shadow:0 0 0 3px rgba(24,215,255,.13)}.goldActivityList article>div{display:grid;gap:4px;min-width:0}.goldActivityList strong{color:#e9f2ff;font-size:11px;letter-spacing:.08em}.goldActivityList small{color:#8499b9;font-size:11px}.activityStatus{margin-left:auto;padding:5px 7px;border-radius:5px;font-size:9px;letter-spacing:.06em}.activityStatus.success{color:#8fffd0;background:rgba(16,185,129,.22)}.activityStatus.failure{color:#ffb8ae;background:rgba(185,28,28,.23)}.goldActivityEmpty{margin:0;color:#8499b9;font-size:12px}
+@media (max-width:1250px){.goldExpirationBuckets{grid-template-columns:repeat(4,1fr)}}
+@media (max-width:760px){.goldExpirationBuckets{grid-template-columns:repeat(2,1fr)}.goldExpirationCenter>header,.goldActivity>header{align-items:flex-start;flex-direction:column}}
 .providerBadge { display: inline-block; width: max-content; padding: 6px 8px; border-radius: 6px; font-size: 10px; letter-spacing: .06em; }
 .badge-healthy { color: #8fffd0; background: rgba(16,185,129,.22); }
 .badge-warn { color: #ffe08a; background: rgba(217,119,6,.22); }
@@ -895,3 +901,97 @@ body::before {
 .cloudAdmin .good {
   color: #67e8b5 !important;
 }
+
+/* ===== Operations Center ===== */
+.cloudAdmin .opsPage { display: flex; flex-direction: column; gap: 20px; }
+.cloudAdmin .opsSummary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+.cloudAdmin .opsMetric { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 16px 18px; border: 1px solid rgba(61,127,220,.32); border-radius: 14px; background: rgba(6,20,48,.66); overflow: hidden; }
+.cloudAdmin .opsMetric::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: rgba(120,153,215,.5); }
+.cloudAdmin .opsMetric.tone-healthy::before { background: #42e39b; }
+.cloudAdmin .opsMetric.tone-warning::before { background: #ffbe5c; }
+.cloudAdmin .opsMetric.tone-critical::before { background: #ff748b; }
+.cloudAdmin .opsMetricLabel { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: #9db6e6; }
+.cloudAdmin .opsMetricValue { font-size: 30px; font-weight: 700; line-height: 1; color: #f2f7ff; }
+.cloudAdmin .opsMetric small { font-size: 12px; color: #8ba3d4; }
+.cloudAdmin .opsMetric.tone-healthy .opsMetricValue { color: #7ff0c0; }
+.cloudAdmin .opsMetric.tone-warning .opsMetricValue { color: #ffd28f; }
+.cloudAdmin .opsMetric.tone-critical .opsMetricValue { color: #ffb3c0; }
+
+.cloudAdmin .opsGrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; }
+.cloudAdmin .opsGridWide { grid-template-columns: 1.6fr 1fr; }
+@media (max-width: 1080px) { .cloudAdmin .opsGrid, .cloudAdmin .opsGridWide { grid-template-columns: 1fr; } }
+
+.cloudAdmin .opsPanel { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px; border: 1px solid rgba(61,127,220,.3); border-radius: 16px; background: rgba(6,18,44,.6); backdrop-filter: blur(6px); }
+.cloudAdmin .opsPanel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.cloudAdmin .opsPanel h2 { margin: 0; font-size: 16px; color: #eaf1ff; }
+.cloudAdmin .opsPanel header p { margin: 2px 0 0; font-size: 12px; color: #8ba3d4; }
+.cloudAdmin .opsPanelActions { display: flex; gap: 8px; flex-shrink: 0; }
+.cloudAdmin .opsGhost { min-height: 34px; padding: 0 12px; font-size: 12px; color: #cfe0ff; border: 1px solid rgba(61,127,220,.5); border-radius: 9px; background: rgba(39,60,107,.55); }
+.cloudAdmin .opsPrimarySm { min-height: 34px; padding: 0 12px; font-size: 12px; font-weight: 600; color: #04122c; border: 0; border-radius: 9px; background: linear-gradient(180deg,#4db3ff,#1f8bff); }
+
+.cloudAdmin .opsStatRow { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; }
+.cloudAdmin .opsStat { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 11px; border: 1px solid rgba(61,127,220,.22); background: rgba(8,24,56,.55); }
+.cloudAdmin .opsStat strong { font-size: 20px; color: #f2f7ff; }
+.cloudAdmin .opsStat span { font-size: 11px; color: #8ba3d4; }
+.cloudAdmin .opsStat.tone-healthy strong { color: #7ff0c0; }
+.cloudAdmin .opsStat.tone-warning strong { color: #ffd28f; }
+.cloudAdmin .opsStat.tone-critical strong { color: #ffb3c0; }
+
+.cloudAdmin .opsMicroNotes { display: flex; flex-wrap: wrap; gap: 8px; }
+.cloudAdmin .opsFlag { font-size: 11px; padding: 4px 9px; border-radius: 999px; border: 1px solid rgba(120,153,215,.3); color: #b7c9ee; }
+.cloudAdmin .opsFlag.ok { color: #9ff0c9; border-color: rgba(66,227,155,.4); }
+.cloudAdmin .opsFlag.warning { color: #ffd28f; border-color: rgba(255,190,92,.4); }
+.cloudAdmin .opsFlag.critical { color: #ffb3c0; border-color: rgba(255,116,139,.45); }
+.cloudAdmin .opsFlag.muted { color: #7f97c8; }
+
+.cloudAdmin .opsList, .cloudAdmin .opsReadiness, .cloudAdmin .opsActivity { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cloudAdmin .opsList li, .cloudAdmin .opsReadiness li { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; background: rgba(8,24,56,.45); }
+.cloudAdmin .opsListName { flex: 1; font-size: 13px; color: #e3ecff; }
+.cloudAdmin .opsDot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #7f97c8; }
+.cloudAdmin .opsDot.dot-healthy { background: #42e39b; }
+.cloudAdmin .opsDot.dot-warn, .cloudAdmin .opsDot.dot-warning { background: #ffbe5c; }
+.cloudAdmin .opsDot.dot-fail, .cloudAdmin .opsDot.dot-critical { background: #ff748b; }
+.cloudAdmin .opsDot.dot-draft, .cloudAdmin .opsDot.dot-disabled, .cloudAdmin .opsDot.dot-neutral { background: #7f97c8; }
+.cloudAdmin .opsBadge { font-size: 10px; letter-spacing: .06em; padding: 3px 8px; border-radius: 6px; text-transform: uppercase; background: rgba(120,153,215,.18); color: #b7c9ee; }
+.cloudAdmin .opsBadge.tone-healthy { background: rgba(66,227,155,.16); color: #7ff0c0; }
+.cloudAdmin .opsBadge.tone-warn, .cloudAdmin .opsBadge.tone-warning { background: rgba(255,190,92,.16); color: #ffd28f; }
+.cloudAdmin .opsBadge.tone-fail, .cloudAdmin .opsBadge.tone-critical { background: rgba(255,116,139,.16); color: #ffb3c0; }
+.cloudAdmin .opsTag { font-size: 9px; font-weight: 700; letter-spacing: .08em; padding: 2px 6px; border-radius: 5px; background: rgba(255,205,120,.16); color: #ffd694; }
+.cloudAdmin .opsReadiness li small { flex-basis: 100%; margin-left: 19px; font-size: 11px; color: #8ba3d4; }
+
+.cloudAdmin .opsTableWrap { overflow-x: auto; }
+.cloudAdmin .opsTable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cloudAdmin .opsTable th { text-align: left; padding: 6px 10px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #7f97c8; border-bottom: 1px solid rgba(61,127,220,.22); }
+.cloudAdmin .opsTable td { padding: 9px 10px; border-bottom: 1px solid rgba(61,127,220,.12); vertical-align: top; color: #dbe6ff; }
+.cloudAdmin .opsTable td strong { display: block; color: #f2f7ff; }
+.cloudAdmin .opsTable td small { display: block; font-size: 11px; color: #8ba3d4; }
+.cloudAdmin .opsSub { display: block; font-size: 11px; color: #8ba3d4; }
+.cloudAdmin .opsSub.warning { color: #ffd28f; }
+.cloudAdmin .opsPillState { font-size: 11px; padding: 3px 9px; border-radius: 999px; }
+.cloudAdmin .opsPillState.ok { color: #9ff0c9; background: rgba(66,227,155,.14); }
+.cloudAdmin .opsPillState.off { color: #ffb3c0; background: rgba(255,116,139,.14); }
+
+.cloudAdmin .opsBuildHook { margin-top: 6px; padding: 12px 14px; border: 1px dashed rgba(120,153,215,.4); border-radius: 12px; display: flex; flex-direction: column; gap: 2px; background: rgba(8,24,56,.4); }
+.cloudAdmin .opsBuildHook span { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8ba3d4; }
+.cloudAdmin .opsBuildHook strong { font-size: 18px; color: #eaf1ff; }
+
+.cloudAdmin .opsActivity li { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 10px; background: rgba(8,24,56,.4); }
+.cloudAdmin .opsActivity li > div { flex: 1; display: flex; flex-direction: column; }
+.cloudAdmin .opsActivity strong { font-size: 13px; color: #e3ecff; }
+.cloudAdmin .opsActivity small { font-size: 11px; color: #8ba3d4; }
+.cloudAdmin .opsActivity time { font-size: 11px; color: #7f97c8; white-space: nowrap; }
+
+.cloudAdmin .opsQuickGrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.cloudAdmin .opsQuick { min-height: 44px; padding: 0 14px; font-size: 13px; color: #dbe6ff; border: 1px solid rgba(61,127,220,.4); border-radius: 11px; background: rgba(39,60,107,.45); text-align: left; }
+.cloudAdmin .opsQuick:hover { border-color: #4db3ff; background: rgba(39,60,107,.7); }
+.cloudAdmin .opsQuick:disabled { opacity: .6; }
+
+.cloudAdmin .opsEmpty { margin: 0; padding: 16px; text-align: center; font-size: 13px; color: #8ba3d4; border: 1px dashed rgba(120,153,215,.28); border-radius: 11px; }
+.cloudAdmin .opsFoot { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: #7f97c8; padding-top: 4px; }
+.cloudAdmin .opsFootMeta { color: #9db6e6; }
+
+/* Gold Panel metric tones (visual polish, values remain real) */
+.cloudAdmin .inviteMetric.tone-amber { border-color: rgba(255,190,92,.5); }
+.cloudAdmin .inviteMetric.tone-amber strong { color: #ffd28f; }
+.cloudAdmin .inviteMetric.tone-red { border-color: rgba(255,116,139,.5); }
+.cloudAdmin .inviteMetric.tone-red strong { color: #ffb3c0; }

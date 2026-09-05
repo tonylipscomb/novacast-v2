@@ -5,6 +5,7 @@ import { canActivateFromHealth, sanitizeHealthSummary } from '../_shared/provide
 import { runProviderHealthCheck } from '../_shared/providerHealthRunner.ts';
 import { checkGoldRoute, createM3uAccount, getDeviceInfo, getPackages, getReseller, parseM3uUrl, renewAccount, safeGoldBaseUrl, setAccountStatus, GoldPanelError } from '../_shared/goldPanelClient.ts';
 import { sanitizeGoldError, sanitizeGoldText } from '../_shared/goldPanelSanitization.ts';
+import { GoldActivityTableMissingError, listGoldAdminActivity, recordGoldAdminEvent } from '../_shared/goldAdminEvents.ts';
 
 type Client = Awaited<ReturnType<typeof requireAdmin>>['client'];
 type Credentials = { type: 'xtream'; baseUrl: string; username: string; password: string; upstreamUrl?: string };
@@ -74,15 +75,23 @@ async function listAccounts(client: Client) {
   return (accounts ?? []).map((account) => ({ ...account, provider: providerById.get(account.managed_provider_id) ?? null, assignedDevice: assignmentByProvider.get(account.managed_provider_id) ?? null }));
 }
 
+async function listActivity(client: Client) {
+  return listGoldAdminActivity(client);
+}
+
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return adminOptionsResponse(request);
   try {
-    const { client } = await requireAdmin(request);
+    const { client, user } = await requireAdmin(request);
     if (request.method === 'GET') return adminJsonResponse(request, { accounts: await listAccounts(client) });
     if (request.method !== 'POST') return adminJsonResponse(request, { errorCategory: 'method_not_allowed' }, 405);
     const body = await readJson(request); const action = String(body?.action ?? '');
     if (action === 'reseller') return adminJsonResponse(request, { success: true, reseller: await getReseller() });
     if (action === 'packages') return adminJsonResponse(request, { success: true, ...(await getPackages()) });
+    if (action === 'activity') {
+      try { return adminJsonResponse(request, { activity: await listActivity(client) }); }
+      catch (error) { if (error instanceof GoldActivityTableMissingError) return adminJsonResponse(request, { activity: [], unavailable: true }); throw error; }
+    }
     if (action === 'list_accounts') return adminJsonResponse(request, { accounts: await listAccounts(client) });
     if (action === 'route_health') return adminJsonResponse(request, { route: await checkGoldRoute(String(body?.domain ?? '')) });
 
@@ -95,6 +104,7 @@ Deno.serve(async (request) => {
       const { data: account, error: metadataError } = await client.from('gold_panel_accounts').insert({ managed_provider_id: provider.id, gold_user_id: recovery.gold_user_id, gold_package_id: recovery.gold_package_id, gold_package_name: recovery.gold_package_name, gold_country: recovery.gold_country, gold_notes: recovery.gold_notes, gold_upstream_url: credentials.baseUrl, gold_enabled: true }).select(ACCOUNT_SELECT).single();
       if (metadataError || !account) throw new GoldPanelError('gold_metadata_create_failed', 'NovaCast provider was created but Gold metadata could not be attached.', 502);
       await client.from('gold_panel_recoveries').update({ used_at: new Date().toISOString() }).eq('id', reference);
+      await recordGoldAdminEvent(client, { action: 'recovery_completed', goldAccountId: account.id, managedProviderId: provider.id, goldUserId: account.gold_user_id, actorUserId: user.id });
       return adminJsonResponse(request, { success: true, recoveryRequired: false, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider });
     }
 
@@ -131,23 +141,26 @@ Deno.serve(async (request) => {
         summary = sanitizeHealthSummary(health, credentials.username, credentials.password);
         await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, last_successful_test_at: canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? health.testedAt : null, validation_stale: false, last_health_summary: summary, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString(), ...(body?.activateIfHealthy === true && canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? { status: 'active' } : {}) }).eq('id', provider.id);
       }
+      await recordGoldAdminEvent(client, { action: goldImported ? 'account_imported' : 'account_created', goldAccountId: account.id, managedProviderId: provider.id, goldUserId: account.gold_user_id, actorUserId: user.id, metadata: { source: goldImported ? 'm3u_import' : 'reseller_create' } });
+      if (summary) await recordGoldAdminEvent(client, { action: 'diagnostics_run', goldAccountId: account.id, managedProviderId: provider.id, goldUserId: account.gold_user_id, actorUserId: user.id, metadata: { healthStatus: summary.overall } });
       return adminJsonResponse(request, { success: true, goldCreated, goldImported, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider, summary });
     }
 
     if (!accountId) throw new GoldPanelError('invalid_request', 'Gold account is required.', 400);
     const { data: account, error: accountError } = await client.from('gold_panel_accounts').select('*').eq('id', accountId).maybeSingle();
     if (accountError || !account) throw new GoldPanelError('gold_account_not_found', 'Gold account was not found.', 404);
-    if (action === 'account_info' || action === 'sync_account') return adminJsonResponse(request, { account: await syncAccount(client, account) });
+    if (action === 'account_info' || action === 'sync_account') { const synced = await syncAccount(client, account); await recordGoldAdminEvent(client, { action: 'account_synced', goldAccountId: account.id, managedProviderId: account.managed_provider_id, goldUserId: synced.gold_user_id, actorUserId: user.id }); return adminJsonResponse(request, { account: synced }); }
     if (action === 'run_diagnostics') {
       const credentials = await providerCredentials(client, account.managed_provider_id);
       const health = await runProviderHealthCheck(credentials, { isGoldManaged: true });
       const safeHealth = sanitizeHealthSummary(health, credentials.username, credentials.password);
       await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, validation_stale: false, last_health_summary: safeHealth, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString() }).eq('id', account.managed_provider_id);
+      await recordGoldAdminEvent(client, { action: 'diagnostics_run', goldAccountId: account.id, managedProviderId: account.managed_provider_id, goldUserId: account.gold_user_id, actorUserId: user.id, metadata: { healthStatus: safeHealth.overall } });
       return adminJsonResponse(request, { summary: safeHealth, account });
     }
-    if (action === 'renew_account') { const credentials = await providerCredentials(client, account.managed_provider_id); await renewAccount({ username: credentials.username, password: credentials.password, sub: String(body?.sub ?? '1') }); return adminJsonResponse(request, { account: await syncAccount(client, account) }); }
-    if (action === 'set_account_status') { await setAccountStatus(account.gold_user_id, body?.enabled !== false); return adminJsonResponse(request, { account: await syncAccount(client, account) }); }
-    if (action === 'account_credentials') { const credentials = await providerCredentials(client, account.managed_provider_id); return adminJsonResponse(request, { username: credentials.username, password: credentials.password, baseUrl: credentials.baseUrl }); }
+    if (action === 'renew_account') { const credentials = await providerCredentials(client, account.managed_provider_id); const sub = String(body?.sub ?? '1'); await renewAccount({ username: credentials.username, password: credentials.password, sub }); const renewed = await syncAccount(client, account); await recordGoldAdminEvent(client, { action: 'account_renewed', goldAccountId: account.id, managedProviderId: account.managed_provider_id, goldUserId: renewed.gold_user_id, actorUserId: user.id, metadata: { subscriptionMonths: Number(sub) } }); return adminJsonResponse(request, { account: renewed }); }
+    if (action === 'set_account_status') { const enabled = body?.enabled !== false; await setAccountStatus(account.gold_user_id, enabled); const updated = await syncAccount(client, account); await recordGoldAdminEvent(client, { action: enabled ? 'account_enabled' : 'account_disabled', goldAccountId: account.id, managedProviderId: account.managed_provider_id, goldUserId: updated.gold_user_id, actorUserId: user.id }); return adminJsonResponse(request, { account: updated }); }
+    if (action === 'account_credentials') { const credentials = await providerCredentials(client, account.managed_provider_id); await recordGoldAdminEvent(client, { action: 'credentials_accessed', goldAccountId: account.id, managedProviderId: account.managed_provider_id, goldUserId: account.gold_user_id, actorUserId: user.id }); return adminJsonResponse(request, { username: credentials.username, password: credentials.password, baseUrl: credentials.baseUrl }); }
     if (action === 'update_route') { const { data, error } = await client.from('gold_panel_accounts').update({ route_mode: String(body?.routeMode ?? '').slice(0, 80) || null, route_domain: String(body?.routeDomain ?? '').slice(0, 240) || null, updated_at: new Date().toISOString() }).eq('id', accountId).select(ACCOUNT_SELECT).single(); if (error) throw new Error('gold_metadata_update_failed'); return adminJsonResponse(request, { account: data }); }
     throw new GoldPanelError('invalid_request', 'Unsupported Gold Panel action.', 400);
   } catch (error) { return errorResponse(request, error); }

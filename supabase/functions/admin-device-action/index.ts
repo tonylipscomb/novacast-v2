@@ -4,6 +4,7 @@ import {
   broadcastDeviceAssignmentChanged,
   isAdminDeviceOnline,
 } from '../_shared/deviceAssignmentBroadcast.ts';
+import { recordGoldAdminEvent } from '../_shared/goldAdminEvents.ts';
 
 const MIN_EXTENSION_HOURS = 1;
 const MAX_EXTENSION_HOURS = 24 * 365 * 100;
@@ -319,6 +320,9 @@ Deno.serve(async (request) => {
         managedProviderId,
         assignedAt: createdAssignment.assigned_at ?? now,
       });
+
+      const goldAccount = await client.from('gold_panel_accounts').select('id,gold_user_id').eq('managed_provider_id', managedProviderId).maybeSingle();
+      await recordGoldAdminEvent(client, { action: 'provider_assigned', goldAccountId: goldAccount.data?.id ?? null, managedProviderId, goldUserId: goldAccount.data?.gold_user_id ?? null, actorUserId: user.id, metadata: { deviceId } });
 
       return adminActionResponse(request, {
         ok: true,

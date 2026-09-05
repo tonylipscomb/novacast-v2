@@ -1,5 +1,6 @@
 import {
   File,
+  FileMode,
   Paths,
 } from 'expo-file-system';
 
@@ -9,6 +10,7 @@ import {
   replaceXmltvChannelNameIndex,
   getXmltvCacheMeta,
   upsertProviderXmltvChannels,
+  replaceProviderXmltvCache,
   type XmltvCacheMeta,
 } from './xmltvEpgStore';
 
@@ -17,6 +19,8 @@ import {
   createXmltvStreamAccumulator,
   normalizeXmltvChannelId,
 } from './xmltvParser';
+import { buildXmltvSourceKey, createCustomXmltvSource, type XmltvSourceDescriptor } from './xmltvSource';
+export { buildXmltvSourceKey, createCustomXmltvSource, type XmltvSourceDescriptor } from './xmltvSource';
 
 // NOVACAST_GUIDE_V2_3F_DISK_XMLTV_V1
 // NOVACAST_GUIDE_V2_3H_TARGETED_XMLTV_V1
@@ -59,6 +63,7 @@ const XMLTV_YIELD_EVERY_FILE_CHUNKS =
 type XmltvClientLike = {
   buildXmltvUrl(): string;
 };
+
 
 export type XmltvRefreshResult = {
   refreshed: boolean;
@@ -181,6 +186,7 @@ async function ensureXmltvFile(
   options: {
     providerKey: string;
     client: XmltvClientLike;
+    source?: XmltvSourceDescriptor;
     force?: boolean;
     signal?: AbortSignal;
   },
@@ -223,24 +229,43 @@ async function ensureXmltvFile(
 
   let downloadCompleted =
     false;
+  let temporaryFile: File | null = null;
 
   try {
     /**
      * Never log the Xtream XMLTV URL.
      * It contains provider credentials.
      */
-    const downloaded =
-      await File.downloadFileAsync(
-        options.client
-          .buildXmltvUrl(),
+    let downloaded: File;
+    if (options.source?.kind === 'custom') {
+      const response = await options.source.getResponse();
+      if (!response.ok || !response.body) {
+        throw new Error(`Custom XMLTV request failed with status ${response.status}.`);
+      }
+      temporaryFile = new File(Paths.cache, `novacast-guide-${hashProviderKey(options.providerKey)}.tmp`);
+      temporaryFile.create({ overwrite: true });
+      const handle = temporaryFile.open(FileMode.WriteOnly);
+      try {
+        const reader = response.body.getReader();
+        for (;;) {
+          throwIfAborted(options.signal);
+          const next = await reader.read();
+          if (next.done) break;
+          if (next.value?.length) handle.writeBytes(next.value);
+        }
+      } finally {
+        handle.close();
+      }
+      if (file.exists) file.delete();
+      temporaryFile.move(file, { overwrite: true });
+      downloaded = file;
+    } else {
+      downloaded = await File.downloadFileAsync(
+        options.client.buildXmltvUrl(),
         file,
-        {
-          idempotent:
-            true,
-          signal:
-            options.signal,
-        },
+        { idempotent: true, signal: options.signal },
       );
+    }
 
     downloadCompleted =
       true;
@@ -262,10 +287,11 @@ async function ensureXmltvFile(
   } catch (error) {
     if (
       !downloadCompleted &&
-      file.exists
+      (options.source?.kind === 'custom' ? temporaryFile?.exists : file.exists)
     ) {
       try {
-        file.delete();
+        if (options.source?.kind === 'custom') temporaryFile?.delete();
+        else file.delete();
       } catch {
         // Best-effort cleanup of a partial Android download.
       }
@@ -278,6 +304,7 @@ async function ensureXmltvFile(
 export async function ensureXmltvChannelNameIndex(options: {
   providerKey: string;
   client: XmltvClientLike;
+  source?: XmltvSourceDescriptor;
   signal?: AbortSignal;
   force?: boolean;
 }): Promise<void> {
@@ -293,6 +320,7 @@ export async function ensureXmltvChannelNameIndex(options: {
       client: options.client,
       signal: options.signal,
       force: options.force,
+      source: options.source,
     });
     const accumulator = createXmltvChannelIndexAccumulator();
     const decoder = new TextDecoder('utf-8');
@@ -352,7 +380,9 @@ export async function refreshXmltvEpgCache(
   options: {
     providerKey: string;
     client: XmltvClientLike;
-    channelIds: string[];
+    channelIds?: string[];
+    source?: XmltvSourceDescriptor;
+    scanAll?: boolean;
     force?: boolean;
     signal?: AbortSignal;
     reason?: string;
@@ -370,7 +400,7 @@ export async function refreshXmltvEpgCache(
   const requestedChannelIds =
     Array.from(
       new Set(
-        options.channelIds
+        options.channelIds ?? []
           .map(
             normalizeXmltvChannelId,
           )
@@ -378,9 +408,7 @@ export async function refreshXmltvEpgCache(
       ),
     );
 
-  if (
-    !requestedChannelIds.length
-  ) {
+  if (!requestedChannelIds.length && !options.scanAll) {
     return {
       refreshed:
         false,
@@ -444,6 +472,8 @@ async function refreshXmltvEpgCacheInternal(
     providerKey: string;
     client: XmltvClientLike;
     channelIds: string[];
+    source?: XmltvSourceDescriptor;
+    scanAll?: boolean;
     force?: boolean;
     signal?: AbortSignal;
     reason?: string;
@@ -458,7 +488,9 @@ async function refreshXmltvEpgCacheInternal(
     );
 
     const staleChannelIds =
-      options.force
+      options.scanAll
+        ? []
+        : options.force
         ? options.channelIds
         : await getStaleXmltvChannelIds(
             options.providerKey,
@@ -466,9 +498,7 @@ async function refreshXmltvEpgCacheInternal(
             XMLTV_CACHE_TTL_MS,
           );
 
-    if (
-      !staleChannelIds.length
-    ) {
+    if (!staleChannelIds.length && !options.scanAll) {
       const cacheMeta =
         await getXmltvCacheMeta(
           options.providerKey,
@@ -512,7 +542,7 @@ async function refreshXmltvEpgCacheInternal(
       },
     );
 
-    const xmltvFile =
+      const xmltvFile =
       await ensureXmltvFile({
         providerKey:
           options.providerKey,
@@ -522,6 +552,8 @@ async function refreshXmltvEpgCacheInternal(
           options.force,
         signal:
           options.signal,
+        source:
+          options.source,
       });
 
     throwIfAborted(
@@ -545,7 +577,7 @@ async function refreshXmltvEpgCacheInternal(
           XMLTV_MAX_CACHED_PROGRAMMES,
 
         wantedChannelIds:
-          staleChannelIds,
+          options.scanAll ? undefined : staleChannelIds,
       });
 
     const decoder =
@@ -659,6 +691,10 @@ async function refreshXmltvEpgCacheInternal(
       options.signal,
     );
 
+    if (options.source?.kind === 'custom' && (!parsed.channels.length || !parsed.programmes.length)) {
+      throw new Error('Custom XMLTV response contained no usable channels or programmes.');
+    }
+
     await yieldToUiThread();
 
     const persistenceStartedAt =
@@ -676,13 +712,22 @@ async function refreshXmltvEpgCacheInternal(
       },
     );
 
-    await upsertProviderXmltvChannels(
-      options.providerKey,
-      staleChannelIds,
-      parsed.channels,
-      parsed.programmes,
-      parsed.malformedProgrammeCount,
-    );
+    if (options.scanAll) {
+      await replaceProviderXmltvCache(
+        options.providerKey,
+        parsed.channels,
+        parsed.programmes,
+        parsed.malformedProgrammeCount,
+      );
+    } else {
+      await upsertProviderXmltvChannels(
+        options.providerKey,
+        staleChannelIds,
+        parsed.channels,
+        parsed.programmes,
+        parsed.malformedProgrammeCount,
+      );
+    }
 
     const persistenceDurationMs =
       Date.now() -

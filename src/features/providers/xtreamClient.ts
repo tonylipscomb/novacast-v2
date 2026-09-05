@@ -553,7 +553,7 @@ export class XtreamClient {
       hash = Math.imul(hash, 16777619);
     }
 
-    return `xtream:${this.baseUrl}:${(hash >>> 0).toString(16)}`;
+    return `epg:${(this.providerId ?? 'unknown').replace(/[^a-zA-Z0-9._-]/g, '_')}:provider:${(hash >>> 0).toString(16)}`;
   }
   buildLiveStreamUrl(streamId: string | number, extension?: string) {
     const id = encodeURIComponent(String(streamId).trim());

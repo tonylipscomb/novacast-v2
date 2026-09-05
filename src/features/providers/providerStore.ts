@@ -50,6 +50,7 @@ import {
   removeProviderCredentials,
   setProviderCredentials,
 } from './providerCredentialStore.ts';
+import { clearProviderCustomEpgUrl, setProviderCustomEpgUrl } from './providerEpgStore.ts';
 import { cancelProviderCatalogSync } from './providerCatalogSync.ts';
 
 const STORAGE_KEY = '@novacast/provider-state';
@@ -482,6 +483,26 @@ async function writeState(next: ProviderState) {
 
 export async function getProviderState() {
   return readState();
+}
+
+/** Temporary internal control path: the URL never enters public provider state. */
+export async function configureProviderCustomEpg(providerId: string, url: string | null) {
+  const value = url?.trim() ?? '';
+  if (value) {
+    await setProviderCustomEpgUrl(providerId, value);
+  } else {
+    await clearProviderCustomEpgUrl(providerId);
+  }
+  const current = await readState();
+  if (!current.providers.some((provider) => provider.id === providerId)) {
+    throw new Error('Provider was not found.');
+  }
+  await writeState({
+    ...current,
+    providers: current.providers.map((provider) => provider.id === providerId
+      ? { ...provider, epg: { mode: 'provider', customUrlConfigured: Boolean(value) } }
+      : provider),
+  });
 }
 
 export async function selectProvider(providerId: string) {

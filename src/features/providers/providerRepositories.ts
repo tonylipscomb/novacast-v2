@@ -7,7 +7,9 @@ import {
   normalizeXmltvChannelId,
   normalizeXmltvDisplayName,
   refreshXmltvEpgCache,
+  createCustomXmltvSource,
 } from '../guide/xmltv';
+import { getProviderCustomEpgUrl } from './providerEpgStore.ts';
 import {
   beginCatalogGuidePriority,
   endCatalogGuidePriority,
@@ -114,6 +116,90 @@ function guideEpgIdDiagnostics(streams: XtreamLiveStreamResponse[]) {
         }
       : null,
   };
+}
+
+async function logXmltvSourceMappingDiagnostics(
+  providerId: string,
+  sourceKind: 'provider' | 'custom',
+  providerKey: string,
+  liveChannels: ProviderLiveChannel[],
+) {
+  const [meta, index] = await Promise.all([
+    getXmltvCacheMeta(providerKey).catch(() => null),
+    getXmltvChannelIndexData(providerKey).catch(() => null),
+  ]);
+  const now = Date.now();
+  const mapped = liveChannels.map((channel) => {
+    const directId = channel.epgChannelId?.trim() ?? '';
+    if (directId && index?.namesByChannelId.has(normalizeXmltvChannelId(directId))) {
+      return { channel, kind: directId === normalizeXmltvChannelId(directId) ? 'exact' : 'normalized' as const };
+    }
+    const matches = index?.namesToChannels.get(normalizeXmltvDisplayName(channel.name)) ?? [];
+    if (matches.length === 1) return { channel, kind: 'name' as const };
+    return { channel, kind: matches.length > 1 ? 'ambiguous' as const : 'unmatched' as const };
+  });
+  const ids = [...new Set((index ? [...index.namesByChannelId.keys()] : []))];
+  const programmes = await getCachedXmltvPrograms(
+    providerKey,
+    ids,
+    now - 12 * 60 * 60 * 1000,
+    now + 72 * 60 * 60 * 1000,
+    48,
+  ).catch(() => new Map<string, ProviderGuideProgram[]>());
+  const current = [...programmes.values()].filter((rows) => rows.some((row) => row.startAt != null && row.endAt != null && row.startAt <= now && row.endAt > now)).length;
+  const future = [...programmes.values()].filter((rows) => rows.some((row) => row.startAt != null && row.startAt > now)).length;
+  const summary = {
+    providerId,
+    sourceKind,
+    liveChannels: liveChannels.length,
+    channelsWithEpgId: liveChannels.filter((channel) => Boolean(channel.epgChannelId?.trim())).length,
+    xmltvChannels: meta?.channelCount ?? index?.diagnostics.xmltvChannelElementCount ?? 0,
+    xmltvPrograms: meta?.programmeCount ?? [...programmes.values()].reduce((total, rows) => total + rows.length, 0),
+    exactMatches: mapped.filter((item) => item.kind === 'exact').length,
+    normalizedMatches: mapped.filter((item) => item.kind === 'normalized').length,
+    nameFallbackMatches: mapped.filter((item) => item.kind === 'name').length,
+    ambiguousMatches: mapped.filter((item) => item.kind === 'ambiguous').length,
+    unmatched: mapped.filter((item) => item.kind === 'unmatched').length,
+    matchedWithCurrentProgram: current,
+    matchedWithFuturePrograms: future,
+    invalidTimestampCount: meta?.malformedProgrammeCount ?? 0,
+    cacheAgeMs: meta?.importedAt ? Math.max(0, now - meta.importedAt) : null,
+    lastRefreshAt: meta?.importedAt ?? null,
+  };
+  console.info('[NovaCast EPG_SOURCE_MAPPING_SUMMARY]', summary);
+  console.info('[NovaCast EPG_SOURCE_MAPPING_SAMPLE]', {
+    providerId,
+    sourceKind,
+    unmatched: mapped.filter((item) => item.kind === 'unmatched').slice(0, 10).map(({ channel }) => ({ channelName: channel.name, epgChannelId: channel.epgChannelId ?? null })),
+    xmltv: (index ? [...index.namesByChannelId.entries()] : []).slice(0, 10).map(([xmltvChannelId, names]) => ({ xmltvChannelId, xmltvDisplayName: names[0] ?? '' })),
+  });
+  return summary;
+}
+
+export async function testCustomXmltvSource(providerId: string, liveChannels: ProviderLiveChannel[]) {
+  const customUrl = await getProviderCustomEpgUrl(providerId);
+  if (!customUrl) throw new Error('Custom EPG is not configured.');
+  const source = createCustomXmltvSource(providerId, customUrl);
+  try {
+    const result = await refreshXmltvEpgCache({
+      providerKey: source.sourceKey,
+      client: { buildXmltvUrl: () => '' },
+      source,
+      scanAll: true,
+      force: true,
+      reason: 'custom-epg-explicit-test',
+    });
+    await ensureXmltvChannelNameIndex({
+      providerKey: source.sourceKey,
+      client: { buildXmltvUrl: () => '' },
+      source,
+      force: true,
+    });
+    const summary = await logXmltvSourceMappingDiagnostics(providerId, 'custom', source.sourceKey, liveChannels);
+    return { ...result, summary };
+  } catch {
+    throw new Error('Custom EPG test failed. Last-good cache was preserved.');
+  }
 }
 
 export type ProviderLiveCategory = {
@@ -2134,6 +2220,14 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
             .slice(0, 5)
             .map(([channelId, names]) => ({ xmltvChannelId: channelId, xmltvDisplayName: names[0] ?? '' })),
         });
+        void logXmltvSourceMappingDiagnostics(
+          client.providerId ?? 'unknown',
+          'provider',
+          providerEpgKey,
+          mappedChannels,
+        ).catch(() => {
+          // Diagnostics are strictly best-effort and never affect Guide rows.
+        });
 
         // NOVACAST_GUIDE_V2_3D_CATALOG_PRIORITY_V1
         //
@@ -2161,6 +2255,43 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
             .finally(() => {
               endCatalogGuidePriority();
             });
+        }
+
+        // Phase 2A: observe a configured custom source in parallel, without
+        // changing the provider-only Guide read above.
+        const providerIdForCustomEpg = client.providerId;
+        if (providerIdForCustomEpg) {
+          void getProviderCustomEpgUrl(providerIdForCustomEpg).then(async (customUrl) => {
+            if (!customUrl) return;
+            const source = createCustomXmltvSource(providerIdForCustomEpg, customUrl);
+            const customResult = await refreshXmltvEpgCache({
+              providerKey: source.sourceKey,
+              client,
+              source,
+              scanAll: true,
+              reason: 'custom-epg-observation',
+            });
+            await ensureXmltvChannelNameIndex({
+              providerKey: source.sourceKey,
+              client,
+              source,
+            });
+            await logXmltvSourceMappingDiagnostics(
+              providerIdForCustomEpg,
+              'custom',
+              source.sourceKey,
+              mappedChannels,
+            );
+            guideDevLog('custom-epg-observation-complete', {
+              refreshed: customResult.refreshed,
+              channelCount: customResult.channelCount ?? 0,
+              programmeCount: customResult.programmeCount ?? 0,
+            });
+          }).catch((error) => {
+            guideDevLog('custom-epg-observation-failed', {
+              errorName: error instanceof Error ? error.name : 'unknown',
+            });
+          });
         }
 
         const rows = mapGuideRowsFromChannels(resolvedMappedChannels, epgByChannel);

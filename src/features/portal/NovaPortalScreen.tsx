@@ -12,6 +12,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -25,8 +26,9 @@ import { PairingScreen } from '@/features/pairing/PairingScreen';
 import { factoryResetNovacast, resetPairingKeepDevice } from '@/features/pairing/resetPairing';
 import { completeLaunchOverlay } from '@/features/startup/launchOverlay';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
+import { testCustomXmltvSource } from '@/features/providers/providerRepositories';
 import { refreshProviderLiveChannelCount } from '@/features/providers/providerCatalogSync';
-import { getProviderRuntime, retryProviderInitialization, selectProvider, useProviderStore } from '@/features/providers/providerStore';
+import { configureProviderCustomEpg, getProviderRuntime, retryProviderInitialization, selectProvider, useProviderStore } from '@/features/providers/providerStore';
 import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
 import { useProviderLibrarySummary } from '@/features/providers/providerLibrarySummaryStore';
 import { initializeDevice, isDeviceActivationRequired, useDeviceState } from '@/features/device';
@@ -231,6 +233,11 @@ function PortalManageProviderRow({
   onPress: () => void;
 }) {
   const [useFocused, setUseFocused] = useState(false);
+  const [customEpgDraft, setCustomEpgDraft] = useState('');
+  const [customEpgSaving, setCustomEpgSaving] = useState(false);
+  const [customEpgTesting, setCustomEpgTesting] = useState(false);
+  const [customEpgTestResult, setCustomEpgTestResult] = useState<Awaited<ReturnType<typeof testCustomXmltvSource>> | null>(null);
+  const [customEpgTestError, setCustomEpgTestError] = useState<string | null>(null);
   const accessExpiration = useAccessExpirationDisplay({
     provider,
     account: provider.account ?? null,
@@ -243,6 +250,79 @@ function PortalManageProviderRow({
         <Text style={styles.providerRowStatus}>
           {provider.status} · {accessExpiration.line}
         </Text>
+        <Text style={styles.providerRowStatus}>Custom EPG: {provider.epg?.customUrlConfigured ? 'Configured' : 'Not Configured'}</Text>
+        {selected ? (
+          <View style={styles.customEpgControl}>
+            <TextInput
+              value={customEpgDraft}
+              onChangeText={setCustomEpgDraft}
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="Custom XMLTV URL"
+              placeholderTextColor="#7F8CA5"
+              style={styles.customEpgInput}
+              accessibilityLabel="Custom XMLTV URL"
+            />
+            <View style={styles.customEpgActions}>
+              <Pressable
+                accessible
+                accessibilityRole="button"
+                accessibilityLabel="Save custom XMLTV URL"
+                disabled={customEpgSaving || !customEpgDraft.trim()}
+                onPress={() => {
+                  setCustomEpgSaving(true);
+                  void configureProviderCustomEpg(provider.id, customEpgDraft)
+                    .then(() => setCustomEpgDraft(''))
+                    .catch(() => undefined)
+                    .finally(() => setCustomEpgSaving(false));
+                }}
+                style={styles.customEpgButton}>
+                <Text style={styles.useButtonText}>{customEpgSaving ? 'Saving…' : 'Save'}</Text>
+              </Pressable>
+              <Pressable
+                accessible
+                accessibilityRole="button"
+                accessibilityLabel="Clear custom XMLTV URL"
+                disabled={customEpgSaving}
+                onPress={() => void configureProviderCustomEpg(provider.id, null)}
+                style={styles.customEpgButton}>
+                <Text style={styles.useButtonText}>Clear</Text>
+              </Pressable>
+              <Pressable
+                accessible
+                accessibilityRole="button"
+                accessibilityLabel="Test custom XMLTV"
+                disabled={customEpgTesting || !provider.epg?.customUrlConfigured}
+                onPress={() => {
+                  const bundle = getActiveRepositoryBundle();
+                  if (!bundle || bundle.providerId !== provider.id) {
+                    setCustomEpgTestError('Active provider is not ready.');
+                    setCustomEpgTestResult(null);
+                    return;
+                  }
+                  setCustomEpgTesting(true);
+                  setCustomEpgTestError(null);
+                  setCustomEpgTestResult(null);
+                  void bundle.live.getChannels('all')
+                    .then((channels) => testCustomXmltvSource(provider.id, channels))
+                    .then((result) => setCustomEpgTestResult(result))
+                    .catch((error) => {
+                      setCustomEpgTestError(error instanceof Error ? error.message : 'Custom EPG test failed.');
+                    })
+                    .finally(() => setCustomEpgTesting(false));
+                }}
+                style={styles.customEpgButton}>
+                <Text style={styles.useButtonText}>{customEpgTesting ? 'Testing…' : 'Test Custom EPG'}</Text>
+              </Pressable>
+            </View>
+            {customEpgTestError ? <Text style={styles.customEpgTestError}>{customEpgTestError}</Text> : null}
+            {customEpgTestResult ? (
+              <Text style={styles.customEpgTestSummary}>
+                {`Custom EPG Test\nStatus: Success\nChannels: ${customEpgTestResult.channelCount ?? 0}\nPrograms: ${customEpgTestResult.programmeCount ?? 0}\nExact Matches: ${customEpgTestResult.summary.exactMatches}\nNormalized Matches: ${customEpgTestResult.summary.normalizedMatches}\nName Matches: ${customEpgTestResult.summary.nameFallbackMatches}\nUnmatched: ${customEpgTestResult.summary.unmatched}\nCurrent Programs: ${customEpgTestResult.summary.matchedWithCurrentProgram}\nFuture Programs: ${customEpgTestResult.summary.matchedWithFuturePrograms}\nLast Refresh: ${customEpgTestResult.summary.lastRefreshAt ? new Date(customEpgTestResult.summary.lastRefreshAt).toLocaleString() : 'Unavailable'}`}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
       </View>
       <Pressable
         ref={focusRef}
@@ -1041,6 +1121,12 @@ const styles = StyleSheet.create({
   providerRowName: { color: '#F5F8FF', fontSize: 18, fontWeight: '800' },
   providerRowNameFocused: focusText.title,
   providerRowStatus: { color: '#AAB6CC', fontSize: 14 },
+  customEpgControl: { marginTop: 8, gap: 7 },
+  customEpgInput: { minHeight: 38, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: GLASS.border, color: '#F5F8FF', backgroundColor: 'rgba(0,0,0,0.18)' },
+  customEpgActions: { flexDirection: 'row', gap: 8 },
+  customEpgButton: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, backgroundColor: GLASS.accentFill, borderWidth: 1, borderColor: GLASS.borderBright },
+  customEpgTestError: { color: '#FF9CA7', fontSize: 13, marginTop: 8 },
+  customEpgTestSummary: { color: '#D8E5FF', fontSize: 13, lineHeight: 19, marginTop: 8 },
   useButton: {
     paddingHorizontal: 15,
     paddingVertical: 9,

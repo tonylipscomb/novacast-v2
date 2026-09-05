@@ -1,6 +1,8 @@
 export type ProviderStatus = 'active' | 'expired' | 'offline' | 'unknown';
 
 export type ProviderConnectionType = 'mock' | 'xtream';
+export type ProviderEpgMode = 'provider' | 'custom' | 'provider_fallback_custom';
+export type ProviderEpgConfig = { mode: ProviderEpgMode; customUrlConfigured: boolean };
 
 /** Public provider metadata. Secrets are stored by providerCredentialStore. */
 export type ProviderConnectionRecord = {
@@ -35,6 +37,7 @@ export type ProviderRecord = {
   account?: ProviderAccountMetadata;
   createdAt?: number;
   updatedAt?: number;
+  epg?: ProviderEpgConfig;
 };
 
 export type ProviderState = {
@@ -118,6 +121,12 @@ function normalizeStatus(value: unknown): ProviderStatus {
   }
 
   return 'unknown';
+}
+
+function normalizeEpg(value: unknown): ProviderEpgConfig {
+  const record = isRecord(value) ? value : {};
+  const mode = record.mode === 'custom' || record.mode === 'provider_fallback_custom' ? record.mode : 'provider';
+  return { mode, customUrlConfigured: record.customUrlConfigured === true };
 }
 
 function normalizeServerIdentifier(baseUrl: string) {
@@ -231,6 +240,7 @@ export function normalizeProviderState(next: unknown): ProviderState {
       const id = provider.id as string;
       const connection = normalizeConnection(provider.connection, id);
       const account = normalizeAccount(provider.account);
+      const epg = normalizeEpg(provider.epg);
       const expirationAt = toEpochMilliseconds(provider.expirationAt) ?? account?.expiresAt ?? null;
 
       return {
@@ -241,6 +251,7 @@ export function normalizeProviderState(next: unknown): ProviderState {
         selected: false,
         ...(connection ? { connection } : {}),
         ...(account ? { account } : {}),
+        epg,
         createdAt: toEpochMilliseconds(provider.createdAt) ?? Date.now(),
         updatedAt: toEpochMilliseconds(provider.updatedAt) ?? Date.now(),
       } satisfies ProviderRecord;

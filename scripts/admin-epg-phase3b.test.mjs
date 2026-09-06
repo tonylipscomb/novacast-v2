@@ -9,6 +9,7 @@ const xmltv = fs.readFileSync(new URL('../supabase/functions/_shared/xmltvEpg.ts
 const migration = fs.readFileSync(new URL('../supabase/migrations/20260905230000_managed_provider_epg_source_cache.sql', import.meta.url), 'utf8');
 const requestMigration = fs.readFileSync(new URL('../supabase/migrations/20260906043251_managed_provider_epg_refresh_requests.sql', import.meta.url), 'utf8');
 const snapshotMigration = fs.readFileSync(new URL('../supabase/migrations/20260906064952_managed_provider_epg_catalog_snapshot.sql', import.meta.url), 'utf8');
+const auditMigration = fs.readFileSync(new URL('../supabase/migrations/20260906072738_managed_provider_epg_mapping_audits.sql', import.meta.url), 'utf8');
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
 const ui = fs.readFileSync(new URL('../pairing-web/src/AdminProviders.tsx', import.meta.url), 'utf8');
 
@@ -101,33 +102,47 @@ test('provider catalog snapshot is bounded, provider-scoped, generation-safe, an
   assert.match(worker, /cleanup_previous_catalog_snapshot/);
   assert.match(worker, /EPG provider catalog snapshot unavailable/);
   assert.match(admin, /action === 'preview_epg_mapping_audit'/);
-  const audit = admin.slice(admin.indexOf('async function previewEpgMappingAudit'), admin.indexOf('async function loadPublicProviders'));
-  assert.match(audit, /managed_provider_epg_catalog_snapshot/);
-  assert.match(audit, /managed_provider_epg_source_channels/);
-  assert.match(audit, /managed_provider_epg_source_mappings/);
+  const audit = admin.slice(admin.indexOf('async function readPersistedEpgMappingAudit'), admin.indexOf('async function loadPublicProviders'));
+  assert.match(audit, /managed_provider_epg_mapping_audits/);
   assert.doesNotMatch(audit, /fetch\(|decrypt|credentials|url_ciphertext|url_iv/);
   assert.match(ui, /Mapping Audit/);
 });
 
 test('mapping audit pages the complete snapshot and applies geographic classification before projections', () => {
-  assert.match(admin, /const snapshotPageSize = 1_000/);
-  assert.match(admin, /const snapshotHardMax = 50_000/);
-  assert.match(admin, /\.range\(offset, offset \+ snapshotPageSize - 1\)/);
-  assert.match(admin, /if \(page\.length < snapshotPageSize\) break/);
-  assert.match(admin, /snapshotRowsLoaded/);
-  assert.match(admin, /snapshotPageCount/);
-  assert.match(admin, /snapshotExpectedRows/);
-  assert.match(admin, /snapshotStoredRows/);
-  assert.match(admin, /snapshotComplete/);
-  assert.match(admin, /classifyEpgChannel\(\{ name: row\.channel_name/);
-  assert.match(admin, /if \(mapped\.has\(row\.provider_stream_id\)\) continue/);
-  assert.match(admin, /additionalDeterministicPotential/);
-  assert.match(admin, /projectedMappedTotal: currentMapped \+ additionalDeterministicPotential/);
-  assert.match(admin, /usRelevantRows/);
-  assert.match(admin, /usProjectedMappingPercent/);
-  assert.match(admin, /unmatchedNational: sample\(\(row\) => isUsRow\(row\)/);
-  const audit = admin.slice(admin.indexOf('async function previewEpgMappingAudit'), admin.indexOf('async function loadPublicProviders'));
-  assert.doesNotMatch(audit, /fetchLiveChannelsForEpgMapping|fetch\(|decrypt/);
+  for (const source of [admin, worker]) assert.match(source, /snapshotRowsLoaded|snapshotPageCount|snapshotExpectedRows|snapshotStoredRows|snapshotComplete/);
+  assert.match(worker, /const snapshotPageSize = 1_000|BATCH_SIZE = 1_000/);
+  assert.match(worker, /function buildMappingAudit\(providerId, sourceId/);
+  assert.match(worker, /if \(mapped\.has\(item\.streamId\)\) continue/);
+  assert.match(worker, /additionalDeterministicPotential/);
+  assert.match(worker, /projectedMappedTotal: currentMapped \+ additionalDeterministicPotential/);
+  assert.match(worker, /usRelevantRows/);
+  assert.match(worker, /usProjectedMappingPercent/);
+  assert.match(worker, /unmatchedNational: sample\(\(item\) => isUs\(item\)/);
+  assert.doesNotMatch(admin, /const snapshotPageSize = 1_000|function buildMappingAudit\(/);
+});
+
+test('full mapping audit is computed by the worker and Edge only reads the persisted result', () => {
+  assert.match(auditMigration, /create table public\.managed_provider_epg_mapping_audits/);
+  assert.match(auditMigration, /managed_provider_id uuid not null/);
+  assert.match(auditMigration, /source_id uuid not null/);
+  assert.match(auditMigration, /groups jsonb/);
+  assert.match(auditMigration, /many_to_one jsonb/);
+  assert.match(auditMigration, /samples jsonb/);
+  assert.match(auditMigration, /enable row level security/);
+  assert.match(auditMigration, /revoke all on table public\.managed_provider_epg_mapping_audits from anon, authenticated/);
+  assert.match(worker, /function buildMappingAudit\(providerId, sourceId/);
+  assert.match(worker, /providerCatalogFetched=\$\{live\.items\.length\}/);
+  assert.match(worker, /snapshotStored=\$\{snapshot\?\.storedRows/);
+  assert.match(worker, /const audit = buildMappingAudit\(providerId, sourceId/);
+  assert.match(worker, /await persistMappingAudit\(audit\)/);
+  assert.doesNotMatch(worker, /fuzzy|edit distance/i);
+  const reader = admin.slice(admin.indexOf('async function readPersistedEpgMappingAudit'), admin.indexOf('async function loadPublicProviders'));
+  assert.match(reader, /managed_provider_epg_mapping_audits/);
+  assert.match(reader, /\.limit\(1\)\s*\.maybeSingle\(\)/);
+  assert.doesNotMatch(reader, /fetch\(|managed_provider_epg_source_programmes|canonicalizeEpgName\(/);
+  const action = admin.slice(admin.indexOf("if (action === 'preview_epg_mapping_audit')"), admin.indexOf("if (action === 'probe')"));
+  assert.match(action, /readPersistedEpgMappingAudit/);
+  assert.doesNotMatch(action, /previewEpgMappingAudit\(/);
 });
 
 test('admin preview is compact and does not expose cached programme payloads or secrets', () => {

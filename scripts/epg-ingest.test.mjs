@@ -8,7 +8,7 @@ process.env.EPG_INGEST_TEST_IMPORT = '1';
 process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
 process.env.PROVIDER_ENCRYPTION_KEY = '00'.repeat(32);
-const { buildMappingAudit } = await import('./epg-ingest/index.mjs');
+const { buildMappingAudit, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
 
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
 const workflow = fs.readFileSync(new URL('../.github/workflows/epg-refresh.yml', import.meta.url), 'utf8');
@@ -53,6 +53,46 @@ test('full mapping audit completes for a 12,000-row provider catalog and 765 XML
   assert.ok(audit.samples.duplicateProviderVariants.length <= 10);
   assert.ok(audit.samples.namespaceFamilies.length <= 10);
   assert.doesNotMatch(JSON.stringify(audit), /password|token|authorization|https?:\/\//i);
+});
+
+test('Phase 2C audit parity preserves alternate names, ambiguity, quality resolution, and foreign prefixes', () => {
+  const audit = buildMappingAudit(
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    [
+      { streamId: 'espn', name: '4K: ESPN UHD 3840P', epgChannelId: null, categoryId: null, categoryName: null },
+      { streamId: 'foreign', name: 'UK: ESPN RAW', epgChannelId: null, categoryId: null, categoryName: null },
+      { streamId: 'alternate', name: 'ESPN SECOND NAME', epgChannelId: null, categoryId: null, categoryName: null },
+      { streamId: 'ambiguous', name: 'TNT', epgChannelId: null, categoryId: null, categoryName: null },
+    ],
+    [
+      { id: 'espn-hd', displayNames: ['ESPN HD', 'ESPN SECOND NAME'] },
+      { id: 'espn-sd', displayNames: ['ESPN'] },
+      { id: 'tnt-east', displayNames: ['TNT'] },
+      { id: 'tnt-west', displayNames: ['TNT'] },
+    ],
+    [],
+    { generation: 'snapshot-generation', expectedRows: 3, storedRows: 3, complete: true },
+    'epg-generation',
+  );
+  assert.equal(audit.xmltvDisplayNames, 5);
+  assert.equal(audit.uniqueXmltvCanonicals, 3);
+  assert.equal(audit.duplicateXmltvCanonicals, 2);
+  assert.equal(audit.phase2cQualityVariantPotential, 1);
+  assert.equal(audit.phase2cAmbiguousPotential, 1);
+  assert.equal(audit.phase2cExactNamePotential, 1);
+  assert.equal(audit.phase2cAdditionalDeterministicPotential, 2);
+  assert.equal(audit.groupsAreNonExclusive, true);
+  assert.equal(audit.usPhase2cProjectedMappingPercent, 66.66666666666666);
+  assert.ok(audit.sanityChannels.length <= 13);
+  assert.doesNotMatch(JSON.stringify(audit), /password|token|authorization|https?:\/\//i);
+});
+
+test('XMLTV audit adapter accepts in-memory/cache shapes and rejects misleading zero-name audits', () => {
+  assert.deepEqual(toAuditXmltvChannel({ id: 'xml-1', displayNames: [' ESPN ', 'ESPN', 'ESPN 2'] }), { id: 'xml-1', displayNames: ['ESPN', 'ESPN 2'] });
+  assert.deepEqual(toAuditXmltvChannel({ xmltv_channel_id: 'xml-2', display_name: 'CNN', alternate_names: ['CNN', 'CNN HD'] }), { id: 'xml-2', displayNames: ['CNN', 'CNN HD'] });
+  assert.deepEqual(toAuditXmltvChannel({ id: 'xml-3', displayNames: ['', '   '] }), { id: 'xml-3', displayNames: [] });
+  assert.throws(() => buildMappingAudit('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', [], [{ id: 'xml-1', displayNames: [] }], [], { generation: 'snapshot-generation', expectedRows: 0, storedRows: 0, complete: true }, 'epg-generation'), /invalid_epg_channel_metadata/);
 });
 
 test('worker uses server-only secrets and streams XMLTV outside Edge', () => {

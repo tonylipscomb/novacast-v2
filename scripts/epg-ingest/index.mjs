@@ -161,6 +161,16 @@ function canonicalize(value) {
   return String(value ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/&/g, ' AND ').replace(/[^A-Z0-9]+/g, ' ').replace(/\b(?:4K|UHD|FHD|HD)\b/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function canonicalizePhase2c(value) {
+  const normalized = String(value ?? '').normalize('NFKC').replace(/[\u1d00-\u1d7f]/gu, (character) => character === '\u1d18' ? 'P' : character);
+  return normalizeAuditName(normalized)
+    .replace(/^(?:4k|hd|fhd|uhd|us|usa|prime)\s*[:\-]?\s*/i, '')
+    .replace(/\b(?:hd|fhd|uhd|4k|3840p|2160p|1080p|720p|event|live event|live-event|backup|raw)\b/gi, ' ')
+    .replace(/[#=\-]{2,}/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function parseTimestamp(value) {
   const match = String(value ?? '').trim().match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\s*([+-])(\d{2})(\d{2}))?/);
   if (!match) return null;
@@ -232,7 +242,7 @@ class XmltvParser {
     if (/^<\/programme\s*>/i.test(tag)) this.finishProgramme();
   }
   finishChannel() {
-    if (this.activeChannel) { this.channels.set(this.activeChannel.id, { id: this.activeChannel.id, displayNames: this.activeChannel.names.slice(0, 6) }); this.onChannel(this.channels.get(this.activeChannel.id)); }
+    if (this.activeChannel) { this.channels.set(this.activeChannel.id, { id: this.activeChannel.id, displayNames: this.activeChannel.names.slice() }); this.onChannel(this.channels.get(this.activeChannel.id)); }
     this.activeChannel = null;
   }
   finishProgramme() {
@@ -352,8 +362,25 @@ function classifyAuditItem(item) {
   return { isUs: false, reason: 'other' };
 }
 
+function toAuditXmltvChannel(row) {
+  const id = String(row?.id ?? row?.xmltv_channel_id ?? '').trim();
+  const rawNames = [
+    ...(Array.isArray(row?.displayNames) ? row.displayNames : []),
+    ...(Array.isArray(row?.display_names) ? row.display_names : []),
+    ...(Array.isArray(row?.alternate_names) ? row.alternate_names : []),
+    row?.displayName,
+    row?.display_name,
+    row?.name,
+  ];
+  const displayNames = [...new Set(rawNames.filter((value) => typeof value === 'string').map((value) => value.trim()).filter(Boolean))];
+  return { id, displayNames };
+}
+
 function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings, snapshot, epgGeneration) {
-  const xmltv = xmltvChannels.map((channel) => ({ id: channel.id, name: channel.displayNames[0] || channel.id, alternates: channel.displayNames.slice(1) }));
+  const adaptedXmltvChannels = xmltvChannels.map(toAuditXmltvChannel);
+  const channelsWithDisplayNames = adaptedXmltvChannels.filter((channel) => channel.displayNames.length > 0).length;
+  if (adaptedXmltvChannels.length > 0 && channelsWithDisplayNames === 0) throw new Error('invalid_epg_channel_metadata');
+  const xmltv = adaptedXmltvChannels.filter((channel) => channel.id && channel.displayNames.length > 0).map((channel) => ({ id: channel.id, name: channel.displayNames[0], alternates: channel.displayNames.slice(1) }));
   const indexes = { ids: new Map(), lowerIds: new Map(), raw: new Map(), normalized: new Map(), canonical: new Map() };
   const add = (index, key, row) => { if (key) index.set(key, [...(index.get(key) ?? []), row]); };
   for (const row of xmltv) {
@@ -362,26 +389,61 @@ function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings,
     for (const value of [row.name, ...row.alternates]) {
       add(indexes.raw, value.trim(), row);
       add(indexes.normalized, normalizeAuditName(value), row);
-      add(indexes.canonical, canonicalize(value), row);
+      add(indexes.canonical, canonicalizePhase2c(value), row);
     }
   }
   const unique = (rows) => [...new Map(rows.map((row) => [row.id, row])).values()];
   const mapped = new Set(mappings.map((row) => row.provider_stream_id));
-  const projections = { directIdPotential: 0, caseInsensitiveIdPotential: 0, exactNamePotential: 0, normalizedNamePotential: 0, canonicalPotential: 0, ambiguousPotential: 0 };
+  const projections = { directIdPotential: 0, caseInsensitiveIdPotential: 0, exactNamePotential: 0, normalizedNamePotential: 0, canonicalPotential: 0, qualityVariantPotential: 0, ambiguousPotential: 0, unmatched: 0 };
+  const ruleBreakdown = { qualityCleanup: 0, resolutionCleanup: 0, eventCleanup: 0, rawCleanup: 0, primeWrapperCleanup: 0, usWrapperCleanup: 0, alternateDisplayName: 0, qualityVariantResolution: 0, otherPhase2cDeterministic: 0 };
   const additional = new Map();
+  const resolution = (candidates, providerName) => {
+    if (candidates.length < 2) return { candidates, resolved: false };
+    const providerHasHd = /(^|[^A-Z])HD([^A-Z]|$)/i.test(providerName);
+    const candidateHasHd = (candidate) => /(^|[\s._-])HD($|[\s._-])/i.test(`${candidate.id} ${candidate.name} ${candidate.alternates.join(' ')}`);
+    const preferred = candidates.filter((candidate) => candidateHasHd(candidate) === providerHasHd);
+    return preferred.length === 1 ? { candidates: preferred, resolved: true } : { candidates, resolved: false };
+  };
+  const matchRule = (providerName, target, kind, qualityResolved) => {
+    const name = String(providerName ?? '');
+    if (qualityResolved) return 'qualityVariantResolution';
+    const canonicalTarget = canonicalizePhase2c(target.name);
+    if (canonicalTarget !== canonicalize(target.name)) {
+      if (/\b(?:3840p|2160p|1080p|720p)\b/i.test(name)) return 'resolutionCleanup';
+      if (/\b(?:event|live[ -]event)\b/i.test(name)) return 'eventCleanup';
+      if (/^\s*prime\s*:/i.test(name)) return 'primeWrapperCleanup';
+      if (/^\s*(?:us|usa)\s*:/i.test(name)) return 'usWrapperCleanup';
+      if (/\b(?:4k|uhd|fhd|hd)\b/i.test(name)) return 'qualityCleanup';
+      if (/\b(?:backup|raw)\b/i.test(name)) return 'rawCleanup';
+      if (/[&#=\-(),._]/.test(name)) return 'rawCleanup';
+    }
+    if (kind === 'canonical' && target.name !== target.alternates[0] && target.alternates.length) return 'alternateDisplayName';
+    return 'otherPhase2cDeterministic';
+  };
   for (const item of items) {
     if (mapped.has(item.streamId)) continue;
     const direct = item.epgChannelId ? unique(indexes.ids.get(item.epgChannelId) ?? []) : [];
     const lower = item.epgChannelId ? unique(indexes.lowerIds.get(item.epgChannelId.toLocaleLowerCase()) ?? []) : [];
     const exact = unique(indexes.raw.get(item.name.trim()) ?? []);
     const normalized = unique(indexes.normalized.get(normalizeAuditName(item.name)) ?? []);
-    const canonical = unique(indexes.canonical.get(canonicalize(item.name)) ?? []);
-    const candidates = [{ key: 'directIdPotential', rows: direct }, { key: 'caseInsensitiveIdPotential', rows: lower }, { key: 'exactNamePotential', rows: exact }, { key: 'normalizedNamePotential', rows: normalized }, { key: 'canonicalPotential', rows: canonical }];
-    const selected = candidates.find((candidate) => candidate.rows.length === 1);
-    if (selected) { projections[selected.key] += 1; additional.set(item.streamId, { item, target: selected.rows[0] }); }
-    else if (normalized.length > 1 || canonical.length > 1) projections.ambiguousPotential += 1;
+    const canonical = unique(indexes.canonical.get(canonicalizePhase2c(item.name)) ?? []);
+    const candidates = [{ key: 'directIdPotential', rows: direct, kind: 'id' }, { key: 'caseInsensitiveIdPotential', rows: lower, kind: 'id' }, { key: 'exactNamePotential', rows: exact, kind: 'exact' }, { key: 'normalizedNamePotential', rows: normalized, kind: 'normalized' }, { key: 'canonicalPotential', rows: canonical, kind: 'canonical' }];
+    let selected = candidates.find((candidate) => candidate.rows.length === 1);
+    let qualityResolved = false;
+    if (!selected && canonical.length > 1) {
+      const resolved = resolution(canonical, item.name);
+      if (resolved.candidates.length === 1) { selected = { key: 'qualityVariantPotential', rows: resolved.candidates, kind: 'canonical' }; qualityResolved = resolved.resolved; }
+    }
+    if (selected) {
+      projections[selected.key] += 1;
+      additional.set(item.streamId, { item, target: selected.rows[0], kind: selected.kind, qualityResolved });
+      ruleBreakdown[matchRule(item.name, selected.rows[0], selected.kind, qualityResolved)] += 1;
+    } else {
+      if (normalized.length > 1 || canonical.length > 1) projections.ambiguousPotential += 1;
+      else projections.unmatched += 1;
+    }
   }
-  const group = (predicate) => { const rows = items.filter(predicate); return { rows: rows.length, uniqueCanonicalNames: new Set(rows.map((row) => canonicalize(row.name)).filter(Boolean)).size }; };
+  const group = (predicate) => { const rows = items.filter(predicate); return { rows: rows.length, uniqueCanonicalNames: new Set(rows.map((row) => canonicalizePhase2c(row.name)).filter(Boolean)).size }; };
   const classify = (item) => classifyAuditItem(item);
   const isUs = (item) => classify(item).isUs;
   const isLocal = (item) => /\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${item.name} ${item.categoryName ?? ''}`);
@@ -407,14 +469,29 @@ function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings,
   const usRows = items.filter(isUs);
   const usCurrentMapped = usRows.filter((item) => mapped.has(item.streamId)).length;
   const usAdditionalPotential = [...additional.values()].filter(({ item }) => isUs(item)).length;
+  const sanityNames = ['ESPN', 'ESPN2', 'TNT', 'TBS', 'USA NETWORK', 'CNN', 'FOX NEWS', 'MSNBC', 'AMC', 'HBO', 'CBS SPORTS NETWORK', 'NFL NETWORK', 'NBA TV'];
+  const sanity = sanityNames.map((requestedName) => {
+    const provider = items.find((item) => canonicalizePhase2c(item.name) === canonicalizePhase2c(requestedName));
+    const candidates = provider ? unique(indexes.canonical.get(canonicalizePhase2c(provider.name)) ?? []) : [];
+    return { providerStreamId: provider?.streamId ?? null, providerName: provider?.name ?? requestedName, providerCanonical: provider ? canonicalizePhase2c(provider.name) : null, xmltvId: candidates.length === 1 ? candidates[0].id : null, xmltvDisplayName: candidates.length === 1 ? candidates[0].name : null, matchRule: candidates.length === 1 ? 'canonical' : null, status: candidates.length === 1 ? 'matched' : candidates.length > 1 ? 'ambiguous' : 'unmatched', reason: provider ? candidates.length ? 'canonical_candidate_count' : 'absent_from_xmltv' : 'provider_row_not_found' };
+  });
+  const affiliateNames = ['6ABC PHILADELPHIA', 'WMAR', 'KIVI', 'WKBW', 'WCIV', 'WCPO', 'WEWS'];
+  const localAffiliateAudit = affiliateNames.map((requestedName) => {
+    const provider = items.find((item) => canonicalizePhase2c(item.name).includes(canonicalizePhase2c(requestedName)));
+    const candidates = provider ? unique(indexes.canonical.get(canonicalizePhase2c(provider.name)) ?? []) : [];
+    return { requestedName, providerStreamId: provider?.streamId ?? null, providerName: provider?.name ?? null, status: candidates.length === 1 ? 'deterministic_match' : candidates.length > 1 ? 'ambiguous' : 'absent_from_us2' };
+  });
   return {
-    providerId, sourceId, snapshotGeneration: snapshot.generation, epgGeneration, providerRows: items.length, uniqueProviderCanonicalNames: new Set(items.map((item) => canonicalize(item.name)).filter(Boolean)).size,
+    providerId, sourceId, snapshotGeneration: snapshot.generation, epgGeneration, providerRows: items.length, uniqueProviderCanonicalNames: new Set(items.map((item) => canonicalizePhase2c(item.name)).filter(Boolean)).size,
     providerRowsWithEpgId: items.filter((item) => item.epgChannelId).length, providerRowsWithoutEpgId: items.filter((item) => !item.epgChannelId).length, xmltvChannels: xmltv.length, currentMapped,
     snapshotExpectedRows: snapshot.expectedRows, snapshotStoredRows: snapshot.storedRows, snapshotComplete: snapshot.complete, snapshotPageCount: 1,
     directIdPotential: projections.directIdPotential, caseInsensitiveIdPotential: projections.caseInsensitiveIdPotential, exactNamePotential: projections.exactNamePotential, normalizedNamePotential: projections.normalizedNamePotential, canonicalPotential: projections.canonicalPotential, ambiguousPotential: projections.ambiguousPotential,
     additionalDeterministicPotential, projectedMappedTotal: currentMapped + additionalDeterministicPotential,
     usRelevantRows: usRows.length, usCurrentMapped, usAdditionalPotential, usProjectedMapped: usCurrentMapped + usAdditionalPotential, usProjectedMappingPercent: usRows.length ? (usCurrentMapped + usAdditionalPotential) / usRows.length : 0,
-    groups, manyToOne: { providerRowCount: duplicateProviderVariants.reduce((sum, row) => sum + row.providerRowCount, 0), uniqueXmltvTargetCount: duplicateProviderVariants.length, duplicateQualityVariantCount: duplicateProviderVariants.filter((row) => row.names.some((name) => /\b(?:HD|FHD|UHD|4K)\b/i.test(name))).length, ambiguityCount: projections.ambiguousPotential },
+    usPhase2cAdditionalPotential: usAdditionalPotential, usPhase2cProjectedMapped: usCurrentMapped + usAdditionalPotential, usPhase2cProjectedMappingRatio: usRows.length ? (usCurrentMapped + usAdditionalPotential) / usRows.length : 0, usPhase2cProjectedMappingPercent: usRows.length ? ((usCurrentMapped + usAdditionalPotential) / usRows.length) * 100 : 0,
+    groups, groupsAreNonExclusive: true, manyToOne: { providerRowCount: duplicateProviderVariants.reduce((sum, row) => sum + row.providerRowCount, 0), uniqueXmltvTargetCount: duplicateProviderVariants.length, duplicateQualityVariantCount: duplicateProviderVariants.filter((row) => row.names.some((name) => /\b(?:HD|FHD|UHD|4K)\b/i.test(name))).length, ambiguityCount: projections.ambiguousPotential },
+    phase2cDirectIdPotential: projections.directIdPotential, phase2cCaseInsensitiveIdPotential: projections.caseInsensitiveIdPotential, phase2cExactNamePotential: projections.exactNamePotential, phase2cNormalizedNamePotential: projections.normalizedNamePotential, phase2cCanonicalPotential: projections.canonicalPotential, phase2cQualityVariantPotential: projections.qualityVariantPotential, phase2cAdditionalDeterministicPotential: additionalDeterministicPotential, phase2cProjectedMappedTotal: currentMapped + additionalDeterministicPotential, phase2cAmbiguousPotential: projections.ambiguousPotential, phase2cUnmatched: projections.unmatched, phase2cRuleBreakdown: ruleBreakdown, sanityChannels: sanity, localAffiliateAudit,
+    xmltvChannelObjects: adaptedXmltvChannels.length, xmltvChannelsWithDisplayNames: channelsWithDisplayNames, xmltvDisplayNames: xmltv.reduce((count, row) => count + 1 + row.alternates.length, 0), uniqueXmltvCanonicals: indexes.canonical.size, duplicateXmltvCanonicals: [...indexes.canonical.values()].filter((rows) => unique(rows).length > 1).length, ambiguousXmltvCanonicals: [...indexes.canonical.values()].filter((rows) => unique(rows).length > 1).length,
     samples: { unmatchedNational: sample((item) => isUs(item) && !mapped.has(item.streamId) && !isLocal(item)), unmatchedLocal: sample((item) => isUs(item) && !mapped.has(item.streamId) && isLocal(item)), duplicateProviderVariants, namespaceFamilies: [...namespace.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([suffix, count]) => ({ suffix, count, scope: 'global' })) },
   };
 }
@@ -422,7 +499,7 @@ function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings,
 async function persistMappingAudit(audit) {
   const auditId = crypto.randomUUID();
   try {
-    await db('managed_provider_epg_mapping_audits', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ id: auditId, managed_provider_id: audit.providerId, source_id: audit.sourceId, snapshot_generation: audit.snapshotGeneration ?? crypto.randomUUID(), epg_generation: audit.epgGeneration ?? null, provider_rows: audit.providerRows, unique_provider_canonical_names: audit.uniqueProviderCanonicalNames, provider_rows_with_epg_id: audit.providerRowsWithEpgId, provider_rows_without_epg_id: audit.providerRowsWithoutEpgId, xmltv_channels: audit.xmltvChannels, current_mapped: audit.currentMapped, snapshot_expected_rows: audit.snapshotExpectedRows, snapshot_stored_rows: audit.snapshotStoredRows, snapshot_complete: audit.snapshotComplete, snapshot_page_count: audit.snapshotPageCount, direct_id_potential: audit.directIdPotential, case_insensitive_id_potential: audit.caseInsensitiveIdPotential, exact_name_potential: audit.exactNamePotential, normalized_name_potential: audit.normalizedNamePotential, canonical_potential: audit.canonicalPotential, ambiguous_potential: audit.ambiguousPotential, additional_deterministic_potential: audit.additionalDeterministicPotential, projected_mapped_total: audit.projectedMappedTotal, us_relevant_rows: audit.usRelevantRows, us_current_mapped: audit.usCurrentMapped, us_additional_potential: audit.usAdditionalPotential, us_projected_mapped: audit.usProjectedMapped, us_projected_mapping_percent: audit.usProjectedMappingPercent, groups: audit.groups, many_to_one: audit.manyToOne, samples: audit.samples }) }, 'persist_mapping_audit');
+    await db('managed_provider_epg_mapping_audits', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ id: auditId, managed_provider_id: audit.providerId, source_id: audit.sourceId, snapshot_generation: audit.snapshotGeneration ?? crypto.randomUUID(), epg_generation: audit.epgGeneration ?? null, provider_rows: audit.providerRows, unique_provider_canonical_names: audit.uniqueProviderCanonicalNames, provider_rows_with_epg_id: audit.providerRowsWithEpgId, provider_rows_without_epg_id: audit.providerRowsWithoutEpgId, xmltv_channels: audit.xmltvChannels, current_mapped: audit.currentMapped, snapshot_expected_rows: audit.snapshotExpectedRows, snapshot_stored_rows: audit.snapshotStoredRows, snapshot_complete: audit.snapshotComplete, snapshot_page_count: audit.snapshotPageCount, direct_id_potential: audit.directIdPotential, case_insensitive_id_potential: audit.caseInsensitiveIdPotential, exact_name_potential: audit.exactNamePotential, normalized_name_potential: audit.normalizedNamePotential, canonical_potential: audit.canonicalPotential, ambiguous_potential: audit.ambiguousPotential, additional_deterministic_potential: audit.additionalDeterministicPotential, projected_mapped_total: audit.projectedMappedTotal, us_relevant_rows: audit.usRelevantRows, us_current_mapped: audit.usCurrentMapped, us_additional_potential: audit.usAdditionalPotential, us_projected_mapped: audit.usProjectedMapped, us_projected_mapping_percent: audit.usProjectedMappingPercent, xmltv_display_names: audit.xmltvDisplayNames, unique_xmltv_canonicals: audit.uniqueXmltvCanonicals, duplicate_xmltv_canonicals: audit.duplicateXmltvCanonicals, ambiguous_xmltv_canonicals: audit.ambiguousXmltvCanonicals, groups_are_non_exclusive: true, phase2c_direct_id_potential: audit.phase2cDirectIdPotential, phase2c_case_insensitive_id_potential: audit.phase2cCaseInsensitiveIdPotential, phase2c_exact_name_potential: audit.phase2cExactNamePotential, phase2c_normalized_name_potential: audit.phase2cNormalizedNamePotential, phase2c_canonical_potential: audit.phase2cCanonicalPotential, phase2c_quality_variant_potential: audit.phase2cQualityVariantPotential, phase2c_additional_deterministic_potential: audit.phase2cAdditionalDeterministicPotential, phase2c_projected_mapped_total: audit.phase2cProjectedMappedTotal, phase2c_ambiguous_potential: audit.phase2cAmbiguousPotential, phase2c_unmatched: audit.phase2cUnmatched, us_phase2c_additional_potential: audit.usPhase2cAdditionalPotential, us_phase2c_projected_mapped: audit.usPhase2cProjectedMapped, us_phase2c_projected_mapping_ratio: audit.usPhase2cProjectedMappingRatio, us_phase2c_projected_mapping_percent: audit.usPhase2cProjectedMappingPercent, phase2c_rule_breakdown: audit.phase2cRuleBreakdown, groups: audit.groups, many_to_one: audit.manyToOne, samples: { ...audit.samples, sanityChannels: audit.sanityChannels, localAffiliateAudit: audit.localAffiliateAudit } }) }, 'persist_mapping_audit');
     await db(`managed_provider_epg_mapping_audits?managed_provider_id=eq.${encodeURIComponent(audit.providerId)}&source_id=eq.${encodeURIComponent(audit.sourceId)}&id=neq.${encodeURIComponent(auditId)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_mapping_audits');
   } catch (error) {
     logDatabaseFailure(error);
@@ -493,7 +570,17 @@ async function processRequest(request) {
   if (source.active_cache_generation) {
     for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_generation').catch(() => {});
   }
-  if (snapshot?.complete === true) await persistMappingAudit(buildMappingAudit(providerId, sourceId, live.items, channels, mappings, snapshot, generation));
+  if (snapshot?.complete === true) {
+    try {
+      const audit = buildMappingAudit(providerId, sourceId, live.items, channels, mappings, snapshot, generation);
+      if (audit.projectedMappedTotal < audit.currentMapped || audit.usPhase2cProjectedMapped < audit.usCurrentMapped) throw new Error('invalid_mapping_audit_totals');
+      await persistMappingAudit(audit);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'invalid_epg_channel_metadata') process.stderr.write('EPG mapping audit skipped: invalid channel metadata.\n');
+      else if (error instanceof Error && error.message === 'invalid_mapping_audit_totals') process.stderr.write('EPG mapping audit skipped: invalid totals.\n');
+      else { logDatabaseFailure(error); process.stderr.write('EPG mapping audit unavailable.\n'); }
+    }
+  }
   return { channels: channels.length, programmes: programmes.length, mapped: mappings.length };
   } catch (error) {
     if (!promoted) for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_generation').catch(() => {});
@@ -638,7 +725,7 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 
-export { buildMappingAudit };
+export { buildMappingAudit, toAuditXmltvChannel };
 
 if (process.env.EPG_INGEST_TEST_IMPORT !== '1') {
   main().catch((error) => {

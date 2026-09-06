@@ -26,6 +26,22 @@ class DatabaseFailure extends Error {
   }
 }
 
+class WorkerValidationFailure extends Error {
+  constructor(operation, message) {
+    super('worker_validation_failed');
+    this.name = 'WorkerValidationFailure';
+    this.operation = operation;
+    this.safeMessage = message;
+  }
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function requireUuid(value, operation, field) {
+  if (typeof value !== 'string' || !UUID_PATTERN.test(value)) throw new WorkerValidationFailure(operation, `missing_or_invalid_${field}`);
+  return value;
+}
+
 function safeErrorText(value) {
   if (typeof value !== 'string') return null;
   let safe = value
@@ -41,6 +57,11 @@ function safeErrorText(value) {
 function logDatabaseFailure(error) {
   if (!(error instanceof DatabaseFailure)) return;
   process.stderr.write(`${JSON.stringify({ databaseFailure: { operation: error.operation, httpStatus: error.httpStatus, code: error.code, message: error.safeMessage, details: error.details, hint: error.hint } })}\n`);
+}
+
+function logWorkerFailure(error) {
+  if (!(error instanceof WorkerValidationFailure)) return;
+  process.stderr.write(`${JSON.stringify({ workerFailure: { operation: error.operation, message: error.safeMessage } })}\n`);
 }
 
 function required(name) {
@@ -73,11 +94,21 @@ async function db(path, init = {}, operation = 'supabase_request') {
     throw new DatabaseFailure(operation, response.status, payload);
   }
   if (response.status === 204) return null;
-  try { return await response.json(); } catch { throw new DatabaseFailure(operation, response.status, { message: 'invalid_database_response' }); }
+  try {
+    const body = await response.text();
+    return body.trim() ? JSON.parse(body) : null;
+  } catch { throw new DatabaseFailure(operation, response.status, { message: 'invalid_database_response' }); }
+}
+
+function returnedRow(result, operation) {
+  const row = Array.isArray(result) ? result[0] : result;
+  if (!row || typeof row !== 'object') throw new WorkerValidationFailure(operation, 'missing_returned_row');
+  return row;
 }
 
 async function patch(table, id, values, extra = '', operation = `update_${table}`) {
-  await db(`${table}?id=eq.${encodeURIComponent(id)}${extra}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(values) }, operation);
+  const safeId = requireUuid(id, operation, 'id');
+  await db(`${table}?id=eq.${encodeURIComponent(safeId)}${extra}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(values) }, operation);
 }
 
 async function insertBatches(table, rows, onConflict = '', operation = `insert_${table}`) {
@@ -201,8 +232,10 @@ async function fetchLiveChannels(provider) {
 }
 
 async function processRequest(request) {
-  const [source] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(request.source_id)}&select=id,managed_provider_id,url_ciphertext,url_iv,priority,active_cache_generation`, {}, 'load_source');
-  const [provider] = await db(`managed_providers?id=eq.${encodeURIComponent(request.managed_provider_id)}&select=id,credentials_ciphertext,credentials_iv`, {}, 'load_provider');
+  const sourceId = requireUuid(request.source_id, 'load_source', 'source_id');
+  const providerId = requireUuid(request.managed_provider_id, 'load_provider', 'provider_id');
+  const [source] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(sourceId)}&select=id,managed_provider_id,url_ciphertext,url_iv,priority,active_cache_generation`, {}, 'load_source');
+  const [provider] = await db(`managed_providers?id=eq.${encodeURIComponent(providerId)}&select=id,credentials_ciphertext,credentials_iv`, {}, 'load_provider');
   if (!source || !provider) throw new Error('source_not_found');
   const generation = crypto.randomUUID();
   const refreshedAt = new Date().toISOString();
@@ -248,13 +281,37 @@ async function processRequest(request) {
   }
 }
 
+async function enqueueScheduledRefresh(source) {
+  const providerId = requireUuid(source.managed_provider_id, 'enqueue_scheduled_refresh', 'provider_id');
+  const sourceId = requireUuid(source.id, 'enqueue_scheduled_refresh', 'source_id');
+  const result = await db('managed_provider_epg_refresh_requests', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=representation' }, body: JSON.stringify({ managed_provider_id: providerId, source_id: sourceId, status: 'pending', requested_at: new Date().toISOString() }) }, 'enqueue_scheduled_refresh');
+  const inserted = Array.isArray(result) ? result[0] : result;
+  if (inserted?.id != null) return requireUuid(inserted.id, 'enqueue_scheduled_refresh', 'request_id');
+  const [existing] = await db(`managed_provider_epg_refresh_requests?managed_provider_id=eq.${encodeURIComponent(providerId)}&source_id=eq.${encodeURIComponent(sourceId)}&status=in.(pending,running)&select=id,refresh_job_id&limit=1`, {}, 'load_existing_refresh_request');
+  return requireUuid(existing?.id, 'enqueue_scheduled_refresh', 'request_id');
+}
+
+async function ensureRefreshJob(source, requestId) {
+  const [request] = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(requestId)}&select=id,refresh_job_id`, {}, 'load_refresh_request');
+  if (!request) throw new WorkerValidationFailure('load_refresh_request', 'missing_request');
+  if (request.refresh_job_id != null) return requireUuid(request.refresh_job_id, 'load_refresh_request', 'job_id');
+  const jobId = requireUuid(crypto.randomUUID(), 'create_refresh_job', 'job_id');
+  const generation = requireUuid(crypto.randomUUID(), 'create_refresh_job', 'generation');
+  const created = await db('managed_provider_epg_refresh_jobs', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ id: jobId, managed_provider_id: source.managed_provider_id, source_id: source.id, generation, status: 'queued', stage: 'queued', updated_at: new Date().toISOString() }) }, 'create_refresh_job');
+  requireUuid(returnedRow(created, 'create_refresh_job').id, 'create_refresh_job', 'job_id');
+  await patch('managed_provider_epg_refresh_requests', requestId, { refresh_job_id: jobId }, '', 'link_refresh_job');
+  return jobId;
+}
+
 async function main() {
-  const providerId = process.argv[2] ?? '';
-  const sourceId = process.argv[3] ?? '';
+  const providerInput = process.argv[2] ?? '';
+  const sourceInput = process.argv[3] ?? '';
+  const providerId = providerInput ? requireUuid(providerInput, 'provider_filter', 'provider_id') : '';
+  const sourceId = sourceInput ? requireUuid(sourceInput, 'source_filter', 'source_id') : '';
   let failed = false;
   if (!providerId && !sourceId) {
     const sources = await db('managed_provider_epg_sources?enabled=eq.true&select=id,managed_provider_id', {}, 'load_sources');
-    for (const source of sources ?? []) await db('managed_provider_epg_refresh_requests', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ managed_provider_id: source.managed_provider_id, source_id: source.id, status: 'pending', requested_at: new Date().toISOString() }) }, 'enqueue_scheduled_refresh').catch((error) => { logDatabaseFailure(error); failed = true; });
+    for (const source of sources ?? []) await enqueueScheduledRefresh(source).catch((error) => { logDatabaseFailure(error); logWorkerFailure(error); failed = true; });
   }
   const query = ['status=eq.pending', 'order=requested_at.asc', 'limit=20', providerId && `managed_provider_id=eq.${encodeURIComponent(providerId)}`, sourceId && `source_id=eq.${encodeURIComponent(sourceId)}`].filter(Boolean).join('&');
   const requests = await db(`managed_provider_epg_refresh_requests?select=id,managed_provider_id,source_id,refresh_job_id,status&${query}`, {}, 'load_pending_requests');
@@ -264,24 +321,35 @@ async function main() {
     return;
   }
   for (const request of requests ?? []) {
-    const claimed = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(request.id)}&status=eq.pending`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }) }, 'claim_refresh_request');
+    const requestId = requireUuid(request.id, 'claim_refresh_request', 'request_id');
+    requireUuid(request.source_id, 'claim_refresh_request', 'source_id');
+    requireUuid(request.managed_provider_id, 'claim_refresh_request', 'provider_id');
+    const claimed = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(requestId)}&status=eq.pending`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }) }, 'claim_refresh_request');
     if (!claimed?.length) continue;
     try {
-      await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'processing', stage: 'worker_ingest', updated_at: new Date().toISOString() }, '', 'start_refresh_job');
+      const source = { id: requireUuid(request.source_id, 'claim_refresh_request', 'source_id'), managed_provider_id: requireUuid(request.managed_provider_id, 'claim_refresh_request', 'provider_id') };
+      const jobId = await ensureRefreshJob(source, requestId);
+      await patch('managed_provider_epg_refresh_jobs', jobId, { status: 'processing', stage: 'worker_ingest', updated_at: new Date().toISOString() }, '', 'start_refresh_job');
       const result = await processRequest(request);
-      await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'complete', stage: null, progress_percent: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'complete_refresh_job');
-      await patch('managed_provider_epg_refresh_requests', request.id, { status: 'complete', completed_at: new Date().toISOString() }, '', 'complete_request');
+      await patch('managed_provider_epg_refresh_jobs', jobId, { status: 'complete', stage: null, progress_percent: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'complete_refresh_job');
+      await patch('managed_provider_epg_refresh_requests', requestId, { status: 'complete', completed_at: new Date().toISOString() }, '', 'complete_request');
       process.stdout.write(`EPG refresh completed: channels=${result.channels} programmes=${result.programmes} mapped=${result.mapped}\n`);
     } catch (error) {
       failed = true;
       logDatabaseFailure(error);
       const code = error instanceof Error && /^[a-z0-9_]+$/.test(error.message) ? error.message : 'worker_failure';
-      if (request.refresh_job_id) await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }, '', 'fail_refresh_job').catch((patchError) => { logDatabaseFailure(patchError); });
-      await patch('managed_provider_epg_refresh_requests', request.id, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() }, '', 'fail_request').catch((patchError) => { logDatabaseFailure(patchError); });
+      if (request.refresh_job_id && UUID_PATTERN.test(request.refresh_job_id)) await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }, '', 'fail_refresh_job').catch((patchError) => { logDatabaseFailure(patchError); });
+      if (UUID_PATTERN.test(requestId)) await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() }, '', 'fail_request').catch((patchError) => { logDatabaseFailure(patchError); });
       process.stderr.write(`EPG refresh failed: ${code}\n`);
     }
   }
   if (failed) process.exitCode = 1;
 }
 
-main().catch((error) => { logDatabaseFailure(error); process.stderr.write(`EPG worker failed: ${error instanceof Error ? error.message : 'worker_failure'}\n`); process.exitCode = 1; });
+main().catch((error) => {
+  logDatabaseFailure(error);
+  logWorkerFailure(error);
+  const code = error instanceof WorkerValidationFailure ? error.safeMessage : error instanceof DatabaseFailure ? error.message : 'worker_failure';
+  process.stderr.write(`EPG worker failed: ${code}\n`);
+  process.exitCode = 1;
+});

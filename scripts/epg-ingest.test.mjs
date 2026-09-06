@@ -47,9 +47,9 @@ test('workflow runs every six hours with manual filtering and a concurrency guar
   assert.match(workflow, /PROVIDER_ENCRYPTION_KEY/);
 });
 
-function runWorker(port, secret = 'super-secret-provider-token') {
+function runWorker(port, secret = 'super-secret-provider-token', args = []) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ['./scripts/epg-ingest/index.mjs'], {
+    const child = spawn(process.execPath, ['./scripts/epg-ingest/index.mjs', ...args], {
       cwd: process.cwd(),
       env: { ...process.env, SUPABASE_URL: `http://127.0.0.1:${port}`, SUPABASE_SERVICE_ROLE_KEY: secret, PROVIDER_ENCRYPTION_KEY: '00'.repeat(32) },
     });
@@ -60,6 +60,77 @@ function runWorker(port, secret = 'super-secret-provider-token') {
     child.on('close', (code) => resolve({ code, stdout, stderr, secret }));
   });
 }
+
+const providerUuid = '11111111-1111-4111-8111-111111111111';
+const sourceUuid = '22222222-2222-4222-8222-222222222222';
+const requestUuid = '33333333-3333-4333-8333-333333333333';
+
+test('HTTP 201 representation returns a valid enqueued request UUID and omits empty filters', async () => {
+  const seen = [];
+  const server = await serverFor((request, response) => {
+    seen.push({ method: request.method, url: request.url, headers: request.headers });
+    if (request.url.includes('managed_provider_epg_sources')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: sourceUuid, managed_provider_id: providerUuid }]));
+      return;
+    }
+    if (request.method === 'POST' && request.url.includes('managed_provider_epg_refresh_requests')) {
+      response.writeHead(201, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: requestUuid }]));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('[]');
+  });
+  const result = await runWorker(server.address().port);
+  server.close();
+  const enqueue = seen.find((entry) => entry.method === 'POST' && entry.url.includes('managed_provider_epg_refresh_requests'));
+  const pending = seen.find((entry) => entry.url.includes('managed_provider_epg_refresh_requests?select='));
+  assert.equal(result.code, 0);
+  assert.ok(enqueue);
+  assert.match(enqueue.headers.prefer, /return=representation/);
+  assert.ok(pending);
+  assert.doesNotMatch(pending.url, /managed_provider_id=eq\.|source_id=eq\./);
+  assert.doesNotMatch(enqueue.url, /null|undefined/i);
+});
+
+test('HTTP 201 with an empty body fails when the inserted request UUID is required', async () => {
+  const server = await serverFor((request, response) => {
+    if (request.url.includes('managed_provider_epg_sources')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: sourceUuid, managed_provider_id: providerUuid }]));
+      return;
+    }
+    if (request.method === 'POST' && request.url.includes('managed_provider_epg_refresh_requests')) {
+      response.writeHead(201);
+      response.end();
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('[]');
+  });
+  const result = await runWorker(server.address().port);
+  server.close();
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /"operation":"enqueue_scheduled_refresh"/);
+  assert.match(result.stderr, /missing_or_invalid_request_id/);
+  assert.doesNotMatch(result.stderr, /undefined|"null"/);
+});
+
+test('invalid source IDs stop before enqueueing a database request', async () => {
+  const seen = [];
+  const server = await serverFor((request, response) => {
+    seen.push({ method: request.method, url: request.url });
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(request.url.includes('managed_provider_epg_sources') ? JSON.stringify([{ id: null, managed_provider_id: providerUuid }]) : '[]');
+  });
+  const result = await runWorker(server.address().port);
+  server.close();
+  assert.equal(result.code, 1);
+  assert.equal(seen.filter((entry) => entry.method === 'POST').length, 0);
+  assert.match(result.stderr, /missing_or_invalid_source_id/);
+  assert.doesNotMatch(result.stderr, /"null"|undefined/);
+});
 
 function serverFor(handler) {
   return new Promise((resolve) => {

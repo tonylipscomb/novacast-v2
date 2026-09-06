@@ -5,6 +5,9 @@
 
 export type CatalogMediaType = 'movie' | 'series';
 
+/** Coordinator job key media, including Live search publication. Live is not catalog_items. */
+export type CatalogSyncMediaType = CatalogMediaType | 'live';
+
 export type CatalogSyncStatus =
   | 'idle'
   | 'syncing'

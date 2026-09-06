@@ -30,7 +30,12 @@ export async function adminLogin(email: string, password: string) {
 export async function adminRequest(path: string, token: string, init: RequestInit = {}) {
   const response = await fetch(`${API_URL}/${path}`, { ...init, headers: { apikey: ANON_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(typeof payload.errorCategory === 'string' ? payload.errorCategory : 'admin_request_failed');
+  if (!response.ok) {
+    const category = response.status === 546 ? 'WORKER_RESOURCE_LIMIT' : typeof payload.errorCategory === 'string' ? payload.errorCategory : 'admin_request_failed';
+    const failure = new Error(category) as Error & { payload?: Record<string, unknown> };
+    failure.payload = payload;
+    throw failure;
+  }
   return payload;
 }
 

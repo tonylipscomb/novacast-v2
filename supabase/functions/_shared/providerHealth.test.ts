@@ -9,6 +9,7 @@ import {
   displayHealthLabel,
   formatStreamProbeDiagnostic,
   isBlockedProviderHost,
+  isGoldCloudProbeRestricted,
   maybeConnectionLimitCode,
   normalizePlaybackExtension,
   parseOptionalInt,
@@ -120,6 +121,25 @@ Deno.test('health aggregation treats playback failure as failed and EPG as degra
     { id: 'playback', label: 'Stream Probe', verdict: 'pass', severity: 'critical', detail: 'ok' },
   ]);
   assertEquals(healthy.overall, 'healthy');
+});
+
+Deno.test('Gold-only 511/404 playback rejection is restricted but raw probes remain failures', () => {
+  const checks = [
+    { id: 'server', label: 'Server Reachable', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'authentication', label: 'Authentication', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'live-catalog', label: 'Live TV Catalog', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'compatibility', label: 'NovaCast Compatibility', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'playback', label: 'Stream Probe', verdict: 'fail', severity: 'critical', detail: 'HTTP 511 and HTTP 404.' },
+  ] as const;
+  const probes: StreamProbeResult[] = [
+    { kind: 'live', ok: false, latencyMs: 1, httpStatus: 511, reason: 'HTTP 511', code: 'stream_endpoint_unavailable' },
+    { kind: 'movie', ok: false, latencyMs: 1, httpStatus: 404, reason: 'HTTP 404', code: 'stream_http_404' },
+    { kind: 'episode', ok: false, latencyMs: 1, httpStatus: 404, reason: 'HTTP 404', code: 'stream_http_404' },
+  ];
+  assertEquals(isGoldCloudProbeRestricted({ isGoldManaged: true, checks: [...checks], probes, catalogs: { liveCategories: 1, liveChannels: 3, movieCategories: 1, movies: 2, seriesCategories: 1, series: 1, episodeLookupOk: true } }), true);
+  assertEquals(isGoldCloudProbeRestricted({ isGoldManaged: false, checks: [...checks], probes, catalogs: { liveCategories: 1, liveChannels: 3, movieCategories: 1, movies: 2, seriesCategories: 1, series: 1 } }), false);
+  assertEquals(isGoldCloudProbeRestricted({ isGoldManaged: true, checks: checks.map((check) => check.id === 'authentication' ? { ...check, verdict: 'fail' as const } : check), probes, catalogs: { liveCategories: 1, liveChannels: 3, movieCategories: 1, movies: 2, seriesCategories: 1, series: 1 } }), false);
+  assertEquals(isGoldCloudProbeRestricted({ isGoldManaged: true, checks, probes: probes.map((probe) => ({ ...probe, httpStatus: 403 })), catalogs: { liveCategories: 1, liveChannels: 3, movieCategories: 1, movies: 2, seriesCategories: 1, series: 1 } }), false);
 });
 
 Deno.test('activation requires non-stale healthy or degraded health', () => {

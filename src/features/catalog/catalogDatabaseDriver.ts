@@ -47,6 +47,10 @@ export function getCatalogDatabaseOpener(): CatalogDatabaseOpener {
   return openExpoCatalogDatabase;
 }
 
+export function isCatalogDatabaseOpenerOverridden() {
+  return openerOverride != null;
+}
+
 /** search-s6-dedicated-read-connection
  * Open a separate connection to the same catalog file for foreground reads.
  * Tests keep using the injected opener; production requests a new Expo connection.

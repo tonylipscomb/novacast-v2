@@ -4,11 +4,13 @@ import {
   isUsAmericanLiveLabel,
   sortProviderCategoriesByRegion,
   type CategorySortLabel,
+  type CategoryRegionalSortMetrics,
 } from './categoryRegionalPipeline.ts';
 
 export { isUsAmericanLiveLabel } from './categoryRegionalPipeline.ts';
 
 export type UsAmericanSortLabel = CategorySortLabel;
+export type { CategoryRegionalSortMetrics } from './categoryRegionalPipeline.ts';
 
 type ContentPolicyFilter = <T extends UsAmericanSortLabel>(
   items: T[],
@@ -102,11 +104,12 @@ export function partitionLiveItemsUsFirst<T extends UsAmericanSortLabel>(
 /** @deprecated Prefer sortByRegionalPreference for large live catalogs. */
 export function sortLiveItemsUsFirst<T extends UsAmericanSortLabel>(
   items: T[],
-  options?: { allowTitleParse?: boolean; contentType?: ProviderCategoryContentType },
+  options?: { allowTitleParse?: boolean; contentType?: ProviderCategoryContentType; metrics?: CategoryRegionalSortMetrics },
 ): T[] {
   return sortProviderCategoriesByRegion(withContentPolicy(items, options?.contentType ?? 'live'), {
     contentType: options?.contentType ?? 'live',
     alphabetizeWithinGroup: true,
+    metrics: options?.metrics,
   });
 }
 

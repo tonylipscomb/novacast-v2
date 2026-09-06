@@ -128,15 +128,22 @@ export function logPlaybackSourceDiagnostics(input: {
   url: string;
   streamId: string | number;
   extensionRaw?: string | null;
-  extensionSource?: 'container' | 'fallback' | 'explicit' | 'unknown';
+  extensionSource?: 'container' | 'fallback' | 'explicit' | 'unknown' | string;
   retryCount?: number;
   playerGenerationId?: number;
   sourceShape?: string;
+  pathShape?: string;
+  providerOutputMetadataPresent?: boolean;
+  channelContainerMetadataPresent?: boolean;
+  constructedFormatMatchesContract?: 'match' | 'mismatch' | 'unknown';
+  preferredOutputFormat?: string | null;
+  allowedOutputFormatCount?: number;
 }) {
   let protocol = 'invalid';
   let hostnameHash = 'invalid';
   let pathSegmentCount = 0;
   let finalExtension = '';
+  let pathShape = input.pathShape ?? 'unknown';
   let credentialsPresentInExpectedPathPositions = false;
   try {
     const parsed = new URL(input.url);
@@ -151,6 +158,14 @@ export function logPlaybackSourceDiagnostics(input: {
     finalExtension = finalPathSegment.includes('.')
       ? finalPathSegment.slice(finalPathSegment.lastIndexOf('.') + 1).toLowerCase()
       : '';
+    if (!input.pathShape) {
+      pathShape = finalExtension
+        ? `/${input.mediaType}/{user}/{pass}/{streamId}.${finalExtension}`
+        : `/${input.mediaType}/{user}/{pass}/{streamId}`;
+      if (endpointIndex < 0) {
+        pathShape = `segments:${pathSegmentCount}`;
+      }
+    }
   } catch {
     // Keep diagnostics safe and structured when the source is malformed.
   }
@@ -170,6 +185,17 @@ export function logPlaybackSourceDiagnostics(input: {
     sourceObjectShape: input.sourceShape ?? 'string',
     retryCount: input.retryCount ?? 0,
     playerGenerationId: input.playerGenerationId,
+    ...(input.mediaType === 'live'
+      ? {
+          pathShape,
+          streamId: String(input.streamId).trim(),
+          providerOutputMetadataPresent: input.providerOutputMetadataPresent ?? false,
+          channelContainerMetadataPresent: input.channelContainerMetadataPresent ?? false,
+          constructedFormatMatchesContract: input.constructedFormatMatchesContract ?? 'unknown',
+          preferredOutputFormat: input.preferredOutputFormat ?? null,
+          allowedOutputFormatCount: input.allowedOutputFormatCount ?? 0,
+        }
+      : {}),
   });
 }
 

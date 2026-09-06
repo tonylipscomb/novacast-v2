@@ -4,6 +4,7 @@ import { novaTvFocus } from '@/components/nova/novaTvFocus';
 import { formatBetaCountdown, getRemainingMs } from '@/features/device/betaAccessCountdown';
 import { useDeviceState } from '@/features/device/deviceActivation';
 import { novaTheme } from '@/theme';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
 const backgroundAsset = require('@/assets/images/pairingbackground.png');
 const logoAsset = require('@/assets/images/novacast-logo.png');
@@ -25,7 +26,7 @@ export function BetaExpiredScreen({
   return (
     <ImageBackground source={backgroundAsset} resizeMode="cover" style={styles.screen}>
       <View pointerEvents="none" style={styles.overlay} />
-      <View style={[styles.layout, { paddingHorizontal: 72 * scale, paddingVertical: 48 * scale }]}>
+      <View style={[styles.layout, styles.glassPanel, { paddingHorizontal: 72 * scale, paddingVertical: 48 * scale }]}>
         <Image source={logoAsset} resizeMode="contain" style={{ width: 260 * scale, height: 196 * scale }} />
         <Text style={[styles.eyebrow, { fontSize: 18 * scale }]}>NOVACAST CLOSED BETA</Text>
         <Text style={[styles.title, { fontSize: 42 * scale }]}>Your beta invitation has expired</Text>
@@ -66,6 +67,12 @@ const styles = StyleSheet.create({
   screen: { flex: 1 },
   overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(2,6,17,0.62)' },
   layout: { flex: 1, justifyContent: 'center', maxWidth: 860 },
+  glassPanel: {
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: 'rgba(5,10,24,0.46)',
+  },
   eyebrow: {
     marginTop: 8,
     color: novaTheme.colors.accentHover,
@@ -93,8 +100,8 @@ const styles = StyleSheet.create({
     padding: 16,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(131,180,255,0.28)',
-    backgroundColor: 'rgba(8,18,38,0.72)',
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: NOVA_GLASS.focused.backgroundColor,
   },
   statLabel: {
     color: novaTheme.colors.textMuted,
@@ -117,9 +124,10 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
     paddingHorizontal: 22,
     paddingVertical: 12,
-    backgroundColor: 'rgba(59,130,246,0.28)',
+    borderRadius: NOVA_GLASS.radius.base,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
     borderWidth: 1,
-    borderColor: 'rgba(96,165,255,0.55)',
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
   },
   buttonText: {
     color: '#F5F8FF',

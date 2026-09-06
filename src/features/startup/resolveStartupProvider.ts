@@ -3,7 +3,11 @@ import {
   initializeDevice,
   isClosedBetaManagedFlow,
 } from '@/features/device';
-import { downloadManagedProviderAssignment } from '@/features/device/managedProviderDownload';
+import {
+  assignmentFromDeviceStatus,
+  markDeviceAssignmentApplied,
+  runManagedProviderRefresh,
+} from '@/features/device/deviceAssignmentReconcile';
 import { setContentPolicyOverride } from '@/features/content-policy';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
 import {
@@ -11,7 +15,7 @@ import {
   hasSavedProvider,
   isProviderConnectionReady,
 } from '@/features/providers/providerModel';
-import { getProviderState, retryProviderInitialization } from '@/features/providers/providerStore';
+import { clearProviderSwitchError, getProviderState, retryProviderInitialization } from '@/features/providers/providerStore';
 import {
   STARTUP_BOOTSTRAP_TIMEOUT_MS,
   STARTUP_NETWORK_TIMEOUT_MS,
@@ -73,6 +77,36 @@ function logProviderPhase(event: string, fields: Record<string, unknown>) {
   console.info('[NovaCast Startup Provider]', JSON.stringify({ event, ...fields }));
 }
 
+const PROVIDER_RESOLUTION_AUDIT_ENABLED =
+  Boolean(__DEV__) ||
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_HOME_PRESENTATION_AUDIT === '1');
+
+function logResolverResult(
+  branch: string,
+  current: ReturnType<typeof getDeviceState>,
+  result: Pick<StartupProviderResolution, 'ok' | 'errorCode' | 'providerBootstrapRequested'>,
+  selectedProviderId: string | null,
+  connectionReady: boolean,
+) {
+  if (!PROVIDER_RESOLUTION_AUDIT_ENABLED) {
+    return;
+  }
+  const bundle = getActiveRepositoryBundle();
+  console.info('[NovaCast Startup Provider Resolution Audit]', JSON.stringify({
+    event: 'resolver-result',
+    branch,
+    managedFlow: isClosedBetaManagedFlow(),
+    ok: result.ok,
+    resolverProviderBootstrapRequested: result.providerBootstrapRequested,
+    errorCode: result.errorCode,
+    bundlePresentAtReturn: Boolean(bundle),
+    bundleProviderIdAtReturn: bundle?.providerId ?? null,
+    selectedProviderId,
+    connectionReady,
+    timestamp: Date.now(),
+  }));
+}
+
 function resolution(
   current: ReturnType<typeof getDeviceState>,
   flags: ReturnType<typeof assignmentFlags>,
@@ -107,12 +141,14 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
   }
 
   if (!isClosedBetaManagedFlow()) {
-    return resolution(current, flags, {
+    const result = resolution(current, flags, {
       ok: true,
       errorCode: null,
       providerBootstrapRequested: false,
       libraryMissing: false,
     });
+    logResolverResult('non-managed-flow', current, result, null, false);
+    return result;
   }
 
   if (!current.status || !current.authorization.effectiveAuthorized) {
@@ -121,12 +157,14 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
       logRetry('retry-assignment-resolved', { ...retryBase, providerBootstrapRequested: false });
       logRetry('retry-failed', { ...retryBase, providerBootstrapRequested: false, errorCode: 'not_authorized' });
     }
-    return resolution(current, flags, {
+    const result = resolution(current, flags, {
       ok: false,
       errorCode: 'not_authorized',
       providerBootstrapRequested: false,
       libraryMissing: false,
     });
+    logResolverResult('assignment-missing', current, result, null, false);
+    return result;
   }
 
   if (current.status.contentPolicy === 'us_only' || current.status.contentPolicy === 'unrestricted') {
@@ -135,23 +173,27 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
 
   const providerState = await getProviderState();
   const selected = getSelectedProvider(providerState);
+  const activeBundle = getActiveRepositoryBundle();
   const alreadyActive =
     hasSavedProvider(providerState) &&
-    Boolean(getActiveRepositoryBundle()) &&
+    Boolean(activeBundle && selected && activeBundle.providerId === selected.id) &&
     Boolean(selected && isProviderConnectionReady(selected));
 
   if (alreadyActive) {
+    clearProviderSwitchError();
     logAssignmentResolved(current, flags, false);
     if (isRetry) {
       logRetry('retry-assignment-resolved', { ...retryBase, providerBootstrapRequested: false });
       logRetry('retry-success', { ...retryBase, providerBootstrapRequested: false });
     }
-    return resolution(current, flags, {
+    const result = resolution(current, flags, {
       ok: true,
       errorCode: null,
       providerBootstrapRequested: false,
       libraryMissing: false,
     });
+    logResolverResult('already-active', current, result, selected?.id ?? null, Boolean(selected && isProviderConnectionReady(selected)));
+    return result;
   }
 
   if (!flags.requiresProviderDownload) {
@@ -160,12 +202,14 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
       logRetry('retry-assignment-resolved', { ...retryBase, providerBootstrapRequested: false });
       logRetry('retry-failed', { ...retryBase, providerBootstrapRequested: false, errorCode: 'no_library_assigned' });
     }
-    return resolution(current, flags, {
+    const result = resolution(current, flags, {
       ok: false,
       errorCode: 'no_library_assigned',
       providerBootstrapRequested: false,
       libraryMissing: true,
     });
+    logResolverResult(selected ? 'assignment-missing' : 'provider-missing', current, result, selected?.id ?? null, false);
+    return result;
   }
 
   logAssignmentResolved(current, flags, true);
@@ -181,10 +225,11 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
 
   try {
     await withTimeout(
-      downloadManagedProviderAssignment(),
+      runManagedProviderRefresh(),
       STARTUP_BOOTSTRAP_TIMEOUT_MS,
       'managed_provider_timeout',
     );
+    await markDeviceAssignmentApplied(assignmentFromDeviceStatus(getDeviceState().status));
   } catch (error) {
     const errorCode = safeErrorCode(error, 'managed_provider_unavailable');
     logProviderPhase('provider-download-failed', {
@@ -204,35 +249,41 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
           logRetry('retry-provider-activation-complete', { ...retryBase, providerBootstrapRequested: true });
           logRetry('retry-success', { ...retryBase, providerBootstrapRequested: true });
         }
-        return resolution(current, flags, {
+        const result = resolution(current, flags, {
           ok: true,
           errorCode: null,
           providerBootstrapRequested: true,
           libraryMissing: false,
         });
+        logResolverResult('managed-refresh-success', current, result, selected?.id ?? null, true);
+        return result;
       } catch (activationError) {
         const activationCode = safeErrorCode(activationError, 'provider_activation_failed');
         if (isRetry) {
           logRetry('retry-failed', { ...retryBase, providerBootstrapRequested: true, errorCode: activationCode });
         }
-        return resolution(current, flags, {
+        const result = resolution(current, flags, {
           ok: false,
           errorCode: activationCode,
           providerBootstrapRequested: true,
           libraryMissing: false,
         });
+        logResolverResult('managed-refresh-failure', current, result, selected?.id ?? null, true);
+        return result;
       }
     }
 
     if (isRetry) {
       logRetry('retry-failed', { ...retryBase, providerBootstrapRequested: true, errorCode });
     }
-    return resolution(current, flags, {
+    const result = resolution(current, flags, {
       ok: false,
       errorCode,
       providerBootstrapRequested: true,
       libraryMissing: false,
     });
+    logResolverResult('managed-refresh-failure', current, result, selected?.id ?? null, Boolean(selected && isProviderConnectionReady(selected)));
+    return result;
   }
 
   logProviderPhase('provider-download-complete', {
@@ -253,12 +304,14 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
         errorCode: 'provider_bundle_unavailable',
       });
     }
-    return resolution(current, flags, {
+    const result = resolution(current, flags, {
       ok: false,
       errorCode: 'provider_bundle_unavailable',
       providerBootstrapRequested: true,
       libraryMissing: false,
     });
+    logResolverResult('provider-bundle-unavailable', current, result, selected?.id ?? null, Boolean(selected && isProviderConnectionReady(selected)));
+    return result;
   }
 
   if (isRetry) {
@@ -266,12 +319,14 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
     logRetry('retry-success', { ...retryBase, providerBootstrapRequested: true });
   }
 
-  return resolution(current, flags, {
+  const result = resolution(current, flags, {
     ok: true,
     errorCode: null,
     providerBootstrapRequested: true,
     libraryMissing: false,
   });
+  logResolverResult('managed-refresh-success', current, result, selected?.id ?? null, Boolean(selected && isProviderConnectionReady(selected)));
+  return result;
 }
 
 export function resolveStartupProvider(options: ResolveOptions = {}) {

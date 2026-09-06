@@ -34,6 +34,7 @@ import {
   type ProviderState,
 } from './providerModel.ts';
 import { formatProviderExpirationLabel } from './providerExpiration.ts';
+import { logAccountOutputFormatPropagation, rememberAccountOutputFormats } from './accountOutputFormats.ts';
 import {
   activateRepositoryBundle,
   createRepositoryBundle,
@@ -88,6 +89,29 @@ let runtime: ProviderRuntimeState = {
   lastError: null,
 };
 
+type ProviderRuntimeAuditSource =
+  | 'background-account-validation-failure'
+  | 'saved-provider-init-failure'
+  | 'saved-provider-init-success'
+  | 'persistence-migration-failure'
+  | 'provider-switch-start'
+  | 'provider-switch-success'
+  | 'provider-switch-failure'
+  | 'xtream-connect-start'
+  | 'xtream-connect-success'
+  | 'xtream-connect-failure'
+  | 'retry-start'
+  | 'retry-success'
+  | 'retry-failure'
+  | 'reset'
+  | 'resolve-startup-already-active-clear';
+
+const PROVIDER_RUNTIME_AUDIT_ENABLED =
+  Boolean(__DEV__) ||
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_HOME_PRESENTATION_AUDIT === '1');
+let providerRuntimeAuditAttemptId = 0;
+let currentProviderRuntimeAuditAttemptId: number | null = null;
+
 let runtimeLoadPromise: Promise<ProviderState> | null = null;
 const runtimeListeners = new Set<() => void>();
 
@@ -95,9 +119,47 @@ function emitRuntimeChange() {
   runtimeListeners.forEach((listener) => listener());
 }
 
-function setRuntime(next: ProviderRuntimeState) {
+function logProviderRuntimeAudit(
+  event: 'provider-switch-error-set' | 'provider-switch-error-cleared',
+  source: ProviderRuntimeAuditSource,
+  next: ProviderRuntimeState,
+) {
+  if (!PROVIDER_RUNTIME_AUDIT_ENABLED) {
+    return;
+  }
+  const selected = cache ? getSelectedProvider(cache) : null;
+  const activeBundle = getActiveRepositoryBundle();
+  console.info('[NovaCast Provider Runtime Audit]', JSON.stringify({
+    event,
+    source,
+    errorPresent: Boolean(next.lastError),
+    errorKind: next.lastError ? 'provider_runtime_error' : null,
+    localProviderId: selected?.id ?? null,
+    activeBundleProviderId: activeBundle?.providerId ?? null,
+    attemptId: currentProviderRuntimeAuditAttemptId,
+    currentAttemptId: currentProviderRuntimeAuditAttemptId,
+    timestamp: Date.now(),
+  }));
+}
+
+function setRuntime(next: ProviderRuntimeState, source: ProviderRuntimeAuditSource) {
+  if (source === 'provider-switch-start' || source === 'xtream-connect-start' || source === 'retry-start') {
+    providerRuntimeAuditAttemptId += 1;
+    currentProviderRuntimeAuditAttemptId = providerRuntimeAuditAttemptId;
+  } else if (source === 'reset') {
+    currentProviderRuntimeAuditAttemptId = null;
+  }
+  const previousErrorPresent = Boolean(runtime.lastError);
   runtime = next;
   emitRuntimeChange();
+  const nextErrorPresent = Boolean(next.lastError);
+  if (previousErrorPresent !== nextErrorPresent) {
+    logProviderRuntimeAudit(
+      nextErrorPresent ? 'provider-switch-error-set' : 'provider-switch-error-cleared',
+      source,
+      next,
+    );
+  }
 }
 
 function describeSwitchFailure(error: unknown, providerId: string) {
@@ -171,13 +233,24 @@ function validatedProviderMetadata(provider: ProviderRecord, accountMetadata: Pr
     return provider;
   }
 
-  return {
+  const nextProvider = {
     ...provider,
     account: accountMetadata ?? undefined,
     expirationAt: accountMetadata?.expiresAt ?? null,
     status: deriveProviderStatus(accountMetadata),
     updatedAt: Date.now(),
   } satisfies ProviderRecord;
+
+  rememberAccountOutputFormats(nextProvider.id, accountMetadata);
+  logAccountOutputFormatPropagation({
+    stage: 'persisted',
+    outputFormatKeyPresent: Boolean(accountMetadata?.allowedOutputFormats?.length || accountMetadata?.preferredOutputFormat),
+    outputFormatValueKind: accountMetadata?.allowedOutputFormats?.length ? 'array' : 'missing',
+    allowedOutputFormats: accountMetadata?.allowedOutputFormats,
+    preferredOutputFormat: accountMetadata?.preferredOutputFormat ?? null,
+  });
+
+  return nextProvider;
 }
 
 async function resolveProviderCredentials(provider: ProviderRecord) {
@@ -231,7 +304,7 @@ function scheduleProviderAccountValidation(provider: ProviderRecord, bundle: Pro
       setRuntime({
         ...runtime,
         lastError: describeSwitchFailure(error, provider.id),
-      });
+      }, 'background-account-validation-failure');
     });
 }
 
@@ -276,7 +349,7 @@ async function initializeSavedProviderOnStartup(provider: NonNullable<ReturnType
         providers: current.providers.map((item) => (item.id === prepared.provider.id ? prepared.provider : item)),
       });
     }
-    setRuntime({ ...runtime, generation: getRepositoryBundleGeneration() });
+    setRuntime({ ...runtime, generation: getRepositoryBundleGeneration() }, 'saved-provider-init-success');
     return prepared.bundle;
   });
 }
@@ -300,12 +373,12 @@ async function ensureSavedProviderInitialized(state: ProviderState) {
       earlyBootMark('provider.ensureSaved_after_delay');
       await initializeSavedProviderOnStartup(selected);
       earlyBootMark('provider.ensureSaved_end');
-      clearProviderSwitchError();
+      clearProviderSwitchError('saved-provider-init-success');
     } catch (error) {
       setRuntime({
         ...runtime,
         lastError: describeSwitchFailure(error, selected.id),
-      });
+      }, 'saved-provider-init-failure');
     } finally {
       startupInitPromise = null;
     }
@@ -387,7 +460,7 @@ async function loadStorageState() {
     } catch {
       persistenceError = 'Unable to migrate saved provider credentials securely.';
       cache = normalizeProviderState(parsed);
-      setRuntime({ ...runtime, lastError: persistenceError });
+      setRuntime({ ...runtime, lastError: persistenceError }, 'persistence-migration-failure');
     }
     earlyBootMark('provider.loadStorageState_end', { providerCount: cache?.providers.length ?? 0 });
     return cache!;
@@ -482,7 +555,7 @@ export async function switchActiveProvider(providerId: string) {
     isSwitching: true,
     switchingProviderId: providerId,
     lastError: null,
-  });
+  }, 'provider-switch-start');
 
   runtimeLoadPromise = (async () => {
     let candidateBundle: ProviderRepositoryBundle | null = null;
@@ -502,7 +575,10 @@ export async function switchActiveProvider(providerId: string) {
       // Keep the old bundle untouched until candidate validation succeeds.
       closeActivePlayback();
       if (current.selectedProviderId && current.selectedProviderId !== providerId) {
-        cancelProviderCatalogSync(current.selectedProviderId);
+        cancelProviderCatalogSync(current.selectedProviderId, {
+          cancelSource: 'provider-switch',
+          cancelCaller: 'providerStore.selectProvider',
+        });
       }
       await writeState(next);
       stateCommitted = true;
@@ -512,7 +588,7 @@ export async function switchActiveProvider(providerId: string) {
         isSwitching: false,
         switchingProviderId: null,
         lastError: null,
-      });
+      }, 'provider-switch-success');
       return next;
     } catch (error) {
       candidateBundle?.invalidate();
@@ -524,7 +600,7 @@ export async function switchActiveProvider(providerId: string) {
         isSwitching: false,
         switchingProviderId: null,
         lastError: describeSwitchFailure(error, providerId),
-      });
+      }, 'provider-switch-failure');
       throw new Error(describeSwitchFailure(error, providerId));
     } finally {
       runtimeLoadPromise = null;
@@ -561,7 +637,7 @@ export async function connectXtreamProvider(input: {
     isSwitching: true,
     switchingProviderId: transactionId,
     lastError: null,
-  });
+  }, 'xtream-connect-start');
 
   runtimeLoadPromise = (async () => {
     let current: ProviderState = createEmptyProviderState();
@@ -622,7 +698,10 @@ export async function connectXtreamProvider(input: {
       if (activate) {
         closeActivePlayback();
         if (current.selectedProviderId && current.selectedProviderId !== providerId) {
-          cancelProviderCatalogSync(current.selectedProviderId);
+          cancelProviderCatalogSync(current.selectedProviderId, {
+          cancelSource: 'provider-switch',
+          cancelCaller: 'providerStore.selectProvider',
+        });
         }
       }
       await runPairingTransactionStep('writeState', () => writeState(next), {
@@ -655,7 +734,7 @@ export async function connectXtreamProvider(input: {
         isSwitching: false,
         switchingProviderId: null,
         lastError: null,
-      });
+      }, 'xtream-connect-success');
       pairingTransactionSuccess('connectXtreamProvider', { providerId, activate, validateAccount });
       return next;
     } catch (error) {
@@ -711,7 +790,7 @@ export async function connectXtreamProvider(input: {
         isSwitching: false,
         switchingProviderId: null,
         lastError: message,
-      });
+      }, 'xtream-connect-failure');
       throw new Error(message);
     } finally {
       runtimeLoadPromise = null;
@@ -735,7 +814,7 @@ export async function retryProviderInitialization() {
     isSwitching: true,
     switchingProviderId: selected.id,
     lastError: null,
-  });
+  }, 'retry-start');
 
   let candidateBundle: ProviderRepositoryBundle | null = null;
   let stateCommitted = false;
@@ -753,7 +832,10 @@ export async function retryProviderInitialization() {
 
     closeActivePlayback();
     if (current.selectedProviderId && current.selectedProviderId !== selected.id) {
-      cancelProviderCatalogSync(current.selectedProviderId);
+      cancelProviderCatalogSync(current.selectedProviderId, {
+        cancelSource: 'provider-switch',
+        cancelCaller: 'providerStore.activateSavedProvider',
+      });
     }
     await writeState(nextState);
     stateCommitted = true;
@@ -763,7 +845,7 @@ export async function retryProviderInitialization() {
       isSwitching: false,
       switchingProviderId: null,
       lastError: null,
-    });
+    }, 'retry-success');
     return nextState;
   } catch (error) {
     candidateBundle?.invalidate();
@@ -776,7 +858,7 @@ export async function retryProviderInitialization() {
       isSwitching: false,
       switchingProviderId: null,
       lastError: message,
-    });
+    }, 'retry-failure');
     throw new Error(message);
   }
 }
@@ -791,7 +873,7 @@ export async function clearProvidersForPairing() {
     isSwitching: false,
     switchingProviderId: null,
     lastError: null,
-  });
+  }, 'reset');
   const result = await writeState(createEmptyProviderState());
   await Promise.all(current.providers.map((provider) => removeProviderCredentials(provider.id).catch(() => undefined)));
   return result;
@@ -807,7 +889,7 @@ export async function resetProviderState() {
     isSwitching: false,
     switchingProviderId: null,
     lastError: null,
-  });
+  }, 'reset');
   const result = await writeState(createDefaultProviderState());
   await Promise.all(current.providers.map((provider) => removeProviderCredentials(provider.id).catch(() => undefined)));
   return result;
@@ -843,7 +925,7 @@ export function getProviderRuntime() {
   return runtime;
 }
 
-export function clearProviderSwitchError() {
+export function clearProviderSwitchError(source: ProviderRuntimeAuditSource = 'resolve-startup-already-active-clear') {
   if (!runtime.lastError) {
     return;
   }
@@ -851,7 +933,7 @@ export function clearProviderSwitchError() {
   setRuntime({
     ...runtime,
     lastError: null,
-  });
+  }, source);
 }
 
 export function useProviderStore() {

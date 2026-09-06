@@ -63,7 +63,7 @@ test('Home wires navbar RIGHT to a live card or retains navbar focus', () => {
   assert.match(hub, /right-from-navbar|logHomeNavbarRightAttempt/);
   assert.match(hub, /retained-navbar-focus|logHomeNavbarFocusRetained/);
   assert.match(shell, /onNavigationItemFocus/);
-  assert.match(shell, /nextFocusRight: navigationNextFocusRight/);
+  assert.match(shell, /nextFocusRight=\{horizontalFocusTarget\(itemIndex, 'right'\)\}/);
 });
 
 test('Discovery Zone origin returns to Discovery Zone, not browse', () => {

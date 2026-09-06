@@ -1,0 +1,40 @@
+name: EPG refresh worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider_id:
+        description: Optional managed provider id
+        required: false
+        type: string
+      source_id:
+        description: Optional EPG source id
+        required: false
+        type: string
+  schedule:
+    - cron: '17 */6 * * *'
+
+concurrency:
+  group: epg-refresh-worker
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run EPG ingestion worker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PROVIDER_ENCRYPTION_KEY: ${{ secrets.PROVIDER_ENCRYPTION_KEY }}
+          PROVIDER_ID: ${{ inputs.provider_id }}
+          SOURCE_ID: ${{ inputs.source_id }}
+        run: node scripts/epg-ingest/index.mjs "$PROVIDER_ID" "$SOURCE_ID"

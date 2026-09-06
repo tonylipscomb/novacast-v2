@@ -70,9 +70,19 @@ test('managed library missing without assignment is actionable', () => {
 test('offline status dedupes outage announcements', () => {
   resetOfflineStatusForTests();
   reportNetworkOutcome(false);
+  reportNetworkOutcome(false);
+  reportNetworkOutcome(false);
   assert.equal(getOfflineSnapshot().status, 'offline');
   assert.equal(shouldAnnounceOfflineOutage(), true);
   assert.equal(shouldAnnounceOfflineOutage(), false);
+});
+
+test('provider failures do not mark the device offline', () => {
+  resetOfflineStatusForTests();
+  reportNetworkOutcome(false, 'provider');
+  reportNetworkOutcome(false, 'provider');
+  reportNetworkOutcome(false, 'provider');
+  assert.equal(getOfflineSnapshot().status, 'unknown');
 });
 
 test('sanitized diagnostics redact sensitive detail and never store secrets', () => {

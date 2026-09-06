@@ -1,9 +1,11 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ElementRef } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
+import { NovaPosterFocusOverlay } from '@/components/nova/NovaPosterFocusOverlay';
+import { formatRatingOneDecimal } from '@/features/media-browser/ratingNormalization';
 import {
   isOnnMoviesTraceEnabled,
   noteOnnMoviesRender,
@@ -96,16 +98,20 @@ export const MoviePosterCard = memo(function MoviePosterCard({
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const [isFocused, setIsFocused] = useState(false);
+  const focusScale = useRef(new Animated.Value(1)).current;
   const showFocused = isFocused || forceFocused;
   const [failedPosterKey, setFailedPosterKey] = useState<string | null>(null);
   const [selfFocusHandle, setSelfFocusHandle] = useState<number | undefined>();
   const nativeHandleRef = useRef<number | null>(null);
+  const trapFocusDownRef = useRef(trapFocusDown);
+  trapFocusDownRef.current = trapFocusDown;
   const instanceToken = useMemo(() => `movie-poster-${++posterInstanceSequence}-${movie.id}`, [movie.id]);
   const posterColors = getPosterColors(movie.posterStyleKey);
   const initials = makeInitials(movie.title);
   const posterKey = `${movie.id}:${movie.posterUrl ?? ''}`;
   const posterFailed = failedPosterKey === posterKey;
   const showPosterArt = Boolean(movie.posterUrl) && !posterFailed;
+  const displayRating = formatRatingOneDecimal(movie.rating);
   const metaPrimary = formatMediaMetaLabel({
     year: movie.year,
     rating: movie.rating,
@@ -136,18 +142,23 @@ export const MoviePosterCard = memo(function MoviePosterCard({
       registerRef?.(instance, instanceToken);
       const handle = instance ? findNodeHandle(instance) ?? null : null;
       nativeHandleRef.current = handle;
-      if (!trapFocusDown) {
+      if (!trapFocusDownRef.current) {
         setSelfFocusHandle((prev) => (prev === undefined ? prev : undefined));
         return;
       }
       setSelfFocusHandle((prev) => (prev === (handle ?? undefined) ? prev : handle ?? undefined));
     },
-    [instanceToken, registerRef, trapFocusDown],
+    [instanceToken, registerRef],
   );
 
   const cardBody = (
     <>
-      <View style={[styles.posterShell, showFocused && styles.posterShellFocused]}>
+      <Animated.View
+        style={[
+          styles.posterShell,
+          showFocused && styles.posterShellFocused,
+          { transform: [{ scale: focusScale }] },
+        ]}>
         <View
           style={[
             styles.poster,
@@ -157,10 +168,10 @@ export const MoviePosterCard = memo(function MoviePosterCard({
           {showPosterArt ? (
             <>
               <TvRemoteImage uri={movie.posterUrl} style={styles.posterImage} onError={() => setFailedPosterKey(posterKey)} />
-              {movie.rating ? (
+              {displayRating ? (
                 <View style={styles.ratingBadge}>
                   <MaterialCommunityIcons name="star" size={10} color="#F6C85F" />
-                  <Text style={styles.ratingText}>{movie.rating}</Text>
+                  <Text style={styles.ratingText}>{displayRating}</Text>
                 </View>
               ) : null}
             </>
@@ -182,22 +193,23 @@ export const MoviePosterCard = memo(function MoviePosterCard({
                   {displayStreamTitle(movie.title)}
                 </Text>
               </View>
-              {movie.rating ? (
+              {displayRating ? (
                 <View style={styles.ratingBadge}>
                   <MaterialCommunityIcons name="star" size={10} color={posterColors.accent} />
-                  <Text style={styles.ratingText}>{movie.rating}</Text>
+                  <Text style={styles.ratingText}>{displayRating}</Text>
                 </View>
               ) : null}
             </>
           )}
-</View>
-      </View>
+          {showFocused ? <NovaPosterFocusOverlay /> : null}
+        </View>
+      </Animated.View>
 
       <Text numberOfLines={1} style={[styles.title, showFocused && styles.titleFocused]}>
         {displayStreamTitle(movie.title)}
       </Text>
       <View style={styles.metaRow}>
-        {metaPrimary ? <Text style={styles.meta}>{metaPrimary}</Text> : null}
+        {metaPrimary ? <Text style={[styles.meta, showFocused && styles.metaFocused]}>{metaPrimary}</Text> : null}
         {metaPrimary && movie.genres[0] ? <View style={styles.metaDot} /> : null}
         <Text style={styles.meta}>{movie.genres[0] ?? 'Feature'}</Text>
       </View>
@@ -228,10 +240,20 @@ export const MoviePosterCard = memo(function MoviePosterCard({
           });
         }
         setIsFocused(true);
+        Animated.timing(focusScale, {
+          toValue: 1.015,
+          duration: 120,
+          useNativeDriver: true,
+        }).start();
         onFocus(movie);
       }}
       onBlur={() => {
         setIsFocused(false);
+        Animated.timing(focusScale, {
+          toValue: 1,
+          duration: 90,
+          useNativeDriver: true,
+        }).start();
       }}
       onPress={() => onPress?.(movie)}
       style={styles.card}>
@@ -329,6 +351,10 @@ function createStyles(theme: NovaTheme) {
       gap: 5,
     },
     meta: focusChrome.meta,
+    metaFocused: {
+      color: theme.colors.textSecondary,
+      fontWeight: '800',
+    },
     metaDot: {
       width: 3,
       height: 3,

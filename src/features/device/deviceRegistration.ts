@@ -1,3 +1,5 @@
+import { getCachedNetworkDiagnostics } from '@/features/diagnostics/runtimeDiagnostics';
+import * as Application from 'expo-application';
 import * as Crypto from 'expo-crypto';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
@@ -40,6 +42,9 @@ function randomSecret() {
   return Crypto.getRandomBytesAsync(32).then((bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(''));
 }
 
+let identityPromise: Promise<DeviceIdentity> | null = null;
+let registrationPromise: Promise<DeviceIdentity> | null = null;
+
 async function resolveInstallationId() {
   const pairingInstallationId = await getSecureValue(PAIRING_INSTALLATION_ID_KEY);
   if (isValidInstallationId(pairingInstallationId)) {
@@ -63,7 +68,7 @@ async function persistCanonicalIdentity(identity: DeviceIdentity) {
   );
 }
 
-async function getOrCreateIdentity() {
+async function resolveOrCreateIdentity() {
   const startedAt = Date.now();
   logRegistration({ event: 'identity-start' });
   try {
@@ -112,6 +117,13 @@ async function getOrCreateIdentity() {
   }
 }
 
+async function getOrCreateIdentity() {
+  if (!identityPromise) {
+    identityPromise = resolveOrCreateIdentity();
+  }
+  return identityPromise;
+}
+
 export async function getDeviceIdentity() {
   return getOrCreateIdentity();
 }
@@ -157,12 +169,13 @@ export function deviceMetadata() {
     model: Device.modelName ?? platformModel ?? null,
     deviceType: looksLikeEmulator ? 'android_emulator' : normalizePhysicalDeviceType(Device.deviceType),
     osVersion: Device.osVersion ?? null,
-    appVersion: Constants.expoConfig?.version ?? 'unknown',
-    appBuild: Constants.expoConfig?.android?.versionCode?.toString() ?? Constants.expoConfig?.ios?.buildNumber ?? null,
+    appVersion: Application.nativeApplicationVersion ?? Constants.expoConfig?.version ?? 'unknown',
+    appBuild: Application.nativeBuildVersion ?? Constants.expoConfig?.android?.versionCode?.toString() ?? Constants.expoConfig?.ios?.buildNumber ?? null,
+    network: getCachedNetworkDiagnostics(),
   };
 }
 
-export async function registerDevice() {
+async function registerDeviceOnce() {
   const startedAt = Date.now();
   const identity = await getOrCreateIdentity();
   logRegistration({
@@ -296,7 +309,17 @@ export async function registerDevice() {
   }
   logRegistration({ event: 'persist-complete', durationMs: Date.now() - startedAt, publicDeviceIdPresent: true });
   logRegistration({ event: 'registration-complete', durationMs: Date.now() - startedAt, publicDeviceIdPresent: true });
+  identityPromise = Promise.resolve(registered);
   return registered;
+}
+
+export function registerDevice() {
+  if (!registrationPromise) {
+    registrationPromise = registerDeviceOnce().finally(() => {
+      registrationPromise = null;
+    });
+  }
+  return registrationPromise;
 }
 
 export async function deviceAuthHeaders(): Promise<Record<string, string>> {
@@ -315,4 +338,9 @@ export async function deviceAuthHeaders(): Promise<Record<string, string>> {
 
 export function getDeviceSecretKeyForTests() {
   return DEVICE_SECRET_KEY;
+}
+
+export function resetDeviceRegistrationCache() {
+  identityPromise = null;
+  registrationPromise = null;
 }

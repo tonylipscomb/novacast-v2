@@ -1,5 +1,5 @@
 ﻿import { deviceMetadata, registerDevice } from './deviceRegistration';
-import { checkDeviceStatus, initializeDevice } from './deviceActivation';
+import { checkDeviceStatus } from './deviceActivation';
 import { deviceFeatureFlags } from './deviceFeatureFlags';
 import { downloadManagedProviderAssignment } from './managedProviderDownload';
 import {
@@ -123,6 +123,9 @@ export async function activateDeviceWithInvitationCode(
     });
     throw new Error(postRegisterGate.errorCode);
   }
+  if (!api) {
+    throw new Error('pairing_api_not_configured');
+  }
 
   logActivationClient({
     stage: 'device-activate-request',
@@ -184,7 +187,6 @@ export async function activateDeviceWithInvitationCode(
     throw new Error(responseErrorCode ?? 'activation_unavailable');
   }
 
-  await initializeDevice();
   await checkDeviceStatus();
 
   logActivationClient({

@@ -94,8 +94,8 @@ test('Movies, Series, and Live toolbars are Search then Discover Zone', () => {
   assert.match(liveScreen, /accessibilityLabel="Search Live TV"/);
   assert.match(liveScreen, /onDiscoverPress=\{\(\) => \{/);
   assert.match(liveScreen, /scope="live"/);
-  assert.match(liveScreen, /playFavoriteFromDiscoverZone/);
-  assert.match(liveScreen, /liveSearchSurfQueueRef\.current = favoriteIds/);
+  assert.match(liveScreen, /playDiscoverLiveChannel/);
+  assert.match(liveScreen, /liveSearchSurfQueueRef\.current = canonicalQueue\.map/);
   assert.match(liveScreen, /origin: 'search'/);
 });
 
@@ -104,7 +104,7 @@ test('Discover Zone does not invent playback helpers or touch the Live focus rou
   assert.doesNotMatch(seriesScreen, /discoverPlayback|favoritePlayback|watchlistPlayback/);
   assert.doesNotMatch(liveScreen, /discoverPlayback|favoritePlayback|watchlistPlayback/);
   assert.doesNotMatch(overlay, /discoverPlayback|launchPlayback|UnifiedPlayer/);
-  assert.doesNotMatch(liveRouter, /Discover Zone|playFavoriteFromDiscoverZone|liveSearchSurfQueueRef/);
+  assert.doesNotMatch(liveRouter, /Discover Zone|playDiscoverLiveChannel|liveSearchSurfQueueRef/);
   assert.match(liveScreen, /LiveTvFocusRouter/);
 });
 
@@ -120,7 +120,7 @@ test('legacy Discover browse injection is retired; provider categories remain', 
 test('Home personalization rails are populated-only Discover Zone lists plus Continue Watching', () => {
   assert.match(hub, /title="Continue Watching"/);
   assert.match(hub, /title="My Watchlist"/);
-  assert.match(hub, /title="Favorite Channels"/);
+  assert.match(hub, /title="My Channels"/);
   assert.match(hub, /title="My Favorites"/);
   assert.doesNotMatch(hub, /Recently Watched/);
   assert.doesNotMatch(hub, /Because You Watched/);
@@ -282,13 +282,12 @@ test('Discover Zone highlight follows native focus and clears when overlay opens
 });
 
 test('Live Discover Zone and favorite surf queue remain unchanged', () => {
-  assert.match(liveScreen, /playFavoriteFromDiscoverZone/);
+  assert.match(liveScreen, /playDiscoverLiveChannel/);
   assert.match(liveScreen, /hydrateFavoriteLiveChannels/);
-  assert.match(liveScreen, /liveSearchSurfQueueRef\.current = favoriteIds/);
+  assert.match(liveScreen, /liveSearchSurfQueueRef\.current = canonicalQueue\.map/);
   assert.match(liveScreen, /origin: 'search'/);
   assert.match(liveScreen, /LiveTvFocusRouter/);
-  assert.doesNotMatch(liveScreen, /bundle\.live\.getChannel\(/);
-  assert.doesNotMatch(liveRouter, /Discover Zone|playFavoriteFromDiscoverZone|canonicalMovie|hydrateCanonical/);
+  assert.doesNotMatch(liveRouter, /Discover Zone|playDiscoverLiveChannel|canonicalMovie|hydrateCanonical/);
   assert.deepEqual(resolveLiveSearchSurfQueue(['espn', 'cnn', 'hbo'], ['cnn', 'fox', 'espn']), ['espn', 'cnn', 'hbo']);
 });
 

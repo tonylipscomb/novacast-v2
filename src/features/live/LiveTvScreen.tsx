@@ -6,6 +6,7 @@ import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   BackHandler,
+  DeviceEventEmitter,
   FlatList,
   findNodeHandle,
   Platform,
@@ -18,12 +19,15 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { getTvDensity, NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusChrome } from '@/components/nova';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { usePlaybackActivity } from '@/features/playback/usePlaybackActivity';
 import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
+import type { LivePlaybackSource } from '@/features/providers/providerPlayback';
 import type { PlaybackItem } from '@/features/playback/unified/types';
 import { playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
+import { novacastTrace } from '@/features/diagnostics/novacastLogPolicy';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
@@ -33,6 +37,7 @@ import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
 import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
+import { classifyProviderBoundaryError, logProviderBoundary } from '@/features/providers/providerBoundaryDiagnostics';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
@@ -44,6 +49,7 @@ import {
   createLiveTvLandingState,
   createLiveTvShellState,
   focusLiveChannel,
+  openResolvedLiveChannelFullscreen,
   surfLiveFullscreenChannel,
   LIVE_TV_LOAD_NOTIFICATION_ID,
   LIVE_TV_NOTIFICATION_DURATION_MS,
@@ -80,7 +86,12 @@ import { LiveTvChannelList } from './LiveTvChannelList';
 import { formatLiveTvCategoryCount } from './liveTvCategoryCount';
 import type { LiveTvChannelRowShellData } from './liveTvChannelRowData';
 import { getLiveTvMemory, rememberLiveTvMemory } from './liveTvMemory';
-import { sanitizePersistedLiveCategoryId } from '@/features/providers/liveCategoryIdSafety';
+import {
+  isRealProviderLiveCategoryId,
+  isSyntheticLiveMyChannelsCategoryId,
+  isSyntheticLiveRecentsCategoryId,
+  sanitizePersistedLiveCategoryId,
+} from '@/features/providers/liveCategoryIdSafety';
 import {
   recordRecentItem,
   toggleLiveFavorite,
@@ -116,8 +127,8 @@ import {
   shouldHandleLiveChannelSurf,
 } from '@/features/playback/continuity/playbackContinuity';
 import { getLiveTvRowVisualFlags } from './liveTvUiPerfMode';
-import { favoriteSurfQueueIds, hydrateFavoriteLiveChannels } from './liveFavoriteHydration';
-import { logLivePerformance } from './liveTvDiagnostics';
+import { hydrateFavoriteLiveChannels } from './liveFavoriteHydration';
+import { logLiveCategoryOrderAudit, logLiveStabilityLoader, logLivePerformance } from './liveTvDiagnostics';
 import { LiveTvChannelListReveal, LiveTvPlanetLoader } from './LiveTvPlanetLoader';
 import {
   logLiveChannelPanelLoader,
@@ -126,7 +137,12 @@ import {
 } from './liveTvChannelPanelLoader';
 import { patchLiveTvWorkload } from './liveTvWorkload';
 import { cancelLiveTvEpgWork } from './liveTvChannelEpg';
-import { cancelLiveSearchCatalogBuild } from '@/features/search/liveSearchSqliteCatalog';
+import {
+  cancelLiveSearchCatalogBuild,
+  findPublishedLiveChannelsByTitle,
+  getPublishedLiveChannelById,
+  getPublishedLiveCatalogState,
+} from '@/features/search/liveSearchSqliteCatalog';
 import { useLiveTvScreenModel } from './useLiveTvScreenModel';
 import { getLiveChannelIndexEntry } from '@/features/search/liveChannelIndex';
 import { displayLiveProgramText, isRawLiveStreamValue } from './liveTvProgramText';
@@ -157,8 +173,39 @@ import { DiscoverZoneOverlay } from '@/features/personalization/DiscoverZoneOver
 import { searchLiveChannels } from '@/features/search/repositories/liveSearchRepository';
 import type { LiveSearchResult, SearchResult } from '@/features/search/searchTypes';
 import { MovieToolbar } from '@/features/movies/components/MovieToolbar';
+import { createFavoriteHoldDetector } from './liveFavoriteHold';
 
 const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false } as const) : {};
+
+declare const __DEV__: boolean | undefined;
+
+function liveLoadAuditNow() {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
+// TEMPORARY: release-visible diagnostics for Discover Live handoff only.
+// Do not use novacastTrace here: it is intentionally suppressed in release.
+function discoverLiveAudit(event: string, data: Record<string, unknown> = {}) {
+  console.info(
+    '[NovaCast Discover Live Release Audit]',
+    JSON.stringify({ timestamp: Date.now(), event, ...data }),
+  );
+}
+
+function safeDiscoverLiveError(error: unknown) {
+  return String(error)
+    .replace(/https?:\/\/\S+/gi, '[redacted-url]')
+    .replace(/\b(password|token|secret|authorization|bearer|apikey|api[_-]?key|credential|cookie|jwt)=\S+/gi, '$1=[redacted]')
+    .slice(0, 240);
+}
+
+type DiscoverLivePlaybackContext = {
+  providerId: string;
+  source: 'favorites' | 'recent';
+  channels: ProviderLiveChannel[];
+  currentIndex: number;
+  focusedItemId?: string;
+};
 
 function formatPreviewWindow(channel: ProviderLiveChannel | null) {
   if (!channel) {
@@ -211,6 +258,24 @@ export function LiveTvScreen() {
   const directPlayConsumedRef = useRef(false);
   const { selectedProvider, selectedProviderLabel, selectedProviderExpiration } = useProviderStore();
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
+  const liveLoadSessionIdRef = useRef(`live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const liveLoadStartedAtRef = useRef(liveLoadAuditNow());
+  const liveLoadAudit = useCallback((event: string, fields: Record<string, unknown> = {}) => {
+    if (typeof __DEV__ === 'undefined' || !__DEV__) {
+      return;
+    }
+    console.info('[NovaCast Live Load Audit]', {
+      loadSessionId: liveLoadSessionIdRef.current,
+      event,
+      elapsedMs: Math.round(liveLoadAuditNow() - liveLoadStartedAtRef.current),
+      ...fields,
+    });
+  }, []);
+  const liveListStageLayoutRef = useRef<string | null>(null);
+  const liveFlatListLayoutRef = useRef<string | null>(null);
+  const liveHeaderLayoutRef = useRef<string | null>(null);
+  const liveFirstChannelsLoggedRef = useRef(false);
+  const liveFirstFocusLoggedRef = useRef(false);
   const { state: personalizationState } = usePersonalizationStore(activeProviderId);
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.liveTv.key);
   const liveMemory = getLiveTvMemory(activeProviderId);
@@ -238,11 +303,20 @@ export function LiveTvScreen() {
     selectCategory: loadCategoryChannels,
     enrichFocusedChannelEpg,
     resolvePlaybackUrl,
+    resolvePlaybackSource,
     reload,
     initialChannel,
   } = useLiveTvScreenModel(
     sanitizePersistedLiveCategoryId(routeCategoryId ?? liveMemory.selectedCategoryId),
     routeChannelId ?? liveMemory.selectedChannelId,
+    { onLoadAudit: liveLoadAudit },
+  );
+  // The synthetic My Channels / Recents rows sit at the top of `categories`, so
+  // every cold-start / focus default must resolve to the first REAL provider
+  // category — never index 0.
+  const firstProviderCategoryId = useMemo(
+    () => categories.find((category) => isRealProviderLiveCategoryId(category.id))?.id ?? null,
+    [categories],
   );
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
   const liveRetryAttemptedRef = useRef(false);
@@ -250,12 +324,23 @@ export function LiveTvScreen() {
   const lastRetryAtRef = useRef(0);
   const liveStateRef = useRef<LiveTvState | null>(null);
   const [interactionState, setState] = useState<LiveTvState | null>(null);
-  const [previewStreamUrl, setPreviewStreamUrl] = useState<string | null>(null);
+  const [previewStreamSource, setPreviewStreamSource] = useState<LivePlaybackSource | null>(null);
+  const previewStreamUrl = previewStreamSource?.uri ?? null;
   const [fullscreenFrameStatus, setFullscreenFrameStatus] = useState<FullscreenFrameStatus>('pending');
   const [fullscreenChromeVisible, setFullscreenChromeVisible] = useState(true);
   const [focusedAction, setFocusedAction] = useState<'favorite' | 'fullscreen' | 'retry' | 'search' | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [discoverZoneOpen, setDiscoverZoneOpen] = useState(false);
+  const [discoverRestoreItemId, setDiscoverRestoreItemId] = useState<string | null>(null);
+  const [pendingDiscoverLiveLaunch, setPendingDiscoverLiveLaunch] = useState<{
+    channel: ProviderLiveChannel;
+    rail: 'favorites' | 'recent';
+  } | null>(null);
+  const pendingDiscoverLiveLaunchRef = useRef<typeof pendingDiscoverLiveLaunch>(null);
+  const discoverHandoffFrameRef = useRef<number | null>(null);
+  const discoverLiveLaunchConsumedRef = useRef(false);
+  const discoverLivePlaybackContextRef = useRef<DiscoverLivePlaybackContext | null>(null);
+  const discoverRestoreItemIdRef = useRef<string | null>(null);
   const [searchOverlayReady, setSearchOverlayReady] = useState(false);
   const [searchRestoreChannelId, setSearchRestoreChannelId] = useState<string | null>(null);
   const [searchCloseFocusHold, setSearchCloseFocusHold] = useState(false);
@@ -289,10 +374,19 @@ export function LiveTvScreen() {
       return null;
     }
 
-    const categoryId = selectedCategoryId || categories[0]?.id || '';
+    const categoryId = selectedCategoryId || firstProviderCategoryId || '';
     return createLiveTvShellState(categoryId);
   }, [categories, selectedCategoryId]);
   const renderState = liveState ?? shellLiveState;
+  // Live startup stability gate: the category/channel UI must stay hidden behind
+  // the loader until the final US-first sorted array is committed, the selection
+  // is resolved from it, and a focus target is therefore known. Derived only —
+  // no timers. `categories` is committed exactly once (sorted, real names), so a
+  // non-empty list here already means the order is final.
+  const liveCategoryStartupReady =
+    categories.length > 0 &&
+    Boolean(selectedCategoryId) &&
+    categories.some((category) => category.id === selectedCategoryId);
   const searchOverlayVisible = shouldShowLiveSearchOverlay({
     searchSessionOpen: searchOpen,
     fullscreenChannelId: liveState?.fullscreenChannelId,
@@ -304,6 +398,57 @@ export function LiveTvScreen() {
     searchOverlayVisible,
     fullscreenActive: Boolean(liveState?.fullscreenChannelId),
   });
+  useEffect(() => {
+    liveLoadAudit('screen-mounted', {
+      component: 'src/features/live/LiveTvScreen.tsx:LiveTvScreen',
+      windowWidth: width,
+      windowHeight: height,
+      providerId: activeProviderId,
+      route: {
+        categoryIdPresent: Boolean(routeCategoryId),
+        channelIdPresent: Boolean(routeChannelId),
+        returnRoute,
+        directPlay: directPlayRequested,
+      },
+    });
+    liveLoadAudit('model-initialized', {
+      providerId: activeProviderId,
+      status: loadStatus,
+      categoryCount: categories.length,
+      channelCount: channels.length,
+    });
+    return () => liveLoadAudit('screen-unmounted');
+  }, []);
+  useEffect(() => {
+    liveLoadAudit('active-provider', { providerId: activeProviderId });
+  }, [activeProviderId, liveLoadAudit]);
+  useEffect(() => {
+    liveLoadAudit('catalog-readiness', {
+      status: loadStatus,
+      channelListPending,
+      categoryCount: categories.length,
+      channelCount: channels.length,
+      selectedCategoryId: selectedCategoryId || null,
+      source: channels.length > 0 ? 'catalog-or-provider' : 'pending',
+    });
+  }, [categories.length, channelListPending, channels.length, loadStatus, liveLoadAudit, selectedCategoryId]);
+  useEffect(() => {
+    if (!liveFirstChannelsLoggedRef.current && channels.length > 0) {
+      liveFirstChannelsLoggedRef.current = true;
+      liveLoadAudit('first-non-empty-channels-committed', {
+        channelCount: channels.length,
+        categoryCount: categories.length,
+        selectedCategoryId: selectedCategoryId || null,
+      });
+    }
+  }, [categories.length, channels.length, liveLoadAudit, selectedCategoryId]);
+  useEffect(() => {
+    liveLoadAudit('favorites-hydration-complete', {
+      favoriteCount: personalizationState.liveFavorites.length,
+      source: 'personalization-store',
+    });
+    liveLoadAudit('recents-hydration-complete', { source: 'personalization-store' });
+  }, [liveLoadAudit, personalizationState.liveFavorites.length]);
   const searchOwnsBackgroundFocus = shouldLiveSearchBlockBackgroundFocus(searchOverlayVisible, searchCloseFocusHold);
   const searchOpenRef = useRef(false);
   const searchOverlayVisibleRef = useRef(false);
@@ -401,7 +546,20 @@ export function LiveTvScreen() {
   const { player: liveStreamPlayer, retry: retryLiveStream, hasStream: hasLiveStream } = useNovaStreamPlayer(
     previewStreamUrl,
     {
-      onError: () => {
+      onError: (message) => {
+        logProviderBoundary('[NovaCast Live Provider Request]', {
+          event: 'source-error',
+          channelId: fullscreenChannelIdRef.current,
+          providerIdPresent: Boolean(activeProviderId),
+          credentialsPresent: Boolean(bundle?.connectionType === 'xtream'),
+          providerBasePresent: Boolean(bundle?.connectionType),
+          sourceScheme: previewStreamUrl ? previewStreamUrl.split(':', 1)[0] : null,
+          extension: previewStreamUrl?.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1] ?? null,
+          userAgentPresent: false,
+          ...classifyProviderBoundaryError(message),
+          playerMounted: true,
+          playbackStarted: false,
+        });
         setFullscreenFrameStatus((current) =>
           fullscreenChannelIdRef.current && current !== 'ready' ? 'error' : current,
         );
@@ -438,13 +596,55 @@ export function LiveTvScreen() {
       selectedChannel,
     [channels, selectedChannel, liveState?.previewChannelId],
   );
-  const [focusedChannelId, setFocusedChannelId] = useState<string | null>(
+  const [, setFocusedChannelId] = useState<string | null>(
     liveMemory.focusedChannelId ?? null,
   );
-  const focusedChannel = useMemo(
-    () => channels.find((channel) => channel.id === focusedChannelId) ?? null,
-    [channels, focusedChannelId],
-  );
+
+  useEffect(() => {
+    if (!previewStreamUrl) {
+      return;
+    }
+    logProviderBoundary('[NovaCast Live Provider Request]', {
+      event: 'source-built',
+      channelId: liveState?.fullscreenChannelId ?? liveState?.previewChannelId ?? null,
+      providerIdPresent: Boolean(activeProviderId),
+      credentialsPresent: Boolean(bundle?.connectionType === 'xtream'),
+      providerBasePresent: Boolean(bundle?.connectionType),
+      sourceScheme: previewStreamUrl.split(':', 1)[0],
+      extension: previewStreamUrl.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1] ?? null,
+      userAgentPresent: false,
+      httpStatus: null,
+      errorCategory: null,
+      playerMounted: false,
+      playbackStarted: false,
+    });
+  }, [activeProviderId, bundle?.connectionType, liveState?.fullscreenChannelId, liveState?.previewChannelId, previewStreamUrl]);
+
+  useEffect(() => {
+    if (!hasLiveStream || !liveState?.fullscreenChannelId) {
+      return;
+    }
+    liveLoadAudit('player-ready', {
+      channelId: liveState.fullscreenChannelId,
+      playerStatus: liveStreamPlayer.status,
+      playing: liveStreamPlayer.playing,
+      currentTime: liveStreamPlayer.currentTime,
+    });
+    logProviderBoundary('[NovaCast Live Provider Request]', {
+      event: 'player-mounted',
+      channelId: liveState.fullscreenChannelId,
+      providerIdPresent: Boolean(activeProviderId),
+      credentialsPresent: Boolean(bundle?.connectionType === 'xtream'),
+      providerBasePresent: Boolean(bundle?.connectionType),
+      sourceScheme: previewStreamUrl?.split(':', 1)[0] ?? null,
+      extension: previewStreamUrl?.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1] ?? null,
+      userAgentPresent: false,
+      httpStatus: null,
+      errorCategory: null,
+      playerMounted: true,
+      playbackStarted: false,
+    });
+  }, [activeProviderId, bundle?.connectionType, hasLiveStream, liveLoadAudit, liveState?.fullscreenChannelId, liveStreamPlayer, previewStreamUrl]);
   const rowVisualFlags = getLiveTvRowVisualFlags();
   const frozenPreviewChannelRef = useRef<ProviderLiveChannel | null>(null);
   const frozenPreviewChannelIdRef = useRef<string | null>(null);
@@ -462,7 +662,7 @@ export function LiveTvScreen() {
   }
   const detailPanelChannel = rowVisualFlags.freezeDetailPanel
     ? frozenPreviewChannelRef.current ?? previewChannel
-    : (focusedChannel ?? selectedChannel ?? previewChannel);
+    : (selectedChannel ?? previewChannel);
   const detailChannelIsFavorite = personalizationState.liveFavorites.map((item) => item.contentId).includes(detailPanelChannel?.id ?? '');
   const liveFavoriteContentIds = useMemo(
     () => new Set(personalizationState.liveFavorites.map((item) => item.contentId)),
@@ -472,6 +672,26 @@ export function LiveTvScreen() {
     () => resolveLivePlaybackChannel(liveState?.fullscreenChannelId, channels, liveSearchPlaybackByIdRef.current),
     [channels, liveState?.fullscreenChannelId],
   );
+  useEffect(() => {
+    if (!liveState?.fullscreenChannelId) {
+      return;
+    }
+
+    novacastTrace('[NovaCast Live Fullscreen Bind] ' + JSON.stringify({
+      channelId: liveState.fullscreenChannelId,
+      fullscreenActive: true,
+      previewStreamUrlPresent: Boolean(previewStreamUrl),
+      resolvedPlaybackChannelPresent: Boolean(fullscreenChannel),
+    }));
+    novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+      phase: 'fullscreen-entered',
+      canonicalContentId: liveState.fullscreenChannelId,
+      channelId: liveState.fullscreenChannelId,
+      streamUrlPresent: Boolean(previewStreamUrl),
+      fullscreenActive: true,
+      previewStreamUrlPresent: Boolean(previewStreamUrl),
+    }));
+  }, [fullscreenChannel, liveState?.fullscreenChannelId, previewStreamUrl]);
   const livePlaybackItem = useMemo<PlaybackItem | null>(() => {
     if (!fullscreenChannel || !previewStreamUrl) {
       return null;
@@ -488,14 +708,29 @@ export function LiveTvScreen() {
   const previousAnalyticsFullscreenIdRef = useRef<string | null>(null);
   useEffect(() => {
     const currentId = liveState?.fullscreenChannelId ?? null;
-    const previousId = previousAnalyticsFullscreenIdRef.current;
-    if (currentId && currentId !== previousId && livePlaybackItem) {
+    const trackedId = previousAnalyticsFullscreenIdRef.current;
+
+    if (!currentId) {
+      if (trackedId) {
+        playbackAnalyticsTracker.stop('user_back');
+        previousAnalyticsFullscreenIdRef.current = null;
+      }
+      return;
+    }
+
+    // The fullscreen id can update before the new source item. Do not consume
+    // that id until the item and fullscreen destination are the same channel.
+    if (!livePlaybackItem || livePlaybackItem.id !== currentId) {
+      return;
+    }
+
+    if (currentId !== trackedId) {
+      if (trackedId) {
+        playbackAnalyticsTracker.stop('channel_change');
+      }
       playbackAnalyticsTracker.request(livePlaybackItem, 'channel');
+      previousAnalyticsFullscreenIdRef.current = currentId;
     }
-    if (!currentId && previousId) {
-      playbackAnalyticsTracker.stop('user_back');
-    }
-    previousAnalyticsFullscreenIdRef.current = currentId;
   }, [livePlaybackItem, liveState?.fullscreenChannelId]);
   const categoriesRef = useRef<FlatList<ProviderLiveCategory>>(null);
   const channelsRef = useRef<FlatList<LiveTvChannelRowShellData>>(null);
@@ -508,8 +743,12 @@ export function LiveTvScreen() {
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [categoryNextFocusRightHandle, setCategoryNextFocusRightHandle] = useState<number | undefined>();
   const focusedChannelIdRef = useRef<string | null>(liveMemory.focusedChannelId ?? null);
+  const focusedActionChannelIdRef = useRef<string | null>(null);
+  const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
+  const favoriteChannelRef = useRef<(channelId: string) => void>(() => undefined);
   const [categoryFocusEpoch, setCategoryFocusEpoch] = useState(0);
   const watchButtonRef = useRef<ElementRef<typeof View>>(null);
+  const favoriteButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenCloseButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenLaunchSourceRef = useRef<FullscreenLaunchSource>(null);
   const previousFullscreenChannelIdRef = useRef<string | null>(null);
@@ -518,12 +757,52 @@ export function LiveTvScreen() {
   const fullscreenRetryFocusKeyRef = useRef<string | null>(null);
   const fullscreenInteractionRef = useRef<ElementRef<typeof View>>(null);
   const lastChannelOkPressRef = useRef<LiveTvOkPressRecord | null>(null);
-  const preferredCategoryFocusId = useRef(liveMemory.focusedCategoryId ?? categories[0]?.id ?? null);
+  const preferredCategoryFocusId = useRef(liveMemory.focusedCategoryId ?? firstProviderCategoryId ?? null);
   const preferredChannelFocusId = useRef(liveMemory.focusedChannelId ?? channels[0]?.id ?? null);
   const preferCategoryFocusRef = useRef(true);
   const preferChannelFocusRef = useRef(true);
+  // True only when the current category reflects a real user/route/persisted
+  // choice. A provisional startup auto-default must never be written back to
+  // Live memory as if it were a user preference.
+  const categorySelectionIsUserRef = useRef(
+    Boolean(sanitizePersistedLiveCategoryId(routeCategoryId ?? liveMemory.selectedCategoryId)),
+  );
+  const firstCategoryFocusLoggedRef = useRef(false);
+  const categoryFocusTargetLoggedRef = useRef(false);
+  const stabilityLoaderShownAtRef = useRef<number | null>(null);
   const surfSessionIdRef = useRef<string | null>(null);
   const intendedSurfChannelIdRef = useRef<string | null>(null);
+
+  const handleLiveLayoutAudit = useCallback(
+    (event: 'list-stage-layout' | 'flatlist-layout' | 'header-layout', layout: { width: number; height: number; x: number; y: number }) => {
+      const key = `${event}:${layout.width}:${layout.height}:${layout.x}:${layout.y}`;
+      const ref = event === 'list-stage-layout' ? liveListStageLayoutRef : event === 'flatlist-layout' ? liveFlatListLayoutRef : liveHeaderLayoutRef;
+      if (ref.current === key) {
+        return;
+      }
+      ref.current = key;
+      liveLoadAudit(event, layout);
+    },
+    [liveLoadAudit],
+  );
+  const handleLiveListLayout = useCallback(
+    (event: { nativeEvent: { layout: { width: number; height: number; x: number; y: number } } }) => {
+      handleLiveLayoutAudit('flatlist-layout', event.nativeEvent.layout);
+    },
+    [handleLiveLayoutAudit],
+  );
+
+  const registerFavoriteActionRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
+    if (focusedChannelIdRef.current === channelId) {
+      favoriteButtonRef.current = instance;
+    }
+  }, []);
+
+  const registerPlayActionRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
+    if (focusedChannelIdRef.current === channelId) {
+      watchButtonRef.current = instance;
+    }
+  }, []);
 
   const registerFullscreenRetryButtonRef = useCallback((instance: ElementRef<typeof View> | null) => {
     fullscreenRetryButtonRef.current = instance;
@@ -538,9 +817,16 @@ export function LiveTvScreen() {
 
     recordLiveTvMemorySync();
     rememberLiveTvMemory(activeProviderId, {
-      selectedCategoryId: liveState.selectedCategoryId,
+      // Only persist the category as a preference once it is user-owned;
+      // a provisional startup auto-default is intentionally omitted so it
+      // cannot masquerade as a user choice on the next cold start.
+      ...(categorySelectionIsUserRef.current
+        ? {
+            selectedCategoryId: liveState.selectedCategoryId,
+            focusedCategoryId: preferredCategoryFocusId.current,
+          }
+        : {}),
       selectedChannelId: liveState.selectedChannelId,
-      focusedCategoryId: preferredCategoryFocusId.current,
       focusedChannelId: preferredChannelFocusId.current,
     });
   }, [activeProviderId, liveState]);
@@ -618,16 +904,16 @@ export function LiveTvScreen() {
         return;
       }
 
-      const playbackUrl = resolvePlaybackUrl(channel);
-      if (!playbackUrl) {
-        setPreviewStreamUrl(null);
+      const playbackSource = resolvePlaybackSource(channel);
+      if (!playbackSource) {
+        setPreviewStreamSource(null);
         setState((current) =>
           resolveLivePreview(current ?? latest, requestId, channelId, 'error', 'This channel is unavailable right now.'),
         );
         return;
       }
 
-      setPreviewStreamUrl(playbackUrl);
+      setPreviewStreamSource(playbackSource);
       if (surfSessionActive) {
         logLiveSurf({
           event: 'source-resolved',
@@ -649,11 +935,11 @@ export function LiveTvScreen() {
   // The request id and preview channel fields are the intentional debounce
   // boundary; the full state object would restart the timer on every update.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- keep preview debounce scoped to its request fields.
-  }, [channels, resolvePlaybackUrl, liveState?.previewChannelId, liveState?.previewRequestId, liveState?.previewStatus]);
+  }, [channels, resolvePlaybackSource, liveState?.previewChannelId, liveState?.previewRequestId, liveState?.previewStatus]);
 
   useEffect(() => {
     if (liveState?.previewStatus === 'idle' || !liveState?.previewChannelId) {
-      setPreviewStreamUrl(null);
+      setPreviewStreamSource(null);
     }
   }, [liveState?.previewChannelId, liveState?.previewStatus]);
 
@@ -726,6 +1012,16 @@ export function LiveTvScreen() {
               router.replace(returnRoute);
               return true;
             }
+            if (fullscreenLaunchSourceRef.current === 'discover') {
+              const context = discoverLivePlaybackContextRef.current;
+              const current = context?.channels[context.currentIndex];
+              discoverRestoreItemIdRef.current = current?.id ?? null;
+              setDiscoverRestoreItemId(current?.id ?? null);
+              discoverLiveAudit('back-restore-requested', {
+                source: context?.source ?? 'recent',
+                currentIndex: context?.currentIndex ?? 0,
+              });
+            }
             setState((current) => closeLiveFullscreen(current ?? liveState ?? bootstrapState ?? createInitialLiveTvState('', '')));
             return true;
           }
@@ -786,6 +1082,14 @@ export function LiveTvScreen() {
     }
 
     const source = fullscreenLaunchSourceRef.current;
+    if (closing && source === 'discover') {
+      setDiscoverZoneOpen(true);
+      discoverLiveAudit('discover-restored', {
+        source: discoverLivePlaybackContextRef.current?.source ?? 'recent',
+        focusedItemFound: Boolean(discoverRestoreItemIdRef.current),
+      });
+      return;
+    }
     isRestoringFullscreenFocusRef.current = true;
 
     const cancel = requestTvFocus({
@@ -824,14 +1128,39 @@ export function LiveTvScreen() {
   }, [liveState?.fullscreenChannelId, fullscreenFrameStatus]);
 
   const handleFullscreenFirstFrame = () => {
+    liveLoadAudit('first-frame', {
+      channelId: liveStateRef.current?.fullscreenChannelId ?? null,
+      playerStatus: liveStreamPlayer.status,
+      playing: liveStreamPlayer.playing,
+    });
     playbackAnalyticsTracker.firstFrame();
     setFullscreenFrameStatus('ready');
   };
   const handleLivePlayerPlayingChange = useCallback(({ isPlaying }: PlayingChangeEventPayload) => {
+    liveLoadAudit('player-playing-change', {
+      channelId: liveStateRef.current?.fullscreenChannelId ?? null,
+      playerStatus: liveStreamPlayer.status,
+      playing: isPlaying,
+      currentTime: liveStreamPlayer.currentTime,
+    });
     if (liveStateRef.current?.fullscreenChannelId && isPlaying && liveStreamPlayer.status === 'readyToPlay') {
+      logProviderBoundary('[NovaCast Live Provider Request]', {
+        event: 'playback-started',
+        channelId: liveStateRef.current.fullscreenChannelId,
+        providerIdPresent: Boolean(activeProviderId),
+        credentialsPresent: Boolean(bundle?.connectionType === 'xtream'),
+        providerBasePresent: Boolean(bundle?.connectionType),
+        sourceScheme: previewStreamUrl?.split(':', 1)[0] ?? null,
+        extension: previewStreamUrl?.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1] ?? null,
+        userAgentPresent: false,
+        httpStatus: null,
+        errorCategory: null,
+        playerMounted: true,
+        playbackStarted: true,
+      });
       playbackAnalyticsTracker.firstFrame('playing_transition');
     }
-  }, [liveStreamPlayer]);
+  }, [activeProviderId, bundle?.connectionType, liveLoadAudit, liveStreamPlayer, previewStreamUrl]);
   const handleLivePlayerTimeUpdate = useCallback(({ currentTime }: TimeUpdateEventPayload) => {
     if (
       liveStateRef.current?.fullscreenChannelId &&
@@ -946,6 +1275,78 @@ export function LiveTvScreen() {
   }, [fullscreenFallbackVisible, fullscreenFrameStatus, liveState?.fullscreenChannelId]);
 
   useEffect(() => {
+    // Provider change invalidates any prior user-selection ownership; re-seed
+    // from the new provider's route/persisted choice (if any).
+    categorySelectionIsUserRef.current = Boolean(
+      sanitizePersistedLiveCategoryId(routeCategoryId ?? getLiveTvMemory(activeProviderId).selectedCategoryId),
+    );
+    firstCategoryFocusLoggedRef.current = false;
+    categoryFocusTargetLoggedRef.current = false;
+  }, [activeProviderId, routeCategoryId]);
+
+  useEffect(() => {
+    // PHASE 1 audit: record the focus target only after the (always-sorted)
+    // category order is committed and a selection is resolved.
+    if (categoryFocusTargetLoggedRef.current || categories.length === 0 || !renderState?.selectedCategoryId) {
+      return;
+    }
+    categoryFocusTargetLoggedRef.current = true;
+    const focusTarget =
+      preferredCategoryFocusId.current ?? renderState.selectedCategoryId ?? firstProviderCategoryId ?? null;
+    logLiveCategoryOrderAudit('category-focus-target-chosen', {
+      providerId: activeProviderId,
+      categoryCount: categories.length,
+      sample: categories,
+      selectedCategoryId: renderState.selectedCategoryId ?? null,
+      selectedCategoryName: categories.find((category) => category.id === focusTarget)?.name ?? null,
+      selectionSource: categorySelectionIsUserRef.current ? 'persisted-user' : 'auto-default',
+      orderReady: true,
+    });
+  }, [activeProviderId, categories, firstProviderCategoryId, renderState?.selectedCategoryId]);
+
+  useEffect(() => {
+    // Stability loader lifecycle telemetry (DEV-only inside the logger).
+    if (!liveCategoryStartupReady) {
+      if (stabilityLoaderShownAtRef.current == null) {
+        stabilityLoaderShownAtRef.current = Date.now();
+        logLiveStabilityLoader('shown', {
+          elapsedMs: 0,
+          namesResolved: false,
+          categoryOrderReady: false,
+          selectionResolved: false,
+          focusTargetReady: false,
+          categoryCount: categories.length,
+        });
+      }
+      return;
+    }
+    if (stabilityLoaderShownAtRef.current != null) {
+      const elapsedMs = Date.now() - stabilityLoaderShownAtRef.current;
+      stabilityLoaderShownAtRef.current = null;
+      const focusTarget =
+        preferredCategoryFocusId.current ?? selectedCategoryId ?? firstProviderCategoryId ?? null;
+      logLiveStabilityLoader('focus-target-ready', {
+        elapsedMs,
+        namesResolved: true,
+        categoryOrderReady: true,
+        selectionResolved: true,
+        focusTargetReady: Boolean(focusTarget),
+        categoryCount: categories.length,
+        selectedCategoryId: selectedCategoryId ?? null,
+      });
+      logLiveStabilityLoader('hidden', {
+        elapsedMs,
+        namesResolved: true,
+        categoryOrderReady: true,
+        selectionResolved: true,
+        focusTargetReady: Boolean(focusTarget),
+        categoryCount: categories.length,
+        selectedCategoryId: selectedCategoryId ?? null,
+      });
+    }
+  }, [liveCategoryStartupReady, categories, selectedCategoryId]);
+
+  useEffect(() => {
     syncLiveTvMemory();
   }, [syncLiveTvMemory]);
 
@@ -982,8 +1383,15 @@ export function LiveTvScreen() {
   const focusChannelRow = useCallback(
     (channelId: string) => {
       const previousFocusedId = focusedChannelIdRef.current;
+      if (previousFocusedId !== channelId) {
+        favoriteHoldRef.current?.cancel('focus_lost');
+      }
       preferredChannelFocusId.current = channelId;
       focusedChannelIdRef.current = channelId;
+      if (!liveFirstFocusLoggedRef.current) {
+        liveFirstFocusLoggedRef.current = true;
+        liveLoadAudit('first-visible-focused-row', { channelId });
+      }
       preferChannelFocusRef.current = false;
       recordLiveTvFocusEvent(channelId);
       enrichFocusedChannelEpg(channelId);
@@ -1006,7 +1414,7 @@ export function LiveTvScreen() {
         return next === base ? current : next;
       });
     },
-    [enrichFocusedChannelEpg],
+    [enrichFocusedChannelEpg, liveLoadAudit],
   );
 
   const closeLiveSearch = useCallback(() => {
@@ -1110,17 +1518,167 @@ export function LiveTvScreen() {
     [activeProviderId, channels, liveState, syncLiveTvMemory],
   );
 
-  const playFavoriteFromDiscoverZone = useCallback(
-    async (channelId: string) => {
+  const playDiscoverLiveChannel = useCallback(
+    async (
+      item: { id: string; contentId?: string; providerId?: string; title?: string; streamId?: string },
+      rail: 'favorites' | 'recent',
+      railItems: Array<{ id: string; contentId?: string; providerId?: string; title?: string; streamId?: string }> = [item],
+    ) => {
       if (!bundle) {
         return;
       }
-      const browseCategoryId = selectedCategoryId;
-      setDiscoverZoneOpen(false);
+      const canonicalContentId = item.contentId?.trim() || item.id.trim();
+      const providerId = item.providerId ?? activeProviderId;
+      const providerMatches = !item.providerId || item.providerId === activeProviderId;
+      const currentCategoryContainsChannel = channels.some((candidate) => candidate.id === canonicalContentId);
+      const providerNativeId = item.streamId?.trim() || '';
+      const legacyIdentityDetected = Boolean(item.title?.trim() && item.title.trim() !== canonicalContentId);
+      novacastTrace('[NovaCast Discover Live Identity] ' + JSON.stringify({
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        savedContentId: canonicalContentId || null,
+        savedProviderMatchesCurrent: providerMatches,
+        currentProviderIdPresent: Boolean(activeProviderId),
+        directCanonicalLookupFound: false,
+        providerNativeIdPresent: Boolean(providerNativeId),
+        legacyIdentityDetected,
+      }));
+      const pendingLaunchAlreadyPresent = pendingDiscoverLiveLaunchRef.current != null;
+      novacastTrace('[NovaCast Discover Live Selection] ' + JSON.stringify({
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        contentIdPresent: Boolean(item.contentId),
+        providerIdPresent: Boolean(item.providerId),
+        canonicalIdPresent: Boolean(canonicalContentId),
+        canonicalChannelFound: false,
+        pendingLaunchAlreadyPresent,
+      }));
+      novacastTrace('[NovaCast Discover Live Press] ' + JSON.stringify({
+        rail,
+        itemId: item.id,
+        canonicalContentId,
+        mediaType: 'live',
+        providerId,
+      }));
+      if (pendingLaunchAlreadyPresent) {
+        return;
+      }
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        event: 'selection-received',
+        rail,
+        canonicalContentId,
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        channelIdPresent: Boolean(canonicalContentId),
+        providerIdPresent: Boolean(providerId),
+        pendingPresent: false,
+        modalOpen: discoverZoneOpen,
+        channelId: null,
+      }));
+      let channel: ProviderLiveChannel | null = null;
+      let globalLookupAttempted = false;
+      let globalLookupFound = false;
+      let providerNativeFallbackAttempted = false;
+      let providerNativeFallbackFound = false;
+      let legacyFallbackAttempted = false;
+      let publishedCatalogReady = false;
+      if (providerMatches && canonicalContentId) {
+        globalLookupAttempted = true;
+        publishedCatalogReady = (await getPublishedLiveCatalogState(activeProviderId).catch(() => null))?.ready === true;
+        channel = await getPublishedLiveChannelById(activeProviderId, canonicalContentId).catch(() => null);
+        globalLookupFound = Boolean(channel);
+      }
+      if (!channel && providerMatches && providerNativeId && providerNativeId !== canonicalContentId) {
+        providerNativeFallbackAttempted = true;
+        channel = await getPublishedLiveChannelById(activeProviderId, providerNativeId).catch(() => null);
+        providerNativeFallbackFound = Boolean(channel);
+      }
+      if (!channel && providerMatches && item.title) {
+        legacyFallbackAttempted = true;
+        const titleMatches = await findPublishedLiveChannelsByTitle(activeProviderId, item.title).catch(() => []);
+        if (titleMatches.length === 1) channel = titleMatches[0];
+      }
+      if (!channel && providerMatches && !publishedCatalogReady) {
+        channel = await bundle.live.getChannel(canonicalContentId).catch(() => null);
+      }
+      novacastTrace('[NovaCast Discover Live Identity] ' + JSON.stringify({
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        savedContentId: canonicalContentId || null,
+        savedProviderMatchesCurrent: providerMatches,
+        currentProviderIdPresent: Boolean(activeProviderId),
+        directCanonicalLookupFound: globalLookupFound,
+        providerNativeIdPresent: Boolean(providerNativeId),
+        legacyIdentityDetected,
+        canonicalRehydrated: Boolean(channel && channel.id !== canonicalContentId),
+      }));
+      novacastTrace('[NovaCast Discover Live Selection] ' + JSON.stringify({
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        contentIdPresent: Boolean(item.contentId),
+        providerIdPresent: Boolean(item.providerId),
+        canonicalIdPresent: Boolean(canonicalContentId),
+        canonicalChannelFound: Boolean(channel),
+        providerMatches,
+        currentCategoryContainsChannel,
+        globalLookupAttempted,
+        globalLookupFound,
+        providerNativeFallbackAttempted,
+        providerNativeFallbackFound,
+        legacyFallbackAttempted,
+        finalCanonicalChannelFound: Boolean(channel),
+        pendingLaunchAlreadyPresent: pendingDiscoverLiveLaunchRef.current != null,
+      }));
+      novacastTrace('[NovaCast Discover Live Resolve] ' + JSON.stringify({
+        rail,
+        canonicalContentId,
+        resolved: Boolean(channel),
+        resolvedChannelId: channel?.id ?? null,
+      }));
+      if (!channel) {
+        discoverLiveAudit('handoff-aborted', {
+          reason: 'canonical-missing',
+          source: rail === 'favorites' ? 'favorite' : 'recent',
+          channelIdPresent: Boolean(canonicalContentId),
+          providerIdPresent: Boolean(providerId),
+        });
+        novacastTrace('[NovaCast Discover Live Resolve Failed] ' + JSON.stringify({
+          rail,
+          itemId: item.id,
+          contentId: item.contentId ?? null,
+          providerId: item.providerId ?? activeProviderId,
+        }));
+        showNotification({
+          type: 'error',
+          title: 'Channel unavailable',
+          message: 'This channel is no longer available.',
+          duration: 6000,
+          scope: 'live',
+        });
+        return;
+      }
+
+      if (pendingDiscoverLiveLaunchRef.current) {
+        return;
+      }
+
+      discoverLiveAudit('canonical-ready', {
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        channelIdPresent: Boolean(channel.id),
+        providerIdPresent: Boolean(providerId),
+      });
+
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        event: 'canonical-resolved',
+        rail,
+        canonicalContentId,
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        channelIdPresent: true,
+        providerIdPresent: Boolean(providerId),
+        pendingPresent: false,
+        modalOpen: discoverZoneOpen,
+        channelId: channel.id,
+      }));
+
       const savedFavoriteIds = [
         ...new Set([
           ...personalizationState.liveFavorites.map((item) => item.contentId).filter(Boolean),
-          channelId,
+          channel.id,
         ]),
       ];
       const hydrated = hydrateFavoriteLiveChannels({
@@ -1129,16 +1687,53 @@ export function LiveTvScreen() {
         getIndexEntry: (id) => getLiveChannelIndexEntry(activeProviderId, id),
         favoriteRecords: personalizationState.liveFavorites,
       });
-      const favoriteIds = favoriteSurfQueueIds(savedFavoriteIds, hydrated.channels);
-      liveSearchSurfQueueRef.current = favoriteIds;
-      preferredChannelFocusId.current = channelId;
+      const queue =
+        rail === 'favorites'
+          ? railItems
+              .map((candidate) => candidate.contentId?.trim() || candidate.id.trim())
+              .map((id) => hydrated.channels.find((candidate) => candidate.id === id))
+              .filter((candidate): candidate is ProviderLiveChannel => Boolean(candidate))
+          : (
+              await Promise.all(
+                railItems.map(async (candidate) => {
+                  if (candidate.providerId && candidate.providerId !== activeProviderId) {
+                    return null;
+                  }
+                  return (
+                    (await getPublishedLiveChannelById(activeProviderId, candidate.contentId?.trim() || candidate.id.trim()).catch(() => null)) ??
+                    (candidate.id === channel.id ? channel : null)
+                  );
+                }),
+              )
+            ).filter((candidate): candidate is ProviderLiveChannel => Boolean(candidate));
+      const canonicalQueue = queue.some((candidate) => candidate.id === channel.id) ? queue : [channel, ...queue];
+      liveSearchSurfQueueRef.current = canonicalQueue.map((candidate) => candidate.id);
+      discoverLivePlaybackContextRef.current = {
+        providerId: activeProviderId,
+        source: rail,
+        channels: canonicalQueue,
+        currentIndex: Math.max(0, canonicalQueue.findIndex((candidate) => candidate.id === channel.id)),
+        focusedItemId: channel.id,
+      };
+      // Discover surf destinations use the same fullscreen resolver as normal
+      // Live TV. Register the complete canonical queue before fullscreen
+      // state can move to any destination.
+      for (const queueChannel of canonicalQueue) {
+        const canonicalId = queueChannel.id.trim();
+        if (canonicalId) {
+          liveSearchPlaybackByIdRef.current.set(canonicalId, queueChannel);
+        }
+      }
+      fullscreenLaunchSourceRef.current = 'discover';
+      discoverLiveAudit('surf-context-created', {
+        source: rail,
+        queueCount: canonicalQueue.length,
+        currentIndex: discoverLivePlaybackContextRef.current.currentIndex,
+      });
+      preferredChannelFocusId.current = channel.id;
       preferChannelFocusRef.current = true;
       for (const favorite of hydrated.channels) {
         liveSearchPlaybackByIdRef.current.set(favorite.id, favorite);
-      }
-      const channel = resolveLivePlaybackChannel(channelId, channels, liveSearchPlaybackByIdRef.current);
-      if (!channel) {
-        return;
       }
       void recordRecentItem({
         providerId: activeProviderId,
@@ -1148,19 +1743,224 @@ export function LiveTvScreen() {
         artworkUrl: channel.logoUrl,
         categoryId: channel.categoryId,
       });
-      setState((current) =>
-        chooseLiveChannel(current ?? liveState ?? createLiveTvLandingState(browseCategoryId, channelId), channelId, {
-          origin: 'search',
-        }),
-      );
-      syncLiveTvMemory();
+      pendingDiscoverLiveLaunchRef.current = { channel, rail };
+      discoverLiveLaunchConsumedRef.current = false;
+      setPendingDiscoverLiveLaunch({ channel, rail });
+      discoverLiveAudit('pending-stored', {
+        pendingPresent: true,
+        modalOpen: discoverZoneOpen,
+      });
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        event: 'pending-stored',
+        rail,
+        canonicalContentId,
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        channelIdPresent: true,
+        providerIdPresent: Boolean(providerId),
+        pendingPresent: true,
+        modalOpen: discoverZoneOpen,
+        channelId: channel.id,
+      }));
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        event: 'modal-close-requested',
+        rail,
+        source: rail === 'favorites' ? 'favorite' : 'recent',
+        channelIdPresent: true,
+        providerIdPresent: Boolean(providerId),
+        pendingPresent: true,
+        modalOpen: discoverZoneOpen,
+        channelId: channel.id,
+      }));
+      discoverLiveAudit('modal-close-requested');
+      setDiscoverZoneOpen(false);
     },
-    [activeProviderId, bundle, channels, liveState, personalizationState.liveFavorites, selectedCategoryId, syncLiveTvMemory],
+    [activeProviderId, bundle, channels, discoverZoneOpen, personalizationState.liveFavorites, showNotification],
   );
+
+  useEffect(() => {
+    const pending = pendingDiscoverLiveLaunchRef.current;
+    if (!pending || discoverZoneOpen || discoverLiveLaunchConsumedRef.current) {
+      return;
+    }
+
+    if (discoverHandoffFrameRef.current != null) {
+      return;
+    }
+
+    discoverLiveAudit('modal-closed-observed', { pendingPresent: true });
+    discoverLiveAudit('pending-read', { pendingPresent: true });
+    novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+      event: 'modal-closed',
+      phase: 'overlay-closed',
+      rail: pending.rail,
+      source: pending.rail === 'favorites' ? 'favorite' : 'recent',
+      canonicalContentId: pending.channel.id,
+      channelIdPresent: true,
+      providerIdPresent: Boolean(activeProviderId),
+      pendingPresent: true,
+      modalOpen: false,
+      channelId: pending.channel.id,
+    }));
+
+    discoverLiveAudit('raf-scheduled');
+    discoverHandoffFrameRef.current = requestAnimationFrame(() => {
+      discoverHandoffFrameRef.current = null;
+      discoverLiveAudit('raf-fired');
+      const pending = pendingDiscoverLiveLaunchRef.current;
+      discoverLiveAudit('pending-read', { pendingPresent: Boolean(pending) });
+      if (!pending) {
+        discoverLiveAudit('handoff-aborted', { reason: 'pending-missing' });
+        return;
+      }
+
+      discoverLiveLaunchConsumedRef.current = true;
+      pendingDiscoverLiveLaunchRef.current = null;
+      setPendingDiscoverLiveLaunch(null);
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        event: 'pending-consumed',
+        phase: 'launch-requested',
+        rail: pending.rail,
+        source: pending.rail === 'favorites' ? 'favorite' : 'recent',
+        canonicalContentId: pending.channel.id,
+        channelIdPresent: true,
+        providerIdPresent: Boolean(activeProviderId),
+        pendingPresent: false,
+        modalOpen: false,
+        channelId: pending.channel.id,
+      }));
+      discoverLiveAudit('pending-consumed');
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        event: 'stream-resolve-requested',
+        phase: 'stream-resolve-start',
+        rail: pending.rail,
+        source: pending.rail === 'favorites' ? 'favorite' : 'recent',
+        canonicalContentId: pending.channel.id,
+        channelIdPresent: true,
+        providerIdPresent: Boolean(activeProviderId),
+        pendingPresent: false,
+        modalOpen: false,
+        channelId: pending.channel.id,
+      }));
+      discoverLiveAudit('stream-resolve-start');
+      let streamUrl: string | null | undefined;
+      try {
+        streamUrl = resolvePlaybackUrl(pending.channel);
+      } catch (error) {
+        discoverLiveAudit('stream-resolve-error', {
+          errorName: error instanceof Error ? error.name : 'UnknownError',
+          message: safeDiscoverLiveError(error),
+        });
+        discoverLiveAudit('handoff-aborted', { reason: 'stream-error' });
+        throw error;
+      }
+      if (!streamUrl) {
+        discoverLiveAudit('stream-resolve-empty', {
+          resultType: typeof streamUrl,
+          urlPresent: false,
+        });
+        discoverLiveAudit('handoff-aborted', { reason: 'stream-empty' });
+        novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+          phase: 'stream-resolve-failed',
+          rail: pending.rail,
+          canonicalContentId: pending.channel.id,
+          channelId: pending.channel.id,
+          streamUrlPresent: false,
+          fullscreenActive: false,
+          previewStreamUrlPresent: false,
+        }));
+        showNotification({
+          type: 'error',
+          title: 'Channel unavailable',
+          message: 'This channel is no longer available.',
+          duration: 6000,
+          scope: 'live',
+        });
+        return;
+      }
+
+      liveSearchPlaybackByIdRef.current.set(pending.channel.id, pending.channel);
+      setPreviewStreamSource(resolvePlaybackSource(pending.channel));
+      discoverLiveAudit('stream-resolve-success', {
+        urlPresent: true,
+        urlLength: streamUrl.length,
+      });
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        phase: 'stream-resolve-success',
+        rail: pending.rail,
+        canonicalContentId: pending.channel.id,
+        discoverZoneOpen: false,
+        channelId: pending.channel.id,
+        streamUrlPresent: true,
+        fullscreenActive: false,
+        previewStreamUrlPresent: false,
+      }));
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        event: 'fullscreen-launch-requested',
+        rail: pending.rail,
+        source: pending.rail === 'favorites' ? 'favorite' : 'recent',
+        canonicalContentId: pending.channel.id,
+        channelIdPresent: true,
+        providerIdPresent: Boolean(activeProviderId),
+        pendingPresent: false,
+        modalOpen: false,
+      }));
+      setState((current) => {
+        discoverLiveAudit('fullscreen-call', {
+          channelIdPresent: Boolean(pending.channel.id),
+          urlPresent: true,
+        });
+        const nextState = openResolvedLiveChannelFullscreen(
+          current ?? liveStateRef.current ?? createLiveTvLandingState(pending.channel.categoryId ?? '', pending.channel.id),
+          pending.channel.id,
+          streamUrl,
+        );
+        discoverLiveAudit('fullscreen-call-returned');
+        return nextState;
+      });
+      syncLiveTvMemory();
+      novacastTrace('[NovaCast Discover Live Handoff] ' + JSON.stringify({
+        phase: 'stream-bound',
+        rail: pending.rail,
+        canonicalContentId: pending.channel.id,
+        discoverZoneOpen: false,
+        channelId: pending.channel.id,
+        streamUrlPresent: true,
+        fullscreenActive: false,
+        previewStreamUrlPresent: true,
+      }));
+    });
+  }, [activeProviderId, discoverZoneOpen, pendingDiscoverLiveLaunch, previewStreamUrl, resolvePlaybackSource, resolvePlaybackUrl, showNotification, syncLiveTvMemory]);
+
+  useEffect(() => {
+    if (discoverLivePlaybackContextRef.current?.providerId !== activeProviderId) {
+      if (discoverLivePlaybackContextRef.current) {
+        discoverLiveAudit('surf-context-cleared', { reason: 'provider-change' });
+      }
+      discoverLivePlaybackContextRef.current = null;
+      liveSearchSurfQueueRef.current = null;
+    }
+  }, [activeProviderId]);
+
+  useEffect(() => {
+    return () => {
+      if (discoverLivePlaybackContextRef.current) {
+        discoverLiveAudit('surf-context-cleared', { reason: 'screen-unmount' });
+        discoverLivePlaybackContextRef.current = null;
+        liveSearchSurfQueueRef.current = null;
+      }
+      const frame = discoverHandoffFrameRef.current;
+      if (frame != null) {
+        cancelAnimationFrame(frame);
+        discoverHandoffFrameRef.current = null;
+        discoverLiveAudit('raf-cancelled', { reason: 'screen-unmount' });
+      }
+    };
+  }, []);
 
   const selectCategory = (categoryId: string) => {
     liveSearchSurfQueueRef.current = null;
     liveRetryAttemptedRef.current = false;
+    categorySelectionIsUserRef.current = true;
     preferredCategoryFocusId.current = categoryId;
     setCategoryFocusEpoch((value) => value + 1);
     scrollCategoryIntoView(categoryId);
@@ -1194,15 +1994,29 @@ export function LiveTvScreen() {
   const handleCategoryFocus = useCallback(
     (categoryId: string) => {
       focusCategoryRow(categoryId);
+      if (!firstCategoryFocusLoggedRef.current) {
+        firstCategoryFocusLoggedRef.current = true;
+        logLiveCategoryOrderAudit('first-category-focus-received', {
+          providerId: activeProviderId,
+          categoryCount: categories.length,
+          selectedCategoryId: liveStateRef.current?.selectedCategoryId ?? selectedCategoryId ?? null,
+          selectionSource: categorySelectionIsUserRef.current ? 'persisted-user' : 'auto-default',
+          orderReady: true,
+        });
+      }
       if (shouldLoadCategoryOnFocusAlone()) {
         // Pass 2: category focus must not load/tune/preview.
       }
     },
-    [focusCategoryRow],
+    [activeProviderId, categories.length, focusCategoryRow, selectedCategoryId],
   );
 
   const tuneChannel = useCallback(
     (channelId: string) => {
+      liveLoadAudit('preview-or-fullscreen-start', {
+        channelId,
+        source: 'channel-ok',
+      });
       const now = Date.now();
       if (!shouldAcceptLiveTvOkPress(channelId, lastChannelOkPressRef.current, now)) {
         return;
@@ -1211,8 +2025,21 @@ export function LiveTvScreen() {
       lastChannelOkPressRef.current = { channelId, at: now };
       const base = interactionState ?? liveState;
       const nextState = chooseLiveChannel(base ?? createLiveTvLandingState(undefined, channelId), channelId);
+      const channel = channels.find((item) => item.id === channelId);
       if (isChannelPressEnteringFullscreen(base, channelId)) {
+        discoverLivePlaybackContextRef.current = null;
         fullscreenLaunchSourceRef.current = 'channel';
+        const streamUrl = channel ? resolvePlaybackUrl(channel) : null;
+        if (!channel || !streamUrl) {
+          showNotification({
+            type: 'error',
+            title: 'Channel unavailable',
+            message: 'This channel is no longer available.',
+            duration: 6000,
+            scope: 'live',
+          });
+          return;
+        }
         logLiveSelection('fullscreen-requested', {
           focusedChannelId: focusedChannelIdRef.current,
           activePreviewChannelId: channelId,
@@ -1231,7 +2058,6 @@ export function LiveTvScreen() {
       recordLiveTvChannelTune();
       preferredChannelFocusId.current = channelId;
       enrichFocusedChannelEpg(channelId);
-      const channel = channels.find((item) => item.id === channelId);
       if (channel) {
         void recordRecentItem({
           providerId: activeProviderId,
@@ -1243,12 +2069,20 @@ export function LiveTvScreen() {
         });
       }
       if (shouldClearPreviewStreamUrl(liveState?.previewChannelId ?? null, channelId)) {
-        setPreviewStreamUrl(null);
+        setPreviewStreamSource(null);
       }
-      setState((current) => chooseLiveChannel(current ?? liveState ?? createLiveTvLandingState(undefined, channelId), channelId));
+      if (isChannelPressEnteringFullscreen(base, channelId) && channel) {
+        const streamUrl = resolvePlaybackUrl(channel);
+        if (streamUrl) {
+          setPreviewStreamSource(resolvePlaybackSource(channel));
+          setState((current) => openResolvedLiveChannelFullscreen(current ?? liveState ?? createLiveTvLandingState(undefined, channelId), channelId, streamUrl));
+        }
+      } else {
+        setState((current) => chooseLiveChannel(current ?? liveState ?? createLiveTvLandingState(undefined, channelId), channelId));
+      }
       syncLiveTvMemory();
     },
-    [activeProviderId, channels, enrichFocusedChannelEpg, interactionState, liveState, syncLiveTvMemory],
+    [activeProviderId, channels, enrichFocusedChannelEpg, interactionState, liveLoadAudit, liveState, resolvePlaybackUrl, showNotification, syncLiveTvMemory],
   );
 
   useEffect(() => {
@@ -1300,8 +2134,10 @@ export function LiveTvScreen() {
       }
 
       const currentId = liveStateRef.current?.fullscreenChannelId ?? liveStateRef.current?.previewChannelId ?? null;
+      const discoverContext = liveStateRef.current?.fullscreenChannelId ? discoverLivePlaybackContextRef.current : null;
+      const surfQueue = discoverContext?.channels ?? null;
       const adjacent = resolveLiveSurfAdjacent({
-        channelIds: resolveLiveSearchSurfQueue(
+        channelIds: surfQueue?.map((channel) => channel.id) ?? resolveLiveSearchSurfQueue(
           liveSearchSurfQueueRef.current,
           channels.map((channel) => channel.id),
         ),
@@ -1340,8 +2176,27 @@ export function LiveTvScreen() {
       });
 
       const nextId = adjacent.toChannelId;
+      if (discoverContext) {
+        discoverLiveAudit('surf-request', {
+          source: discoverContext.source,
+          direction: delta === 1 ? 'next' : 'previous',
+          fromIndex: adjacent.fromIndex,
+          toIndex: adjacent.toIndex,
+          queueCount: adjacent.queueLength,
+        });
+      }
       intendedSurfChannelIdRef.current = nextId;
-      const nextChannel = resolveLivePlaybackChannel(nextId, channels, liveSearchPlaybackByIdRef.current);
+      const nextChannel = surfQueue?.find((candidate) => candidate.id === nextId) ?? resolveLivePlaybackChannel(nextId, channels, liveSearchPlaybackByIdRef.current);
+      if (discoverContext && nextChannel) {
+        const canonicalId = nextChannel.id.trim();
+        if (canonicalId) {
+          liveSearchPlaybackByIdRef.current.set(canonicalId, nextChannel);
+          discoverLiveAudit('surf-destination-registered', {
+            source: discoverContext.source,
+            destinationIdPresent: true,
+          });
+        }
+      }
       setSurfOverlay({
         channelId: nextId,
         name: nextChannel?.name ?? 'Channel',
@@ -1391,13 +2246,21 @@ export function LiveTvScreen() {
           surfSessionId: surfSessionIdRef.current,
           requestId,
         });
+        if (discoverContext) {
+          discoverContext.currentIndex = adjacent.toIndex;
+          discoverContext.focusedItemId = nextId;
+          discoverLiveAudit('surf-launch', {
+            source: discoverContext.source,
+            destinationChannelIdPresent: true,
+          });
+        }
         setState((current) => {
           const base = current ?? liveStateRef.current;
           if (!base) {
             return current;
           }
           if (shouldClearPreviewStreamUrl(base.previewChannelId, nextId)) {
-            setPreviewStreamUrl(null);
+            setPreviewStreamSource(null);
           }
           return surfLiveFullscreenChannel(base, nextId);
         });
@@ -1470,6 +2333,7 @@ export function LiveTvScreen() {
       return;
     }
 
+    discoverLivePlaybackContextRef.current = null;
     fullscreenLaunchSourceRef.current = 'button';
     logLiveSelection('fullscreen-requested', {
       focusedChannelId: focusedChannelIdRef.current,
@@ -1485,6 +2349,90 @@ export function LiveTvScreen() {
       };
     });
   };
+
+  const favoriteChannelIds = liveFavoriteContentIds;
+  const favoriteChannel = useCallback(
+    (channelId: string) => {
+      const channel = channels.find((item) => item.id === channelId);
+      if (channel) {
+        void toggleLiveFavorite(activeProviderId, channel);
+      }
+    },
+    [activeProviderId, channels],
+  );
+  favoriteChannelRef.current = favoriteChannel;
+  if (!favoriteHoldRef.current) {
+    favoriteHoldRef.current = createFavoriteHoldDetector({
+      onTriggered: () => {
+        const channelId = focusedChannelIdRef.current;
+        if (channelId) {
+          favoriteChannelRef.current(channelId);
+        }
+      },
+    });
+  }
+  const handleNativeFavoriteTvKey = useCallback(
+    (event: { keyCode?: number; action?: number; repeatCount?: number }) => {
+      if (Platform.OS !== 'android' || !Platform.isTV) {
+        return;
+      }
+      const keyCode = event.keyCode;
+      if (keyCode !== 23 && keyCode !== 66 && keyCode !== 160) {
+        return;
+      }
+      if (!focusedChannelIdRef.current || focusedActionChannelIdRef.current) {
+        return;
+      }
+      favoriteHoldRef.current?.handleEvent({
+        keyCode,
+        eventKeyAction: event.action,
+        repeatCount: event.repeatCount,
+      });
+    },
+    [],
+  );
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !Platform.isTV) {
+      return;
+    }
+    const subscription = DeviceEventEmitter.addListener('onNovaCastNativeTvKey', handleNativeFavoriteTvKey);
+    return () => {
+      subscription.remove();
+      favoriteHoldRef.current?.cancel('screen_unmount');
+    };
+  }, [handleNativeFavoriteTvKey]);
+  const consumeFavoriteHoldSuppression = useCallback((channelId: string) => {
+    if (focusedChannelIdRef.current !== channelId) {
+      return false;
+    }
+    return favoriteHoldRef.current?.consumeSuppressedPress() ?? false;
+  }, []);
+  const handleActionFocusChange = useCallback((channelId: string, focused: boolean) => {
+    focusedActionChannelIdRef.current = focused ? channelId : null;
+    if (focused) {
+      favoriteHoldRef.current?.cancel('action_focus');
+    }
+  }, []);
+  const playChannel = useCallback(
+    (channelId: string) => {
+      if (liveState?.previewChannelId === channelId && liveState.previewStatus === 'ready') {
+        watchFullScreen();
+        return;
+      }
+      tuneChannel(channelId);
+    },
+    [liveState, tuneChannel],
+  );
+  const closeDiscoverZone = useCallback(() => {
+    setDiscoverZoneOpen(false);
+    if (!liveStateRef.current?.fullscreenChannelId && discoverLivePlaybackContextRef.current) {
+      discoverLiveAudit('surf-context-cleared', { reason: 'discover-closed' });
+      discoverLivePlaybackContextRef.current = null;
+      liveSearchSurfQueueRef.current = null;
+      setDiscoverRestoreItemId(null);
+      discoverRestoreItemIdRef.current = null;
+    }
+  }, []);
 
   const executeLiveSearch = useCallback(
     async (request: Parameters<typeof searchLiveChannels>[2]) => {
@@ -1648,7 +2596,6 @@ export function LiveTvScreen() {
                 onPress={handleReload}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color={theme.colors.textPrimary} />
-                <Text style={styles.retryText}>Retry</Text>
               </Pressable>
             </>
           ) : (
@@ -1666,7 +2613,6 @@ export function LiveTvScreen() {
                 onPress={handleReload}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color={theme.colors.textPrimary} />
-                <Text style={styles.retryText}>Retry</Text>
               </Pressable>
             </>
           )}
@@ -1685,44 +2631,37 @@ export function LiveTvScreen() {
     );
   }
 
+  if (!renderState.fullscreenChannelId && !liveCategoryStartupReady) {
+    // Startup stability loader: keep the shell/navbar usable, show a centered
+    // spinner, and render NO category/channel content until the final US-first
+    // order + selection + focus target are ready. Prevents any raw/pre-sort or
+    // "Live {id}" placeholder flash and any post-paint reorder or focus loss.
+    return (
+      <View style={styles.root}>
+        <NovaTvShell
+          activeId="live"
+          providerLabel={selectedProviderLabel}
+          preferActiveNavigationFocus={false}
+          navigationFocusable={!searchOwnsBackgroundFocus}
+          compactNavigationRail>
+          <View style={styles.statePanel}>
+            <LiveTvPlanetLoader label="Preparing live channels…" />
+          </View>
+        </NovaTvShell>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.root}>
       {!renderState.fullscreenChannelId ? (
       <NovaTvShell
         activeId="live"
-        title="Live TV"
-        subtitle="Browse channels without losing the picture."
         providerLabel={selectedProviderLabel}
         preferActiveNavigationFocus={false}
         navigationFocusable={!searchOwnsBackgroundFocus}
         compactNavigationRail
-        headerSupplement={
-          <MovieToolbar
-            accessibilityLabel="Search Live TV"
-            buttonRef={searchToolbarRef}
-            focusable={!searchOverlayVisible && !renderState.fullscreenChannelId}
-            onSearchFocus={() => setFocusedAction('search')}
-            onSearchPress={openLiveSearch}
-            discoverZoneOpen={discoverZoneOpen}
-            onDiscoverPress={() => {
-              if (searchOpen) {
-                closeLiveSearch();
-              }
-              logLivePerformance({
-                event: 'discover-zone-open',
-                elapsedMs: 0,
-                providerIdPresent: Boolean(activeProviderId && activeProviderId !== 'no-provider'),
-                categoryCount: categories.length,
-                channelCount: channels.length,
-                selectedCategoryIdPresent: Boolean(selectedCategoryId),
-                source: 'memory',
-                epgPending: false,
-                discoverPending: true,
-              });
-              setDiscoverZoneOpen(true);
-            }}
-          />
-        }>
+        >
         <View
           style={styles.screen}
           pointerEvents={searchOwnsBackgroundFocus ? 'none' : 'auto'}
@@ -1742,7 +2681,9 @@ export function LiveTvScreen() {
               tvDensity === 'normal' && styles.categoriesPanelNormal,
               tvDensity === 'comfortable' && styles.categoriesPanelComfortable,
             ]}>
-            <View style={styles.panelHeader}>
+            <View
+              style={styles.panelHeader}
+              onLayout={(event) => handleLiveLayoutAudit('header-layout', event.nativeEvent.layout)}>
               <Text style={styles.panelTitle}>Categories</Text>
               <Text style={styles.panelCount}>{formatLiveTvCategoryCount(categoryTotalCount)}</Text>
             </View>
@@ -1765,7 +2706,7 @@ export function LiveTvScreen() {
                 <LiveTvCategoryRow
                   category={item}
                   selected={item.id === renderState.selectedCategoryId}
-                  preferFocus={preferCategoryFocusRef.current && item.id === preferredCategoryFocusId.current}
+                  preferFocus={preferCategoryFocusRef.current && item.id === (preferredCategoryFocusId.current ?? renderState.selectedCategoryId ?? firstProviderCategoryId ?? null)}
                   nextFocusRight={
                     item.id === renderState.selectedCategoryId ? categoryNextFocusRightHandle : undefined
                   }
@@ -1783,12 +2724,33 @@ export function LiveTvScreen() {
               tvDensity === 'compact' && styles.channelsPanelCompact,
               tvDensity === 'normal' && styles.channelsPanelNormal,
               tvDensity === 'comfortable' && styles.channelsPanelComfortable,
-            ]}>
-            <View style={styles.panelHeader}>
+            ]}
+            onLayout={(event) => handleLiveLayoutAudit('list-stage-layout', event.nativeEvent.layout)}>
+            <View
+              style={styles.panelHeader}
+              onLayout={(event) => handleLiveLayoutAudit('header-layout', event.nativeEvent.layout)}>
               <Text style={styles.panelTitle}>Channels</Text>
-              <Text style={styles.panelCount}>
-                {showChannelPanelLoader ? '...' : channels.length.toLocaleString()}
-              </Text>
+              <View style={styles.channelHeaderActions}>
+                <MovieToolbar
+                  accessibilityLabel="Search Live TV"
+                  buttonRef={searchToolbarRef}
+                  focusable={!searchOverlayVisible && !renderState.fullscreenChannelId}
+                  onSearchFocus={() => setFocusedAction('search')}
+                  onSearchPress={openLiveSearch}
+                  discoverZoneOpen={discoverZoneOpen}
+                  onDiscoverPress={() => {
+                    if (searchOpen) closeLiveSearch();
+                    logLivePerformance({
+                      event: 'discover-zone-open', elapsedMs: 0,
+                      providerIdPresent: Boolean(activeProviderId && activeProviderId !== 'no-provider'),
+                      categoryCount: categories.length, channelCount: channels.length,
+                      selectedCategoryIdPresent: Boolean(selectedCategoryId), source: 'memory',
+                      epgPending: false, discoverPending: true,
+                    });
+                    setDiscoverZoneOpen(true);
+                  }}
+                />
+              </View>
             </View>
             {showChannelPanelLoader ? (
               <LiveTvPlanetLoader label="Loading channels…" />
@@ -1800,7 +2762,13 @@ export function LiveTvScreen() {
             ) : channels.length === 0 && loadStatus === 'empty' ? (
               <View style={styles.inlineStateNotice}>
                 <MaterialCommunityIcons name="television-off" size={22} color={theme.colors.textMuted} />
-                <Text style={styles.inlineStateText}>No channels in this category.</Text>
+                <Text style={styles.inlineStateText}>
+                  {isSyntheticLiveMyChannelsCategoryId(renderState.selectedCategoryId)
+                    ? 'No saved channels yet'
+                    : isSyntheticLiveRecentsCategoryId(renderState.selectedCategoryId)
+                      ? 'No recent channels yet'
+                      : 'No channels in this category.'}
+                </Text>
               </View>
             ) : (
               <LiveTvChannelListReveal revealKey={renderState.selectedCategoryId || selectedCategoryId}>
@@ -1808,8 +2776,17 @@ export function LiveTvScreen() {
                   channels={channels}
                   selectedChannelId={renderState.selectedChannelId}
                   previewChannelId={renderState.previewChannelId}
-                  preferFocusChannelId={preferChannelFocusRef.current ? preferredChannelFocusId.current : null}
+                  preferFocusChannelId={preferChannelFocusRef.current ? (preferredChannelFocusId.current ?? channels[0]?.id ?? null) : null}
                   categoryFocusLeftHandle={categoryFocusLeftHandle}
+                  favoriteChannelIds={favoriteChannelIds}
+                  onFavoriteChannel={favoriteChannel}
+                  onPlayChannel={playChannel}
+                  playEnabled={renderState.previewStatus === 'ready' && Boolean(renderState.previewChannelId) && !renderState.fullscreenChannelId}
+                  registerFavoriteActionRef={registerFavoriteActionRef}
+                  registerPlayActionRef={registerPlayActionRef}
+                  consumeFavoriteHoldSuppression={consumeFavoriteHoldSuppression}
+                  onActionFocusChange={handleActionFocusChange}
+                  onLayout={handleLiveListLayout}
                   listRef={channelsRef}
                   onTuneChannel={tuneChannel}
                   onChannelFocus={focusChannelRow}
@@ -1846,7 +2823,6 @@ export function LiveTvScreen() {
                       accessibilityLabel="Retry preview"
                       onPress={handlePreviewRetry}
                       style={[styles.watchButton, novaTvFocus.base]}>
-                      <Text style={styles.watchButtonText}>Retry</Text>
                     </Pressable>
                   </View>
                 ) : renderState.previewStatus === 'idle' || streamSurfaceInFullscreen || !hasLiveStream ? (
@@ -1873,48 +2849,6 @@ export function LiveTvScreen() {
                   upNext={detailPanelChannel?.next}
                 />
 
-                <View style={styles.actionRow}>
-                  <View style={styles.actionButtons}>
-                    <Pressable
-                      focusable
-                      accessibilityRole="button"
-                      accessibilityLabel={detailChannelIsFavorite ? 'Favorited' : 'Favorite'}
-                      onFocus={() => setFocusedAction('favorite')}
-                      onBlur={() => setFocusedAction(null)}
-                      onPress={() => {
-                        if (detailPanelChannel) {
-                          void toggleLiveFavorite(activeProviderId, detailPanelChannel);
-                        }
-                      }}
-                      style={[styles.favoriteButton, novaTvFocus.base, focusedAction === 'favorite' && styles.textFocusActive]}>
-                      <MaterialCommunityIcons
-                        name={detailChannelIsFavorite ? 'star' : 'star-outline'}
-                        size={18}
-                        color={theme.colors.accentHover}
-                      />
-                    </Pressable>
-                    <Pressable
-                      ref={watchButtonRef}
-                      focusable={Boolean(renderState.previewChannelId) && !renderState.fullscreenChannelId}
-                      hasTVPreferredFocus={false}
-                      accessibilityRole="button"
-                      accessibilityLabel="Watch Full Screen"
-                      {...(renderState.selectedChannelId
-                        ? { nextFocusLeft: findNodeHandle(channelRowRefs.current.get(renderState.selectedChannelId) ?? null) ?? undefined }
-                        : null)}
-                      onFocus={() => setFocusedAction('fullscreen')}
-                      onBlur={() => setFocusedAction(null)}
-                      onPress={watchFullScreen}
-                      style={[
-                        styles.watchButton,
-                        novaTvFocus.base,
-                        renderState.previewStatus !== 'ready' && styles.watchButtonDisabled,
-                        focusedAction === 'fullscreen' && styles.textFocusActive,
-                      ]}>
-                      <MaterialCommunityIcons name="play" size={20} color={theme.colors.textPrimary} />
-                    </Pressable>
-                  </View>
-                </View>
               </View>
             </View>
           ) : null}
@@ -2007,7 +2941,6 @@ export function LiveTvScreen() {
                 onPress={retryFullscreenPlayback}
                 style={[styles.watchButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color="#FFFFFF" />
-                <Text style={styles.watchButtonText}>Retry</Text>
               </Pressable>
             </View>
           ) : null}
@@ -2064,9 +2997,16 @@ export function LiveTvScreen() {
         visible={discoverZoneOpen && !liveState?.fullscreenChannelId}
         providerId={activeProviderId}
         scope="live"
-        onClose={() => setDiscoverZoneOpen(false)}
-        onSelectItem={(item) => {
-          void playFavoriteFromDiscoverZone(item.id);
+        onClose={closeDiscoverZone}
+        restoreFocusItemId={discoverRestoreItemId}
+        onRestoreFocusHandled={() => {
+          setDiscoverRestoreItemId(null);
+          discoverRestoreItemIdRef.current = null;
+        }}
+        onSelectItem={(item, rail, railItems) => {
+          if (item.mediaType === 'live' && (rail === 'favorites' || rail === 'recent')) {
+            void playDiscoverLiveChannel(item, rail, railItems);
+          }
         }}
       />
       <SearchOverlay
@@ -2153,11 +3093,6 @@ function createStyles(theme: NovaTheme) {
     backgroundColor: theme.colors.surface,
     paddingHorizontal: 16,
   },
-  retryText: {
-    color: theme.colors.textPrimary,
-    fontSize: 13,
-    fontWeight: '800',
-  },
   previewPlayer: {
     flex: 1,
     minHeight: 0,
@@ -2183,10 +3118,12 @@ function createStyles(theme: NovaTheme) {
     position: 'absolute',
     paddingVertical: 10,
     paddingHorizontal: 14,
-    borderRadius: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.78)',
+    borderRadius: NOVA_GLASS.radius.base,
+    backgroundColor: 'rgba(3, 8, 20, 0.58)',
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.subtle.borderColor,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.12)',
+    borderTopColor: NOVA_GLASS.focused.topHighlight,
   },
   mainGrid: {
     flex: 1,
@@ -2207,19 +3144,17 @@ function createStyles(theme: NovaTheme) {
     flex: 22,
     minWidth: 260,
     minHeight: 0,
-    borderRadius: 0,
-    borderWidth: 0,
-    borderRightWidth: 1,
-    borderColor: theme.colors.borderSubtle,
-    backgroundColor: 'transparent',
-    padding: 0,
-    paddingRight: 14,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    backgroundColor: 'rgba(3, 8, 20, 0.42)',
+    padding: 8,
   },
   categoriesPanelCompact: {
     flex: 22,
     minWidth: 200,
-    padding: 0,
-    paddingRight: 12,
+    padding: 6,
+    paddingRight: 6,
   },
   categoriesPanelNormal: {
     flex: 22,
@@ -2233,19 +3168,18 @@ function createStyles(theme: NovaTheme) {
     flex: 53,
     minWidth: 300,
     minHeight: 0,
-    borderRadius: 0,
-    borderWidth: 0,
-    borderRightWidth: 1,
-    borderColor: theme.colors.borderSubtle,
-    backgroundColor: 'transparent',
-    padding: 0,
-    paddingHorizontal: 14,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    backgroundColor: 'rgba(3, 8, 20, 0.42)',
+    padding: 8,
+    paddingHorizontal: 8,
   },
   channelsPanelCompact: {
     flex: 53,
     minWidth: 260,
-    padding: 0,
-    paddingHorizontal: 12,
+    padding: 6,
+    paddingHorizontal: 6,
   },
   channelsPanelNormal: {
     flex: 53,
@@ -2261,10 +3195,10 @@ function createStyles(theme: NovaTheme) {
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 5,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.borderSubtle,
+    gap: 8,
   },
   panelTitle: {
+    flexShrink: 1,
     color: theme.colors.textPrimary,
     fontSize: 20,
     fontWeight: '800',
@@ -2279,6 +3213,12 @@ function createStyles(theme: NovaTheme) {
     fontWeight: '700',
     textAlign: 'center',
     paddingVertical: 4,
+  },
+  channelHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexShrink: 0,
   },
   categoryList: {
     gap: 3,
@@ -2596,7 +3536,7 @@ function createStyles(theme: NovaTheme) {
     paddingVertical: 4,
   },
   description: {
-    color: theme.colors.textSecondary,
+    color: '#C4D0E4',
     fontSize: 13,
     lineHeight: 18,
   },
@@ -2672,10 +3612,10 @@ function createStyles(theme: NovaTheme) {
   closeButton: {
     flexShrink: 0,
     minHeight: 48,
-    borderRadius: theme.radius.md,
+    borderRadius: NOVA_GLASS.radius.base,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.22)',
-    backgroundColor: 'rgba(4,8,14,0.56)',
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: NOVA_GLASS.focused.backgroundColor,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,

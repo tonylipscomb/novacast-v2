@@ -378,6 +378,10 @@ export function MoviesScreen() {
   const detailFocusPhaseRef = useRef<MoviesDetailFocusPhase>('browse');
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [sortFocusRightHandle, setSortFocusRightHandle] = useState<number | undefined>();
+  const searchToolbarRef = useRef<View | null>(null);
+  const discoverToolbarRef = useRef<View | null>(null);
+  const [searchToolbarFocusHandle, setSearchToolbarFocusHandle] = useState<number | undefined>();
+  const [discoverToolbarFocusHandle, setDiscoverToolbarFocusHandle] = useState<number | undefined>();
   const isRestoringPlaybackFocusRef = useRef(false);
   const [restoringBrowseFocus, setRestoringBrowseFocus] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -568,6 +572,19 @@ export function MoviesScreen() {
     startupFocusOwnershipActive: startupFocusOwnershipActiveRef.current,
     playbackReturnRestoring: isRestoringPlaybackFocusRef.current,
   });
+
+  // The toolbar and Sort control live in separate components. Resolve the two
+  // toolbar handles after native attachment and only publish real changes so
+  // the horizontal graph never depends on an unstable ref callback.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const searchHandle = searchToolbarRef.current ? findNodeHandle(searchToolbarRef.current) ?? undefined : undefined;
+      const discoverHandle = discoverToolbarRef.current ? findNodeHandle(discoverToolbarRef.current) ?? undefined : undefined;
+      setSearchToolbarFocusHandle((current) => current === searchHandle ? current : searchHandle);
+      setDiscoverToolbarFocusHandle((current) => current === discoverHandle ? current : discoverHandle);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [chromeFocusable, searchOpen]);
   const activeClosingFocusMovieId = resolveMoviesClosingFocusableMovieId({
     phase: detailFocusPhase,
     targetMovieId: closingFocusMovieId,
@@ -2139,8 +2156,8 @@ export function MoviesScreen() {
           categoryId: selectedCategoryId,
           renderedIndex: snap?.movieIndex ?? null,
           listOffset: snap?.verticalOffset ?? viewportStateRef.current.offset,
-          firstVisibleIndex: snap?.firstVisibleIndex ?? null,
-          lastVisibleIndex: snap?.lastVisibleIndex ?? null,
+          firstVisibleIndex: snap?.visibleFirstIndex ?? null,
+          lastVisibleIndex: snap?.visibleLastIndex ?? null,
           gridInstanceId: getOnnMoviesGridInstanceId(),
           gridMounted: isOnnMoviesGridMounted(),
           categoriesLength: categories.length,
@@ -2601,8 +2618,8 @@ export function MoviesScreen() {
         gridInstanceId: getOnnMoviesGridInstanceId(),
         listRevision: openBrowseListRevision,
         originalOffset: snapshot.verticalOffset,
-        firstVisibleIndex: snapshot.firstVisibleIndex,
-        lastVisibleIndex: snapshot.lastVisibleIndex,
+        firstVisibleIndex: snapshot.visibleFirstIndex,
+        lastVisibleIndex: snapshot.visibleLastIndex,
         targetVisible: snapshotWasVisible,
       });
       immutableCloseTargetRef.current = immutableTarget;
@@ -2681,8 +2698,8 @@ export function MoviesScreen() {
           categoryId: snapshot.categoryId,
           renderedIndex: snapshot.movieIndex,
           listOffset: snapshot.verticalOffset,
-          firstVisibleIndex: snapshot.firstVisibleIndex,
-          lastVisibleIndex: snapshot.lastVisibleIndex,
+          firstVisibleIndex: snapshot.visibleFirstIndex,
+          lastVisibleIndex: snapshot.visibleLastIndex,
           gridInstanceId: getOnnMoviesGridInstanceId(),
           gridMounted: isOnnMoviesGridMounted(),
           currentOffset: viewportStateRef.current.offset,
@@ -4624,7 +4641,9 @@ export function MoviesScreen() {
         },
         {
           launchSource: 'play',
-          contentFit: 'cover',
+          // Preserve the complete movie frame, including credits and edge content.
+          // Series and Search playback already use the shared contain behavior.
+          contentFit: 'contain',
         },
       );
 
@@ -5500,13 +5519,14 @@ useEffect(() => {
         compactNavigationRail>
         <View style={styles.screen}>
           <View style={styles.topBar}>
-            <View style={styles.headingBlock}>
-              <Text style={styles.heading}>Movies</Text>
-              <Text style={styles.copy}>Thousands of movies. Any genre. Anytime.</Text>
-            </View>
             <MovieToolbar
               focusable={chromeFocusable && !searchBlocksBrowse && backgroundTvFocusEnabled}
               hasTVPreferredFocus={false}
+              buttonRef={searchToolbarRef}
+              discoverButtonRef={discoverToolbarRef}
+              searchNextFocusRight={discoverToolbarFocusHandle}
+              discoverNextFocusLeft={searchToolbarFocusHandle}
+              discoverNextFocusRight={sortFocusRightHandle}
               onSearchFocus={() => {
                 // Stage 4.2L.2: Search may log unexpected focus but must NEVER call
                 // requestTvFocus / fight native focus (fatal on Android TV).
@@ -5711,7 +5731,7 @@ useEffect(() => {
                     onSortChange={setSort}
                     showRatingSort={categoryHasRatings}
                     isDiscover={isDiscoverCategory}
-                    sortFocusLeftHandle={categoryFocusLeftHandle}
+                    sortFocusLeftHandle={discoverToolbarFocusHandle ?? searchToolbarFocusHandle ?? categoryFocusLeftHandle}
                     onSortFocusHandleReady={setSortFocusRightHandle}
                     sortFocusable={chromeFocusable && !searchBlocksBrowse && backgroundTvFocusEnabled}
                     loadMore={handleLoadMore}
@@ -5969,13 +5989,18 @@ function createMoviesStyles(theme: NovaTheme) {
     screen: {
       flex: 1,
       minHeight: 0,
-      paddingTop: 4,
-      gap: 12,
+      position: 'relative',
+      paddingTop: 0,
+      gap: 6,
     },
     topBar: {
-      minHeight: 48,
+      position: 'absolute',
+      top: 0,
+      right: 220,
+      zIndex: 4,
+      minHeight: 36,
       flexDirection: 'row',
-      alignItems: 'flex-start',
+      alignItems: 'center',
       justifyContent: 'space-between',
       gap: 12,
     },
@@ -5985,14 +6010,14 @@ function createMoviesStyles(theme: NovaTheme) {
     },
     heading: {
       color: theme.colors.textPrimary,
-      fontSize: 32,
-      fontWeight: '900',
-      letterSpacing: -0.5,
+      fontSize: 28,
+      fontWeight: '800',
+      letterSpacing: -0.4,
     },
     copy: {
-      marginTop: 2,
+      marginTop: 1,
       color: theme.colors.textSecondary,
-      fontSize: 14,
+      fontSize: 13,
     },
     contentRow: {
       flex: 1,

@@ -14,6 +14,7 @@ import {
 
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { novaTheme } from '@/theme';
 
@@ -1374,10 +1375,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingBottom: 18,
     paddingTop: 12,
-    backgroundColor: 'rgba(3,7,12,0.82)',
+    backgroundColor: 'rgba(3,7,12,0.62)',
     gap: 8,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.08)',
+    borderTopColor: NOVA_GLASS.subtle.borderColor,
+    borderTopLeftRadius: NOVA_GLASS.radius.base,
+    borderTopRightRadius: NOVA_GLASS.radius.base,
   },
   topBar: {
     flexDirection: 'row',
@@ -1422,7 +1425,7 @@ const styles = StyleSheet.create({
     borderRadius: 0,
     borderWidth: 1,
     borderColor: novaTheme.colors.borderSubtle,
-    backgroundColor: 'rgba(18,24,34,0.88)',
+    backgroundColor: NOVA_GLASS.subtle.backgroundColor,
     paddingHorizontal: 10,
     flexDirection: 'row',
     alignItems: 'center',
@@ -1477,13 +1480,13 @@ const styles = StyleSheet.create({
     borderColor: novaTheme.colors.borderSubtle,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: NOVA_GLASS.subtle.backgroundColor,
   },
   playButton: {
     minWidth: 52,
     minHeight: 44,
-    backgroundColor: novaTheme.colors.accent,
-    borderColor: novaTheme.colors.accent,
+    backgroundColor: NOVA_GLASS.active.backgroundColor,
+    borderColor: NOVA_GLASS.active.borderColor,
   },
   controlButtonDisabled: {
     opacity: 0.35,

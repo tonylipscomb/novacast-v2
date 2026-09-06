@@ -12,6 +12,7 @@ import {
   endCatalogGuidePriority,
 } from './catalogSyncGuidePriority.ts';
 import { logContentSortAuditPayload } from '../media-browser/contentSortAudit.ts';
+import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
 import {
   buildContentSortPageMetadata,
   categoryHasValidRatings,
@@ -38,7 +39,12 @@ import {
   normalizeProviderCategoryId,
   type ProviderCategoryType,
 } from './categoryNormalization.ts';
-import { isSyntheticLiveFavoritesCategoryId } from './liveCategoryIdSafety.ts';
+import { isSyntheticLiveFavoritesCategoryId, isSyntheticLiveCategoryId } from './liveCategoryIdSafety.ts';
+import {
+  assignLiveStreamCategoryId,
+  LIVE_UNKNOWN_CATEGORY_ID,
+  mergeLiveMetadataWithDumpCategories,
+} from './liveCatalogCompletion.ts';
 import {
   partitionLiveItemsUsFirst,
   sortLiveCategoriesUsFirst,
@@ -66,6 +72,9 @@ import {
   type XtreamVodInfoResponse,
   type XtreamVodStreamResponse,
 } from './xtreamClient.ts';
+import { logSampledLiveStreamRow } from './liveStreamRowDiagnostics.ts';
+import { summarizeXtreamAccountEntitlements } from './providerEntitlementAudit.ts';
+import { classifyProviderBoundaryError, logProviderBoundary } from './providerBoundaryDiagnostics.ts';
 const POSTER_STYLE_KEYS = ['ember', 'signal', 'glacier', 'orbit', 'midnight', 'onyx', 'aurora', 'dune'] as const;
 
 /** Xtream has no portable pagination contract; keep fallback indexing bounded. */
@@ -184,6 +193,7 @@ export type ProviderSeriesPoster = {
   seriesId: string;
   posterUrl?: string;
   addedAt?: number;
+  releaseDate?: string;
   latestEpisodeDate?: string | number;
   popularity?: number;
 };
@@ -214,6 +224,12 @@ export interface ProviderLiveRepository {
    * getTotalChannelCount when Account needs an accurate figure.
    */
   getApproximateTotalChannelCount?(signal?: AbortSignal): Promise<number>;
+  /**
+   * Absolute Xtream `get_live_streams` URL for diagnostic dumps. Never log.
+   * Optional so Live publication paths do not depend on it.
+   */
+  getLiveDumpRequestUrl?(): string | null;
+  getLiveCategoryStreamRequestUrl?(categoryId: string): string | null;
   getChannels(categoryId: string, signal?: AbortSignal): Promise<ProviderLiveChannel[]>;
   getChannel(channelId: string, signal?: AbortSignal): Promise<ProviderLiveChannel | null>;
   getShortEpg(
@@ -458,6 +474,7 @@ function mapXtreamSeriesPoster(
     rating: typeof stream.rating === 'number' ? String(stream.rating) : typeof stream.rating === 'string' ? stream.rating : undefined,
     tone: toneForIndex(index),
     posterUrl: resolveMediaUrl(baseUrl, coverCandidate),
+    releaseDate: stream.releasedate,
     addedAt: normalizeAddedTimestamp(stream.added),
     latestEpisodeDate: stream.last_modified ?? stream.releasedate ?? stream.added,
     popularity: normalizeRating(stream.popularity) || undefined,
@@ -982,8 +999,9 @@ function mapLiveStream(stream: XtreamLiveStreamResponse, index: number, category
   const number = toSafeNumber(stream.num ?? stream.stream_id, index + 1);
   const channelId = String(stream.stream_id ?? `${categoryId}-${index}`);
   const shortName = shortNameForTitle(name);
+  logSampledLiveStreamRow('xtream-api-row', stream);
 
-  return {
+  const channel = {
     id: channelId,
     categoryId,
     number,
@@ -1006,6 +1024,15 @@ function mapLiveStream(stream: XtreamLiveStreamResponse, index: number, category
     containerExtension: stream.container_extension?.trim() || undefined,
     countryCode: parsedPrefix.countryCode,
   };
+  logSampledLiveStreamRow('provider-channel', {
+    ...channel,
+    stream_id: channel.id,
+    category_id: channel.categoryId,
+    container_extension: channel.containerExtension,
+    direct_source: channel.streamUrl,
+    stream_type: (stream as { stream_type?: unknown }).stream_type,
+  });
+  return channel;
 }
 
 export function resolveMediaUrl(baseUrl: string, raw?: string | null): string | undefined {
@@ -1234,6 +1261,8 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
   let cachedLiveStreamCount = 0;
   let cachedAllLiveStreamsUsFirst: XtreamLiveStreamResponse[] | null = null;
   let loadingAllLiveStreamsUsFirst: Promise<XtreamLiveStreamResponse[]> | null = null;
+  let authoritativeLiveDump: XtreamLiveStreamResponse[] | null = null;
+  let loadingAuthoritativeLiveDump: Promise<XtreamLiveStreamResponse[]> | null = null;
   const liveStreamEpgIds = new Map<string, string>();
   let guideEpgProbeStarted = false;
   let guideProbeAllStreams: XtreamLiveStreamResponse[] = [];
@@ -1250,7 +1279,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
   }
 
   function startGuideEpgProbe(categoryId: string, categoryStreams: XtreamLiveStreamResponse[]) {
-    if (guideEpgProbeStarted || !categoryId || categoryId === 'all' || isSyntheticLiveFavoritesCategoryId(categoryId)) {
+    if (guideEpgProbeStarted || !categoryId || categoryId === 'all' || isSyntheticLiveCategoryId(categoryId)) {
       return;
     }
     // Full-catalog dump + sync scan of every live stream. Release Live browse must not run this.
@@ -1309,31 +1338,49 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
   function invalidateLiveStreamOrderCache() {
     cachedAllLiveStreamsUsFirst = null;
     loadingAllLiveStreamsUsFirst = null;
+    authoritativeLiveDump = null;
+    loadingAuthoritativeLiveDump = null;
     liveCategoryCountsLoaded = false;
     liveStreamCountMayBeTruncated = false;
     liveCategoryCountCache.clear();
     cachedLiveStreamCount = 0;
   }
 
+  async function loadAuthoritativeLiveDump(signal?: AbortSignal) {
+    if (authoritativeLiveDump) {
+      return authoritativeLiveDump;
+    }
+    if (!loadingAuthoritativeLiveDump) {
+      loadingAuthoritativeLiveDump = (async () => {
+        const streams = dedupeXtreamLiveStreamsByStreamId(await client.getLiveStreams(undefined, signal));
+        authoritativeLiveDump = streams;
+        applyLiveStreamCounts(streams, streams.length >= XTREAM_MAX_ITEMS_PER_RESPONSE);
+        return streams;
+      })().finally(() => {
+        loadingAuthoritativeLiveDump = null;
+      });
+    }
+    return loadingAuthoritativeLiveDump;
+  }
+
   async function resolveLiveCategoryStreamsRaw(categoryId: string | undefined, signal?: AbortSignal) {
+    const dump = enrichLiveStreamsWithKnownEpgIds(await loadAuthoritativeLiveDump(signal));
     if (!categoryId || categoryId === 'all') {
-      const streams = await client.getLiveStreams(undefined, signal);
-      const enriched = enrichLiveStreamsWithKnownEpgIds(streams);
-      guideDevLog('raw-streams', { categoryId: 'all', ...guideEpgIdDiagnostics(enriched) });
-      return enriched;
+      guideDevLog('raw-streams', { categoryId: 'all', ...guideEpgIdDiagnostics(dump) });
+      return dump;
     }
 
-    const serverSideCategoryId = categoryId === fallbackProviderCategoryId('live') ? undefined : categoryId;
-    const allStreams = await client.getLiveStreams(serverSideCategoryId, signal);
-    startGuideEpgProbe(categoryId, allStreams);
-    const enrichedStreams = enrichLiveStreamsWithKnownEpgIds(allStreams);
-    const filtered = enrichedStreams.filter(
-      (stream) => resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds) === categoryId,
-    );
+    const filtered =
+      categoryId === LIVE_UNKNOWN_CATEGORY_ID
+        ? dump.filter((stream) => !normalizeProviderCategoryId(stream.category_id))
+        : dump.filter((stream) => normalizeProviderCategoryId(stream.category_id) === categoryId);
+    if (categoryId !== LIVE_UNKNOWN_CATEGORY_ID) {
+      startGuideEpgProbe(categoryId, dump);
+    }
     guideDevLog('raw-streams', {
       categoryId,
-      serverStreamCount: allStreams.length,
-      serverStreamsWithEpgId: guideEpgIdDiagnostics(enrichedStreams).streamsWithEpgId,
+      serverStreamCount: dump.length,
+      serverStreamsWithEpgId: guideEpgIdDiagnostics(dump).streamsWithEpgId,
       ...guideEpgIdDiagnostics(filtered),
     });
     return filtered;
@@ -1609,13 +1656,16 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       }
       return client.buildPlayerApiUrl('get_vod_streams', { category_id: categoryId });
     },
+    async getAccountEntitlementSnapshot() {
+      const response = await client.getAccountInfo();
+      return summarizeXtreamAccountEntitlements(response, client.baseUrl);
+    },
   };
 
   function applyLiveStreamCounts(streams: XtreamLiveStreamResponse[], mayBeTruncated: boolean) {
     liveCategoryCountCache.clear();
-    liveCategoryIds.forEach((categoryId) => liveCategoryCountCache.set(categoryId, 0));
     for (const stream of streams) {
-      const categoryId = resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds);
+      const categoryId = assignLiveStreamCategoryId(stream.category_id);
       liveCategoryCountCache.set(categoryId, (liveCategoryCountCache.get(categoryId) ?? 0) + 1);
     }
     cachedLiveStreamCount = streams.length;
@@ -1659,7 +1709,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
           seenStreamIds.add(streamId);
         }
 
-        const resolvedCategoryId = resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds);
+        const resolvedCategoryId = assignLiveStreamCategoryId(stream.category_id);
         liveCategoryCountCache.set(resolvedCategoryId, (liveCategoryCountCache.get(resolvedCategoryId) ?? 0) + 1);
       }
     }
@@ -1688,7 +1738,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
     }
 
     await ensureLiveCategoryIds(signal);
-    const dump = dedupeXtreamLiveStreamsByStreamId(await client.getLiveStreams(undefined, signal));
+    const dump = await loadAuthoritativeLiveDump(signal);
     const dumpLikelyTruncated = dump.length >= XTREAM_MAX_ITEMS_PER_RESPONSE && liveCategoryIds.size > 0;
     applyLiveStreamCounts(dump, dumpLikelyTruncated);
 
@@ -1706,7 +1756,35 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       );
       liveCategoryIds.clear();
       mappedCategories.forEach((category) => liveCategoryIds.add(category.id));
-      return mappedCategories.map((category) => ({
+      const dump = await loadAuthoritativeLiveDump(signal);
+      const streamCategoryIds = new Set<string>();
+      let missingCategoryIdCount = 0;
+      for (const stream of dump) {
+        const categoryId = normalizeProviderCategoryId(stream.category_id);
+        if (categoryId) {
+          streamCategoryIds.add(categoryId);
+        } else {
+          missingCategoryIdCount += 1;
+        }
+      }
+      const merged = mergeLiveMetadataWithDumpCategories({
+        metadata: mappedCategories,
+        streamCategoryIds,
+        missingCategoryIdCount,
+      });
+      const derived = merged.categories.filter((category) => category.derived);
+      const extraCategories: ProviderLiveCategory[] = derived.map((category, index) => {
+        liveCategoryIds.add(category.id);
+        return {
+          id: category.id,
+          renderKey: buildCategoryRenderKey(category.id, mappedCategories.length + index),
+          name: category.name,
+          rawName: category.name,
+          count: liveCategoryCountCache.get(category.id) ?? 0,
+          icon: 'flag-outline' as const,
+        };
+      });
+      return [...mappedCategories, ...extraCategories].map((category) => ({
         ...category,
         count: category.count ?? liveCategoryCountCache.get(category.id) ?? null,
       }));
@@ -1732,8 +1810,17 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       await loadLiveStreamIndex(signal, { accurate: false });
       return cachedLiveStreamCount;
     },
+    getLiveDumpRequestUrl() {
+      return client.buildPlayerApiUrl('get_live_streams');
+    },
+    getLiveCategoryStreamRequestUrl(categoryId: string) {
+      if (!categoryId || categoryId === 'all') {
+        return client.buildPlayerApiUrl('get_live_streams');
+      }
+      return client.buildPlayerApiUrl('get_live_streams', { category_id: categoryId });
+    },
     async getChannels(categoryId: string, signal) {
-      if (isSyntheticLiveFavoritesCategoryId(categoryId)) {
+      if (isSyntheticLiveCategoryId(categoryId)) {
         console.info('[NovaCast Live Category]', {
           event: 'selection-rejected',
           categoryId,
@@ -1744,9 +1831,8 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       }
       const streams = await resolveLiveCategoryStreams(categoryId, signal);
       return streams
-        .slice(0, XTREAM_MAX_ITEMS_PER_CATEGORY)
         .map((stream, index) =>
-          mapLiveStream(stream, index, resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds)),
+          mapLiveStream(stream, index, assignLiveStreamCategoryId(stream.category_id)),
         );
     },
     async getChannel(channelId: string, signal) {
@@ -1758,7 +1844,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
         return null;
       }
       const stream = streams[index];
-      return mapLiveStream(stream, index, resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds));
+      return mapLiveStream(stream, index, assignLiveStreamCategoryId(stream.category_id));
     },
     async getShortEpg(channelId: string, limit = 3, signal, epgChannelId?: string) {
       const result = await fetchShortEpgWithFallback(client, channelId, epgChannelId, limit, signal);
@@ -1816,13 +1902,43 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
         return streams.map((stream, index) => mapSeriesPoster(stream, index, categoryId, client.baseUrl));
       },
       getCatalogListRequestUrl(categoryId: string) {
-        if (!categoryId || categoryId === 'all' || categoryId === fallbackProviderCategoryId('series')) {
+        // `all` requests the unfiltered get_series dump (no category_id).
+        // Diagnostic completeness uses this; Series publication still crawls per category.
+        if (!categoryId || categoryId === 'all') {
+          return client.buildPlayerApiUrl('get_series');
+        }
+        if (categoryId === fallbackProviderCategoryId('series')) {
           return null;
         }
         return client.buildPlayerApiUrl('get_series', { category_id: categoryId });
       },
       async getSeriesInfo(seriesId: string, signal) {
-        return client.getSeriesInfo(seriesId, signal).catch(() => null);
+        const startedAt = Date.now();
+        return client.getSeriesInfo(seriesId, signal).then((info) => {
+          if (isNovaCastTraceLoggingEnabled()) {
+            console.info('[NovaCast Series Compatibility Audit]', {
+              event: info == null ? 'provider-returned-null' : 'repository-response',
+              action: 'get_series_info',
+              providerSeriesIdPresent: Boolean(String(seriesId).trim()),
+              normalizedResultNull: info == null,
+              timestamp: Date.now(),
+            });
+          }
+          return info;
+        }).catch((error) => {
+          const classification = classifyProviderBoundaryError(error);
+          logProviderBoundary('[NovaCast Series Provider Request]', {
+            event: 'error',
+            seriesId: String(seriesId),
+            requestAction: 'get_series_info',
+            providerIdPresent: Boolean(client.providerId),
+            credentialsPresent: Boolean(client.username && client.password),
+            providerBasePresent: Boolean(client.baseUrl),
+            ...classification,
+            durationMs: Date.now() - startedAt,
+          });
+          return null;
+        });
       },
     },
     guide: {
@@ -1843,7 +1959,7 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
         });
         const mappedChannels = streams
           .slice(channelOffset, channelOffset + channelLimit)
-          .map((stream, index) => mapLiveStream(stream, channelOffset + index, resolveProviderStreamCategoryId(stream.category_id, 'live', liveCategoryIds)));
+          .map((stream, index) => mapLiveStream(stream, channelOffset + index, assignLiveStreamCategoryId(stream.category_id)));
         guideDevLog('mapped-channels', {
           channelCount: mappedChannels.length,
           channelsWithEpgId: mappedChannels.filter((channel) => Boolean(channel.epgChannelId)).length,

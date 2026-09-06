@@ -75,3 +75,9 @@ export function isValidRating(value: unknown) {
 export function normalizeRating(value: unknown) {
   return parseProviderRating(value)?.value ?? 0;
 }
+
+/** Stable one-decimal presentation for poster/detail rating badges. */
+export function formatRatingOneDecimal(value: unknown) {
+  const rating = parseProviderRating(value);
+  return rating ? rating.value.toFixed(1) : null;
+}

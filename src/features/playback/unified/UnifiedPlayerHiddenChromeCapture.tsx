@@ -240,7 +240,8 @@ export function UnifiedPlayerVodFocusRouter({
         accessible={false}
         importantForAccessibility="no"
         onFocus={handleAnchorFocus}
-        hasTVPreferredFocus={!chromeVisible}
+        // Hidden playback chrome is an explicit handoff target, never a
+        // startup preferred-focus owner. Home owns first native focus.
         {...(handles.left != null ? { nextFocusLeft: handles.left } : {})}
         {...(handles.right != null ? { nextFocusRight: handles.right } : {})}
         {...(!chromeVisible && wakeHandles.up != null ? { nextFocusUp: wakeHandles.up } : {})}

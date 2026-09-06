@@ -20,10 +20,15 @@ export function UnifiedPlayerLoadingState({ title }: UnifiedPlayerLoadingStatePr
 const styles = StyleSheet.create({
   container: {
     ...StyleSheet.absoluteFillObject,
+    // Keep the loader centered in the video area, above the bottom control
+    // glass instead of placing it behind the play/pause button.
+    bottom: 116,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'transparent',
-    // Below control chrome (zIndex 3) so the badge never covers title / seek UI.
-    zIndex: 2,
+    // Above the control chrome so the loader remains visible while the player
+    // is resolving its source instead of being hidden behind the play button.
+    zIndex: 4,
+    elevation: 4,
   },
 });

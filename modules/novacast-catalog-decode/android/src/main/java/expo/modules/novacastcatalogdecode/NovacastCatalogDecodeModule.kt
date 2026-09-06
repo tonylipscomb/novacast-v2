@@ -89,6 +89,7 @@ class NovacastCatalogDecodeModule : Module() {
         val categoryPosition = (options["categoryPosition"] as? Number)?.toInt()
         val totalCategoryCount = (options["totalCategoryCount"] as? Number)?.toInt()
         val requestAttempt = ((options["requestAttempt"] as? Number)?.toInt() ?: 1)
+        val preserveLiveEpgChannelId = options["preserveLiveEpgChannelId"] as? Boolean ?: false
 
         val jobId = UUID.randomUUID().toString()
         val job = DecodeJob(
@@ -105,6 +106,7 @@ class NovacastCatalogDecodeModule : Module() {
           categoryPosition = categoryPosition,
           totalCategoryCount = totalCategoryCount,
           requestAttempt = requestAttempt,
+          preserveLiveEpgChannelId = preserveLiveEpgChannelId,
         )
         jobs[jobId] = job
         job.start(scope) {
@@ -367,6 +369,7 @@ private class DecodeJob(
   private val categoryPosition: Int?,
   private val totalCategoryCount: Int?,
   private val requestAttempt: Int,
+  private val preserveLiveEpgChannelId: Boolean,
 ) {
   private val channel = Channel<DecodeBatch>(capacity = 0) // rendezvous backpressure
   private val cancelled = AtomicBoolean(false)
@@ -660,7 +663,7 @@ private class DecodeJob(
         "streamExtension" to stringField(raw, "container_extension"),
         "providerSortOrder" to index,
         "seriesId" to null,
-      )
+      ) + if (preserveLiveEpgChannelId) mapOf("epgChannelId" to stringField(raw, "epg_channel_id")) else emptyMap()
     }
   }
 

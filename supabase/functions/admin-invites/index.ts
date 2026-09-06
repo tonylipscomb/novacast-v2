@@ -1,9 +1,9 @@
-import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
+import { adminJsonResponse, adminOptionsResponse, readJson } from '../_shared/http.ts';
 import { requireAdmin } from '../_shared/admin.ts';
 import { createPairingCode, hashCode } from '../_shared/security.ts';
 
 Deno.serve(async (request) => {
-  if (request.method === 'OPTIONS') return optionsResponse();
+  if (request.method === 'OPTIONS') return adminOptionsResponse(request);
 
   try {
     const { client, user } = await requireAdmin(request);
@@ -16,18 +16,18 @@ Deno.serve(async (request) => {
         )
         .order('created_at', { ascending: false });
       if (error) throw new Error('admin_query_failed');
-      return jsonResponse({ invitations: data ?? [] });
+      return adminJsonResponse(request, { invitations: data ?? [] });
     }
 
     if (request.method !== 'POST' && request.method !== 'PATCH') {
-      return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
+      return adminJsonResponse(request, { errorCategory: 'method_not_allowed' }, 405);
     }
 
     const body = await readJson(request);
 
     if (request.method === 'PATCH') {
       const id = typeof body?.id === 'string' ? body.id : '';
-      if (!id) return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+      if (!id) return adminJsonResponse(request, { errorCategory: 'invalid_request' }, 400);
 
       const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
       if (['active', 'paused', 'revoked'].includes(String(body?.status))) patch.status = body.status;
@@ -52,14 +52,14 @@ Deno.serve(async (request) => {
 
       const { error } = await client.from('beta_invites').update(patch).eq('id', id);
       if (error) throw new Error('admin_update_failed');
-      return jsonResponse({ ok: true });
+      return adminJsonResponse(request, { ok: true });
     }
 
     const code = createPairingCode();
     const durationHours = Number(body?.activationDurationHours);
     const managedProviderId = typeof body?.managedProviderId === 'string' ? body.managedProviderId : '';
     if (!managedProviderId) {
-      return jsonResponse({ errorCategory: 'managed_provider_required' }, 400);
+      return adminJsonResponse(request, { errorCategory: 'managed_provider_required' }, 400);
     }
     const { data: managedProvider, error: providerError } = await client
       .from('managed_providers')
@@ -67,10 +67,10 @@ Deno.serve(async (request) => {
       .eq('id', managedProviderId)
       .maybeSingle();
     if (providerError || !managedProvider) {
-      return jsonResponse({ errorCategory: 'provider_not_found' }, 400);
+      return adminJsonResponse(request, { errorCategory: 'provider_not_found' }, 400);
     }
     if (String(managedProvider.status ?? '') !== 'active') {
-      return jsonResponse({ errorCategory: 'provider_inactive' }, 400);
+      return adminJsonResponse(request, { errorCategory: 'provider_inactive' }, 400);
     }
     const { data, error } = await client
       .from('beta_invites')
@@ -95,10 +95,10 @@ Deno.serve(async (request) => {
       .single();
 
     if (error || !data) throw new Error('admin_create_failed');
-    return jsonResponse({ invitation: data, code });
+    return adminJsonResponse(request, { invitation: data, code });
   } catch (error) {
     const category =
       error instanceof Error && error.message === 'admin_unauthorized' ? error.message : 'admin_request_failed';
-    return jsonResponse({ errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);
+    return adminJsonResponse(request, { errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);
   }
 });

@@ -21,6 +21,7 @@ export type LiveChannelIndexEntry = {
   tone?: string;
   logoUrl?: string;
   containerExtension?: string;
+  streamUrl?: string;
   // search-live-s1-cached-index
   // Cache normalized fields once during ingestion instead of rebuilding a haystack per keystroke.
   normalizedName: string;
@@ -71,6 +72,15 @@ export function ingestLiveSearchCategories(
   }
 }
 
+export function getLiveSearchCategoryName(providerId: string, categoryId: string): string | undefined {
+  const id = categoryId.trim();
+  if (!id) {
+    return undefined;
+  }
+  const name = categoryNames.get(providerId)?.get(id)?.trim();
+  return name || undefined;
+}
+
 export function findMatchingLiveCategoryIds(providerId: string, query: string) {
   const map = categoryNames.get(providerId);
   if (!map?.size) {
@@ -112,6 +122,7 @@ export function ingestLiveChannels(providerId: string, channels: ProviderLiveCha
       tone: channel.tone,
       logoUrl: channel.logoUrl,
       containerExtension: channel.containerExtension,
+      streamUrl: channel.streamUrl,
       normalizedName,
       normalizedCurrent,
       normalizedCategory: normalizeSearchQuery(categoryName),
@@ -151,6 +162,7 @@ function toLiveSearchResult(providerId: string, entry: LiveChannelIndexEntry): L
     categoryName: entry.categoryName,
     currentProgram: entry.current,
     containerExtension: entry.containerExtension,
+    streamUrl: entry.streamUrl,
   };
 }
 

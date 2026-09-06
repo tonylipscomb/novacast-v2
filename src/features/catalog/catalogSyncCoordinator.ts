@@ -1,4 +1,4 @@
-import type { CatalogMediaType } from './catalogTypes.ts';
+import type { CatalogSyncMediaType } from './catalogTypes.ts';
 
 export type CatalogSyncCoordinatorStatus =
   | 'idle'
@@ -42,14 +42,14 @@ function nowMs(): number {
   return Date.now();
 }
 
-export function buildCatalogSyncKey(providerId: string, mediaType: CatalogMediaType): string {
+export function buildCatalogSyncKey(providerId: string, mediaType: CatalogSyncMediaType): string {
   return `${providerId}::${mediaType}`;
 }
 
-function parseCatalogSyncKey(key: string): { providerId: string; mediaType: CatalogMediaType } {
+function parseCatalogSyncKey(key: string): { providerId: string; mediaType: CatalogSyncMediaType } {
   const separatorIndex = key.indexOf('::');
   const providerId = key.slice(0, separatorIndex);
-  const mediaType = key.slice(separatorIndex + 2) as CatalogMediaType;
+  const mediaType = key.slice(separatorIndex + 2) as CatalogSyncMediaType;
   return { providerId, mediaType };
 }
 
@@ -66,7 +66,7 @@ function bumpGeneration(key: string): number {
 function matchesKeyFilter(
   key: string,
   providerId?: string,
-  mediaType?: CatalogMediaType,
+  mediaType?: CatalogSyncMediaType,
 ): boolean {
   const parsed = parseCatalogSyncKey(key);
   if (providerId && parsed.providerId !== providerId) {
@@ -82,6 +82,10 @@ function isInFlight(job: CatalogSyncJob | undefined): job is CatalogSyncJob & { 
   return Boolean(job?.promise && (job.status === 'queued' || job.status === 'running'));
 }
 
+export function getCatalogSyncEpoch(key: string): number {
+  return getGeneration(key);
+}
+
 export function getCatalogSyncCancelToken(key: string): CatalogSyncCancelToken {
   if (!keyGenerations.has(key)) {
     keyGenerations.set(key, 0);
@@ -95,7 +99,7 @@ export function getCatalogSyncCancelToken(key: string): CatalogSyncCancelToken {
 
 export function getCatalogSyncJobStatus(
   providerId: string,
-  mediaType: CatalogMediaType,
+  mediaType: CatalogSyncMediaType,
 ): CatalogSyncJobStatus {
   const key = buildCatalogSyncKey(providerId, mediaType);
   const job = jobs.get(key);
@@ -112,7 +116,7 @@ export function getCatalogSyncJobStatus(
 
 export function isCatalogSyncRunning(
   providerId?: string,
-  mediaType?: CatalogMediaType,
+  mediaType?: CatalogSyncMediaType,
 ): boolean {
   for (const [key, job] of jobs) {
     if (!matchesKeyFilter(key, providerId, mediaType)) {
@@ -125,9 +129,15 @@ export function isCatalogSyncRunning(
   return false;
 }
 
+export type CatalogSyncCancelMeta = {
+  cancelSource?: string;
+  cancelCaller?: string;
+};
+
 export function cancelCatalogSync(
   providerId?: string,
-  mediaType?: CatalogMediaType,
+  mediaType?: CatalogSyncMediaType,
+  meta?: CatalogSyncCancelMeta,
 ): void {
   const keysToCancel = new Set<string>([...jobs.keys(), ...keyGenerations.keys()]);
   if (providerId && mediaType) {
@@ -138,7 +148,23 @@ export function cancelCatalogSync(
     if (!matchesKeyFilter(key, providerId, mediaType)) {
       continue;
     }
+    const parsed = parseCatalogSyncKey(key);
+    const previousEpoch = getGeneration(key);
     bumpGeneration(key);
+    if (parsed.mediaType === 'series') {
+      void import('../providers/seriesCancellationAudit.ts')
+        .then((audit) => {
+          audit.noteSeriesCancelRequested({
+            cancelSource: meta?.cancelSource ?? 'coordinator-replacement',
+            cancelCaller: meta?.cancelCaller ?? 'cancelCatalogSync',
+            abortReason: 'catalog-sync-coordinator-generation-bumped',
+            providerId: parsed.providerId,
+            coordinatorEpoch: getGeneration(key),
+            workerEpoch: previousEpoch,
+          });
+        })
+        .catch(() => undefined);
+    }
     const job = jobs.get(key);
     if (!job) {
       continue;
@@ -148,8 +174,11 @@ export function cancelCatalogSync(
   }
 }
 
-export function invalidateCatalogSyncForProvider(providerId: string): void {
-  cancelCatalogSync(providerId);
+export function invalidateCatalogSyncForProvider(
+  providerId: string,
+  meta?: CatalogSyncCancelMeta,
+): void {
+  cancelCatalogSync(providerId, undefined, meta);
   void import('./nativeCatalogDecode.ts')
     .then((mod) => mod.cancelNativeDecodeJobsForProvider(providerId))
     .catch(() => undefined);
@@ -189,21 +218,72 @@ async function delayMs(ms: number, key: string, runGeneration: number): Promise<
   return currentEpoch === runGeneration;
 }
 
+function logMoviePromiseProbe(event: string, fields: Record<string, unknown>) {
+  console.info(
+    '[NovaCast Movie Promise Probe]',
+    JSON.stringify({
+      event,
+      mediaType: 'movie',
+      timestamp: Date.now(),
+      providerId: fields.providerId ?? null,
+      runId: fields.runId ?? null,
+      generation: fields.generation ?? fields.coordinatorEpoch ?? null,
+      sqliteEnabled: fields.sqliteEnabled ?? null,
+      movieFinishCalled: fields.movieFinishCalled ?? null,
+      movieFinishOutcome: fields.movieFinishOutcome ?? null,
+      returnReason: fields.returnReason ?? null,
+      abandonedOpenSqliteGeneration: fields.abandonedOpenSqliteGeneration ?? null,
+      movieStatus: fields.movieStatus ?? null,
+      seriesStatus: fields.seriesStatus ?? null,
+      ...fields,
+    }),
+  );
+}
+
+function logLivePromiseProbe(event: string, fields: Record<string, unknown>) {
+  console.info(
+    '[NovaCast Live Promise Probe]',
+    JSON.stringify({
+      event,
+      mediaType: 'live',
+      timestamp: Date.now(),
+      providerId: fields.providerId ?? null,
+      runId: fields.runId ?? null,
+      generation: fields.generation ?? fields.coordinatorEpoch ?? null,
+      rawLiveCount: fields.rawLiveCount ?? null,
+      distinctLiveStreamIds: fields.distinctLiveStreamIds ?? null,
+      publishedLiveCount: fields.publishedLiveCount ?? null,
+      returnReason: fields.returnReason ?? null,
+      liveStatus: fields.liveStatus ?? null,
+      ...fields,
+    }),
+  );
+}
+
 export function scheduleCatalogSync(
   key: string,
   runner: () => Promise<void>,
   options?: { delayMs?: number },
 ): Promise<void> {
+  const parsed = parseCatalogSyncKey(key);
   const existing = jobs.get(key);
   if (isInFlight(existing)) {
     logCatalogBootstrapDispatch('coordinator-deduped', {
-      providerId: parseCatalogSyncKey(key).providerId,
+      providerId: parsed.providerId,
       coordinatorKey: key,
       coordinatorEpoch: existing.generation,
       activeCoordinatorEpoch: getGeneration(key),
       cancelled: false,
       reason: 'existing-in-flight-job',
     });
+    if (parsed.mediaType === 'movie') {
+      logMoviePromiseProbe('coordinator-deduped-existing-promise', {
+        providerId: parsed.providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: existing.generation,
+        jobStatus: existing.status,
+      });
+    }
     return existing.promise;
   }
 
@@ -214,6 +294,42 @@ export function scheduleCatalogSync(
     resolvePromise = resolve;
     rejectPromise = reject;
   });
+  const settleCoordinator = (outcome: 'resolve' | 'reject', extra: Record<string, unknown> = {}) => {
+    if (parsed.mediaType === 'movie') {
+      logMoviePromiseProbe('coordinator-settle', {
+        providerId: parsed.providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: runGeneration,
+        generation: runGeneration,
+        sqliteEnabled: null,
+        movieFinishCalled: null,
+        movieFinishOutcome: null,
+        returnReason: extra.reason ?? null,
+        abandonedOpenSqliteGeneration: null,
+        movieStatus: outcome === 'resolve' ? 'fulfilled' : 'rejected',
+        seriesStatus: null,
+        outcome,
+        ...extra,
+      });
+    }
+    if (parsed.mediaType === 'live') {
+      logLivePromiseProbe('coordinator-settle', {
+        providerId: parsed.providerId,
+        coordinatorKey: key,
+        coordinatorEpoch: runGeneration,
+        generation: runGeneration,
+        returnReason: extra.reason ?? null,
+        liveStatus: outcome === 'resolve' ? 'fulfilled' : 'rejected',
+        outcome,
+        ...extra,
+      });
+    }
+    if (outcome === 'resolve') {
+      resolvePromise();
+    } else {
+      rejectPromise(extra.error);
+    }
+  };
 
   const job: CatalogSyncJob = {
     promise,
@@ -221,6 +337,23 @@ export function scheduleCatalogSync(
     generation: runGeneration,
   };
   jobs.set(key, job);
+  if (parsed.mediaType === 'movie') {
+    logMoviePromiseProbe('coordinator-promise-created', {
+      providerId: parsed.providerId,
+      coordinatorKey: key,
+      coordinatorEpoch: runGeneration,
+      delayMs: options?.delayMs ?? 0,
+    });
+  }
+  if (parsed.mediaType === 'live') {
+    logLivePromiseProbe('coordinator-promise-created', {
+      providerId: parsed.providerId,
+      coordinatorKey: key,
+      coordinatorEpoch: runGeneration,
+      delayMs: options?.delayMs ?? 0,
+      liveStatus: 'queued',
+    });
+  }
   logCatalogBootstrapDispatch('coordinator-queued', {
     providerId: parseCatalogSyncKey(key).providerId,
     coordinatorKey: key,
@@ -232,6 +365,14 @@ export function scheduleCatalogSync(
 
   void (async () => {
     try {
+      if (parsed.mediaType === 'movie') {
+        logMoviePromiseProbe('coordinator-async-worker-started', {
+          providerId: parsed.providerId,
+          coordinatorKey: key,
+          coordinatorEpoch: runGeneration,
+          delayMs: options?.delayMs ?? 0,
+        });
+      }
       const shouldContinue = await delayMs(options?.delayMs ?? 0, key, runGeneration);
       logCatalogBootstrapDispatch('coordinator-recheck', {
         providerId: parseCatalogSyncKey(key).providerId,
@@ -273,7 +414,7 @@ export function scheduleCatalogSync(
           skipReason: 'coordinator-epoch-changed-during-delay',
         });
         job.status = 'cancelled';
-        resolvePromise();
+        settleCoordinator('resolve', { reason: 'stale-during-delay' });
         return;
       }
 
@@ -295,7 +436,7 @@ export function scheduleCatalogSync(
           skipReason: 'provider-sync-callback-missing',
         });
         job.status = 'failed';
-        resolvePromise();
+        settleCoordinator('resolve', { reason: 'callback-missing' });
         return;
       }
 
@@ -326,10 +467,18 @@ export function scheduleCatalogSync(
         activeCoordinatorEpoch: getGeneration(key),
         cancelled: getGeneration(key) !== runGeneration,
       });
+      if (parsed.mediaType === 'movie') {
+        logMoviePromiseProbe('coordinator-runner-returned', {
+          providerId: parsed.providerId,
+          coordinatorKey: key,
+          coordinatorEpoch: runGeneration,
+          next: 'resolvePromise',
+        });
+      }
 
       if (getGeneration(key) !== runGeneration) {
         logCatalogBootstrapDispatch('coordinator-stale-return', {
-          providerId: parseCatalogSyncKey(key).providerId,
+          providerId: parsed.providerId,
           coordinatorKey: key,
           coordinatorEpoch: runGeneration,
           activeCoordinatorEpoch: getGeneration(key),
@@ -337,17 +486,37 @@ export function scheduleCatalogSync(
           skipReason: 'coordinator-epoch-changed-after-provider-sync',
         });
         job.status = 'cancelled';
-        resolvePromise();
+        settleCoordinator('resolve', { reason: 'stale-after-runner' });
         return;
       }
 
       job.status = 'completed';
       job.error = undefined;
-      resolvePromise();
+      settleCoordinator('resolve', { reason: 'runner-fulfilled' });
     } catch (error) {
+      if (parsed.mediaType === 'movie') {
+        const err = error instanceof Error ? error : null;
+        console.info(
+          '[NovaCast Movie Sync Probe]',
+          JSON.stringify({
+            functionName: 'scheduleCatalogSync',
+            mediaType: 'movie',
+            providerId: parsed.providerId,
+            coordinatorKey: key,
+            coordinatorEpoch: runGeneration,
+            activeCoordinatorEpoch: getGeneration(key),
+            reason: 'coordinator-catch-rejecting-movie-runner',
+            errorName: err?.name ?? typeof error,
+            errorMessage: err?.message ?? String(error),
+            errorStack: typeof err?.stack === 'string' ? err.stack : null,
+            promiseAwaitedByCoordinator: true,
+            note: 'rejectPromise-then-startProviderCatalogSync-Promise.all-catch-swallows',
+          }),
+        );
+      }
       job.status = 'failed';
       job.error = error;
-      rejectPromise(error);
+      settleCoordinator('reject', { reason: 'runner-rejected', error });
     } finally {
       delete job.promise;
     }

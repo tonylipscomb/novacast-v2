@@ -5,6 +5,7 @@ import { AdminDevices } from './AdminDevices';
 import { AdminInvitations } from './AdminInvitations';
 import { AdminProviders } from './AdminProviders';
 import { AdminDiagnostics } from './AdminDiagnostics';
+import { AdminGoldPanel } from './AdminGoldPanel';
 import {
   formatProviderAssignmentMessage,
   resolveProviderAssignmentAckState,
@@ -12,7 +13,7 @@ import {
 import { adminLogin, adminRequest } from './pairing';
 
 type Row = Record<string, unknown>;
-type AdminTab = 'dashboard' | 'devices' | 'providers' | 'invitations' | 'analytics' | 'settings';
+type AdminTab = 'dashboard' | 'devices' | 'providers' | 'gold' | 'invitations' | 'analytics' | 'settings';
 
 type InvitationInput = {
   label: string;
@@ -30,28 +31,36 @@ export function AdminCloud() {
   const [invitations, setInvitations] = useState<Row[]>([]);
   const [providers, setProviders] = useState<Row[]>([]);
   const [dashboard, setDashboard] = useState<Row | null>(null);
+  const [goldAccounts, setGoldAccounts] = useState<Row[]>([]);
+  const [goldReseller, setGoldReseller] = useState<Row | null>(null);
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [openCreateInvite, setOpenCreateInvite] = useState(false);
   const [openAddProvider, setOpenAddProvider] = useState(false);
+  const [openAddGold, setOpenAddGold] = useState(false);
 
   const load = useCallback(async (nextToken: string, quiet = false) => {
     if (!quiet) setLoading(true);
     else setRefreshing(true);
 
     try {
-      const [deviceResult, inviteResult, providerResult, dashboardResult] = await Promise.all([
+      const [deviceResult, inviteResult, providerResult, dashboardResult, goldResult, resellerResult] = await Promise.all([
         adminRequest('admin-devices', nextToken),
         adminRequest('admin-invites', nextToken),
         adminRequest('admin-providers', nextToken).catch(() => ({ providers: [] })),
         adminRequest('admin-dashboard', nextToken).catch(() => null),
+        adminRequest('admin-gold-panel', nextToken).catch(() => ({ accounts: [] })),
+        adminRequest('admin-gold-panel', nextToken, { method: 'POST', body: JSON.stringify({ action: 'reseller' }) }).catch(() => null),
       ]);
 
       setDevices(Array.isArray(deviceResult.devices) ? deviceResult.devices : []);
       setInvitations(Array.isArray(inviteResult.invitations) ? inviteResult.invitations : []);
       setProviders(Array.isArray(providerResult.providers) ? providerResult.providers : []);
-      setDashboard(dashboardResult);
+      // admin-dashboard returns { serverTime, dashboard: {...} }; keep the inner core.
+      setDashboard(dashboardResult && typeof dashboardResult === 'object' && dashboardResult.dashboard ? dashboardResult.dashboard : dashboardResult);
+      setGoldAccounts(Array.isArray(goldResult?.accounts) ? goldResult.accounts : []);
+      setGoldReseller(resellerResult?.reseller ?? null);
     } catch (error) {
       const category = error instanceof Error ? error.message : 'admin_request_failed';
       if (category === 'admin_unauthorized') {
@@ -94,6 +103,8 @@ export function AdminCloud() {
     setInvitations([]);
     setProviders([]);
     setDashboard(null);
+    setGoldAccounts([]);
+    setGoldReseller(null);
   };
 
   const extend = async (id: string, hours: number) => {
@@ -256,6 +267,7 @@ export function AdminCloud() {
           <NavButton active={tab === 'dashboard'} icon="D" label="Dashboard" onClick={() => setTab('dashboard')} />
           <NavButton active={tab === 'devices'} icon="V" label="Devices" onClick={() => setTab('devices')} />
           <NavButton active={tab === 'providers'} icon="P" label="Providers" onClick={() => setTab('providers')} />
+          <NavButton active={tab === 'gold'} icon="G" label="Gold Panel" onClick={() => setTab('gold')} />
           <NavButton active={tab === 'invitations'} icon="I" label="Invitations" onClick={() => setTab('invitations')} />
           <NavButton active={tab === 'analytics'} icon="A" label="Analytics" onClick={() => setTab('analytics')} />
           <NavButton active={tab === 'settings'} icon="S" label="Settings" onClick={() => setTab('settings')} />
@@ -299,8 +311,11 @@ export function AdminCloud() {
             devices={devices}
             invitations={invitations}
             providers={providers}
+            goldAccounts={goldAccounts}
+            goldReseller={goldReseller}
             onNavigate={(next) => setTab(next)}
             onAddProvider={() => { setTab('providers'); setOpenAddProvider(true); }}
+            onAddGoldAccount={() => { setTab('gold'); setOpenAddGold(true); }}
             onRefresh={() => void load(token, true)}
             refreshing={refreshing}
             onCreateInvite={() => { setTab('invitations'); setOpenCreateInvite(true); }}
@@ -343,6 +358,7 @@ export function AdminCloud() {
         {!loading && tab === 'analytics' ? (
           <AdminDiagnostics token={token} onMessage={setMessage} />
         ) : null}
+        {!loading && tab === 'gold' ? <AdminGoldPanel token={token} devices={devices} providers={providers} openCreate={openAddGold} onOpenCreateHandled={() => setOpenAddGold(false)} onAssignProvider={(id, providerId) => void assignProvider(id, providerId)} onMessage={setMessage} /> : null}
         {!loading && tab === 'settings' ? (
           <ComingSoon title="Cloud Admin settings" text="Administrator preferences and platform controls will appear here." />
         ) : null}
@@ -382,9 +398,10 @@ function ComingSoon({ title, text }: { title: string; text: string }) {
 
 function titleFor(tab: AdminTab) {
   return {
-    dashboard: 'Dashboard',
+    dashboard: 'Operations Center',
     devices: 'Devices',
     providers: 'Providers',
+    gold: 'Gold Panel',
     invitations: 'Invitations',
     analytics: 'Analytics',
     settings: 'Settings',
@@ -393,9 +410,10 @@ function titleFor(tab: AdminTab) {
 
 function subtitleFor(tab: AdminTab) {
   return {
-    dashboard: 'Monitor the NovaCast beta and manage platform operations.',
+    dashboard: 'Live operational health across NovaCast devices, providers, and Gold reseller capacity.',
     devices: 'Manage and monitor all registered NovaCast devices.',
     providers: 'Add, validate, and activate managed IPTV providers before testers see them.',
+    gold: 'Provision and monitor Gold reseller accounts linked to NovaCast providers.',
     invitations: 'Create and track controlled beta access.',
     analytics: 'Review device and playback performance.',
     settings: 'Configure NovaCast Cloud Admin.',

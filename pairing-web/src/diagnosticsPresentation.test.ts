@@ -3,6 +3,8 @@ import test from 'node:test';
 // @ts-ignore TS5097: Node's strip-types runner requires the explicit extension.
 import {
   diagnosticEventLabel,
+  diagnosticEventStage,
+  diagnosticEventStatus,
   diagnosticStatusLabel,
   diagnosticTone,
   formatDiagnosticDuration,
@@ -12,6 +14,9 @@ test('diagnostic event labels are human readable', () => {
   assert.equal(diagnosticEventLabel('play_attempt'), 'Trying to play');
   assert.equal(diagnosticEventLabel('network_request_failure'), 'Network request failed');
   assert.equal(diagnosticEventLabel('new_event_type'), 'new event type');
+  assert.equal(diagnosticEventLabel('stream_resolution_failed'), 'Stream could not be resolved');
+  assert.equal(diagnosticEventStage('first_frame'), 'PLAYER');
+  assert.equal(diagnosticEventStatus('provider_request_failed'), 'ERROR');
 });
 
 test('health tones and copy distinguish good, problem, and missing data', () => {

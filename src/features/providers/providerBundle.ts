@@ -4,6 +4,7 @@ import { createSmartMovieDataSource } from '../movies/smart/SmartMovieDataSource
 import { createProviderSeriesDataSource } from '../series/data/ProviderSeriesDataSource.ts';
 import { createSmartSeriesDataSource } from '../series/smart/SmartSeriesDataSource.ts';
 import { createSqliteFirstSeriesDataSource } from '../series/data/SqliteSeriesDataSource.ts';
+import { logSeriesDataSourceAudit } from '../series/seriesDataSourceAudit.ts';
 import type { SeriesDataSource } from '../series/data/SeriesDataSource.ts';
 import {
   createMockProviderRepositories,
@@ -11,12 +12,20 @@ import {
   type ProviderRepositories,
 } from './providerRepositories.ts';
 import { XtreamClient, normalizeXtreamAccountMetadata } from './xtreamClient.ts';
+import {
+  getRememberedAccountOutputFormats,
+  mergeAccountOutputFormats,
+  rememberAccountOutputFormats,
+} from './accountOutputFormats.ts';
 import { cancelProviderCatalogSync } from './providerCatalogSync.ts';
 import { invalidateCatalogSyncForProvider, isCatalogSyncRunning } from '../catalog/catalogSyncCoordinator.ts';
 import {
   shouldResumeInterruptedCatalogSync,
   shouldSkipBootstrapBecauseSyncing,
 } from '../catalog/catalogReadableGenerationRestore.ts';
+import { logProviderBoundary, safeProviderRuntimeFlags } from './providerBoundaryDiagnostics.ts';
+import { summarizeXtreamAccountEntitlements } from './providerEntitlementAudit.ts';
+import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 
 /** Stage 4.2O.2 — Series SQLite Parity. Mirrors Movies' build-time kill switch. */
 const SERIES_SQLITE_READS_ENABLED = process.env.EXPO_PUBLIC_SERIES_SQLITE_READS === 'true';
@@ -36,22 +45,37 @@ export type ProviderRepositoryBundle = ProviderRepositories & {
 
 let activeBundle: ProviderRepositoryBundle | null = null;
 let bundleGeneration = 0;
+
+const PROVIDER_BUNDLE_AUDIT_ENABLED =
+  Boolean(__DEV__) ||
+  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_HOME_PRESENTATION_AUDIT === '1');
+
+function logProviderBundleAudit(
+  event: 'bundle-activated' | 'bundle-invalidated',
+  fields: Record<string, unknown>,
+) {
+  if (!PROVIDER_BUNDLE_AUDIT_ENABLED) {
+    return;
+  }
+  console.info('[NovaCast Provider Bundle Audit]', JSON.stringify({ event, ...fields, timestamp: Date.now() }));
+}
 const listeners = new Set<() => void>();
 const catalogBootstrapRequested = new WeakSet<ProviderRepositoryBundle>();
 let repositoryBundleFactoryOverride: ((provider: ProviderRecord, credentials?: ProviderCredentialRecord) => ProviderRepositoryBundle) | null = null;
 let activationObserverForTests: ((bundle: ProviderRepositoryBundle) => void) | null = null;
 
 function logFreshProviderBootstrap(phase: string, fields: Record<string, unknown> = {}) {
-  console.info('[NovaCast Fresh Provider Bootstrap]', JSON.stringify({ phase, ...fields }));
+  novacastTrace('[NovaCast Fresh Provider Bootstrap]', JSON.stringify({ phase, ...fields }));
 }
 
 function logCatalogBootstrapDispatch(phase: string, fields: Record<string, unknown> = {}) {
-  console.info('[NovaCast Catalog Bootstrap Dispatch]', JSON.stringify({ phase, ...fields }));
+  novacastTrace('[NovaCast Catalog Bootstrap Dispatch]', JSON.stringify({ phase, ...fields }));
 }
 
 async function requestCatalogBootstrap(bundle: ProviderRepositoryBundle) {
   const { getCatalogBootstrapState } = await import('../catalog/catalogRepository.ts');
-  const state = await getCatalogBootstrapState(bundle.providerId, 'movie');
+  const coordinatorInFlight = isCatalogSyncRunning(bundle.providerId, 'movie');
+  let state = await getCatalogBootstrapState(bundle.providerId, 'movie');
   logFreshProviderBootstrap('durable-state-read', {
     providerId: bundle.providerId,
     providerCatalogGeneration: state.providerCatalogGeneration,
@@ -61,7 +85,6 @@ async function requestCatalogBootstrap(bundle: ProviderRepositoryBundle) {
     decisionReason: state.durableReadyLifecycleState === 'ready' ? 'ready-generation-present' : null,
   });
 
-  const coordinatorInFlight = isCatalogSyncRunning(bundle.providerId, 'movie');
   if (shouldSkipBootstrapBecauseSyncing({
     currentStatus: state.currentStatus,
     coordinatorInFlight,
@@ -75,6 +98,21 @@ async function requestCatalogBootstrap(bundle: ProviderRepositoryBundle) {
       decisionReason: 'current-movie-sync-already-in-progress',
     });
     return;
+  }
+
+  const { reconcileOrphanedCatalogSyncs } = await import('../catalog/catalogOrphanedSyncRecovery.ts');
+  const abandonedOrphans = await reconcileOrphanedCatalogSyncs();
+  if (abandonedOrphans > 0) {
+    state = await getCatalogBootstrapState(bundle.providerId, 'movie');
+    logFreshProviderBootstrap('orphaned-sync-abandoned', {
+      providerId: bundle.providerId,
+      abandonedOrphans,
+      providerCatalogGeneration: state.providerCatalogGeneration,
+      currentAttemptGeneration: state.currentAttemptGeneration,
+      currentStatus: state.currentStatus,
+      durableReadyGeneration: state.durableReadyGeneration,
+      decisionReason: 'durable-syncing-without-active-writer',
+    });
   }
 
   const interruptedSync = shouldResumeInterruptedCatalogSync({
@@ -153,7 +191,7 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
 } {
   const base =
     provider.connection?.type === 'xtream'
-      ? createXtreamProviderRepositories(new XtreamClient(credentials!))
+      ? createXtreamProviderRepositories(new XtreamClient(credentials!, { providerId: provider.id }))
       : createMockProviderRepositories(provider.id);
 
   // Stage 4.2O.2: insert the SQLite-first composite *below* the smart
@@ -163,8 +201,18 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
   // and that "base" now prefers a readable local generation, falling back
   // to the real provider network call only when none exists.
   const rawSeriesDataSource = createProviderSeriesDataSource(base.series, base.mediaBaseUrl);
+  const seriesSqliteSelected = SERIES_SQLITE_READS_ENABLED;
+  logSeriesDataSourceAudit({
+    event: 'data-source-selection',
+    providerId: provider.id,
+    selectedSource: seriesSqliteSelected ? 'sqlite' : 'repository',
+    sourceClass: seriesSqliteSelected ? 'SqliteSeriesDataSource' : 'ProviderSeriesDataSource',
+    sqliteEnabled: seriesSqliteSelected,
+    generationStatus: 'bundle-factory',
+    fallbackReason: seriesSqliteSelected ? null : 'EXPO_PUBLIC_SERIES_SQLITE_READS!==true',
+  });
   const seriesDataSource = createSmartSeriesDataSource(
-    SERIES_SQLITE_READS_ENABLED
+    seriesSqliteSelected
       ? createSqliteFirstSeriesDataSource(provider.id, rawSeriesDataSource)
       : rawSeriesDataSource,
     provider.id,
@@ -207,6 +255,7 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
           requestSource,
           coordinatorState: 'resolved',
           pendingInputPresent: false,
+          timestamp: Date.now(),
         });
       } catch (error) {
         logCatalogBootstrapDispatch('dispatch-failed', {
@@ -238,9 +287,19 @@ export function createRepositoryBundle(provider: ProviderRecord, credentials?: P
   }
 
   const repositories = buildRepositories(provider, credentials);
+  logProviderBoundary('[NovaCast Provider Runtime]', safeProviderRuntimeFlags({
+    managedProviderId: provider.id,
+    providerRecord: provider,
+    credentials,
+    providerBase: provider.connection?.type === 'xtream' ? credentials?.baseUrl : provider.connection?.serverId,
+    assignmentSource: 'active-provider-bundle',
+  }));
   const nextGeneration = bundleGeneration + 1;
   let cancelled = false;
-  let accountMetadata: ProviderAccountMetadata | null = provider.account ?? null;
+  let accountMetadata: ProviderAccountMetadata | null =
+    mergeAccountOutputFormats(provider.account, getRememberedAccountOutputFormats(provider.id)) ??
+    provider.account ??
+    null;
 
   const bundle = {
     ...repositories,
@@ -255,7 +314,7 @@ export function createRepositoryBundle(provider: ProviderRecord, credentials?: P
         return;
       }
 
-      const client = new XtreamClient(credentials!);
+      const client = new XtreamClient(credentials!, { providerId: provider.id });
       const response = await client.getAccountInfo();
       if (cancelled) {
         throw new Error('Provider initialization was cancelled.');
@@ -263,6 +322,15 @@ export function createRepositoryBundle(provider: ProviderRecord, credentials?: P
 
       accountMetadata = normalizeXtreamAccountMetadata(response);
       bundle.accountMetadata = accountMetadata;
+      rememberAccountOutputFormats(provider.id, accountMetadata);
+      const entitlement = summarizeXtreamAccountEntitlements(response, credentials?.baseUrl);
+      logProviderBoundary('[NovaCast Provider Runtime]', {
+        event: 'account-state',
+        accountStatus: entitlement.status,
+        activeConnections: entitlement.activeConnections,
+        maxConnections: entitlement.maxConnections,
+        allowedOutputFormats: entitlement.allowedOutputFormats,
+      });
     }),
     invalidate() {
       cancelled = true;
@@ -296,8 +364,14 @@ export function activateRepositoryBundle(bundle: ProviderRepositoryBundle) {
   });
   if (previousBundle && previousBundle !== bundle) {
     if (previousBundle.providerId !== bundle.providerId) {
-      cancelProviderCatalogSync(previousBundle.providerId);
-      invalidateCatalogSyncForProvider(previousBundle.providerId);
+      cancelProviderCatalogSync(previousBundle.providerId, {
+        cancelSource: 'provider-replaced',
+        cancelCaller: 'activateRepositoryBundle',
+      });
+      invalidateCatalogSyncForProvider(previousBundle.providerId, {
+        cancelSource: 'provider-replaced',
+        cancelCaller: 'activateRepositoryBundle',
+      });
     }
     previousBundle.invalidate();
   }
@@ -305,6 +379,11 @@ export function activateRepositoryBundle(bundle: ProviderRepositoryBundle) {
   activeBundle = bundle;
   bundleGeneration = bundle.generation;
   notify();
+  logProviderBundleAudit('bundle-activated', {
+    providerId: bundle.providerId,
+    previousProviderId: previousBundle?.providerId ?? null,
+    bundlePresentAfter: true,
+  });
 
   logFreshProviderBootstrap('provider-ready', {
     providerId: bundle.providerId,
@@ -350,13 +429,20 @@ export function getRepositoryBundleGeneration() {
 }
 
 export function invalidateRepositoryBundle() {
-  cancelProviderCatalogSync();
+  cancelProviderCatalogSync(undefined, {
+    cancelSource: 'bundle-invalidated',
+    cancelCaller: 'invalidateRepositoryBundle',
+  });
   const previousBundle = activeBundle;
   previousBundle?.invalidate();
   activeBundle = null;
   if (previousBundle) {
     bundleGeneration += 1;
     notify();
+    logProviderBundleAudit('bundle-invalidated', {
+      previousProviderId: previousBundle.providerId,
+      bundlePresentAfter: false,
+    });
   }
 }
 

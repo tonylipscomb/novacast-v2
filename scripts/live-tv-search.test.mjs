@@ -96,7 +96,7 @@ function ingestEspnFamily(providerId = 'p1') {
 test('1. Live Search action appears as first-class MovieToolbar Search', () => {
   assert.match(liveScreen, /MovieToolbar/);
   assert.match(liveScreen, /accessibilityLabel="Search Live TV"/);
-  assert.match(liveScreen, /headerSupplement/);
+  assert.match(liveScreen, /channelHeaderActions/);
   assert.match(movieToolbar, /name="magnify"/);
   assert.match(movieToolbar, />Search</);
 });
@@ -374,7 +374,7 @@ test('33. Movies Search unchanged', () => {
 test('34. Series Search unchanged', () => {
   assert.doesNotMatch(seriesScreen, /liveTvSearchSession/);
   assert.match(seriesScreen, /scope="series"/);
-  assert.match(seriesScreen, /searchSeries/);
+  assert.match(seriesScreen, /searchByScope\(bundle, 'series'/);
 });
 
 test('35. global/main-menu Search unchanged', () => {

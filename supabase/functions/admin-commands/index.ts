@@ -1,4 +1,4 @@
-import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
+import { adminJsonResponse, adminOptionsResponse, readJson } from '../_shared/http.ts';
 import { requireAdmin } from '../_shared/admin.ts';
 
 const ALLOWED_COMMANDS = new Set([
@@ -18,7 +18,7 @@ const ALLOWED_COMMANDS = new Set([
 ]);
 
 Deno.serve(async (request) => {
-  if (request.method === 'OPTIONS') return optionsResponse();
+  if (request.method === 'OPTIONS') return adminOptionsResponse(request);
 
   try {
     const { client, user } = await requireAdmin(request);
@@ -34,18 +34,18 @@ Deno.serve(async (request) => {
       if (deviceId) query = query.eq('device_id', deviceId);
       const { data, error } = await query;
       if (error) throw new Error('admin_query_failed');
-      return jsonResponse({ commands: data ?? [] });
+      return adminJsonResponse(request, { commands: data ?? [] });
     }
 
     if (request.method !== 'POST') {
-      return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
+      return adminJsonResponse(request, { errorCategory: 'method_not_allowed' }, 405);
     }
 
     const body = await readJson(request);
     const deviceId = typeof body?.deviceId === 'string' ? body.deviceId : '';
     const command = typeof body?.command === 'string' ? body.command.trim() : '';
     if (!deviceId || !ALLOWED_COMMANDS.has(command)) {
-      return jsonResponse({ errorCategory: 'invalid_request' }, 400);
+      return adminJsonResponse(request, { errorCategory: 'invalid_request' }, 400);
     }
 
     const payload = body?.payload && typeof body.payload === 'object' ? body.payload : {};
@@ -62,10 +62,10 @@ Deno.serve(async (request) => {
       .single();
 
     if (error || !data) throw new Error('admin_create_failed');
-    return jsonResponse({ command: data });
+      return adminJsonResponse(request, { command: data });
   } catch (error) {
     const category =
       error instanceof Error && error.message === 'admin_unauthorized' ? error.message : 'admin_request_failed';
-    return jsonResponse({ errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);
+    return adminJsonResponse(request, { errorCategory: category }, category === 'admin_unauthorized' ? 401 : 500);
   }
 });

@@ -1,6 +1,6 @@
 import type { ElementRef, ReactNode } from 'react';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { FlatList, StyleSheet, Text, View, useWindowDimensions, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FlatList, StyleSheet, Text, View, type LayoutChangeEvent, type ListRenderItemInfo, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { useAppTheme, type NovaTheme } from '@/theme';
@@ -17,6 +17,7 @@ import {
   inferMovieGridUnmountReason,
 } from '../moviesDiagnosticsState';
 import { MoviePosterCard } from './MoviePosterCard';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { recordFocusAudit } from '@/features/navigation/focusRequestAudit';
 import {
   getOnnMoviesGridInstanceId,
@@ -162,7 +163,7 @@ export function MoviePosterGrid({
   const previousMoviesDataRef = useRef<MovieSummary[] | null>(null);
   const moviesDiagnosticsRef = useRef<MovieSummary[]>(movies);
   const restorationTokenDiagnosticsRef = useRef<string | null>(restorationToken);
-  const { width } = useWindowDimensions();
+  const [gridWidth, setGridWidth] = useState(0);
   const listRef = useRef<FlatList<MovieSummary> | null>(null);
   const currentOffsetRef = useRef(0);
   const visibleRangeRef = useRef({ firstIndex: null as number | null, lastIndex: null as number | null });
@@ -568,9 +569,15 @@ export function MoviePosterGrid({
   }).current;
 
   const columnWidth = useMemo(() => {
-    const usable = Math.max(240, width - 320);
-    return usable / Math.max(1, columns);
-  }, [columns, width]);
+    const gap = 6;
+    const horizontalPadding = 4;
+    const available =
+      gridWidth -
+      horizontalPadding -
+      gap * Math.max(0, columns - 1);
+    const measured = available / Math.max(1, columns);
+    return gridWidth > 0 ? Math.max(1, Math.floor(measured)) : 120;
+  }, [columns, gridWidth]);
 
   const rowHeight = useMemo(() => estimatePosterRowHeight(columnWidth), [columnWidth]);
 
@@ -590,38 +597,40 @@ export function MoviePosterGrid({
     ({ item, index }: ListRenderItemInfo<MovieSummary>) => {
       tvPerfRecordPosterRender();
       return (
-        <MoviePosterCard
-          movie={item}
-          isDiscover={isDiscover}
-          focusable={
-            postersFocusable || (closingFocusMovieId != null && closingFocusMovieId === item.id)
-          }
-          trapFocusDown={isLastPosterRow({ index, itemCount: movies.length, columns })}
-          forceFocused={
-            pinnedHighlightMovieId != null
-              ? pinnedHighlightMovieId === item.id
-              : closingFocusMovieId === item.id || postRestorePreferredMovieId === item.id
-          }
-          auditSelected={selectedMovieId != null && selectedMovieId === item.id}
-          hasPreferredFocus={
-            // Stage 3D.2: restored poster retains preferred ownership after confirm.
-            postRestorePreferredMovieId != null
-              ? postRestorePreferredMovieId === item.id
-              : // Stage 4.2L.1: immutable close target is the only preferred owner during close.
-                closingFocusMovieId != null
-                ? closingFocusMovieId === item.id
-                : suppressPreferredFocus
-                  ? false
-                  : shouldClaimPreferredPosterFocus({
-                      focusClaimed: focusClaimedRef.current || selectedMovieId != null,
-                      itemId: item.id,
-                      seedId: focusSeedRef.current,
-                    })
-          }
-          onFocus={handleFocusMovie}
-          onPress={handleSelectMovie}
-          registerRef={(instance, instanceToken) => handleRegisterRef(item.id, index, instance, instanceToken)}
-        />
+        <View style={[styles.cell, { width: columnWidth }]}>
+          <MoviePosterCard
+            movie={item}
+            isDiscover={isDiscover}
+            focusable={
+              postersFocusable || (closingFocusMovieId != null && closingFocusMovieId === item.id)
+            }
+            trapFocusDown={isLastPosterRow({ index, itemCount: movies.length, columns })}
+            forceFocused={
+              pinnedHighlightMovieId != null
+                ? pinnedHighlightMovieId === item.id
+                : closingFocusMovieId === item.id || postRestorePreferredMovieId === item.id
+            }
+            auditSelected={selectedMovieId != null && selectedMovieId === item.id}
+            hasPreferredFocus={
+              // Stage 3D.2: restored poster retains preferred ownership after confirm.
+              postRestorePreferredMovieId != null
+                ? postRestorePreferredMovieId === item.id
+                : // Stage 4.2L.1: immutable close target is the only preferred owner during close.
+                  closingFocusMovieId != null
+                  ? closingFocusMovieId === item.id
+                  : suppressPreferredFocus
+                    ? false
+                    : shouldClaimPreferredPosterFocus({
+                        focusClaimed: focusClaimedRef.current || selectedMovieId != null,
+                        itemId: item.id,
+                        seedId: focusSeedRef.current,
+                      })
+            }
+            onFocus={handleFocusMovie}
+            onPress={handleSelectMovie}
+            registerRef={(instance, instanceToken) => handleRegisterRef(item.id, index, instance, instanceToken)}
+          />
+        </View>
       );
     },
     [
@@ -631,6 +640,7 @@ export function MoviePosterGrid({
       handleRegisterRef,
       handleSelectMovie,
       isDiscover,
+      columnWidth,
       movies.length,
       pinnedHighlightMovieId,
       postRestorePreferredMovieId,
@@ -673,7 +683,12 @@ export function MoviePosterGrid({
           <Text style={styles.emptyNoticeText}>{emptyNotice}</Text>
         </View>
       ) : (
-        <View style={styles.listStage}>
+        <View
+          style={styles.listStage}
+          onLayout={(event: LayoutChangeEvent) => {
+            const nextWidth = Math.floor(event.nativeEvent.layout.width);
+            setGridWidth((current) => (current === nextWidth ? current : nextWidth));
+          }}>
           <FlatList
             ref={(instance) => {
               listRef.current = instance;
@@ -727,23 +742,25 @@ function createStyles(theme: NovaTheme) {
     panel: {
       flex: 1,
       minWidth: 0,
-      borderTopWidth: 1,
-      borderTopColor: theme.colors.borderSubtle,
-      backgroundColor: 'transparent',
-      paddingHorizontal: 0,
-      paddingTop: 8,
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: 'rgba(3, 8, 20, 0.58)',
+      paddingHorizontal: 10,
+      paddingTop: 6,
     },
     header: {
-      minHeight: 36,
+      minHeight: 32,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      marginBottom: 6,
+      marginBottom: 4,
       paddingHorizontal: 2,
     },
     title: {
       flex: 1,
       minWidth: 0,
+      maxWidth: '45%',
       color: theme.colors.textPrimary,
       fontSize: 20,
       fontWeight: '800',
@@ -766,6 +783,13 @@ function createStyles(theme: NovaTheme) {
     row: {
       gap: 6,
       marginBottom: 6,
+      alignItems: 'flex-start',
+      justifyContent: 'flex-start',
+    },
+    cell: {
+      flexGrow: 0,
+      flexShrink: 0,
+      minWidth: 0,
     },
     emptyNotice: {
       flex: 1,

@@ -3,7 +3,7 @@ import type { ImageSourcePropType } from 'react-native';
 import type { AppearanceThemeId } from './variants';
 
 const NOVA_LOGO = require('@/assets/images/novacast-logo.png');
-const ICE_LOGO = require('@/assets/images/NCicelogo.png');
+const ICE_LOGO = require('@/assets/images/NCNewIceLogo.png');
 const MIDNIGHT_LOGO = require('@/assets/images/NCmidnightlogo.png');
 
 /** Home hero only — Ice / Midnight splash art. Nova keeps the existing card art. */
@@ -26,7 +26,7 @@ export function getThemeLogoSource(themeId: AppearanceThemeId): ImageSourcePropT
 
 /**
  * Compact nav / mark asset.
- * Ice & Midnight logos already include the wordmark, so they replace nav-mark.
+ * Ice uses the new planet mark and pairs with the NovaCast text in the shared logo lockup.
  */
 export function getThemeMarkSource(themeId: AppearanceThemeId): ImageSourcePropType {
   if (themeId === 'ice') {
@@ -51,5 +51,5 @@ export function getThemeHeroSource(themeId: AppearanceThemeId): ImageSourcePropT
 
 /** True when the logo image already carries the NOVACAST wordmark. */
 export function themeLogoIncludesWordmark(themeId: AppearanceThemeId) {
-  return themeId === 'ice' || themeId === 'blackout';
+  return themeId === 'blackout';
 }

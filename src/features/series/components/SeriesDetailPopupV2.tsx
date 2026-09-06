@@ -16,10 +16,11 @@
  */
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ComponentProps, ComponentType, ElementRef, ReactNode } from 'react';
-import { Component, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
 import {
   Platform,
+  BackHandler,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -33,10 +34,12 @@ import { TvRemoteImage } from '@/components/media/TvRemoteImage';
 import { MediaArtworkFallback } from '@/features/media-browser/MediaArtworkFallback';
 import type { MediaDetail, MediaDetailEpisode } from '@/features/media-browser/mediaTypes';
 import { novaTheme } from '@/theme';
+import { NOVA_FOCUS, NOVA_GLASS } from '@/components/nova/novaGlassTheme';
+import { isValidTvFocusableTarget, requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
+import { novacastTrace } from '@/features/diagnostics/novacastLogPolicy';
 import {
   computeSeriesDetailPopupV2Layout,
   filterSeriesDetailPopupV2Episodes,
-  isSeriesDetailPopupV2EpisodesActionEnabled,
   logSeriesDetailPopupV2Event,
   resolveSeriesDetailPopupV2InitialFocusId,
   resolveSeriesDetailPopupV2SeasonNumber,
@@ -83,8 +86,6 @@ export type SeriesDetailPopupV2Props = {
    * instead of closing the whole popup (episode view -> popup -> browse).
    */
   onEpisodesAreaFocusChange?: (focused: boolean) => void;
-  /** Bumped by SeriesScreen to request focus land back on the Episodes action. */
-  episodesFocusReturnToken?: number;
 };
 
 type ActionSpec = {
@@ -151,6 +152,10 @@ function ActionButton({
   preferred,
   focused,
   buttonRef,
+  nextFocusLeft,
+  nextFocusRight,
+  nextFocusUp,
+  nextFocusDown,
   onFocus,
   onBlur,
 }: {
@@ -158,10 +163,17 @@ function ActionButton({
   preferred: boolean;
   focused: boolean;
   buttonRef: (instance: ElementRef<typeof Pressable> | null) => void;
+  nextFocusLeft?: number;
+  nextFocusRight?: number;
+  nextFocusUp?: number;
+  nextFocusDown?: number;
   onFocus: () => void;
   onBlur: () => void;
 }) {
   const focusable = !action.disabled;
+  const visibleLabel = action.id === 'play' && action.label.toLowerCase().startsWith('continue')
+    ? 'Continue'
+    : action.label;
   const lastPressAtRef = useRef(0);
   const activate = () => {
     if (!focusable) return;
@@ -177,6 +189,10 @@ function ActionButton({
       focusable={focusable}
       disabled={!focusable}
       hasTVPreferredFocus={preferred && focusable}
+      {...(nextFocusLeft != null ? { nextFocusLeft } : {})}
+      {...(nextFocusRight != null ? { nextFocusRight } : {})}
+      {...(nextFocusUp != null ? { nextFocusUp } : {})}
+      {...(nextFocusDown != null ? { nextFocusDown } : {})}
       accessibilityRole="button"
       accessibilityLabel={action.label}
       onFocus={onFocus}
@@ -185,6 +201,7 @@ function ActionButton({
       {...(Platform.isTV ? { onClick: activate } : {})}
       style={[
         styles.action,
+        action.primary && styles.actionPrimarySize,
         action.primary && styles.actionPrimary,
         action.disabled && styles.actionDisabled,
         focused && styles.actionFocused,
@@ -192,59 +209,291 @@ function ActionButton({
       ]}>
       <MaterialCommunityIcons
         name={action.icon}
-        size={20}
-        color={action.disabled ? novaTheme.colors.textMuted : '#FFFFFF'}
-      />
-      <Text
-        style={[
-          styles.actionLabel,
-          action.disabled && styles.actionLabelDisabled,
-          focused && styles.actionLabelFocused,
-        ]}>
-        {action.label}
-      </Text>
+        size={focused ? 27 : 22}
+        color={
+          action.disabled
+            ? novaTheme.colors.textMuted
+            : focused
+              ? '#FFFFFF'
+              : '#FFFFFF'
+        }
+        />
+      {focused ? (
+        <Text
+          style={[
+            styles.actionLabel,
+            action.disabled && styles.actionLabelDisabled,
+            styles.actionLabelFocused,
+          ]}
+          numberOfLines={1}>
+          {visibleLabel}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }
 
-function SeasonChip({
-  seasonNumber,
-  label,
-  selected,
-  onPress,
+function CollectionSelector({
+  seasons,
+  selectedSeasonNumber,
+  open,
+  onToggle,
+  onSelect,
   onAreaFocusChange,
-  chipRef,
+  controlRef,
+  focusProps,
 }: {
-  seasonNumber: number;
-  label: string;
-  selected: boolean;
-  onPress: (seasonNumber: number) => void;
+  seasons: Array<{ seasonNumber: number; name?: string | null }>;
+  selectedSeasonNumber: number | null;
+  open: boolean;
+  onToggle: () => void;
+  onSelect: (seasonNumber: number) => void;
   onAreaFocusChange?: (focused: boolean) => void;
-  chipRef?: (instance: ElementRef<typeof Pressable> | null) => void;
+  controlRef?: (instance: ElementRef<typeof Pressable> | null) => void;
+  focusProps?: {
+    nextFocusLeft?: number;
+    nextFocusRight?: number;
+    nextFocusUp?: number;
+    nextFocusDown?: number;
+  };
 }) {
-  const [isFocused, setIsFocused] = useState(false);
-  const activate = () => onPress(seasonNumber);
+  const [focused, setFocused] = useState(false);
+  const controlTargetRef = useRef<ElementRef<typeof Pressable> | null>(null);
+  const optionRefs = useRef(new Map<number, ElementRef<typeof Pressable>>());
+  const optionRefCallbacks = useRef(new Map<number, (instance: ElementRef<typeof Pressable> | null) => void>());
+  const optionHandlesRef = useRef(new Map<number, number>());
+  const seasonScrollRef = useRef<ScrollView | null>(null);
+  const seasonScrollOffsetRef = useRef(0);
+  const seasonMenuHeightRef = useRef(0);
+  const cancelOptionFocusRef = useRef<(() => void) | null>(null);
+  const menuOpenSessionRef = useRef(0);
+  const menuOpenRef = useRef(open);
+  const [collectionMenuFocusOwned, setCollectionMenuFocusOwned] = useState(false);
+  const [focusedSeasonOption, setFocusedSeasonOption] = useState<number | null>(null);
+  const registerControlRef = useCallback((instance: ElementRef<typeof Pressable> | null) => {
+    controlTargetRef.current = instance;
+    controlRef?.(instance);
+  }, [controlRef]);
+  menuOpenRef.current = open;
+  const selected = seasons.find((season) => season.seasonNumber === selectedSeasonNumber);
+  const label = selected
+    ? selected.seasonNumber === 0 ? 'Specials' : selected.name ?? `Season ${selected.seasonNumber}`
+    : 'Select collection';
+
+  const registerSeasonOption = useCallback((seasonNumber: number, instance: ElementRef<typeof Pressable> | null) => {
+    if (instance == null) {
+      optionRefs.current.delete(seasonNumber);
+      optionHandlesRef.current.delete(seasonNumber);
+      return;
+    }
+
+    optionRefs.current.set(seasonNumber, instance);
+    const handle = ReactNative.findNodeHandle(instance);
+    if (handle == null || optionHandlesRef.current.get(seasonNumber) === handle) {
+      return;
+    }
+    optionHandlesRef.current.set(seasonNumber, handle);
+  }, []);
+
+  const getSeasonOptionRef = useCallback((seasonNumber: number) => {
+    const existing = optionRefCallbacks.current.get(seasonNumber);
+    if (existing) {
+      return existing;
+    }
+    const callback = (instance: ElementRef<typeof Pressable> | null) => {
+      registerSeasonOption(seasonNumber, instance);
+    };
+    optionRefCallbacks.current.set(seasonNumber, callback);
+    return callback;
+  }, [registerSeasonOption]);
+
+  const restoreControlFocus = () => {
+    menuOpenRef.current = false;
+    setCollectionMenuFocusOwned(false);
+    setFocusedSeasonOption(null);
+    novacastTrace('[NovaCast Season Dropdown Focus]', {
+      event: 'close', selectedSeason: selectedSeasonNumber,
+      focusedSeason: focusedSeasonOption, targetSeason: selectedSeasonNumber,
+    });
+    cancelOptionFocusRef.current?.();
+    cancelOptionFocusRef.current = requestTvFocus({
+      screen: 'series',
+      source: 'SeriesDetailPopupV2',
+      region: 'collection-control',
+      reason: 'collection-menu-close',
+      getTarget: () =>
+        isValidTvFocusableTarget(controlTargetRef.current) ? controlTargetRef.current : null,
+    });
+  };
+
+  useEffect(() => () => cancelOptionFocusRef.current?.(), []);
+
+  useEffect(() => {
+    menuOpenRef.current = open;
+    if (!open) {
+      setCollectionMenuFocusOwned(false);
+      setFocusedSeasonOption(null);
+      return;
+    }
+
+    const session = menuOpenSessionRef.current + 1;
+    menuOpenSessionRef.current = session;
+    const preferredSeason = seasons.some((season) => season.seasonNumber === selectedSeasonNumber)
+      ? selectedSeasonNumber
+      : seasons[0].seasonNumber;
+    setFocusedSeasonOption(null);
+    novacastTrace('[NovaCast Season Dropdown Focus]', {
+      event: 'open', selectedSeason: selectedSeasonNumber,
+      focusedSeason: null, targetSeason: preferredSeason,
+    });
+    cancelOptionFocusRef.current?.();
+    cancelOptionFocusRef.current = requestTvFocus({
+      screen: 'series',
+      source: 'SeriesDetailPopupV2',
+      region: 'collection-menu',
+      itemId: preferredSeason == null ? null : String(preferredSeason),
+      reason: 'season-dropdown-open',
+      maxFrames: 6,
+      isActive: () => menuOpenRef.current && menuOpenSessionRef.current === session,
+      getTarget: () => {
+        const target = preferredSeason == null ? null : optionRefs.current.get(preferredSeason);
+        return isValidTvFocusableTarget(target) ? target : null;
+      },
+    });
+    novacastTrace('[NovaCast Season Dropdown Focus]', {
+      event: 'focus-requested', selectedSeason: selectedSeasonNumber,
+      focusedSeason: null, targetSeason: preferredSeason,
+    });
+
+    return () => cancelOptionFocusRef.current?.();
+  // The request is intentionally keyed only to menu open. D-pad movement or
+  // parent detail updates must not start another opening handoff.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const reactNative = ReactNative as typeof ReactNative & { TVFocusGuideView?: typeof View };
+  const FocusBoundaryView = (reactNative.TVFocusGuideView ?? View) as unknown as ComponentType<{
+    children?: ReactNode;
+    style?: unknown;
+    focusable?: boolean;
+    autoFocus?: boolean;
+    trapFocusLeft?: boolean;
+    trapFocusRight?: boolean;
+    trapFocusUp?: boolean;
+    trapFocusDown?: boolean;
+  }>;
+
   return (
-    <Pressable
-      ref={chipRef}
-      focusable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      onFocus={() => {
-        setIsFocused(true);
-        onAreaFocusChange?.(true);
-      }}
-      onBlur={() => {
-        setIsFocused(false);
-        onAreaFocusChange?.(false);
-      }}
-      onPress={activate}
-      {...(Platform.isTV ? { onClick: activate } : {})}
-      style={[styles.seasonChip, selected && styles.seasonChipSelected, isFocused && styles.seasonChipFocused]}>
-      <Text style={[styles.seasonChipText, selected && styles.seasonChipTextSelected]} numberOfLines={1}>
-        {label}
-      </Text>
-    </Pressable>
+    <View style={styles.collectionBlock}>
+      <Text style={styles.sectionLabel}>Collection</Text>
+      <Pressable
+        ref={registerControlRef}
+        focusable
+        accessibilityRole="button"
+        accessibilityLabel={`Collection: ${label}`}
+        onFocus={() => { setFocused(true); onAreaFocusChange?.(true); }}
+        onBlur={() => {
+          if (!open || collectionMenuFocusOwned) {
+            setFocused(false);
+          }
+          onAreaFocusChange?.(open && !collectionMenuFocusOwned);
+        }}
+        onPress={onToggle}
+        {...(Platform.isTV ? { onClick: onToggle } : {})}
+        {...focusProps}
+        style={[styles.collectionControl, (focused || (open && !collectionMenuFocusOwned)) && styles.collectionControlFocused]}>
+        <Text style={styles.collectionValue} numberOfLines={1}>{label}</Text>
+        <MaterialCommunityIcons name={open ? 'chevron-up' : 'chevron-down'} size={21} color="#DCEBFF" />
+      </Pressable>
+      {open ? (
+        <FocusBoundaryView
+          style={styles.collectionMenu}
+          focusable={false}
+          {...(Platform.OS === 'android'
+            ? { autoFocus: false, trapFocusLeft: true, trapFocusRight: true, trapFocusUp: true, trapFocusDown: true }
+            : {})}>
+          <ScrollView
+            ref={seasonScrollRef}
+            focusable={false}
+            showsVerticalScrollIndicator={false}
+            nestedScrollEnabled
+            scrollEventThrottle={16}
+            onScroll={(event) => {
+              seasonScrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+            }}
+            onLayout={(event) => {
+              seasonMenuHeightRef.current = event.nativeEvent.layout.height;
+            }}>
+            {seasons.map((season, seasonIndex) => {
+              const seasonLabel = season.seasonNumber === 0
+                ? 'Specials' : season.name ?? `Season ${season.seasonNumber}`;
+              const selectedRow = season.seasonNumber === selectedSeasonNumber;
+              return (
+                <Pressable
+                  ref={getSeasonOptionRef(season.seasonNumber)}
+                  key={`collection-option-${season.seasonNumber}`}
+                  focusable
+                  accessibilityRole="button"
+                  accessibilityLabel={seasonLabel}
+                  onFocus={() => {
+                    setFocusedSeasonOption(season.seasonNumber);
+                    setCollectionMenuFocusOwned(true);
+                    onAreaFocusChange?.(true);
+                    const rowHeight = 36;
+                    const rowTop = seasonIndex * rowHeight;
+                    const rowBottom = rowTop + rowHeight;
+                    const viewportBottom = seasonScrollOffsetRef.current + seasonMenuHeightRef.current;
+                    if (seasonMenuHeightRef.current > 0 && rowTop < seasonScrollOffsetRef.current) {
+                      seasonScrollRef.current?.scrollTo({ y: rowTop, animated: true });
+                    } else if (seasonMenuHeightRef.current > 0 && rowBottom > viewportBottom) {
+                      seasonScrollRef.current?.scrollTo({
+                        y: Math.max(0, rowBottom - seasonMenuHeightRef.current),
+                        animated: true,
+                      });
+                    }
+                    novacastTrace('[NovaCast Season Dropdown Focus]', {
+                      event: 'option-focus', selectedSeason: selectedSeasonNumber,
+                      focusedSeason: season.seasonNumber, targetSeason: season.seasonNumber,
+                    });
+                  }}
+                  onBlur={() => {
+                    setFocusedSeasonOption((current) => current === season.seasonNumber ? null : current);
+                    onAreaFocusChange?.(false);
+                    novacastTrace('[NovaCast Season Dropdown Focus]', {
+                      event: 'option-blur', selectedSeason: selectedSeasonNumber,
+                      focusedSeason: null, targetSeason: season.seasonNumber,
+                    });
+                  }}
+                  onPress={() => {
+                    novacastTrace('[NovaCast Season Dropdown Focus]', {
+                      event: 'select', selectedSeason: season.seasonNumber,
+                      focusedSeason: focusedSeasonOption, targetSeason: season.seasonNumber,
+                    });
+                    onSelect(season.seasonNumber);
+                    restoreControlFocus();
+                  }}
+                  {...(Platform.isTV ? { onClick: () => { onSelect(season.seasonNumber); restoreControlFocus(); } } : {})}
+                  style={[
+                    styles.collectionOption,
+                    selectedRow && styles.collectionOptionSelected,
+                    focusedSeasonOption === season.seasonNumber && styles.collectionOptionFocused,
+                  ]}>
+                  <Text
+                    style={[
+                      styles.collectionOptionText,
+                      focusedSeasonOption === season.seasonNumber && styles.collectionOptionTextFocused,
+                    ]}
+                    numberOfLines={1}>
+                    {seasonLabel}
+                  </Text>
+                  {selectedRow ? <MaterialCommunityIcons name="check" size={18} color="#8FD7FF" /> : null}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </FocusBoundaryView>
+      ) : null}
+    </View>
   );
 }
 
@@ -255,6 +504,10 @@ function EpisodeChip({
   onPressEpisode,
   onAreaFocusChange,
   chipRef,
+  nextFocusLeft,
+  nextFocusRight,
+  nextFocusUp,
+  nextFocusDown,
 }: {
   episode: MediaDetailEpisode;
   focusedEpisodeId: string | null;
@@ -262,6 +515,10 @@ function EpisodeChip({
   onPressEpisode?: (episode: MediaDetailEpisode) => void;
   onAreaFocusChange?: (focused: boolean) => void;
   chipRef?: (instance: ElementRef<typeof Pressable> | null) => void;
+  nextFocusLeft?: number;
+  nextFocusRight?: number;
+  nextFocusUp?: number;
+  nextFocusDown?: number;
 }) {
   const [isFocused, setIsFocused] = useState(false);
   const highlighted = isFocused || focusedEpisodeId === episode.id;
@@ -270,6 +527,10 @@ function EpisodeChip({
     <Pressable
       ref={chipRef}
       focusable
+      {...(nextFocusLeft != null ? { nextFocusLeft } : {})}
+      {...(nextFocusRight != null ? { nextFocusRight } : {})}
+      {...(nextFocusUp != null ? { nextFocusUp } : {})}
+      {...(nextFocusDown != null ? { nextFocusDown } : {})}
       accessibilityRole="button"
       accessibilityLabel={`Episode ${episode.episodeNumber}: ${episode.title}`}
       onFocus={() => {
@@ -284,9 +545,12 @@ function EpisodeChip({
       onPress={activate}
       {...(Platform.isTV ? { onClick: activate } : {})}
       style={[styles.episodeChip, highlighted && styles.episodeChipFocused]}>
-      <Text style={styles.episodeChipText} numberOfLines={1}>
-        E{episode.episodeNumber} · {episode.title}
-      </Text>
+      <View style={styles.episodeTextWrap}>
+        <Text style={styles.episodeChipText} numberOfLines={1}>
+          E{episode.episodeNumber} · {episode.title}
+        </Text>
+        {episode.runtime ? <Text style={styles.episodeRuntime} numberOfLines={1}>{episode.runtime}</Text> : null}
+      </View>
     </Pressable>
   );
 }
@@ -312,7 +576,6 @@ export function SeriesDetailPopupV2({
   onEpisodeFocus,
   onEpisodePress,
   onEpisodesAreaFocusChange,
-  episodesFocusReturnToken,
 }: SeriesDetailPopupV2Props) {
   const { width, height } = useWindowDimensions();
   const layout = useMemo(
@@ -321,14 +584,47 @@ export function SeriesDetailPopupV2({
   );
 
   const actionRefs = useRef(new Map<string, ElementRef<typeof Pressable>>());
-  const episodeChipRefs = useRef(new Map<string, ElementRef<typeof Pressable>>());
-  const seasonChipRefs = useRef(new Map<number, ElementRef<typeof Pressable>>());
+  const collectionRef = useRef<ElementRef<typeof Pressable> | null>(null);
+  const detailRefCallbacks = useRef(new Map<string, (instance: ElementRef<typeof Pressable> | null) => void>());
+  const detailHandlesRef = useRef(new Map<string, number>());
+  const [detailHandles, setDetailHandles] = useState<Record<string, number>>({});
   const [focusedActionId, setFocusedActionId] = useState<string | null>(null);
+  const [collectionOpen, setCollectionOpen] = useState(false);
   const [closeFocused, setCloseFocused] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
   const closeGuardRef = useRef(0);
   const wasVisibleRef = useRef(false);
-  const episodesReturnTokenRef = useRef(episodesFocusReturnToken);
+
+  const registerDetailHandle = useCallback((id: string, instance: ElementRef<typeof Pressable> | null) => {
+    if (instance == null) {
+      detailHandlesRef.current.delete(id);
+      setDetailHandles((current) => {
+        if (!(id in current)) return current;
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      if (id === 'collection') collectionRef.current = null;
+      if (id === 'close') return;
+      if (id.startsWith('action:')) actionRefs.current.delete(id.slice('action:'.length));
+      return;
+    }
+
+    if (id.startsWith('action:')) actionRefs.current.set(id.slice('action:'.length), instance);
+    if (id === 'collection') collectionRef.current = instance;
+    const handle = ReactNative.findNodeHandle(instance);
+    if (handle == null || detailHandlesRef.current.get(id) === handle) return;
+    detailHandlesRef.current.set(id, handle);
+    setDetailHandles((current) => current[id] === handle ? current : { ...current, [id]: handle });
+  }, []);
+
+  const getDetailRef = useCallback((id: string) => {
+    const existing = detailRefCallbacks.current.get(id);
+    if (existing) return existing;
+    const callback = (instance: ElementRef<typeof Pressable> | null) => registerDetailHandle(id, instance);
+    detailRefCallbacks.current.set(id, callback);
+    return callback;
+  }, [registerDetailHandle]);
 
   const title = series?.title ?? detail?.title ?? '';
   const posterUrl = detail?.posterUrl ?? series?.posterUrl;
@@ -337,30 +633,32 @@ export function SeriesDetailPopupV2({
 
   const seasons = detail?.seasons ?? [];
   const episodes = detail?.episodes ?? [];
+  // Keep the selector stable while details are loading, but do not expose
+  // provider seasons that explicitly contain no episodes once loaded.
+  const selectableSeasons = useMemo(
+    () => loading ? seasons : seasons.filter((season) => season.episodeCount > 0),
+    [loading, seasons],
+  );
+  const [openSeasonOptions, setOpenSeasonOptions] = useState<typeof selectableSeasons | null>(null);
+  useEffect(() => {
+    // Capture once per open session. Hydration may update selectableSeasons,
+    // but native focus must not lose the option view it currently owns.
+    setOpenSeasonOptions(collectionOpen ? selectableSeasons : null);
+    // Deliberately depend only on the open/close boundary; do not refresh the
+    // snapshot when episode hydration changes the canonical season list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collectionOpen]);
+  const renderedSeasonOptions = collectionOpen && openSeasonOptions
+    ? openSeasonOptions
+    : selectableSeasons;
   const activeSeasonNumber = useMemo(
-    () => resolveSeriesDetailPopupV2SeasonNumber(seasons, selectedSeasonNumber),
-    [seasons, selectedSeasonNumber],
+    () => resolveSeriesDetailPopupV2SeasonNumber(renderedSeasonOptions, selectedSeasonNumber),
+    [renderedSeasonOptions, selectedSeasonNumber],
   );
   const seasonEpisodes = useMemo(
     () => filterSeriesDetailPopupV2Episodes(episodes, activeSeasonNumber).slice(0, 24),
     [episodes, activeSeasonNumber],
   );
-
-  const episodesActionEnabled = isSeriesDetailPopupV2EpisodesActionEnabled(seasons.length);
-
-  const focusEpisodesArea = () => {
-    const target =
-      seasonEpisodes.length > 0
-        ? episodeChipRefs.current.get(seasonEpisodes[0].id)
-        : activeSeasonNumber != null
-          ? seasonChipRefs.current.get(activeSeasonNumber)
-          : undefined;
-    try {
-      target?.focus?.();
-    } catch {
-      // Never crash the popup for focus.
-    }
-  };
 
   const actions = useMemo<ActionSpec[]>(() => {
     const next: ActionSpec[] = [];
@@ -373,17 +671,10 @@ export function SeriesDetailPopupV2({
         onPress: onPlay,
       });
     }
-    next.push({
-      id: 'episodes',
-      label: 'Episodes',
-      icon: 'playlist-play',
-      disabled: !episodesActionEnabled,
-      onPress: focusEpisodesArea,
-    });
     if (onToggleFavorite) {
       next.push({
         id: 'favorite',
-        label: isFavorite ? 'Favorited' : 'Favorite',
+        label: isFavorite ? 'In My List' : 'My List',
         icon: isFavorite ? 'heart' : 'heart-outline',
         onPress: onToggleFavorite,
       });
@@ -391,7 +682,7 @@ export function SeriesDetailPopupV2({
     if (onToggleWatchlist) {
       next.push({
         id: 'watchlist',
-        label: isWatchlisted ? 'In Watchlist' : 'Watchlist',
+        label: isWatchlisted ? 'Bookmarked' : 'Bookmark',
         icon: isWatchlisted ? 'bookmark' : 'bookmark-outline',
         onPress: onToggleWatchlist,
       });
@@ -407,7 +698,6 @@ export function SeriesDetailPopupV2({
     return next;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    episodesActionEnabled,
     error,
     isFavorite,
     isWatchlisted,
@@ -416,8 +706,6 @@ export function SeriesDetailPopupV2({
     onToggleFavorite,
     onToggleWatchlist,
     playLabel,
-    seasonEpisodes,
-    activeSeasonNumber,
   ]);
 
   const initialFocusActionId = useMemo(
@@ -428,6 +716,58 @@ export function SeriesDetailPopupV2({
     [actions],
   );
 
+  // Native focus must remain inside the modal even during the short period in
+  // which Android has attached some refs but not their neighbors. A missing
+  // neighbor therefore resolves to the current control's own handle. Handles
+  // are registered through stable callbacks; this state is only a render
+  // notification and never changes from inside render.
+  const detailFocusProps = useCallback((id: string, targets: {
+    left: string;
+    right: string;
+    up: string;
+    down: string;
+  }) => {
+    const ownHandle = detailHandles[id];
+    const resolve = (targetId: string) => detailHandles[targetId] ?? ownHandle;
+    return {
+      ...(resolve(targets.left) != null ? { nextFocusLeft: resolve(targets.left) } : {}),
+      ...(resolve(targets.right) != null ? { nextFocusRight: resolve(targets.right) } : {}),
+      ...(resolve(targets.up) != null ? { nextFocusUp: resolve(targets.up) } : {}),
+      ...(resolve(targets.down) != null ? { nextFocusDown: resolve(targets.down) } : {}),
+    };
+  }, [detailHandles]);
+
+  const actionIds = actions.map((action) => `action:${action.id}`);
+  const episodeIds = seasonEpisodes.map((episode) => `episode:${episode.id}`);
+  const firstActionId = actionIds[0] ?? 'close';
+  const lastActionId = actionIds[actionIds.length - 1] ?? 'close';
+  const firstContentId = firstActionId !== 'close' ? firstActionId : ('collection' in detailHandles ? 'collection' : (episodeIds[0] ?? 'close'));
+  const lastContentId = episodeIds[episodeIds.length - 1] ?? ('collection' in detailHandles ? 'collection' : lastActionId);
+  const focusPropsById = new Map<string, ReturnType<typeof detailFocusProps>>();
+  focusPropsById.set('close', detailFocusProps('close', {
+    left: 'close', right: firstActionId, up: 'close', down: firstContentId,
+  }));
+  actionIds.forEach((id, index) => {
+    const previous = actionIds[index - 1] ?? id;
+    const next = actionIds[index + 1] ?? id;
+    focusPropsById.set(id, detailFocusProps(id, {
+      left: previous,
+      right: next,
+      up: 'close',
+      down: renderedSeasonOptions.length > 0 ? 'collection' : (episodeIds[0] ?? id),
+    }));
+  });
+  if ('collection' in detailHandles || renderedSeasonOptions.length > 0) {
+    focusPropsById.set('collection', detailFocusProps('collection', {
+      left: 'collection', right: 'collection', up: lastActionId, down: episodeIds[0] ?? 'collection',
+    }));
+  }
+  episodeIds.forEach((id, index) => {
+    focusPropsById.set(id, detailFocusProps(id, {
+      left: id, right: id, up: episodeIds[index - 1] ?? ('collection' in detailHandles ? 'collection' : lastActionId), down: episodeIds[index + 1] ?? id,
+    }));
+  });
+
   useEffect(() => {
     if (!visible) {
       wasVisibleRef.current = false;
@@ -435,13 +775,14 @@ export function SeriesDetailPopupV2({
     }
     const opening = !wasVisibleRef.current;
     wasVisibleRef.current = true;
-    setPosterFailed(false);
-    if (opening) {
+      setPosterFailed(false);
+      if (opening) {
       // Reset stale focus-ring state from a prior open/close cycle — same
       // fix as Movies V2 (Android doesn't reliably fire onBlur on the close
       // button when its host view unmounts mid-focus).
-      setCloseFocused(false);
-      setFocusedActionId(null);
+        setCloseFocused(false);
+        setFocusedActionId(null);
+        setCollectionOpen(false);
       logSeriesDetailPopupV2Event('series_detail_popup_v2_active', {
         seriesId: series?.id ?? null,
       });
@@ -472,25 +813,30 @@ export function SeriesDetailPopupV2({
     };
   }, [initialFocusActionId, series?.id, visible]);
 
-  // Back-order support: when SeriesScreen decides a Back press should just
-  // collapse episode-area focus (not close the whole popup), it bumps
-  // `episodesFocusReturnToken`. Landing focus back on the Episodes action
-  // keeps the D-pad experience predictable (episode area -> Episodes -> popup).
   useEffect(() => {
-    if (
-      episodesFocusReturnToken == null ||
-      episodesFocusReturnToken === episodesReturnTokenRef.current
-    ) {
-      return;
-    }
-    episodesReturnTokenRef.current = episodesFocusReturnToken;
-    const target = actionRefs.current.get('episodes');
-    try {
-      target?.focus?.();
-    } catch {
-      // Never crash the popup for focus.
-    }
-  }, [episodesFocusReturnToken]);
+    if (!collectionOpen) return;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      setCollectionOpen(false);
+      novacastTrace('[NovaCast Season Dropdown Focus]', {
+        event: 'close', selectedSeason: activeSeasonNumber,
+        focusedSeason: null, targetSeason: activeSeasonNumber,
+      });
+      requestTvFocus({
+        screen: 'series',
+        source: 'SeriesDetailPopupV2',
+        region: 'collection-control',
+        reason: 'collection-menu-back',
+        getTarget: () =>
+          isValidTvFocusableTarget(collectionRef.current) ? collectionRef.current : null,
+      });
+      novacastTrace('[NovaCast Season Dropdown Focus]', {
+        event: 'selector-restored', selectedSeason: activeSeasonNumber,
+        focusedSeason: null, targetSeason: activeSeasonNumber,
+      });
+      return true;
+    });
+    return () => subscription.remove();
+  }, [collectionOpen]);
 
   const requestClose = (source: 'back' | 'x') => {
     const now = Date.now();
@@ -541,7 +887,9 @@ export function SeriesDetailPopupV2({
         <View style={[styles.shadowWrap, { width: layout.popupWidth, height: layout.popupHeight }]}>
           {/* No backdrop image — same Android layout-stability reasoning as Movies V2. */}
           <View style={styles.card}>
+            <View pointerEvents="none" style={styles.cardTopHighlight} />
             <Pressable
+              ref={getDetailRef('close')}
               focusable
               hasTVPreferredFocus={false}
               accessibilityRole="button"
@@ -550,6 +898,7 @@ export function SeriesDetailPopupV2({
               onBlur={() => setCloseFocused(false)}
               onPress={() => requestClose('x')}
               {...(Platform.isTV ? { onClick: () => requestClose('x') } : {})}
+              {...focusPropsById.get('close')}
               style={[styles.closeButton, closeFocused && styles.closeButtonFocused]}>
               <MaterialCommunityIcons name="close" size={22} color="#FFFFFF" />
             </Pressable>
@@ -571,16 +920,16 @@ export function SeriesDetailPopupV2({
               </View>
 
               <View style={styles.copyPanel}>
-                <Text style={styles.title} numberOfLines={2}>
+                <Text style={styles.title} numberOfLines={3}>
                   {title}
                 </Text>
                 {metaLine ? (
-                  <Text style={styles.meta} numberOfLines={1}>
+                  <Text style={styles.meta} numberOfLines={2}>
                     {metaLine}
                   </Text>
                 ) : null}
                 {description ? (
-                  <Text style={styles.description} numberOfLines={3}>
+                  <Text style={styles.description} numberOfLines={5}>
                     {description}
                   </Text>
                 ) : null}
@@ -603,67 +952,53 @@ export function SeriesDetailPopupV2({
                       action={action}
                       preferred={action.id === initialFocusActionId}
                       focused={focusedActionId === action.id}
-                      buttonRef={(instance) => {
-                        if (instance) {
-                          actionRefs.current.set(action.id, instance);
-                        } else {
-                          actionRefs.current.delete(action.id);
-                        }
-                      }}
+                      buttonRef={getDetailRef(`action:${action.id}`)}
+                      {...focusPropsById.get(`action:${action.id}`)}
                       onFocus={() => setFocusedActionId(action.id)}
                       onBlur={() => setFocusedActionId(null)}
                     />
                   ))}
                 </View>
 
-                {seasons.length > 0 ? (
-                  <View style={styles.seasonsBlock}>
-                    <ScrollView
-                      horizontal
-                      focusable={false}
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.seasonRow}>
-                      {seasons.map((season) => (
-                        <SeasonChip
-                          key={`season-${season.seasonNumber}`}
-                          seasonNumber={season.seasonNumber}
-                          label={season.name ?? `Season ${season.seasonNumber}`}
-                          selected={season.seasonNumber === activeSeasonNumber}
-                          onPress={(seasonNumber) => onSeasonPress?.(seasonNumber)}
-                          onAreaFocusChange={onEpisodesAreaFocusChange}
-                          chipRef={(instance) => {
-                            if (instance) {
-                              seasonChipRefs.current.set(season.seasonNumber, instance);
-                            } else {
-                              seasonChipRefs.current.delete(season.seasonNumber);
-                            }
-                          }}
-                        />
-                      ))}
-                    </ScrollView>
-                    <ScrollView
-                      horizontal
-                      focusable={false}
-                      showsHorizontalScrollIndicator={false}
-                      contentContainerStyle={styles.episodeRow}>
-                      {seasonEpisodes.map((episode) => (
-                        <EpisodeChip
-                          key={episode.id}
-                          episode={episode}
-                          focusedEpisodeId={focusedEpisodeId}
-                          onFocusEpisode={onEpisodeFocus}
-                          onPressEpisode={onEpisodePress}
-                          onAreaFocusChange={onEpisodesAreaFocusChange}
-                          chipRef={(instance) => {
-                            if (instance) {
-                              episodeChipRefs.current.set(episode.id, instance);
-                            } else {
-                              episodeChipRefs.current.delete(episode.id);
-                            }
-                          }}
-                        />
-                      ))}
-                    </ScrollView>
+                {renderedSeasonOptions.length > 0 ? (
+                  <View style={styles.episodesSection}>
+                    <CollectionSelector
+                      seasons={renderedSeasonOptions}
+                      selectedSeasonNumber={activeSeasonNumber}
+                      open={collectionOpen}
+                      onToggle={() => setCollectionOpen((open) => !open)}
+                      focusProps={focusPropsById.get('collection')}
+                      onSelect={(seasonNumber) => {
+                        onSeasonPress?.(seasonNumber);
+                        setCollectionOpen(false);
+                      }}
+                      onAreaFocusChange={onEpisodesAreaFocusChange}
+                      controlRef={getDetailRef('collection')}
+                    />
+                    <Text style={styles.sectionLabel}>Episodes</Text>
+                    <View style={styles.episodeBox}>
+                      {seasonEpisodes.length > 0 ? (
+                        <ScrollView
+                          showsVerticalScrollIndicator
+                          nestedScrollEnabled
+                          contentContainerStyle={styles.episodeList}>
+                          {seasonEpisodes.map((episode) => (
+                            <EpisodeChip
+                              key={episode.id}
+                              episode={episode}
+                              focusedEpisodeId={focusedEpisodeId}
+                              onFocusEpisode={onEpisodeFocus}
+                              onPressEpisode={onEpisodePress}
+                              onAreaFocusChange={onEpisodesAreaFocusChange}
+                              chipRef={getDetailRef(`episode:${episode.id}`)}
+                              {...focusPropsById.get(`episode:${episode.id}`)}
+                            />
+                          ))}
+                        </ScrollView>
+                      ) : (
+                        <Text style={styles.emptyEpisodes}>No episodes available for this collection.</Text>
+                      )}
+                    </View>
                   </View>
                 ) : null}
               </View>
@@ -695,13 +1030,21 @@ const styles = StyleSheet.create({
     shadowRadius: 24,
     elevation: 16,
   },
-  // No overflow:'hidden' here — same reasoning as Movies V2's `card` style.
   card: {
     flex: 1,
     borderRadius: 20,
-    backgroundColor: 'rgba(14, 18, 26, 0.88)',
+    overflow: 'hidden',
+    backgroundColor: 'rgba(8, 13, 25, 0.72)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    borderColor: 'rgba(205,190,255,0.28)',
+  },
+  cardTopHighlight: {
+    position: 'absolute',
+    top: 0,
+    left: 28,
+    right: 28,
+    height: 2,
+    backgroundColor: NOVA_FOCUS.poster.innerHighlight,
   },
   closeButton: {
     position: 'absolute',
@@ -718,17 +1061,17 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(255,255,255,0.16)',
   },
   closeButtonFocused: {
-    borderColor: novaTheme.colors.focusRing,
-    backgroundColor: 'rgba(59, 130, 246, 0.4)',
-    transform: [{ scale: 1.08 }],
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
   },
   contentRow: {
     flex: 1,
     flexDirection: 'row',
-    paddingHorizontal: 30,
-    paddingVertical: 26,
-    gap: 26,
+    paddingHorizontal: 28,
+    paddingVertical: 24,
+    gap: 24,
     zIndex: 2,
+    overflow: 'hidden',
   },
   posterPanel: {
     aspectRatio: 2 / 3,
@@ -747,25 +1090,26 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     minHeight: 0,
-    paddingRight: 24,
-    justifyContent: 'center',
-    gap: 10,
+    paddingRight: 36,
+    justifyContent: 'flex-start',
+    gap: 8,
+    overflow: 'hidden',
   },
   title: {
     color: novaTheme.colors.textPrimary,
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: '700',
     letterSpacing: 0.2,
   },
   meta: {
     color: novaTheme.colors.textSecondary,
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
   },
   description: {
     color: 'rgba(255,255,255,0.86)',
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: 13,
+    lineHeight: 19,
   },
   statusLine: {
     color: novaTheme.colors.textMuted,
@@ -775,101 +1119,182 @@ const styles = StyleSheet.create({
     color: novaTheme.colors.warning,
     fontSize: 14,
   },
-  seasonsBlock: {
-    gap: 8,
-    marginTop: 2,
-    flexShrink: 1,
+  episodesSection: {
+    flex: 1,
     minHeight: 0,
+    gap: 6,
+    marginTop: 2,
   },
-  seasonRow: {
-    gap: 8,
-    paddingVertical: 2,
-  },
-  seasonChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.10)',
-  },
-  seasonChipSelected: {
-    borderColor: novaTheme.colors.focusRing,
-    backgroundColor: 'rgba(59, 130, 246, 0.28)',
-  },
-  seasonChipFocused: {
-    borderColor: novaTheme.colors.focusRing,
-    transform: [{ scale: 1.05 }],
-  },
-  seasonChipText: {
-    color: novaTheme.colors.textSecondary,
+  sectionLabel: {
+    color: '#B8D7FF',
     fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  collectionBlock: {
+    gap: 5,
+    zIndex: 3,
+  },
+  collectionControl: {
+    minHeight: 42,
+    width: '100%',
+    paddingHorizontal: 13,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(21,35,61,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(104,157,224,0.38)',
+  },
+  collectionControlFocused: {
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+  },
+  collectionValue: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+    flex: 1,
+  },
+  collectionMenu: {
+    height: 116,
+    borderRadius: 10,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(7,15,29,0.97)',
+    borderWidth: 1,
+    borderColor: 'rgba(104,157,224,0.55)',
+  },
+  collectionOption: {
+    minHeight: 36,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(135,175,220,0.12)',
+  },
+  collectionOptionSelected: {
+    backgroundColor: NOVA_GLASS.active.backgroundColor,
+    borderColor: NOVA_GLASS.active.borderColor,
+  },
+  collectionOptionFocused: {
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+    borderWidth: 2,
+    borderColor: NOVA_GLASS.focused.borderColor,
+  },
+  collectionOptionText: {
+    color: '#E8F2FF',
+    fontSize: 13,
     fontWeight: '600',
+    flex: 1,
   },
-  seasonChipTextSelected: {
-    color: novaTheme.colors.textPrimary,
+  collectionOptionTextFocused: {
+    color: '#FFFFFF',
+    fontWeight: '800',
   },
-  episodeRow: {
-    gap: 8,
-    paddingVertical: 2,
+  episodeList: {
+    padding: 7,
+    gap: 4,
+  },
+  episodeBox: {
+    width: '100%',
+    maxWidth: '100%',
+    flex: 1,
+    minHeight: 84,
+    overflow: 'hidden',
+    borderRadius: 10,
+    backgroundColor: 'rgba(10,20,38,0.56)',
+    borderWidth: 1,
+    borderColor: 'rgba(104,157,224,0.28)',
   },
   episodeChip: {
-    maxWidth: 200,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.06)',
+    width: '100%',
+    minHeight: 34,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 7,
+    backgroundColor: 'rgba(255,255,255,0.045)',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
+    justifyContent: 'center',
   },
   episodeChipFocused: {
-    borderColor: novaTheme.colors.focusRing,
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: NOVA_GLASS.focused.backgroundColor,
   },
   episodeChipText: {
     color: novaTheme.colors.textPrimary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  episodeTextWrap: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  episodeRuntime: {
+    color: '#AFC8E8',
     fontSize: 12,
+    marginLeft: 'auto',
+  },
+  emptyEpisodes: {
+    color: novaTheme.colors.textMuted,
+    fontSize: 13,
+    padding: 14,
   },
   actionsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
-    marginTop: 4,
+    gap: 9,
+    marginTop: 8,
+    maxWidth: '100%',
     flexShrink: 0,
+    alignItems: 'flex-start',
+    paddingRight: 8,
   },
   action: {
-    flexDirection: 'row',
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
-    minHeight: 46,
-    paddingHorizontal: 18,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    width: 50,
+    height: 44,
+    minWidth: 50,
+    paddingHorizontal: 0,
+    backgroundColor: 'transparent',
+  },
+  actionPrimarySize: {
+    width: 56,
+    minWidth: 56,
   },
   actionPrimary: {
-    backgroundColor: novaTheme.colors.accent,
-    borderColor: novaTheme.colors.accentHover,
+    backgroundColor: 'transparent',
   },
   actionDisabled: {
     opacity: 0.4,
   },
   actionFocused: {
-    borderColor: novaTheme.colors.focusRing,
-    backgroundColor: 'rgba(131, 180, 255, 0.28)',
-    transform: [{ scale: 1.06 }],
-    shadowColor: novaTheme.colors.focusRing,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 10,
-    elevation: 10,
+    flexDirection: 'row',
+    gap: 7,
+    width: 96,
+    minWidth: 96,
+    paddingHorizontal: 10,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    borderRadius: NOVA_GLASS.radius.base,
   },
   actionPrimaryFocused: {
-    backgroundColor: novaTheme.colors.accentHover,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    width: 104,
+    minWidth: 104,
   },
   actionLabel: {
     color: novaTheme.colors.textPrimary,
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
   },
   actionLabelDisabled: {

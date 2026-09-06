@@ -4,6 +4,7 @@ import {
   getCatalogDatabase,
   getCatalogReadDatabase,
   logCatalogWalAudit,
+  waitForForegroundCatalogReadsToDrain,
   withCatalogTransaction,
   type CatalogTransactionDiagnostics,
 } from './catalogDatabase.ts';
@@ -457,7 +458,16 @@ export async function writeCatalogCategoriesBatch(
     itemCount?: number;
     updatedAt?: number;
   }>,
-  options?: { mediaType?: CatalogMediaType },
+  options?: {
+    mediaType?: CatalogMediaType;
+    timing?: {
+      prepareMs?: number;
+      queueWaitMs?: number;
+      transactionBodyMs?: number;
+      finalizeMs?: number;
+      busyMs?: number;
+    };
+  },
 ): Promise<number> {
   if (!categories.length) {
     return 0;
@@ -480,6 +490,12 @@ export async function writeCatalogCategoriesBatch(
   );
 
   const resolvedMediaType = (mediaType ?? categories[0]?.mediaType ?? 'movie') as CatalogMediaType;
+  const transactionDiagnostics: CatalogTransactionDiagnostics = {
+    providerId: categories[0]?.providerId,
+    mediaType: resolvedMediaType,
+    generation: categories[0]?.syncGeneration,
+    writeType: 'category',
+  };
   const categoriesTable = catalogCategoriesTable(resolvedMediaType);
   const categoryConflict = catalogCategoriesConflictTarget(resolvedMediaType);
   const categoryConflictUpdate = usesGenerationSafeCatalog(resolvedMediaType)
@@ -562,13 +578,20 @@ export async function writeCatalogCategoriesBatch(
         });
       }
       return count;
-    });
+    }, transactionDiagnostics);
 
     return written;
   } finally {
     const finalizeStart = perfNowMs();
     await statement.finalize();
     finalizeMs = perfNowMs() - finalizeStart;
+    if (options?.timing) {
+      options.timing.prepareMs = prepareMs;
+      options.timing.queueWaitMs = transactionDiagnostics.queueWaitMs ?? 0;
+      options.timing.transactionBodyMs = transactionDiagnostics.transactionBodyMs ?? 0;
+      options.timing.finalizeMs = finalizeMs;
+      options.timing.busyMs = prepareMs + (transactionDiagnostics.transactionBodyMs ?? 0) + finalizeMs;
+    }
     recordColdCategorySubPhase({
       phase: 'finalize',
       mediaType,
@@ -629,6 +652,7 @@ export async function writeCatalogItemsBatch(
     return written;
   }
 
+  await waitForForegroundCatalogReadsToDrain();
   const db = await getCatalogDatabase();
   const mediaType = (items[0]?.mediaType ?? 'movie') as CatalogMediaType;
   const itemsTable = catalogItemsTable(mediaType);
@@ -682,6 +706,35 @@ export async function writeCatalogItemsBatch(
       ${itemConflictUpdate}`;
 
   const totalWriteStart = perfNowMs();
+  const parameters: CatalogSqlParams = [];
+  for (const item of items) {
+    const updatedAt = item.updatedAt ?? nowMs();
+    const normalizedTitle = item.normalizedTitle ?? normalizeCatalogTitle(item.title);
+    parameters.push(
+      item.providerId,
+      item.mediaType,
+      item.contentId,
+      item.categoryId ?? null,
+      item.title,
+      normalizedTitle,
+      item.artworkUrl ?? null,
+      item.backdropUrl ?? null,
+      item.releaseDate ?? null,
+      item.releaseYear ?? null,
+      item.rating ?? null,
+      item.addedAt ?? null,
+      item.popularity ?? null,
+      item.description ?? null,
+      item.streamExtension ?? null,
+      item.providerSortOrder ?? null,
+      item.seriesId ?? null,
+      item.seasonNumber ?? null,
+      item.episodeNumber ?? null,
+      item.syncGeneration,
+      updatedAt,
+    );
+  }
+
   const prepareStart = perfNowMs();
   const statement = await db.prepare(sql);
   const prepareMs = perfNowMs() - prepareStart;
@@ -704,34 +757,6 @@ export async function writeCatalogItemsBatch(
   try {
     const result = await withCatalogTransaction(async () => {
       const writeStart = perfNowMs();
-      const parameters: CatalogSqlParams = [];
-      for (const item of items) {
-        const updatedAt = item.updatedAt ?? nowMs();
-        const normalizedTitle = item.normalizedTitle ?? normalizeCatalogTitle(item.title);
-        parameters.push(
-          item.providerId,
-          item.mediaType,
-          item.contentId,
-          item.categoryId ?? null,
-          item.title,
-          normalizedTitle,
-          item.artworkUrl ?? null,
-          item.backdropUrl ?? null,
-          item.releaseDate ?? null,
-          item.releaseYear ?? null,
-          item.rating ?? null,
-          item.addedAt ?? null,
-          item.popularity ?? null,
-          item.description ?? null,
-          item.streamExtension ?? null,
-          item.providerSortOrder ?? null,
-          item.seriesId ?? null,
-          item.seasonNumber ?? null,
-          item.episodeNumber ?? null,
-          item.syncGeneration,
-          updatedAt,
-        );
-      }
       const executeStart = perfNowMs();
       await statement.execute(parameters);
       const executeMs = perfNowMs() - executeStart;
@@ -3798,13 +3823,10 @@ export async function getCatalogTotalCount(
 }
 
 export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise<CatalogItemsPage> {
-  // search-s5-foreground-read-priority
-  const releaseForegroundRead = query.query?.trim() ? beginCatalogForegroundRead() : null;
+  // Foreground Movies/Series/Search reads must not share the writer connection.
+  const releaseForegroundRead = beginCatalogForegroundRead();
   try {
-  // search-s6-dedicated-read-connection
-  const db = query.query?.trim()
-    ? await getCatalogReadDatabase()
-    : await getCatalogDatabase();
+  const db = await getCatalogReadDatabase();
   const generation = query.generation ?? (await resolveActiveGeneration(query.providerId, query.mediaType));
   const limit = Math.min(Math.max(query.limit ?? CATALOG_DEFAULT_PAGE_SIZE, 1), 100);
   const offset = Math.max(query.offset ?? 0, 0);
@@ -4221,6 +4243,66 @@ export async function listCatalogCategoriesForGeneration(
     [providerId, mediaType, generation],
   );
   return rows.map(mapCategory);
+}
+
+export async function listKnownSeriesCategoryNames(
+  providerId: string,
+): Promise<Array<{ categoryId: string; categoryName: string; syncGeneration: number }>> {
+  if (!providerId) {
+    return [];
+  }
+  const db = await getCatalogDatabase();
+  const categoriesTable = catalogCategoriesTable('series');
+  const rows = await db.getAll<{
+    category_id: string;
+    category_name: string;
+    sync_generation: number | string;
+  }>(
+    `SELECT category_id, category_name, sync_generation
+     FROM ${categoriesTable}
+     WHERE provider_id = ? AND media_type = ?
+     ORDER BY sync_generation DESC`,
+    [providerId, 'series'],
+  );
+  return rows.map((row) => ({
+    categoryId: asString(row.category_id),
+    categoryName: asString(row.category_name),
+    syncGeneration: asNumber(row.sync_generation),
+  }));
+}
+
+/**
+ * Label-only Series update. Never changes category_id, item associations, or counts.
+ */
+export async function updatePublishedSeriesCategoryNames(
+  providerId: string,
+  generation: number,
+  updates: Array<{ categoryId: string; categoryName: string }>,
+): Promise<number> {
+  if (!providerId || generation <= 0 || !updates.length) {
+    return 0;
+  }
+  const categoriesTable = catalogCategoriesTable('series');
+  const db = await getCatalogDatabase();
+  return withCatalogTransaction(async () => {
+    let written = 0;
+    const updatedAt = nowMs();
+    for (const update of updates) {
+      const categoryId = asString(update.categoryId).trim();
+      const categoryName = asString(update.categoryName).trim();
+      if (!categoryId || !categoryName) {
+        continue;
+      }
+      const result = await db.run(
+        `UPDATE ${categoriesTable}
+            SET category_name = ?, updated_at = ?
+          WHERE provider_id = ? AND media_type = ? AND sync_generation = ? AND category_id = ?`,
+        [categoryName, updatedAt, providerId, 'series', generation, categoryId],
+      );
+      written += Number(result?.changes ?? 0);
+    }
+    return written;
+  });
 }
 
 export async function listCatalogSeasonsForGeneration(

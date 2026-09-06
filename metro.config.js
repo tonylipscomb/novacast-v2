@@ -1,8 +1,10 @@
+const path = require('path');
 const {
   getSentryExpoConfig
 } = require("@sentry/react-native/metro");
 
 const config = getSentryExpoConfig(__dirname);
+const NATIVE_WEBSOCKET_SHIM = path.join(__dirname, 'metro', 'native-websocket.js');
 
 // The project root accumulates loose debug artifacts from manual device/emulator
 // testing sessions (screenshots, UI-dump XML, adb/gradle/metro logs, sideloaded
@@ -28,6 +30,12 @@ config.resolver.blockList = [
 // release builds must use the Expo-native implementation instead.
 const upstreamResolveRequest = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  // @supabase/realtime-js contains a Node-only `ws` fallback that imports
+  // `stream`. React Native provides a native WebSocket, so keep that fallback
+  // out of the Android bundle.
+  if (typeof moduleName === 'string' && (moduleName === 'ws' || moduleName.startsWith('ws/'))) {
+    return { type: 'sourceFile', filePath: NATIVE_WEBSOCKET_SHIM };
+  }
   if (
     platform === 'android' &&
     typeof moduleName === 'string' &&

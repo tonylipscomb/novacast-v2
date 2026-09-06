@@ -13,7 +13,9 @@ export type OnnMoviesTraceTag =
   | 'Back'
   | 'Focus'
   | 'Scroll'
-  | 'Overlay';
+  | 'Overlay'
+  | 'Startup'
+  | 'Playback';
 
 export type OnnMoviesNamedScenario =
   | 'detail-back'

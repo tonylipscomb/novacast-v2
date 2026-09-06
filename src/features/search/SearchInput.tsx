@@ -4,7 +4,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
 import { findNodeHandle, Platform, Pressable, StyleSheet, TextInput, View, type TextInput as TextInputType } from 'react-native';
 
-import { novaTvFocus, createNovaTvFocusTextStyles, NOVA_TV_GLASS } from '@/components/nova/novaTvFocus';
+import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
 
@@ -344,20 +345,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    borderRadius: 0,
-    borderWidth: 2,
-    borderColor: 'transparent',
-    borderBottomWidth: 2,
-    borderBottomColor: novaTheme.colors.borderSubtle,
-    backgroundColor: 'transparent',
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    backgroundColor: NOVA_GLASS.subtle.backgroundColor,
     paddingLeft: 2,
     paddingRight: 2,
     paddingVertical: 4,
   },
   searchBoxFocused: {
-    borderColor: NOVA_TV_GLASS.border,
-    borderBottomColor: NOVA_TV_GLASS.border,
-    backgroundColor: NOVA_TV_GLASS.fill,
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
   },
   searchField: {
     flex: 1,

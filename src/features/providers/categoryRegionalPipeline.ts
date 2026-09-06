@@ -38,8 +38,53 @@ export type CategoryRegionalProfile = {
 
 export type CategorySortLabel = CategoryRegionalInput;
 
+export type CategoryRegionalSortMetrics = {
+  profileBuildMs: number;
+  actualSortMs: number;
+  profileBuildCount: number;
+  comparatorCalls: number;
+  // DEV-only stage breakdown. Populated only when a metrics object is passed
+  // through the audited cold path; production callers pass no metrics and pay
+  // none of the per-stage timing overhead.
+  titleParseMs?: number;
+  scriptDetectMs?: number;
+  regionClassifyMs?: number;
+  displayNameMs?: number;
+  sortKeyMs?: number;
+  titleParseCount?: number;
+  scriptDetectCount?: number;
+  regionClassifyCount?: number;
+};
+
+function nowMs() {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now();
+}
+
 const LETTER_PATTERN = /\p{L}/u;
 const LATIN_LETTER_PATTERN = /\p{Script=Latin}/u;
+
+// Reuse one collator for the within-group alphabetical comparison. Calling
+// String.prototype.localeCompare with an options object constructs a fresh
+// collator on every invocation; across ~7.7k comparisons for a 913-category
+// cold Live load that per-call construction (a JNI/ICU round trip on Hermes)
+// dominated the sort. A shared collator yields identical ordering.
+const CATEGORY_SORT_COLLATOR: Pick<Intl.Collator, 'compare'> | null = (() => {
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.Collator === 'function') {
+      return new Intl.Collator(undefined, { sensitivity: 'base' });
+    }
+  } catch {
+    // Fall through to the localeCompare path below.
+  }
+  return null;
+})();
+
+function compareSortLabels(left: string, right: string): number {
+  if (CATEGORY_SORT_COLLATOR) {
+    return CATEGORY_SORT_COLLATOR.compare(left, right);
+  }
+  return left.localeCompare(right, undefined, { sensitivity: 'base' });
+}
 
 function titleCaseWords(value: string) {
   return value
@@ -189,6 +234,55 @@ function isDeprioritizedForeignLatin(labels: string[], countryCode?: string) {
   });
 }
 
+type ParsedCategoryLabel = { label: string; countryCode?: string; title: string };
+
+function parsedLabelsFor(labels: string[]): ParsedCategoryLabel[] {
+  return labels.map((label) => {
+    const parsed = parseProviderTitlePrefix(label);
+    return { label, countryCode: parsed.countryCode, title: parsed.title };
+  });
+}
+
+function hasParsedCountry(parsedLabels: ParsedCategoryLabel[], countryCode: string) {
+  return parsedLabels.some((label) => label.countryCode === countryCode);
+}
+
+function isUsRegionFast(labels: string[], countryCode: string | undefined, parsedLabels: ParsedCategoryLabel[]) {
+  return countryCode === 'US' || matchesAnyLabel(labels, US_REGION_MARKERS) || hasParsedCountry(parsedLabels, 'US');
+}
+
+function isUkRegionFast(labels: string[], countryCode: string | undefined, parsedLabels: ParsedCategoryLabel[]) {
+  return countryCode === 'GB' || matchesAnyLabel(labels, UK_REGION_MARKERS) || hasParsedCountry(parsedLabels, 'GB');
+}
+
+function isCanadaRegionFast(labels: string[], countryCode: string | undefined, parsedLabels: ParsedCategoryLabel[]) {
+  return countryCode === 'CA' || matchesAnyLabel(labels, CANADA_REGION_MARKERS) || hasParsedCountry(parsedLabels, 'CA');
+}
+
+function isAustraliaRegionFast(labels: string[], countryCode: string | undefined, parsedLabels: ParsedCategoryLabel[]) {
+  return countryCode === 'AU' || matchesAnyLabel(labels, AUSTRALIA_REGION_MARKERS) || hasParsedCountry(parsedLabels, 'AU');
+}
+
+function resolveCategoryRegionGroupFromParsed(
+  labels: string[],
+  scriptProfile: CategoryScriptProfile,
+  countryCode: string | undefined,
+  parsedLabels: ParsedCategoryLabel[],
+): CategoryRegionGroup {
+  if (scriptProfile === 'foreign') return 'foreign';
+  if (scriptProfile === 'mixed') return 'mixed';
+  const us = isUsRegionFast(labels, countryCode, parsedLabels);
+  const uk = isUkRegionFast(labels, countryCode, parsedLabels);
+  if (us) return 'us';
+  if (isCanadaRegionFast(labels, countryCode, parsedLabels)) return 'canada';
+  if (isAustraliaRegionFast(labels, countryCode, parsedLabels)) return 'australia';
+  if (!us && !uk && matchesAnyLabel(labels, INTERNATIONAL_ENGLISH_MARKERS)) return 'intlEnglish';
+  if (uk) return 'uk';
+  if (matchesCountryCode(countryCode, EUROPE_COUNTRY_CODES) || matchesAnyLabel(labels, EUROPE_REGION_MARKERS) || parsedLabels.some((label) => label.countryCode && EUROPE_COUNTRY_CODES.has(label.countryCode))) return 'europe';
+  if (matchesCountryCode(countryCode, FOREIGN_COUNTRY_CODES) || matchesAnyLabel(labels, DEPRIORITIZED_FOREIGN_LANGUAGE_MARKERS) || matchesAnyLabel(labels, DEPRIORITIZED_RELIGIOUS_MARKERS) || parsedLabels.some((label) => label.countryCode && FOREIGN_COUNTRY_CODES.has(label.countryCode))) return 'foreign';
+  return 'international';
+}
+
 export function resolveCategoryRegionGroup(
   labels: string[],
   scriptProfile: CategoryScriptProfile,
@@ -336,13 +430,58 @@ export function resolveCategoryDisplayName(input: CategoryRegionalInput): string
   return display;
 }
 
-export function buildCategoryRegionalProfile(input: CategoryRegionalInput): CategoryRegionalProfile {
+export function buildCategoryRegionalProfile(
+  input: CategoryRegionalInput,
+  metrics?: CategoryRegionalSortMetrics,
+): CategoryRegionalProfile {
   const labels = collectCategoryLabels(input);
+
+  const parseStartedAt = metrics ? nowMs() : 0;
+  const parsedLabels = parsedLabelsFor(labels);
+  if (metrics) {
+    metrics.titleParseMs = (metrics.titleParseMs ?? 0) + (nowMs() - parseStartedAt);
+    metrics.titleParseCount = (metrics.titleParseCount ?? 0) + labels.length;
+  }
+
+  const scriptStartedAt = metrics ? nowMs() : 0;
   const scriptProfile = analyzeCategoryScriptProfile(labels);
-  const regionGroup = resolveCategoryRegionGroup(labels, scriptProfile, input.countryCode);
+  if (metrics) {
+    metrics.scriptDetectMs = (metrics.scriptDetectMs ?? 0) + (nowMs() - scriptStartedAt);
+    metrics.scriptDetectCount = (metrics.scriptDetectCount ?? 0) + 1;
+  }
+
+  const regionStartedAt = metrics ? nowMs() : 0;
+  const regionGroup = resolveCategoryRegionGroupFromParsed(labels, scriptProfile, input.countryCode, parsedLabels);
+  if (metrics) {
+    metrics.regionClassifyMs = (metrics.regionClassifyMs ?? 0) + (nowMs() - regionStartedAt);
+    metrics.regionClassifyCount = (metrics.regionClassifyCount ?? 0) + 1;
+  }
+
   const sortPriority = CATEGORY_REGION_SORT_PRIORITY[regionGroup];
-  const displayName = resolveCategoryDisplayName(input);
+  const primary = parsedLabels[0];
+
+  const displayStartedAt = metrics ? nowMs() : 0;
+  let displayName = primary?.title.trim() || input.name.trim();
+  if (regionGroup === 'us') {
+    displayName = formatUsCategoryDisplay(displayName, labels, input.contentType ?? 'live');
+  } else if (regionGroup === 'intlEnglish') {
+    displayName = formatInternationalEnglishDisplay(displayName);
+  } else if (regionGroup === 'uk') {
+    displayName = formatUnitedKingdomDisplay(displayName, labels);
+  } else if (regionGroup === 'canada') {
+    displayName = formatCanadaDisplay(displayName);
+  } else if (regionGroup === 'australia') {
+    displayName = formatAustraliaDisplay(displayName);
+  }
+  if (metrics) {
+    metrics.displayNameMs = (metrics.displayNameMs ?? 0) + (nowMs() - displayStartedAt);
+  }
+
+  const sortKeyStartedAt = metrics ? nowMs() : 0;
   const sortLabel = displayName.toLocaleLowerCase();
+  if (metrics) {
+    metrics.sortKeyMs = (metrics.sortKeyMs ?? 0) + (nowMs() - sortKeyStartedAt);
+  }
 
   return {
     labels,
@@ -371,7 +510,7 @@ export function compareCategoryRegionalProfiles(left: CategoryRegionalProfile, r
     return left.sortPriority - right.sortPriority;
   }
 
-  return left.sortLabel.localeCompare(right.sortLabel, undefined, { sensitivity: 'base' });
+  return compareSortLabels(left.sortLabel, right.sortLabel);
 }
 
 export function compareCategoryRegionalPriority(left: CategoryRegionalProfile, right: CategoryRegionalProfile) {
@@ -381,7 +520,7 @@ export function compareCategoryRegionalPriority(left: CategoryRegionalProfile, r
 /** Stable sort: region priority, optional alphabetical grouping, then original order. */
 export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
   items: T[],
-  options?: { contentType?: ProviderCategoryContentType; alphabetizeWithinGroup?: boolean },
+  options?: { contentType?: ProviderCategoryContentType; alphabetizeWithinGroup?: boolean; metrics?: CategoryRegionalSortMetrics },
 ): T[] {
   if (items.length <= 1) {
     return items;
@@ -389,6 +528,7 @@ export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
 
   const alphabetizeWithinGroup = options?.alphabetizeWithinGroup ?? true;
   const contentType = options?.contentType;
+  const profileStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
   const ranked = items.map((item, index) => ({
     item,
     index,
@@ -397,8 +537,12 @@ export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
       rawName: item.rawName,
       countryCode: item.countryCode,
       contentType,
-    }),
+    }, options?.metrics),
   }));
+  if (options?.metrics) {
+    options.metrics.profileBuildMs += (typeof performance !== 'undefined' ? performance.now() : Date.now()) - profileStartedAt;
+    options.metrics.profileBuildCount += ranked.length;
+  }
 
   const hasPriorityVariation = ranked.some(
     ({ profile }, index, array) => index > 0 && profile.sortPriority !== array[0]?.profile.sortPriority,
@@ -418,16 +562,16 @@ export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
     }
   }
 
+  const sortStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
   ranked.sort((left, right) => {
+    if (options?.metrics) options.metrics.comparatorCalls += 1;
     const priorityDelta = compareCategoryRegionalPriority(left.profile, right.profile);
     if (priorityDelta !== 0) {
       return priorityDelta;
     }
 
     if (alphabetizeWithinGroup) {
-      const alphaDelta = left.profile.sortLabel.localeCompare(right.profile.sortLabel, undefined, {
-        sensitivity: 'base',
-      });
+      const alphaDelta = compareSortLabels(left.profile.sortLabel, right.profile.sortLabel);
       if (alphaDelta !== 0) {
         return alphaDelta;
       }
@@ -435,6 +579,9 @@ export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
 
     return left.index - right.index;
   });
+  if (options?.metrics) {
+    options.metrics.actualSortMs += (typeof performance !== 'undefined' ? performance.now() : Date.now()) - sortStartedAt;
+  }
 
   return ranked.map(({ item }) => item);
 }

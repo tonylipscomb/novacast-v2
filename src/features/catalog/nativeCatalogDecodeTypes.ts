@@ -4,6 +4,8 @@ export type NativeCatalogRecord = {
   mediaType: CatalogDecodeMediaType;
   contentId: string;
   categoryId?: string | null;
+  /** Series dump only. Present when the provider row includes a category label. */
+  categoryName?: string | null;
   title: string;
   artworkUrl?: string | null;
   backdropUrl?: string | null;
@@ -13,6 +15,10 @@ export type NativeCatalogRecord = {
   releaseDate?: string | null;
   releaseYear?: number | null;
   streamExtension?: string | null;
+  /** Live dump only. Exact provider direct_source when present. Never log. */
+  directSource?: string | null;
+  /** Live dump only. Provider EPG identifier when present. */
+  epgChannelId?: string | null;
   providerSortOrder?: number | null;
   seriesId?: string | null;
 };
@@ -33,6 +39,23 @@ export type CatalogDecodeBatchStats = {
   arrayLength?: number;
   errorReason?: string;
   sanitizerRepairCount?: number;
+  firstItemKeys?: string[];
+  firstItemPlaybackHint?: {
+    fieldNames?: string[];
+    directSourcePresent?: boolean;
+    containerExtensionKeyPresent?: boolean;
+    containerExtension?: string | null;
+    streamType?: string | null;
+    customSidPresent?: boolean;
+    urlLikeFieldPresent?: boolean;
+    streamId?: string | null;
+    categoryId?: string | null;
+  };
+  seriesCategoryNameFieldPresentCount?: number;
+  httpStatus?: number;
+  contentLengthHeader?: number;
+  bytesRead?: number;
+  decoderStage?: string;
 };
 
 /** Panels that ignore category_id= return nearly the full dump for every category request. */
@@ -49,6 +72,22 @@ export function isLikelyUnfilteredCategoryDump(stats: {
   return matched >= Math.floor(rawSeen * 0.9);
 }
 
+export type CatalogNetworkGateDecodeFields = {
+  runId?: string | null;
+  catalogNetworkMediaType?: 'movie' | 'series' | 'live';
+  catalogNetworkOperation?: string;
+  catalogNetworkRequestSource?: string | null;
+  catalogNetworkBackground?: boolean;
+  catalogNetworkCancellable?: boolean;
+  catalogNetworkForeground?: boolean;
+  catalogNetworkActiveSurface?: 'live' | 'movies' | 'series' | 'other';
+  catalogNetworkReadableGenerationPresent?: boolean;
+  catalogNetworkOnPreemptionRequested?: () => boolean;
+  catalogNetworkOnPreemptionReleased?: (input: { ownerHeldMs: number }) => void;
+  /** Set only when the caller already holds `withProviderCatalogNetworkGate`. */
+  skipCatalogNetworkGate?: boolean;
+};
+
 export type StreamXtreamCategoryDecodeInput = {
   requestUrl: string;
   mediaType: CatalogDecodeMediaType;
@@ -64,7 +103,7 @@ export type StreamXtreamCategoryDecodeInput = {
   categoryPosition?: number;
   totalCategoryCount?: number;
   requestAttempt?: number;
-};
+} & CatalogNetworkGateDecodeFields;
 
 export type StreamXtreamCategoryDecodeResult = {
   matched: number;

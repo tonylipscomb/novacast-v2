@@ -4,6 +4,7 @@
  * Tuning state is process-local only (not persisted across launches).
  */
 
+import { getCatalogBackgroundWriteYield } from './catalogForegroundPriority.ts';
 import { recordCatalogWritePhase } from './catalogWritePhaseAudit.ts';
 
 export const CATALOG_CHUNK_PREFERRED_MS = 45;
@@ -19,6 +20,7 @@ export type ChunkWorkKind =
   | 'seriesMapping'
   | 'movieItemWrites'
   | 'itemWrites'
+  | 'liveNormalization'
   | 'regionRanking'
   | 'generic';
 
@@ -33,6 +35,8 @@ export type TimeBudgetOptions = {
   isCancelled?: () => boolean;
   /** Called immediately before each buffered write batch begins. */
   beforeFlush?: () => void | Promise<void>;
+  /** Optional native timing supplied by a bounded writer; queue wait is excluded. */
+  getFlushBusyMs?: () => number | undefined;
   onChunk?: (info: {
     processed: number;
     chunkMs: number;
@@ -71,6 +75,7 @@ const DEFAULT_BATCH: Record<ChunkWorkKind, number> = {
   seriesMapping: 32,
   movieItemWrites: 10,
   itemWrites: 16,
+  liveNormalization: 128,
   regionRanking: 64,
   generic: 24,
 };
@@ -82,6 +87,7 @@ const safeStreak: Record<ChunkWorkKind, number> = {
   seriesMapping: 0,
   movieItemWrites: 0,
   itemWrites: 0,
+  liveNormalization: 0,
   regionRanking: 0,
   generic: 0,
 };
@@ -338,7 +344,8 @@ export async function processStreamingBatches<T, R>(
     batch.length = 0;
 
     const chunkMs = nowMs() - chunkStart;
-    const effectiveBusyMs = writeMs;
+    const suppliedBusyMs = options?.getFlushBusyMs?.();
+    const effectiveBusyMs = suppliedBusyMs === undefined ? writeMs : suppliedBusyMs;
     peakBatchMs = Math.max(peakBatchMs, effectiveBusyMs);
     maxChunkMs = Math.max(maxChunkMs, effectiveBusyMs);
     chunks += 1;
@@ -350,7 +357,7 @@ export async function processStreamingBatches<T, R>(
         recordCatalogWritePhase('native.overrun', {
           wallMs: effectiveBusyMs,
           itemCount: batchLen,
-          meta: { kind: writeKind, includesMutexWait: true },
+          meta: { kind: writeKind, includesMutexWait: suppliedBusyMs === undefined },
         });
       }
       singleItemOverruns += 1;
@@ -364,6 +371,7 @@ export async function processStreamingBatches<T, R>(
     }
     writeBatchSize = learnedBatchSizes[writeKind];
     const measuredMacrotaskLagMs = await yieldMacrotaskMeasured();
+    options?.onYield?.(measuredMacrotaskLagMs);
     const eventLoopLagMs = Math.max(effectiveBusyMs, measuredMacrotaskLagMs);
     const pressureLagMs = measuredMacrotaskLagMs;
     let pauseMs = 0;
@@ -377,6 +385,11 @@ export async function processStreamingBatches<T, R>(
     } else if (effectiveBusyMs >= 100) {
       pauseMs = 12;
       pauseReason = 'sqlite-busy-100';
+    }
+    const foregroundYield = getCatalogBackgroundWriteYield();
+    if (foregroundYield.pauseMs > pauseMs) {
+      pauseMs = foregroundYield.pauseMs;
+      pauseReason = foregroundYield.reason;
     }
     if (pauseMs > 0) {
       pressurePauseCount += 1;

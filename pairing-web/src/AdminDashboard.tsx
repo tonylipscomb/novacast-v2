@@ -1,77 +1,301 @@
 import type { ReactNode } from 'react';
 
-type Row = Record<string, unknown>;
-type DashboardData = Row & {
-  devicesOnline?: number;
-  activatedDevices?: number;
-  providers?: number;
-  pendingActivations?: number;
-  pendingPairings?: number;
-  recentErrors?: Row[];
-  deviceStatuses?: { status: string; count: number }[];
-  betaActivity?: { date: string; value: number }[];
-  recentActivity?: { type: string; title: string; context?: string; timestamp: string }[];
-  mostRecentDevice?: { displayName: string; timestamp: string } | null;
-};
+import { formatCount, formatTimestamp } from './providerHealthDisplay';
+import {
+  deriveDeviceSupportRows,
+  deriveGoldSummary,
+  deriveOpsSummary,
+  deriveProviderHealthSummary,
+  deriveReleaseReadiness,
+  readDashboardCore,
+  type Row,
+  type StatusTone,
+} from './operationsCenter';
+
+type DashboardNavTarget = 'devices' | 'invitations' | 'providers' | 'gold' | 'analytics';
 
 export function AdminDashboard({
   data,
   devices,
   invitations,
   providers,
+  goldAccounts,
+  goldReseller,
   onNavigate,
   onRefresh,
   refreshing,
   onCreateInvite,
   onAddProvider,
+  onAddGoldAccount,
 }: {
-  data: DashboardData | null;
+  data: Row | null;
   devices: Row[];
   invitations: Row[];
   providers: Row[];
-  onNavigate: (tab: 'devices' | 'invitations' | 'providers') => void;
+  goldAccounts: Row[];
+  goldReseller: Row | null;
+  onNavigate: (tab: DashboardNavTarget) => void;
   onRefresh: () => void;
   refreshing: boolean;
   onCreateInvite: () => void;
   onAddProvider?: () => void;
+  onAddGoldAccount?: () => void;
 }) {
-  const deviceCount = devices.length;
-  const recent = data?.mostRecentDevice ?? deriveMostRecent(devices);
-  const statuses = data?.deviceStatuses?.length ? data.deviceStatuses : deriveStatuses(devices);
-  const activity = data?.recentActivity?.length ? data.recentActivity : deriveActivity(devices, invitations, providers);
-  const chart = data?.betaActivity?.length ? data.betaActivity : deriveRegistrations(devices);
-  const max = Math.max(...chart.map((point) => point.value), 1);
-  const errors = data?.recentErrors?.length ?? 0;
-  const metrics: { icon: string; label: string; value: ReactNode; detail: ReactNode; tone: string }[] = [
-    { icon: 'devices-online', label: 'Devices online', value: data?.devicesOnline ?? 0, detail: 'Live heartbeat window', tone: 'blue' },
-    { icon: 'providers', label: 'Providers', value: data?.providers ?? providers.length, detail: 'Active managed packages', tone: 'purple' },
-    { icon: 'errors', label: 'Errors', value: errors, detail: errors ? 'Diagnostics reported' : 'No error feed configured', tone: 'red' },
-    { icon: 'pending', label: 'Pending pairings', value: data?.pendingPairings ?? '', detail: 'Unexpired sessions only', tone: 'amber' },
-    { icon: 'beta', label: 'Beta users', value: data?.activatedDevices ?? 0, detail: 'Activated devices', tone: 'green' },
-    { icon: 'recent', label: 'Most recent device', value: recent?.displayName ?? 'No devices yet', detail: recent ? relativeTime(recent.timestamp) : 'Awaiting registration', tone: 'cyan' },
-  ];
+  const core = readDashboardCore(data);
+  const providerHealth = deriveProviderHealthSummary(providers);
+  const gold = deriveGoldSummary(goldAccounts, goldReseller);
+  const summary = deriveOpsSummary({ core, providerHealth, gold, deviceCount: devices.length });
+  const readiness = deriveReleaseReadiness({ core, providerHealth, gold, deviceCount: devices.length });
+  const supportRows = deriveDeviceSupportRows(devices);
+  const providerById = new Map(providers.map((provider) => [String(provider.id), provider]));
+  const activity = deriveActivity(devices, invitations, providers);
+  const currentBuild = typeof core.currentBetaBuild === 'string' ? core.currentBetaBuild : null;
 
-  return <div className="dashboardPage">
-    <div className="metricGrid">{metrics.map((metric) => <Metric key={metric.label} {...metric} />)}</div>
-    <div className="dashboardGrid">
-      <Panel title="Devices overview" className="overviewPanel"><div className="donutLayout"><Donut statuses={statuses} total={deviceCount} /><div className="statusList">{statuses.length ? statuses.map((status) => <div className="statusRow" key={status.status}><i className={`dot dot-${status.status}`} /><span>{status.status}</span><strong>{status.count}</strong><small>{deviceCount ? `${Math.round((status.count / deviceCount) * 100)}%` : '0%'}</small></div>) : <Empty text="No device status data yet" />}</div></div><button className="textLink" onClick={() => onNavigate('devices')}>View all devices </button></Panel>
-      <Panel title="Beta activity" action={<span className="panelSelect">Registrations  7 days</span>} className="activityPanel">{chart.length ? <div className="barChart" aria-label="Device registrations over the last seven days">{chart.map((point) => <div className="barItem" key={point.date} title={`${point.date}: ${point.value}`}><div className="barTrack"><div className="barFill" style={{ height: `${Math.max((point.value / max) * 100, point.value ? 8 : 2)}%` }} /></div><small>{formatDay(point.date)}</small></div>)}</div> : <Empty text="Historical activity will appear after device registrations." />}<button className="textLink" onClick={() => onNavigate('devices')}>View device activity </button></Panel>
-      <Panel title="Recent activity" className="recentPanel">{activity.length ? <div className="activityList">{activity.slice(0, 5).map((item) => <div className="activityItem" key={`${item.type}-${item.timestamp}`}><span className={`activityIcon ${item.type}`}>{item.type === 'error' ? '!' : item.type === 'activation' ? '' : ''}</span><div><strong>{item.title}</strong><small>{item.context ?? 'NovaCast Cloud Admin'}</small></div><time>{relativeTime(item.timestamp)}</time></div>)}</div> : <Empty text="No activity events are available yet." />}<button className="textLink" onClick={() => onNavigate('devices')}>View all activity </button></Panel>
+  return (
+    <div className="opsPage">
+      <div className="opsSummary">
+        {summary.map((metric) => (
+          <article key={metric.id} className={`opsMetric tone-${metric.tone}`}>
+            <span className="opsMetricLabel">{metric.label}</span>
+            <strong className="opsMetricValue">{metric.value}</strong>
+            <small>{metric.detail}</small>
+          </article>
+        ))}
+      </div>
+
+      <div className="opsGrid">
+        <Panel
+          title="Gold operations"
+          subtitle="Reseller capacity and Gold-linked providers"
+          actions={
+            <>
+              <button className="opsGhost" onClick={() => onNavigate('gold')}>Open Gold Panel</button>
+              <button className="opsPrimarySm" onClick={onAddGoldAccount ?? (() => onNavigate('gold'))}>Add Gold Account</button>
+            </>
+          }>
+          <div className="opsStatRow">
+            <Stat label="Reseller credits" value={gold.credits === null ? '\u2014' : gold.credits} tone={gold.credits === null ? 'neutral' : gold.credits <= 0 ? 'critical' : gold.credits <= 5 ? 'warning' : 'healthy'} />
+            <Stat label="Managed accounts" value={gold.total} tone="neutral" />
+            <Stat label="Active" value={gold.active} tone="healthy" />
+            <Stat label="Expiring 7d" value={gold.expiringSoon} tone={gold.expiringSoon ? 'warning' : 'neutral'} />
+            <Stat label="Expired" value={gold.expired} tone={gold.expired ? 'critical' : 'neutral'} />
+            <Stat label="Unassigned" value={gold.unassignedDevice} tone={gold.unassignedDevice ? 'warning' : 'neutral'} />
+          </div>
+          <div className="opsMicroNotes">
+            {gold.resellerEnabled === false ? <span className="opsFlag critical">Reseller connection disabled</span> : null}
+            {gold.unassignedProvider ? <span className="opsFlag warning">{gold.unassignedProvider} without a NovaCast provider</span> : null}
+            {gold.routeAlertsReliable ? (
+              <span className={`opsFlag ${gold.routeAlerts ? 'warning' : 'ok'}`}>{gold.routeAlerts} route alerts</span>
+            ) : (
+              <span className="opsFlag muted">Route health checked per-account in Gold Panel</span>
+            )}
+          </div>
+        </Panel>
+
+        <Panel
+          title="Provider health"
+          subtitle="Shared health semantics from Providers"
+          actions={<button className="opsGhost" onClick={() => onNavigate('providers')}>View Providers</button>}>
+          <div className="opsStatRow">
+            <Stat label="Healthy" value={providerHealth.healthy} tone="healthy" />
+            <Stat label="Needs attention" value={providerHealth.needsAttention} tone={providerHealth.needsAttention ? 'warning' : 'neutral'} />
+            <Stat label="Draft" value={providerHealth.draft} tone="neutral" />
+            <Stat label="Gold managed" value={providerHealth.goldManaged} tone="neutral" />
+          </div>
+          {providerHealth.unhealthy.length ? (
+            <ul className="opsList">
+              {providerHealth.unhealthy.slice(0, 4).map((provider) => (
+                <li key={provider.id}>
+                  <span className={`opsDot dot-${provider.tone}`} />
+                  <span className="opsListName">{provider.name}</span>
+                  {provider.goldManaged ? <span className="opsTag">GOLD</span> : null}
+                  <b className={`opsBadge tone-${provider.tone}`}>{provider.label}</b>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Empty text="All providers are healthy." />
+          )}
+        </Panel>
+      </div>
+
+      <div className="opsGrid opsGridWide">
+        <Panel
+          title="Devices & support"
+          subtitle="Offline and unassigned devices first"
+          actions={<button className="opsGhost" onClick={() => onNavigate('devices')}>View devices</button>}>
+          {supportRows.length ? (
+            <div className="opsTableWrap">
+              <table className="opsTable">
+                <thead>
+                  <tr><th>Device</th><th>Status</th><th>Provider</th><th>Build</th><th>Last seen</th></tr>
+                </thead>
+                <tbody>
+                  {supportRows.map((row) => {
+                    const provider = row.assignedProviderId ? providerById.get(row.assignedProviderId) : null;
+                    return (
+                      <tr key={row.id}>
+                        <td>
+                          <strong>{row.code}</strong>
+                          <small>{row.name}</small>
+                        </td>
+                        <td>
+                          <span className={`opsPillState ${row.online ? 'ok' : 'off'}`}>{row.online ? 'Online' : 'Offline'}</span>
+                          {row.activationStatus !== 'active' ? <small className="opsSub">{row.activationStatus}</small> : null}
+                        </td>
+                        <td>
+                          {provider ? String(provider.display_name ?? '\u2014') : <span className="opsSub warning">Unassigned</span>}
+                          {row.assignmentState && row.assignmentState !== 'completed' ? <small className="opsSub">{row.assignmentState}</small> : null}
+                        </td>
+                        <td>{row.appVersion ? `${row.appVersion}${row.appBuild ? ` (${row.appBuild})` : ''}` : '\u2014'}</td>
+                        <td>{row.lastSeen ? relativeTime(row.lastSeen) : 'Never'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Empty text="No devices registered yet." />
+          )}
+        </Panel>
+
+        <Panel title="Release readiness" subtitle="Real service signals - not a score">
+          <ul className="opsReadiness">
+            {readiness.map((signal) => (
+              <li key={signal.id}>
+                <span className={`opsDot dot-${signal.tone}`} />
+                <span className="opsListName">{signal.label}</span>
+                <b className={`opsBadge tone-${signal.tone}`}>{signal.state}</b>
+                {signal.detail ? <small>{signal.detail}</small> : null}
+              </li>
+            ))}
+          </ul>
+          <div className="opsBuildHook">
+            <span>Latest reported build</span>
+            <strong>{currentBuild ?? 'Unknown'}</strong>
+            {/* Distribution/download rollout metadata is not yet exposed to Cloud Admin. */}
+            <small className="opsSub">Highest app build currently reported by registered devices</small>
+          </div>
+        </Panel>
+      </div>
+
+      <div className="opsGrid opsGridWide">
+        <Panel title="Recent activity" subtitle="Latest platform events">
+          {activity.length ? (
+            <ul className="opsActivity">
+              {activity.slice(0, 6).map((item) => (
+                <li key={`${item.type}-${item.timestamp}`}>
+                  <span className={`opsDot dot-${item.type === 'error' ? 'critical' : item.type === 'activation' ? 'healthy' : 'neutral'}`} />
+                  <div>
+                    <strong>{item.title}</strong>
+                    <small>{item.context ?? 'NovaCast Cloud Admin'}</small>
+                  </div>
+                  <time>{relativeTime(item.timestamp)}</time>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Empty text="No activity events available yet." />
+          )}
+        </Panel>
+
+        <Panel title="Quick actions" subtitle="Common operations">
+          <div className="opsQuickGrid">
+            <button className="opsQuick" onClick={onCreateInvite}>Create invitation</button>
+            <button className="opsQuick" onClick={onAddProvider ?? (() => onNavigate('providers'))}>Add provider</button>
+            <button className="opsQuick" onClick={onAddGoldAccount ?? (() => onNavigate('gold'))}>Add Gold account</button>
+            <button className="opsQuick" onClick={() => onNavigate('analytics')}>Open diagnostics</button>
+            <button className="opsQuick" onClick={() => exportReport(core, devices, invitations, providers, goldAccounts)}>Export report</button>
+            <button className="opsQuick" onClick={onRefresh} disabled={refreshing}>{refreshing ? 'Refreshing...' : 'Refresh data'}</button>
+          </div>
+        </Panel>
+      </div>
+
+      <div className="opsFoot">
+        <span>{core.serverTime ? `Server time ${formatTimestamp(core.serverTime)}` : 'Dashboard data is secured by NovaCast admin APIs.'}</span>
+        <span className="opsFootMeta">{formatCount(providers.length)} providers {'\u00B7'} {formatCount(devices.length)} devices {'\u00B7'} {formatCount(gold.total)} Gold accounts</span>
+      </div>
     </div>
-    <Panel title="Quick actions" className="quickPanel"><div className="quickActions"><QuickAction icon="" label="Create invitation" onClick={onCreateInvite} /><QuickAction icon="" label="Add provider" onClick={onAddProvider ?? (() => onNavigate('providers'))} /><QuickAction icon="" label="View devices" onClick={() => onNavigate('devices')} /><QuickAction icon="" label="Send announcement" disabled /><QuickAction icon="" label="System health" onClick={onRefresh} /><QuickAction icon="" label="Export report" onClick={() => exportReport(data, devices, invitations, providers)} /></div></Panel>
-    <div className="dashboardFoot"><span>{data?.lastUpdatedAt ? `Last data update ${relativeTime(String(data.lastUpdatedAt))}` : 'Dashboard data is secured by NovaCast admin APIs.'}</span><button onClick={onRefresh} disabled={refreshing}>{refreshing ? 'Refreshing' : 'Refresh dashboard'}</button></div>
-  </div>;
+  );
 }
 
-function Metric({ icon, label, value, detail, tone }: { icon: string; label: string; value: ReactNode; detail: ReactNode; tone: string }) { return <article className={`metricCard tone-${tone}`}><div className="metricIcon">{icon === 'errors' ? '!' : icon === 'recent' ? '' : icon === 'providers' ? '' : icon === 'pending' ? '' : icon === 'beta' ? '' : ''}</div><span className="metricLabel">{label}</span><strong className="metricValue">{value}</strong><small>{detail}</small></article>; }
-function Panel({ title, action, children, className = '' }: { title: string; action?: ReactNode; children: ReactNode; className?: string }) { return <section className={`dashPanel ${className}`}><header><h2>{title}</h2>{action}</header>{children}</section>; }
-function QuickAction({ icon, label, onClick, disabled = false }: { icon: string; label: string; onClick?: () => void; disabled?: boolean }) { return <button className="quickAction" onClick={onClick} disabled={disabled}><span>{icon}</span>{label}{disabled ? <small>Coming soon</small> : null}</button>; }
-function Donut({ statuses, total }: { statuses: { status: string; count: number }[]; total: number }) { const colors = ['#18d7ff', '#7c3aed', '#10b981', '#f59e0b', '#ef4444']; const sum = Math.max(statuses.reduce((total, item) => total + item.count, 0), 1); let cursor = 0; const stops = statuses.map((item, index) => { const start = cursor; cursor += (item.count / sum) * 360; return `${colors[index % colors.length]} ${start}deg ${cursor}deg`; }).join(', '); return <div className="donut" style={{ background: statuses.length ? `conic-gradient(${stops})` : 'conic-gradient(#273653 0 360deg)' }}><div><strong>{total}</strong><small>Total devices</small></div></div>; }
-function Empty({ text }: { text: string }) { return <p className="emptyState">{text}</p>; }
-function relativeTime(value: string) { const time = Date.parse(value); if (!Number.isFinite(time)) return 'Unknown time'; const minutes = Math.max(0, Math.floor((Date.now() - time) / 60000)); if (minutes < 1) return 'Just now'; if (minutes < 60) return `${minutes}m ago`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours}h ago`; return `${Math.floor(hours / 24)}d ago`; }
-function formatDay(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(undefined, { weekday: 'short' }).slice(0, 3); }
-function deriveStatuses(devices: Row[]) { const cutoff = Date.now() - 30 * 60 * 1000; const counts = new Map<string, number>(); for (const device of devices) { const activation = String(device.activation_status ?? 'inactive'); const status = String(device.status ?? 'active'); const lastSeen = Date.parse(String(device.last_seen_at ?? '')); const category = ['revoked', 'disabled'].includes(status) ? 'revoked' : activation === 'expired' ? 'expired' : activation !== 'active' ? 'pending' : lastSeen >= cutoff ? 'online' : 'offline'; counts.set(category, (counts.get(category) ?? 0) + 1); } return [...counts.entries()].map(([status, count]) => ({ status, count })); }
-function deriveRegistrations(devices: Row[]) { if (!devices.some((device) => typeof device.created_at === 'string')) return []; const points = Array.from({ length: 7 }, (_, index) => { const date = new Date(); date.setHours(0, 0, 0, 0); date.setDate(date.getDate() - (6 - index)); return { date: date.toISOString(), value: 0 }; }); for (const device of devices) { const time = Date.parse(String(device.created_at ?? '')); const point = points.find((candidate) => { const start = Date.parse(candidate.date); return time >= start && time < start + 86400000; }); if (point) point.value += 1; } return points; }
-function deriveActivity(devices: Row[], invitations: Row[], providers: Row[]) { const entries: { type: string; title: string; context?: string; timestamp: string }[] = []; devices.forEach((device) => { const timestamp = String(device.updated_at ?? device.created_at ?? ''); if (timestamp) entries.push({ type: device.activation_status === 'active' ? 'activation' : 'device', title: device.activation_status === 'active' ? 'Device activated' : 'Device registered', context: String(device.friendly_name ?? device.model ?? device.public_device_code ?? 'NovaCast device'), timestamp }); }); invitations.forEach((invite) => { const timestamp = String(invite.created_at ?? ''); if (timestamp) entries.push({ type: 'invite', title: 'Invitation created', context: String(invite.display_label ?? 'Beta invitation'), timestamp }); }); providers.forEach((provider) => { const timestamp = String(provider.created_at ?? ''); if (timestamp) entries.push({ type: 'provider', title: 'Provider package added', context: String(provider.display_name ?? provider.slug ?? 'Managed provider'), timestamp }); }); return entries.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 8); }
-function deriveMostRecent(devices: Row[]) { const latest = [...devices].sort((a, b) => Date.parse(String(b.last_seen_at ?? b.created_at ?? 0)) - Date.parse(String(a.last_seen_at ?? a.created_at ?? 0)))[0]; if (!latest) return null; return { displayName: String(latest.friendly_name ?? latest.model ?? latest.public_device_code ?? 'NovaCast device'), timestamp: String(latest.last_seen_at ?? latest.created_at ?? '') }; }
-function exportReport(data: DashboardData | null, devices: Row[], invitations: Row[], providers: Row[]) { const safe = { exportedAt: new Date().toISOString(), dashboard: data, devices: devices.map(({ id, public_device_code, friendly_name, model, platform, status, activation_status, last_seen_at, created_at }) => ({ id, public_device_code, friendly_name, model, platform, status, activation_status, last_seen_at, created_at })), invitations, providers }; const blob = new Blob([JSON.stringify(safe, null, 2)], { type: 'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `novacast-dashboard-${new Date().toISOString().slice(0, 10)}.json`; link.click(); URL.revokeObjectURL(link.href); }
+function Panel({ title, subtitle, actions, children }: { title: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="opsPanel">
+      <header>
+        <div>
+          <h2>{title}</h2>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </div>
+        {actions ? <div className="opsPanelActions">{actions}</div> : null}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: ReactNode; tone: StatusTone }) {
+  return (
+    <div className={`opsStat tone-${tone}`}>
+      <strong>{value}</strong>
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function Empty({ text }: { text: string }) {
+  return <p className="opsEmpty">{text}</p>;
+}
+
+function relativeTime(value: string) {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return 'Unknown';
+  const minutes = Math.max(0, Math.floor((Date.now() - time) / 60000));
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function deriveActivity(devices: Row[], invitations: Row[], providers: Row[]) {
+  const entries: { type: string; title: string; context?: string; timestamp: string }[] = [];
+  devices.forEach((device) => {
+    const timestamp = String(device.updated_at ?? device.created_at ?? '');
+    if (timestamp) {
+      entries.push({
+        type: device.activation_status === 'active' ? 'activation' : 'device',
+        title: device.activation_status === 'active' ? 'Device activated' : 'Device registered',
+        context: String(device.friendly_name ?? device.model ?? device.public_device_code ?? 'NovaCast device'),
+        timestamp,
+      });
+    }
+  });
+  invitations.forEach((invite) => {
+    const timestamp = String(invite.created_at ?? '');
+    if (timestamp) entries.push({ type: 'invite', title: 'Invitation created', context: String(invite.display_label ?? 'Beta invitation'), timestamp });
+  });
+  providers.forEach((provider) => {
+    const timestamp = String(provider.created_at ?? '');
+                          {provider ? String(provider.display_name ?? '\u2014') : <span className="opsSub warning">Unassigned</span>}
+  });
+  return entries.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)).slice(0, 8);
+}
+
+function exportReport(core: Row, devices: Row[], invitations: Row[], providers: Row[], goldAccounts: Row[]) {
+  const safe = {
+    exportedAt: new Date().toISOString(),
+    dashboard: core,
+    devices: devices.map(({ id, public_device_code, friendly_name, model, platform, status, activation_status, last_seen_at, created_at, app_version, app_build }) => ({ id, public_device_code, friendly_name, model, platform, status, activation_status, last_seen_at, created_at, app_version, app_build })),
+    invitations,
+    providers: providers.map(({ id, display_name, slug, status, health_status, validation_stale }) => ({ id, display_name, slug, status, health_status, validation_stale })),
+    gold: goldAccounts.map(({ id, gold_user_id, gold_package_name, gold_expiration, gold_enabled, managed_provider_id }) => ({ id, gold_user_id, gold_package_name, gold_expiration, gold_enabled, managed_provider_id })),
+  };
+  const blob = new Blob([JSON.stringify(safe, null, 2)], { type: 'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = `novacast-operations-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}

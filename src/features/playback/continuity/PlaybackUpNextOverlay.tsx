@@ -3,6 +3,7 @@ import * as ReactNative from 'react-native';
 import { findNodeHandle, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { novaTheme } from '@/theme';
 
@@ -214,18 +215,18 @@ export function PlaybackUpNextOverlay({
             ...(guideDestinations.length ? { destinations: guideDestinations } : {}),
           }
         : {})}>
-      <Text focusable={false} style={styles.kicker}>
+      <Text style={styles.kicker}>
         UP NEXT
       </Text>
       {episodeLabel ? (
-        <Text focusable={false} style={styles.episode}>
+        <Text style={styles.episode}>
           {episodeLabel}
         </Text>
       ) : null}
-      <Text numberOfLines={2} focusable={false} style={styles.title}>
+      <Text numberOfLines={2} style={styles.title}>
         {displayStreamTitle(title)}
       </Text>
-      <Text focusable={false} style={styles.countdown}>
+      <Text style={styles.countdown}>
         {autoplay ? `Playing in ${secondsLeft}` : 'Ready when you are'}
       </Text>
       <View style={styles.actions} focusable={false} pointerEvents="box-none">
@@ -255,9 +256,10 @@ export function PlaybackUpNextOverlay({
             styles.button,
             styles.primary,
             novaTvFocus.base,
+            focusedControl === 'play-now' && styles.buttonFocused,
             focusedControl === 'play-now' && novaTvFocus.active,
           ]}>
-          <Text focusable={false} style={styles.primaryText}>
+          <Text style={styles.primaryText}>
             Play Now
           </Text>
         </Pressable>
@@ -286,9 +288,10 @@ export function PlaybackUpNextOverlay({
             styles.button,
             styles.secondary,
             novaTvFocus.base,
+            focusedControl === 'cancel' && styles.buttonFocused,
             focusedControl === 'cancel' && novaTvFocus.active,
           ]}>
-          <Text focusable={false} style={styles.secondaryText}>
+          <Text style={styles.secondaryText}>
             Cancel
           </Text>
         </Pressable>
@@ -304,7 +307,9 @@ const styles = StyleSheet.create({
     bottom: 36,
     width: 420,
     borderRadius: 18,
-    backgroundColor: 'rgba(3, 7, 12, 0.88)',
+    backgroundColor: 'rgba(8, 13, 25, 0.76)',
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.subtle.borderColor,
     paddingHorizontal: 22,
     paddingVertical: 20,
     gap: 6,
@@ -344,10 +349,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   primary: {
-    backgroundColor: novaTheme.colors.accent,
+    backgroundColor: NOVA_GLASS.active.backgroundColor,
+    borderColor: NOVA_GLASS.active.borderColor,
   },
   secondary: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
+    backgroundColor: NOVA_GLASS.subtle.backgroundColor,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+  },
+  buttonFocused: {
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
   },
   primaryText: {
     color: '#FFFFFF',

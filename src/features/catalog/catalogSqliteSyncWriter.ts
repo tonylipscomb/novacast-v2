@@ -2,7 +2,8 @@ import type { MovieSummary } from '../movies/movieTypes.ts';
 import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 import { parseRatingNumber } from '../movies/smart/movieMetadata.ts';
 import type { NativeCatalogRecord } from './nativeCatalogDecodeTypes.ts';
-import { initializeCatalogDatabase } from './catalogDatabase.ts';
+import { checkpointCatalogWalIfIdle, initializeCatalogDatabase } from './catalogDatabase.ts';
+import { waitForForegroundCatalogReadsToDrain } from './catalogForegroundPriority.ts';
 import {
   processStreamingBatches,
   type ChunkWorkKind,
@@ -33,6 +34,11 @@ import {
 import { validateMoviesCategoryDistribution } from './moviesCategoryDistributionValidation.ts';
 import { resolveCatalogItemCategoryId } from './vodCategoryFilterCapability.ts';
 import { isCatalogGuidePriorityActive, waitUntilCatalogGuidePriorityIdle } from '../providers/catalogSyncGuidePriority.ts';
+import { waitForCatalogInteractiveUiReady } from './catalogInteractiveStartup.ts';
+import {
+  registerActiveCatalogSqliteWriter,
+  unregisterActiveCatalogSqliteWriter,
+} from './catalogSyncWriterRegistry.ts';
 
 const PERF_LOG_PREFIX = '[NovaCast CatalogSqlite]';
 
@@ -42,6 +48,12 @@ function logMovieCompletionTailAudit(input: Record<string, unknown>) {
 
 function logMovieCompletionTailSummary(input: Record<string, unknown>) {
   console.info('[NovaCast Movie Completion Tail Summary]', input);
+}
+
+async function waitForForegroundCatalogWork(providerId: string, mediaType: CatalogMediaType) {
+  await waitForCatalogInteractiveUiReady();
+  await waitForForegroundCatalogReadsToDrain();
+  await waitForGuideBeforeCatalogWrite(providerId, mediaType);
 }
 
 async function waitForGuideBeforeCatalogWrite(providerId: string, mediaType: CatalogMediaType) {
@@ -76,6 +88,10 @@ export type CatalogSqliteMediaSyncHandle = {
   runId?: string;
   accounting: CatalogSqliteWriterAccounting;
   pendingCategories: CatalogCategoryInput[];
+  lastCategoryId?: string | null;
+  lastCategoryIndex?: number | null;
+  lastCategoryCount?: number | null;
+  lastRequestAttempt?: number | null;
 };
 
 export type CatalogSqliteWriterAccounting = {
@@ -141,6 +157,24 @@ export function recordCatalogSqliteCheckpoint(
       categoryIndex,
     );
   }
+}
+
+export function recordCatalogSqliteCategoryContext(
+  handle: CatalogSqliteMediaSyncHandle | null | undefined,
+  context: {
+    categoryId: string;
+    categoryIndex: number;
+    categoryCount: number;
+    requestAttempt?: number;
+  },
+) {
+  if (!handle) {
+    return;
+  }
+  handle.lastCategoryId = context.categoryId;
+  handle.lastCategoryIndex = context.categoryIndex;
+  handle.lastCategoryCount = context.categoryCount;
+  handle.lastRequestAttempt = context.requestAttempt ?? 1;
 }
 
 export function createDisabledCatalogSqliteMediaSyncHandle(
@@ -379,6 +413,19 @@ export async function startCatalogSqliteMediaSync(input: {
 }): Promise<CatalogSqliteMediaSyncHandle> {
   let generation: number | null = null;
   try {
+    if (input.mediaType === 'movie') {
+      console.info(
+        '[NovaCast Movie Sync Probe]',
+        JSON.stringify({
+          functionName: 'startCatalogSqliteMediaSync',
+          providerId: input.providerId,
+          mediaType: input.mediaType,
+          runId: input.runId ?? null,
+          reason: 'enter-before-initializeCatalogDatabase',
+          promiseAwaitedByCoordinator: true,
+        }),
+      );
+    }
     await earlyBootTimed('sqlite.initializeCatalogDatabase', () => initializeCatalogDatabase());
     await earlyBootTimed('sqlite.upsertCatalogProvider', () =>
       upsertCatalogProvider({
@@ -426,6 +473,30 @@ export async function startCatalogSqliteMediaSync(input: {
           ? 'stage3b1-onn-writer-pressure-v1'
           : 'stage295-native-completion-v1',
     });
+    registerActiveCatalogSqliteWriter({
+      providerId: input.providerId,
+      mediaType: input.mediaType,
+      generation,
+      runId: input.runId,
+    });
+    if (input.mediaType === 'movie') {
+      console.info(
+        '[NovaCast Movie Promise Probe]',
+        JSON.stringify({
+          event: 'startCatalogSqliteMediaSync-returned',
+          mediaType: 'movie',
+          providerId: input.providerId,
+          generation,
+          runId: input.runId ?? null,
+          timestamp: Date.now(),
+          returnedValueKind: 'handle',
+          isCompletionPromise: false,
+          launchesBackgroundWork: false,
+          launchesFinish: false,
+          note: 'beginCatalogSync-only-same-caller-must-await-finishCatalogSqliteMediaSync',
+        }),
+      );
+    }
     return {
       enabled: true,
       providerId: input.providerId,
@@ -436,6 +507,10 @@ export async function startCatalogSqliteMediaSync(input: {
       pendingCategories: [],
     };
   } catch (error) {
+    if (generation !== null) {
+      unregisterActiveCatalogSqliteWriter(input.providerId, input.mediaType, generation);
+      await failCatalogSync(input.providerId, input.mediaType, 'sqlite_sync_start_failed').catch(() => undefined);
+    }
     if (input.mediaType === 'movie' && generation !== null) {
       releaseMovieCategoryGate(input.providerId, generation, 'media-sync-start-failed');
     }
@@ -443,6 +518,24 @@ export async function startCatalogSqliteMediaSync(input: {
       providerId: input.providerId,
       mediaType: input.mediaType,
     });
+    if (input.mediaType === 'movie') {
+      console.info(
+        '[NovaCast Movie Promise Probe]',
+        JSON.stringify({
+          event: 'startCatalogSqliteMediaSync-returned',
+          mediaType: 'movie',
+          providerId: input.providerId,
+          generation: 0,
+          runId: input.runId ?? null,
+          timestamp: Date.now(),
+          returnedValueKind: 'handle',
+          isCompletionPromise: false,
+          launchesBackgroundWork: false,
+          sqliteEnabled: false,
+          note: 'start-failed-disabled-handle',
+        }),
+      );
+    }
     return {
       enabled: false,
       providerId: input.providerId,
@@ -510,24 +603,79 @@ export async function writeCategoriesFromSourceBudgeted<T>(
 
     beginCatalogWriteQuietPeriod(20_000);
     let written = 0;
+    let latestCategoryBusyMs: number | undefined;
+    let latestCategoryTiming: {
+      prepareMs?: number;
+      transactionBodyMs?: number;
+      finalizeMs?: number;
+    } = {};
+    let categoryBatchIndex = 0;
+    let categoryTransformMs = 0;
+    let categoryYieldMs = 0;
     await timedCatalogWritePhase(
       'category.normalize',
       async () => {
         const result = await processStreamingBatches(
           categories,
-          (category, index) => mapCategory(category, index),
+          (category, index) => {
+            const transformStartedAt = Date.now();
+            const mapped = mapCategory(category, index);
+            categoryTransformMs += Date.now() - transformStartedAt;
+            return mapped;
+          },
           async (batch) => {
+            const timing: {
+              prepareMs?: number;
+              transactionBodyMs?: number;
+              finalizeMs?: number;
+              busyMs?: number;
+            } = {};
             written += await writeCatalogCategoriesBatch(batch, {
               mediaType: handle.mediaType,
+              timing,
             });
+            latestCategoryBusyMs = timing.busyMs;
+            latestCategoryTiming = timing;
           },
           {
             kind: 'categories',
             writeKind: 'categories',
             minItems: 4,
-            maxItems: 12,
+            // Category upserts run inside the serialized SQLite transaction.
+            maxItems: 4,
             isCancelled: options?.isCancelled,
-            beforeFlush: () => waitForGuideBeforeCatalogWrite(handle.providerId, handle.mediaType),
+            beforeFlush: () => waitForForegroundCatalogWork(handle.providerId, handle.mediaType),
+            getFlushBusyMs: () => latestCategoryBusyMs,
+            onYield: (yieldMs) => {
+              categoryYieldMs = yieldMs;
+            },
+            onChunk: (info) => {
+              categoryBatchIndex += 1;
+              console.info('[NovaCast Catalog Batch]', {
+                mediaType: handle.mediaType,
+                generation: handle.generation,
+                batchSize: info.chunkItems,
+                batchIndex: categoryBatchIndex,
+                sqliteWriteMs: Math.round(latestCategoryTiming.transactionBodyMs ?? info.sqliteWriteMs ?? 0),
+                preWriteTransformMs: Math.round(categoryTransformMs),
+                postWriteMs: Math.round(latestCategoryTiming.finalizeMs ?? 0),
+                eventLoopLagMs: Math.round(info.eventLoopLagMs ?? 0),
+                yieldMs: Math.round(categoryYieldMs),
+                transactionType: 'category-upsert',
+              });
+              if (info.effectiveBusyMs !== undefined && info.effectiveBusyMs > 100) {
+                console.warn('[Catalog Writer Pressure]', {
+                  mediaType: handle.mediaType,
+                  generation: handle.generation,
+                  batchSize: info.chunkItems,
+                  batchIndex: categoryBatchIndex,
+                  sqliteWriteMs: Math.round(info.effectiveBusyMs),
+                  eventLoopLagMs: Math.round(info.eventLoopLagMs ?? 0),
+                });
+              }
+              categoryTransformMs = 0;
+              categoryYieldMs = 0;
+            },
           },
         );
         logSqlite('sqlite-categories-streamed', {
@@ -609,7 +757,7 @@ export async function writeCatalogItemsFromSourceBudgeted<T>(
         pressureMode: handle.mediaType === 'movie',
         diagnostic: true,
         isCancelled: options?.isCancelled,
-        beforeFlush: () => waitForGuideBeforeCatalogWrite(handle.providerId, handle.mediaType),
+        beforeFlush: () => waitForForegroundCatalogWork(handle.providerId, handle.mediaType),
         onChunk: (info) => {
           if (
             handle.mediaType === 'movie' &&
@@ -674,9 +822,41 @@ export async function finishCatalogSqliteMediaSync(input: {
 }): Promise<boolean> {
   const { handle, ok, processedCount, errorCode } = input;
   if (!handle.enabled) {
+    if (handle.mediaType === 'movie') {
+      console.info(
+        '[NovaCast Movie Promise Probe]',
+        JSON.stringify({
+          event: 'finishCatalogSqliteMediaSync-returned',
+          mediaType: 'movie',
+          providerId: handle.providerId,
+          generation: handle.generation,
+          runId: handle.runId ?? null,
+          timestamp: Date.now(),
+          skippedDisabled: true,
+          result: true,
+          ok,
+        }),
+      );
+    }
     return true;
   }
 
+  if (handle.mediaType === 'movie') {
+    console.info(
+      '[NovaCast Movie Promise Probe]',
+      JSON.stringify({
+        event: 'finishCatalogSqliteMediaSync-enter',
+        mediaType: 'movie',
+        providerId: handle.providerId,
+        generation: handle.generation,
+        runId: handle.runId ?? null,
+        ok,
+        timestamp: Date.now(),
+      }),
+    );
+  }
+
+  let finishResult: boolean | null = null;
   try {
     if (ok) {
       if (handle.mediaType === 'movie') {
@@ -797,6 +977,7 @@ export async function finishCatalogSqliteMediaSync(input: {
 
         if (!barrierPassed) {
           await failCatalogSync(handle.providerId, handle.mediaType, 'completion_barrier_failed');
+          finishResult = false;
           return false;
         }
 
@@ -1073,6 +1254,7 @@ export async function finishCatalogSqliteMediaSync(input: {
             handle.mediaType,
             distribution.rejectionReason ?? 'category_distribution_failed',
           );
+          finishResult = false;
           return false;
         }
 
@@ -1094,6 +1276,7 @@ export async function finishCatalogSqliteMediaSync(input: {
         });
         pointerPromotionMs = Date.now() - promotionStarted;
         if (!activated) {
+          finishResult = false;
           return false;
         }
         logMovieCompletionTailSummary({
@@ -1118,6 +1301,7 @@ export async function finishCatalogSqliteMediaSync(input: {
           generation: handle.generation,
           processedCount,
         });
+        finishResult = true;
         return true;
       }
 
@@ -1136,6 +1320,7 @@ export async function finishCatalogSqliteMediaSync(input: {
         processedCount,
         activated,
       });
+      finishResult = activated;
       return activated;
     }
 
@@ -1145,7 +1330,12 @@ export async function finishCatalogSqliteMediaSync(input: {
       mediaType: handle.mediaType,
       generation: handle.generation,
       errorCode: errorCode ?? 'sync_failed',
+      categoryId: handle.lastCategoryId ?? null,
+      categoryIndex: handle.lastCategoryIndex ?? null,
+      categoryCount: handle.lastCategoryCount ?? null,
+      requestAttempt: handle.lastRequestAttempt ?? null,
     });
+    finishResult = true;
     return true;
   } catch (error) {
     logSqliteError('sqlite-sync-finish-failed', error, {
@@ -1154,14 +1344,34 @@ export async function finishCatalogSqliteMediaSync(input: {
       generation: handle.generation,
       ok,
     });
+    finishResult = false;
     return false;
   } finally {
+    unregisterActiveCatalogSqliteWriter(handle.providerId, handle.mediaType, handle.generation);
     if (handle.mediaType === 'movie') {
       releaseMovieCategoryGate(handle.providerId, handle.generation, 'media-sync-finally');
       endCatalogWriteQuietPeriod();
+      console.info(
+        '[NovaCast Movie Promise Probe]',
+        JSON.stringify({
+          event: 'finishCatalogSqliteMediaSync-returned',
+          mediaType: 'movie',
+          providerId: handle.providerId,
+          generation: handle.generation,
+          runId: handle.runId ?? null,
+          timestamp: Date.now(),
+          result: finishResult,
+          ok,
+          errorCode: errorCode ?? null,
+          processedCount: processedCount ?? null,
+        }),
+      );
     }
     if (handle.mediaType === 'series') {
       endCatalogWriteQuietPeriod();
+    }
+    if (finishResult) {
+      void checkpointCatalogWalIfIdle();
     }
   }
 }

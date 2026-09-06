@@ -38,6 +38,7 @@ export function liveChannelFromIndexEntry(entry: LiveChannelIndexEntry): Provide
     currentEnd: '',
     logoUrl: entry.logoUrl,
     containerExtension: entry.containerExtension,
+    streamUrl: entry.streamUrl,
   };
 }
 

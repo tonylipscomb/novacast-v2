@@ -17,7 +17,7 @@ import {
   subscribeVodHeapProfile,
 } from './vodPlayerMemory.ts';
 import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
-import { type ComponentProps, useCallback, useEffect, useRef } from 'react';
+import { type ComponentProps, useCallback, useEffect, useMemo, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useEventListener } from 'expo';
 import { isVideoDecoderInitFailure, UNSUPPORTED_VIDEO_FORMAT_CATEGORY } from './unified/moviePlaybackCompatibility.ts';
@@ -111,7 +111,7 @@ function replacePlayerSource(player: VideoPlayer, source: VideoSource) {
   }
 }
 
-export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStreamPlayerOptions = {}) {
+export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamPlayerOptions = {}) {
   const { autoPlay = true, muted = false, onError, onReady, bufferPolicy = 'live' } = options;
   const lastUrlRef = useRef(streamUrl);
   const lastPlayerRef = useRef<VideoPlayer | null>(null);
@@ -132,7 +132,8 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
     void primeVodHeapLimit();
   }, [bufferPolicy]);
 
-  const player = useVideoPlayer(streamUrl, (nextPlayer) => {
+  const stableSource = useMemo(() => streamUrl, [streamUrl]);
+  const player = useVideoPlayer(stableSource, (nextPlayer) => {
     if (bufferPolicyRef.current === 'vod') {
       applyVodBufferProfile(nextPlayer);
     }

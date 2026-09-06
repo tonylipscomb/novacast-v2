@@ -7,6 +7,7 @@ const health = fs.readFileSync(new URL('../supabase/functions/_shared/providerHe
 const runner = fs.readFileSync(new URL('../supabase/functions/_shared/providerHealthRunner.ts', import.meta.url), 'utf8');
 const catalog = fs.readFileSync(new URL('../supabase/functions/_shared/providerHealthCatalog.ts', import.meta.url), 'utf8');
 const adminUi = fs.readFileSync(new URL('../pairing-web/src/AdminProviders.tsx', import.meta.url), 'utf8');
+const pairing = fs.readFileSync(new URL('../pairing-web/src/pairing.ts', import.meta.url), 'utf8');
 const cloud = fs.readFileSync(new URL('../pairing-web/src/AdminCloud.tsx', import.meta.url), 'utf8');
 const migration = fs.readFileSync(new URL('../supabase/migrations/20260816180000_provider_health_validation.sql', import.meta.url), 'utf8');
 
@@ -87,4 +88,17 @@ test('Admin Cloud mounts the Providers management page', () => {
   assert.match(adminUi, /Save & Activate/);
   assert.match(adminUi, /Test Provider/);
   assert.match(adminUi, /summary.notes/);
+});
+
+test('EPG size failures remain distinguishable and byte metrics are displayed', () => {
+  assert.match(adminUi, /compressed_response_too_large/);
+  assert.match(adminUi, /decompressed_response_too_large/);
+  assert.match(adminUi, /compressedBytes/);
+  assert.match(adminUi, /decompressedBytes/);
+});
+
+test('EPG worker resource failures have a safe user-facing category', () => {
+  assert.match(adminUi, /EPG processing exceeded server resource limits/);
+  assert.match(pairing, /response\.status === 546/);
+  assert.match(pairing, /WORKER_RESOURCE_LIMIT/);
 });

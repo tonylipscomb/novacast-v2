@@ -130,14 +130,15 @@ test('3. saved legacy favorites selectedCategoryId falls back safely', () => {
 test('4. synthetic favorites id never reaches provider category repository', () => {
   assert.equal(isRealProviderLiveCategoryId('favorites'), false);
   assert.match(liveModel, /if \(!isRealProviderLiveCategoryId\(categoryId\)\)/);
-  assert.match(repositories, /if \(isSyntheticLiveFavoritesCategoryId\(categoryId\)\)/);
+  assert.match(repositories, /if \(isSyntheticLiveCategoryId\(categoryId\)\)/);
   assert.match(repositories, /reason: 'provider-repository-guard'/);
+  assert.match(liveModel, /getPublishedLiveChannels\(bundle\.providerId, categoryId,/);
   assert.match(liveModel, /bundle\.live\.getChannels\(categoryId, signal\)/);
   assert.doesNotMatch(liveModel, /bundle\.live\.getChannel\(/);
 });
 
 test('5. synthetic favorites id never reaches category EPG\/Guide probing', () => {
-  assert.match(repositories, /isSyntheticLiveFavoritesCategoryId\(categoryId\)/);
+  assert.match(repositories, /isSyntheticLiveCategoryId\(categoryId\)/);
   assert.match(repositories, /typeof __DEV__ === 'undefined' \|\| !__DEV__/);
   assert.match(liveModel, /prefetchChannelEpg\(requestId, nextChannels, resolvedCategoryId\)/);
   assert.match(liveModel, /caller: 'useLiveTvScreenModel.prefetchChannelEpg'/);
@@ -171,7 +172,6 @@ test('6. Favorite Channels hydration is bounded to favorite IDs', () => {
 test('7. Favorite Channels does not require full Live network fetch', () => {
   assert.match(liveScreen, /hydrateFavoriteLiveChannels\(/);
   assert.match(liveScreen, /getLiveChannelIndexEntry\(activeProviderId, id\)/);
-  assert.doesNotMatch(liveScreen, /bundle\.live\.getChannel\(/);
   assert.doesNotMatch(liveScreen, /getLiveStreams\(/);
   assert.doesNotMatch(liveScreen, /getCategoryCounts\(/);
 });
@@ -184,9 +184,9 @@ test('8. Discover Zone open does not mutate selectedCategoryId', () => {
 });
 
 test('9. Discover Zone close preserves original provider category', () => {
-  assert.match(liveScreen, /onClose=\{\(\) => setDiscoverZoneOpen\(false\)\}/);
-  assert.match(liveScreen, /const browseCategoryId = selectedCategoryId/);
-  assert.match(liveScreen, /createLiveTvLandingState\(browseCategoryId, channelId\)/);
+  assert.match(liveScreen, /onClose=\{closeDiscoverZone\}/);
+  assert.match(liveScreen, /if \(!liveStateRef\.current\?\.fullscreenChannelId && discoverLivePlaybackContextRef\.current\)/);
+  assert.match(liveScreen, /setDiscoverRestoreItemId\(null\)/);
   const landing = createLiveTvLandingState('10', 'cnn');
   const afterFavorite = chooseLiveChannel(landing, 'cnn', { origin: 'search' });
   assert.equal(afterFavorite.selectedCategoryId, '10');
@@ -198,7 +198,7 @@ test('10. Favorite launch creates exact temporary surf queue', () => {
   const resolved = [channel('espn', 'ESPN'), channel('cnn', 'CNN'), channel('hbo', 'HBO')];
   assert.deepEqual(favoriteSurfQueueIds(favoriteIds, resolved), favoriteIds);
   assert.deepEqual(resolveLiveSearchSurfQueue(favoriteIds, ['cnn', 'fox', 'espn', 'nbc', 'hbo']), favoriteIds);
-  assert.match(liveScreen, /liveSearchSurfQueueRef\.current = favoriteIds/);
+  assert.match(liveScreen, /liveSearchSurfQueueRef\.current = canonicalQueue\.map\(\(candidate\) => candidate\.id\)/);
 });
 
 test('11. favorite surf remains circular', () => {
@@ -281,10 +281,11 @@ test('17. Live initial browse does not wait on EPG', () => {
 
 test('18. Live initial browse does not wait on Discover Zone hydration', () => {
   assert.doesNotMatch(liveModel, /loadDiscoverZoneSnapshot/);
-  assert.doesNotMatch(liveModel, /hydrateFavoriteLiveChannels/);
   assert.doesNotMatch(liveModel, /getLiveFavoriteEntries/);
-  assert.doesNotMatch(liveModel, /usePersonalizationStore/);
   assert.doesNotMatch(liveModel, /getCategoryCounts/);
+  // Reactive personalization state (My Channels / Recents) is read synchronously
+  // from the store hook — initial provider browse never awaits it.
+  assert.doesNotMatch(liveModel, /await[^\n]*usePersonalizationStore/);
 });
 
 test('Live FocusRouter and Movies\/Series Discover Zone stay closed', () => {

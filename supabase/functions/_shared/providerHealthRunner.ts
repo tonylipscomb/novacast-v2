@@ -16,6 +16,7 @@ import {
   summarizeProbeGroup,
   aggregateStreamProbeCheck,
   connectionSlotOccupied,
+  isGoldCloudProbeRestricted,
   maybeConnectionLimitCode,
   normalizePlaybackExtension,
   parseOptionalInt,
@@ -408,7 +409,24 @@ async function fetchContentList(
   };
 }
 
-export async function runProviderHealthCheck(credentials: XtreamCredentials): Promise<ProviderHealthSummary> {
+export async function fetchLiveChannelsForEpgMapping(credentials: XtreamCredentials) {
+  const result = await fetchXtreamCatalog(
+    buildXtreamPlayerApiUrl(credentials.baseUrl, credentials.username, credentials.password, 'get_live_streams'),
+    CATALOG_TIMEOUT_MS,
+    { keepAll: true },
+  );
+  return {
+    ...result,
+    items: result.items.map((row) => ({
+      streamId: catalogItemId(row.stream_id),
+      name: String(row.name ?? ''),
+      epgChannelId: String(row.epg_channel_id ?? row['tvg-id'] ?? row.tvg_id ?? '').trim() || null,
+      category: String(row.category_name ?? row.category_id ?? '').trim() || null,
+    })),
+  };
+}
+
+export async function runProviderHealthCheck(credentials: XtreamCredentials, options: { isGoldManaged?: boolean } = {}): Promise<ProviderHealthSummary> {
   const startedAt = Date.now();
   const checks: ProviderHealthCheck[] = [];
   const notes: string[] = [];
@@ -768,7 +786,7 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials): Pr
     checks.push(check('epg', 'EPG', 'warn', 'noncritical', 'EPG unavailable.'));
   }
 
-  return finish(checks, notes, startedAt, account, catalogs, probes);
+  return finish(checks, notes, startedAt, account, catalogs, probes, options);
 }
 
 function finish(
@@ -778,14 +796,23 @@ function finish(
   account: ProviderHealthSummary['account'],
   catalogs: ProviderHealthSummary['catalogs'],
   probes: StreamProbeResult[],
+  options: { isGoldManaged?: boolean } = {},
 ): ProviderHealthSummary {
   const live = summarizeProbeGroup(probes.filter((item) => item.kind === 'live'));
   const movies = summarizeProbeGroup(probes.filter((item) => item.kind === 'movie'));
   const episodes = summarizeProbeGroup(probes.filter((item) => item.kind === 'episode'));
+  const cloudPlaybackProbeRestricted = isGoldCloudProbeRestricted({ isGoldManaged: options.isGoldManaged === true, checks, probes, catalogs });
+  const playback = checks.find((check) => check.id === 'playback');
+  if (cloudPlaybackProbeRestricted && playback) {
+    playback.verdict = 'warn';
+    playback.severity = 'noncritical';
+    playback.detail = `Cloud playback probe restricted. ${playback.detail}`;
+  }
   const classified = classifyOverallHealth(checks);
   return {
     overall: classified.overall,
     overallLabel: classified.overallLabel,
+    ...(cloudPlaybackProbeRestricted ? { cloudPlaybackProbeRestricted: true, cloudPlaybackProbeReason: 'gold_cloud_probe_restricted' as const } : {}),
     testedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAt,
     checks,

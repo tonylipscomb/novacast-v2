@@ -15,6 +15,7 @@ const workflow = fs.readFileSync(new URL('../.github/workflows/epg-refresh.yml',
 const admin = fs.readFileSync(new URL('../supabase/functions/admin-providers/index.ts', import.meta.url), 'utf8');
 const migration = fs.readFileSync(new URL('../supabase/migrations/20260906043251_managed_provider_epg_refresh_requests.sql', import.meta.url), 'utf8');
 const jobsMigration = fs.readFileSync(new URL('../supabase/migrations/20260906090000_managed_provider_epg_refresh_jobs.sql', import.meta.url), 'utf8');
+const mappingConstraintMigration = fs.readFileSync(new URL('../supabase/migrations/20260906134032_managed_provider_epg_source_mapping_match_types_and_snapshot_promotion.sql', import.meta.url), 'utf8');
 
 test('full mapping audit completes for a 12,000-row provider catalog and 765 XMLTV channels', () => {
   const providerRows = Array.from({ length: 12000 }, (_, index) => ({
@@ -103,6 +104,16 @@ test('Phase 2C eligible matches are staged for promotion without replacing the e
   assert.match(worker, /cache_generation: generation/);
   assert.match(worker, /promote_generation/);
   assert.doesNotMatch(worker, /fuzzy|edit distance/i);
+});
+
+test('mapping provenance accepts quality variants and snapshot promotion avoids the timed-out bulk deactivation update', () => {
+  assert.match(mappingConstraintMigration, /drop constraint if exists managed_provider_epg_source_mappings_match_type_check/);
+  for (const value of ['direct_id', 'case_insensitive_id', 'exact_name', 'normalized_name', 'canonical', 'quality_variant', 'alias', 'local_affiliate', 'ambiguous', 'unmatched']) assert.match(mappingConstraintMigration, new RegExp(`'${value}'`));
+  assert.doesNotMatch(mappingConstraintMigration, /fuzzy|guessed|heuristic|confidence-score/i);
+  assert.doesNotMatch(worker, /deactivate_previous_catalog_snapshot/);
+  assert.match(worker, /promote_catalog_snapshot/);
+  assert.match(worker, /cleanup_previous_catalog_snapshot/);
+  assert.match(worker, /snapshotComplete/);
 });
 
 test('worker uses server-only secrets and streams XMLTV outside Edge', () => {

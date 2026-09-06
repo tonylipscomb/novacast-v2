@@ -314,21 +314,15 @@ async function persistProviderCatalogSnapshot(providerId, items) {
     }));
   if (!rows.length) return { generation, expectedRows: items.length, storedRows: 0, complete: false };
   const [previous] = await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&is_active=eq.true&select=snapshot_generation&order=captured_at.desc&limit=1`, {}, 'load_previous_catalog_snapshot');
-  let previousDeactivated = false;
   try {
     await insertBatches('managed_provider_epg_catalog_snapshot', rows, 'managed_provider_id,snapshot_generation,provider_stream_id', 'insert_catalog_snapshot');
     const complete = rows.length === items.length;
     await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ snapshot_expected_rows: items.length, snapshot_complete: complete }) }, 'complete_catalog_snapshot');
-    if (previous?.snapshot_generation && previous.snapshot_generation !== generation) {
-      await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(previous.snapshot_generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ is_active: false }) }, 'deactivate_previous_catalog_snapshot');
-      previousDeactivated = true;
-    }
     await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ is_active: true }) }, 'promote_catalog_snapshot');
     if (previous?.snapshot_generation && previous.snapshot_generation !== generation) {
-      await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(previous.snapshot_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_catalog_snapshot');
+      await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(previous.snapshot_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_catalog_snapshot').catch((error) => { logDatabaseFailure(error); process.stderr.write('Previous provider catalog snapshot cleanup deferred.\n'); });
     }
   } catch (error) {
-    if (previousDeactivated && previous?.snapshot_generation) await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(previous.snapshot_generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ is_active: true }) }, 'restore_previous_catalog_snapshot').catch(() => {});
       await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_catalog_snapshot').catch(() => {});
     logDatabaseFailure(error);
     process.stderr.write('EPG provider catalog snapshot unavailable.\n');

@@ -8,6 +8,7 @@ const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url
 const workflow = fs.readFileSync(new URL('../.github/workflows/epg-refresh.yml', import.meta.url), 'utf8');
 const admin = fs.readFileSync(new URL('../supabase/functions/admin-providers/index.ts', import.meta.url), 'utf8');
 const migration = fs.readFileSync(new URL('../supabase/migrations/20260906043251_managed_provider_epg_refresh_requests.sql', import.meta.url), 'utf8');
+const jobsMigration = fs.readFileSync(new URL('../supabase/migrations/20260906090000_managed_provider_epg_refresh_jobs.sql', import.meta.url), 'utf8');
 
 test('worker uses server-only secrets and streams XMLTV outside Edge', () => {
   assert.match(worker, /SUPABASE_SERVICE_ROLE_KEY/);
@@ -45,6 +46,20 @@ test('workflow runs every six hours with manual filtering and a concurrency guar
   assert.match(workflow, /concurrency:/);
   assert.match(workflow, /SUPABASE_SERVICE_ROLE_KEY/);
   assert.match(workflow, /PROVIDER_ENCRYPTION_KEY/);
+});
+
+test('worker reclaims stale active jobs without deleting the active cache and handles races safely', () => {
+  assert.match(worker, /STALE_REFRESH_JOB_MS = 30 \* 60 \* 1000/);
+  assert.match(worker, /ACTIVE_REFRESH_JOB_STATUSES = \['queued', 'fetching', 'processing', 'finalizing'\]/);
+  assert.match(worker, /loadActiveRefreshJob/);
+  assert.match(worker, /failure_code: 'stale_refresh_job'/);
+  assert.match(worker, /reclaim_stale_refresh_job/);
+  assert.match(worker, /cleanupStagedGeneration/);
+  assert.match(worker, /generation === activeCacheGeneration/);
+  assert.match(worker, /error\.code !== '23505'/);
+  assert.match(worker, /active_job_exists/);
+  assert.match(worker, /skip_active_refresh_request/);
+  assert.match(jobsMigration, /status in \('queued', 'fetching', 'processing', 'finalizing'\)/);
 });
 
 test('worker reports safe non-database stages and validates credentials without exposing secrets', () => {

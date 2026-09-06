@@ -11,6 +11,7 @@ const BATCH_SIZE = 1_000;
 const PAST_RETENTION_MS = 6 * 60 * 60 * 1000;
 const FUTURE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 60_000;
+const STALE_REFRESH_JOB_MS = 30 * 60 * 1000;
 const headers = { apikey: SERVICE_ROLE_KEY, authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'content-type': 'application/json' };
 
 class DatabaseFailure extends Error {
@@ -354,16 +355,51 @@ async function enqueueScheduledRefresh(source) {
   return requireUuid(existing?.id, 'enqueue_scheduled_refresh', 'request_id');
 }
 
+const ACTIVE_REFRESH_JOB_STATUSES = ['queued', 'fetching', 'processing', 'finalizing'];
+
+async function loadActiveRefreshJob(sourceId) {
+  const safeSourceId = requireUuid(sourceId, 'load_active_refresh_job', 'source_id');
+  const statusFilter = `(${ACTIVE_REFRESH_JOB_STATUSES.join(',')})`;
+  const [job] = await db(`managed_provider_epg_refresh_jobs?source_id=eq.${encodeURIComponent(safeSourceId)}&status=in.${statusFilter}&select=id,source_id,generation,status,created_at,started_at,updated_at&order=created_at.desc&limit=1`, {}, 'load_active_refresh_job');
+  return job ?? null;
+}
+
+async function cleanupStagedGeneration(sourceId, generation, activeCacheGeneration, operation) {
+  if (!generation || generation === activeCacheGeneration) return;
+  const safeSourceId = requireUuid(sourceId, operation, 'source_id');
+  const safeGeneration = requireUuid(generation, operation, 'generation');
+  for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) {
+    await db(`${table}?source_id=eq.${encodeURIComponent(safeSourceId)}&cache_generation=eq.${encodeURIComponent(safeGeneration)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, operation).catch(() => {});
+  }
+}
+
 async function ensureRefreshJob(source, requestId) {
   const [request] = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(requestId)}&select=id,refresh_job_id`, {}, 'load_refresh_request');
   if (!request) throw new WorkerValidationFailure('load_refresh_request', 'missing_request');
-  if (request.refresh_job_id != null) return requireUuid(request.refresh_job_id, 'load_refresh_request', 'job_id');
+  if (request.refresh_job_id != null) return { jobId: requireUuid(request.refresh_job_id, 'load_refresh_request', 'job_id'), skipped: false };
+  const activeJob = await loadActiveRefreshJob(source.id);
+  if (activeJob) {
+    const timestamp = Date.parse(activeJob.updated_at ?? activeJob.started_at ?? activeJob.created_at ?? '');
+    const isStale = !Number.isFinite(timestamp) || Date.now() - timestamp > STALE_REFRESH_JOB_MS;
+    if (!isStale) return { jobId: requireUuid(activeJob.id, 'active_job_exists', 'job_id'), skipped: true };
+    const [providerSource] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(source.id)}&select=active_cache_generation`, {}, 'load_source_for_stale_job');
+    await patch('managed_provider_epg_refresh_jobs', activeJob.id, { status: 'failed', stage: null, failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'reclaim_stale_refresh_job');
+    await cleanupStagedGeneration(source.id, activeJob.generation, providerSource?.active_cache_generation, 'cleanup_stale_refresh_job');
+  }
   const jobId = requireUuid(crypto.randomUUID(), 'create_refresh_job', 'job_id');
   const generation = requireUuid(crypto.randomUUID(), 'create_refresh_job', 'generation');
-  const created = await db('managed_provider_epg_refresh_jobs', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ id: jobId, managed_provider_id: source.managed_provider_id, source_id: source.id, generation, status: 'queued', stage: 'queued', updated_at: new Date().toISOString() }) }, 'create_refresh_job');
+  let created;
+  try {
+    created = await db('managed_provider_epg_refresh_jobs', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ id: jobId, managed_provider_id: source.managed_provider_id, source_id: source.id, generation, status: 'queued', stage: 'queued', updated_at: new Date().toISOString() }) }, 'create_refresh_job');
+  } catch (error) {
+    if (!(error instanceof DatabaseFailure) || error.code !== '23505') throw error;
+    const racedJob = await loadActiveRefreshJob(source.id);
+    if (!racedJob) throw error;
+    return { jobId: requireUuid(racedJob.id, 'active_job_exists', 'job_id'), skipped: true };
+  }
   requireUuid(returnedRow(created, 'create_refresh_job').id, 'create_refresh_job', 'job_id');
   await patch('managed_provider_epg_refresh_requests', requestId, { refresh_job_id: jobId }, '', 'link_refresh_job');
-  return jobId;
+  return { jobId, skipped: false };
 }
 
 async function main() {
@@ -391,7 +427,12 @@ async function main() {
     if (!claimed?.length) continue;
     try {
       const source = { id: requireUuid(request.source_id, 'claim_refresh_request', 'source_id'), managed_provider_id: requireUuid(request.managed_provider_id, 'claim_refresh_request', 'provider_id') };
-      const jobId = await ensureRefreshJob(source, requestId);
+      const ensuredJob = await ensureRefreshJob(source, requestId);
+      if (ensuredJob.skipped) {
+        await patch('managed_provider_epg_refresh_requests', requestId, { status: 'complete', failure_code: 'active_job_exists', failure_message: 'active_job_exists', completed_at: new Date().toISOString() }, '', 'skip_active_refresh_request');
+        continue;
+      }
+      const jobId = ensuredJob.jobId;
       await patch('managed_provider_epg_refresh_jobs', jobId, { status: 'processing', stage: 'worker_ingest', updated_at: new Date().toISOString() }, '', 'start_refresh_job');
       const result = await processRequest(request);
       await patch('managed_provider_epg_refresh_jobs', jobId, { status: 'complete', stage: null, progress_percent: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'complete_refresh_job');

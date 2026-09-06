@@ -13,6 +13,36 @@ const FUTURE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 60_000;
 const headers = { apikey: SERVICE_ROLE_KEY, authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'content-type': 'application/json' };
 
+class DatabaseFailure extends Error {
+  constructor(operation, httpStatus, payload) {
+    super('database_failure');
+    this.name = 'DatabaseFailure';
+    this.operation = operation;
+    this.httpStatus = httpStatus ?? null;
+    this.code = safeErrorText(payload?.code);
+    this.safeMessage = safeErrorText(payload?.message) || 'database_failure';
+    this.details = safeErrorText(payload?.details);
+    this.hint = safeErrorText(payload?.hint);
+  }
+}
+
+function safeErrorText(value) {
+  if (typeof value !== 'string') return null;
+  let safe = value
+    .replace(/https?:\/\/[^\s"']+/gi, '[redacted-url]')
+    .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+    .replace(/[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[redacted-token]')
+    .replace(/(password|passwd|username|user|token|secret|authorization|api[_-]?key|ciphertext|encryption[_-]?key)\s*[=:]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .slice(0, 300);
+  for (const secret of [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.PROVIDER_ENCRYPTION_KEY].filter(Boolean)) safe = safe.split(secret).join('[redacted]');
+  return safe || null;
+}
+
+function logDatabaseFailure(error) {
+  if (!(error instanceof DatabaseFailure)) return;
+  process.stderr.write(`${JSON.stringify({ databaseFailure: { operation: error.operation, httpStatus: error.httpStatus, code: error.code, message: error.safeMessage, details: error.details, hint: error.hint } })}\n`);
+}
+
 function required(name) {
   const value = process.env[name];
   if (!value) throw new Error(`missing_${name.toLowerCase()}`);
@@ -30,21 +60,30 @@ async function decryptSecret(ciphertext, iv) {
   return Buffer.from(plaintext).toString('utf8');
 }
 
-async function db(path, init = {}) {
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...init, headers: { ...headers, ...(init.headers ?? {}) } });
-  if (!response.ok) throw new Error('database_failure');
+async function db(path, init = {}, operation = 'supabase_request') {
+  let response;
+  try {
+    response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...init, headers: { ...headers, ...(init.headers ?? {}) } });
+  } catch {
+    throw new DatabaseFailure(operation, null, { message: 'database_network_failure' });
+  }
+  if (!response.ok) {
+    let payload = {};
+    try { payload = await response.json(); } catch { payload = {}; }
+    throw new DatabaseFailure(operation, response.status, payload);
+  }
   if (response.status === 204) return null;
-  return response.json();
+  try { return await response.json(); } catch { throw new DatabaseFailure(operation, response.status, { message: 'invalid_database_response' }); }
 }
 
-async function patch(table, id, values, extra = '') {
-  await db(`${table}?id=eq.${encodeURIComponent(id)}${extra}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(values) });
+async function patch(table, id, values, extra = '', operation = `update_${table}`) {
+  await db(`${table}?id=eq.${encodeURIComponent(id)}${extra}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(values) }, operation);
 }
 
-async function insertBatches(table, rows, onConflict = '') {
+async function insertBatches(table, rows, onConflict = '', operation = `insert_${table}`) {
   for (let offset = 0; offset < rows.length; offset += BATCH_SIZE) {
     const suffix = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
-    await db(`${table}${suffix}`, { method: 'POST', headers: { Prefer: onConflict ? 'resolution=ignore-duplicates,return=minimal' : 'return=minimal' }, body: JSON.stringify(rows.slice(offset, offset + BATCH_SIZE)) });
+    await db(`${table}${suffix}`, { method: 'POST', headers: { Prefer: onConflict ? 'resolution=ignore-duplicates,return=minimal' : 'return=minimal' }, body: JSON.stringify(rows.slice(offset, offset + BATCH_SIZE)) }, operation);
   }
 }
 
@@ -162,8 +201,8 @@ async function fetchLiveChannels(provider) {
 }
 
 async function processRequest(request) {
-  const [source] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(request.source_id)}&select=id,managed_provider_id,url_ciphertext,url_iv,priority,active_cache_generation`);
-  const [provider] = await db(`managed_providers?id=eq.${encodeURIComponent(request.managed_provider_id)}&select=id,credentials_ciphertext,credentials_iv`);
+  const [source] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(request.source_id)}&select=id,managed_provider_id,url_ciphertext,url_iv,priority,active_cache_generation`, {}, 'load_source');
+  const [provider] = await db(`managed_providers?id=eq.${encodeURIComponent(request.managed_provider_id)}&select=id,credentials_ciphertext,credentials_iv`, {}, 'load_provider');
   if (!source || !provider) throw new Error('source_not_found');
   const generation = crypto.randomUUID();
   const refreshedAt = new Date().toISOString();
@@ -187,7 +226,7 @@ async function processRequest(request) {
   await new Promise((resolve, reject) => { stream.once('end', resolve); stream.once('error', reject); });
   parser.finish();
   if (!channels.length || !programmes.length) throw new Error('empty_feed');
-  await insertBatches('managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalize(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1), refreshed_at: refreshedAt })));
+  await insertBatches('managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalize(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1), refreshed_at: refreshedAt })), '', 'insert_channels');
   const byId = new Map(channels.map((channel) => [channel.id, channel]));
   const byName = new Map(channels.flatMap((channel) => { const key = canonicalize(channel.displayNames[0] || channel.id); return key ? [[key, channel]] : []; }));
   for (const channel of live.items) {
@@ -195,16 +234,16 @@ async function processRequest(request) {
     const named = direct ?? byName.get(canonicalize(channel.name));
     if (named) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: channel.streamId, xmltv_channel_id: named.id, match_type: direct ? 'direct_id' : 'normalized_name', match_confidence_class: 'proven', provider_canonical: canonicalize(channel.name), xmltv_canonical: canonicalize(named.displayNames[0] || named.id), mapped_at: refreshedAt });
   }
-  await insertBatches('managed_provider_epg_source_programmes', programmes.map((programme) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: programme.channelId, start_at: programme.startAt, stop_at: programme.stopAt, title: programme.title, subtitle: programme.subtitle, description: programme.description, category: programme.category, refreshed_at: refreshedAt })), 'source_id,cache_generation,xmltv_channel_id,start_at,stop_at,title');
-  await insertBatches('managed_provider_epg_source_mappings', mappings);
-  await patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: channels.length, programme_count: programmes.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, invalidTimestamps: parser.invalidTimestamps }, updated_at: refreshedAt });
+  await insertBatches('managed_provider_epg_source_programmes', programmes.map((programme) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: programme.channelId, start_at: programme.startAt, stop_at: programme.stopAt, title: programme.title, subtitle: programme.subtitle, description: programme.description, category: programme.category, refreshed_at: refreshedAt })), 'source_id,cache_generation,xmltv_channel_id,start_at,stop_at,title', 'insert_programmes');
+  await insertBatches('managed_provider_epg_source_mappings', mappings, '', 'insert_mappings');
+  await patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: channels.length, programme_count: programmes.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, invalidTimestamps: parser.invalidTimestamps }, updated_at: refreshedAt }, '', 'promote_generation');
   promoted = true;
   if (source.active_cache_generation) {
-    for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }).catch(() => {});
+    for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_generation').catch(() => {});
   }
   return { channels: channels.length, programmes: programmes.length, mapped: mappings.length };
   } catch (error) {
-    if (!promoted) for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }).catch(() => {});
+    if (!promoted) for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_generation').catch(() => {});
     throw error;
   }
 }
@@ -212,28 +251,37 @@ async function processRequest(request) {
 async function main() {
   const providerId = process.argv[2] ?? '';
   const sourceId = process.argv[3] ?? '';
+  let failed = false;
   if (!providerId && !sourceId) {
-    const sources = await db('managed_provider_epg_sources?enabled=eq.true&select=id,managed_provider_id');
-    for (const source of sources ?? []) await db('managed_provider_epg_refresh_requests', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ managed_provider_id: source.managed_provider_id, source_id: source.id, status: 'pending', requested_at: new Date().toISOString() }) }).catch(() => {});
+    const sources = await db('managed_provider_epg_sources?enabled=eq.true&select=id,managed_provider_id', {}, 'load_sources');
+    for (const source of sources ?? []) await db('managed_provider_epg_refresh_requests', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ managed_provider_id: source.managed_provider_id, source_id: source.id, status: 'pending', requested_at: new Date().toISOString() }) }, 'enqueue_scheduled_refresh').catch((error) => { logDatabaseFailure(error); failed = true; });
   }
   const query = ['status=eq.pending', 'order=requested_at.asc', 'limit=20', providerId && `managed_provider_id=eq.${encodeURIComponent(providerId)}`, sourceId && `source_id=eq.${encodeURIComponent(sourceId)}`].filter(Boolean).join('&');
-  const requests = await db(`managed_provider_epg_refresh_requests?select=id,managed_provider_id,source_id,refresh_job_id,status&${query}`);
+  const requests = await db(`managed_provider_epg_refresh_requests?select=id,managed_provider_id,source_id,refresh_job_id,status&${query}`, {}, 'load_pending_requests');
+  if (!requests?.length) {
+    if (!providerId && !sourceId) process.stdout.write('No pending EPG refresh requests.\n');
+    if (failed) process.exitCode = 1;
+    return;
+  }
   for (const request of requests ?? []) {
-    const claimed = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(request.id)}&status=eq.pending`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }) });
+    const claimed = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(request.id)}&status=eq.pending`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }) }, 'claim_refresh_request');
     if (!claimed?.length) continue;
     try {
-      await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'processing', stage: 'worker_ingest', updated_at: new Date().toISOString() });
+      await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'processing', stage: 'worker_ingest', updated_at: new Date().toISOString() }, '', 'start_refresh_job');
       const result = await processRequest(request);
-      await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'complete', stage: null, progress_percent: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() });
-      await patch('managed_provider_epg_refresh_requests', request.id, { status: 'complete', completed_at: new Date().toISOString() });
+      await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'complete', stage: null, progress_percent: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'complete_refresh_job');
+      await patch('managed_provider_epg_refresh_requests', request.id, { status: 'complete', completed_at: new Date().toISOString() }, '', 'complete_request');
       process.stdout.write(`EPG refresh completed: channels=${result.channels} programmes=${result.programmes} mapped=${result.mapped}\n`);
     } catch (error) {
+      failed = true;
+      logDatabaseFailure(error);
       const code = error instanceof Error && /^[a-z0-9_]+$/.test(error.message) ? error.message : 'worker_failure';
-      if (request.refresh_job_id) await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }).catch(() => {});
-      await patch('managed_provider_epg_refresh_requests', request.id, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() });
+      if (request.refresh_job_id) await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }, '', 'fail_refresh_job').catch((patchError) => { logDatabaseFailure(patchError); });
+      await patch('managed_provider_epg_refresh_requests', request.id, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() }, '', 'fail_request').catch((patchError) => { logDatabaseFailure(patchError); });
       process.stderr.write(`EPG refresh failed: ${code}\n`);
     }
   }
+  if (failed) process.exitCode = 1;
 }
 
-main().catch((error) => { process.stderr.write(`EPG worker failed: ${error instanceof Error ? error.message : 'worker_failure'}\n`); process.exitCode = 1; });
+main().catch((error) => { logDatabaseFailure(error); process.stderr.write(`EPG worker failed: ${error instanceof Error ? error.message : 'worker_failure'}\n`); process.exitCode = 1; });

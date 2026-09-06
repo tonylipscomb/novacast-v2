@@ -11,7 +11,7 @@ import {
 } from '../_shared/providerHealth.ts';
 import { runProviderHealthCheck } from '../_shared/providerHealthRunner.ts';
 import { fetchLiveChannelsForEpgMapping } from '../_shared/providerHealthRunner.ts';
-import { canonicalizeEpgName, normalizeEpgMode, safeEpgUrl, testXmltvFeed, traceXmltvFeed, type EpgLiveChannel, type EpgMode, type XmltvStreamSink } from '../_shared/xmltvEpg.ts';
+import { canonicalizeEpgName, normalizeEpgMode, probeXmltvFeed, safeEpgUrl, testXmltvFeed, traceXmltvFeed, type EpgLiveChannel, type EpgMode, type XmltvStreamSink } from '../_shared/xmltvEpg.ts';
 
 const PROVIDER_SELECT =
   'id,slug,display_name,status,content_policy,notes,last_validated_at,last_tested_at,last_successful_test_at,health_status,live_channel_count,movie_count,series_count,validation_stale,last_health_summary,epg_mode,custom_epg_url_ciphertext,epg_last_refresh_at,epg_last_refresh_status,epg_last_refresh_summary,created_at,updated_at';
@@ -547,46 +547,42 @@ async function updateRefreshJob(client: Awaited<ReturnType<typeof requireAdmin>>
 }
 
 async function previewEpgResolution(client: Awaited<ReturnType<typeof requireAdmin>>['client'], providerId: string) {
-  const provider = await loadProvider(client, providerId, true);
-  const credentials = await decryptXtream(provider);
-  const liveChannels = (await fetchLiveChannelsForEpgMapping(credentials)).items;
-  const { data: sources, error: sourceError } = await client.from('managed_provider_epg_sources').select(EPG_SOURCE_SELECT).eq('managed_provider_id', providerId).eq('enabled', true).order('priority', { ascending: true }).order('created_at', { ascending: true });
-  if (sourceError) throwEpgSourceDatabaseError(sourceError, 'admin_query_failed');
-  const mappingsBySource = new Map<string, Map<string, Record<string, unknown>>>();
-  for (const source of (sources ?? []) as ManagedProviderEpgSourceRow[]) {
-    const rows = source.active_cache_generation ? await client.from('managed_provider_epg_source_mappings').select('provider_stream_id,xmltv_channel_id,match_type,match_confidence_class').eq('source_id', source.id).eq('cache_generation', source.active_cache_generation) : { data: [], error: null };
-    if (rows.error) throw new Error('admin_query_failed');
-    mappingsBySource.set(source.id, new Map((rows.data ?? []).map((row) => [String(row.provider_stream_id), row as Record<string, unknown>])));
-  }
-  const resolvedBySource: Record<string, number> = {};
-  const resolvedByMatchType: Record<string, number> = {};
-  let resolved = 0;
-  let duplicateCandidateConflicts = 0;
-  const unresolvedSamples: Array<Record<string, string | null>> = [];
-  const resolvedSamples: Array<Record<string, string | null>> = [];
-  for (const channel of liveChannels) {
-    const key = channel.streamId ?? channel.epgChannelId ?? channel.name;
-    const candidates = (sources ?? []).map((source) => ({ source: source as ManagedProviderEpgSourceRow, mapping: mappingsBySource.get(source.id)?.get(key) })).filter((item) => item.mapping?.match_confidence_class === 'proven');
-    if (candidates.length > 1) duplicateCandidateConflicts += 1;
-    const winner = candidates[0];
-    if (!winner) {
-      if (unresolvedSamples.length < 10) unresolvedSamples.push({ channelName: channel.name.slice(0, 200), epgChannelId: channel.epgChannelId });
-      continue;
-    }
-    resolved += 1;
-    resolvedBySource[winner.source.safe_label] = (resolvedBySource[winner.source.safe_label] ?? 0) + 1;
-    const matchType = String(winner.mapping?.match_type ?? 'unknown');
-    resolvedByMatchType[matchType] = (resolvedByMatchType[matchType] ?? 0) + 1;
-    if (resolvedSamples.length < 10) resolvedSamples.push({ channelName: channel.name.slice(0, 200), epgChannelId: channel.epgChannelId, source: winner.source.safe_label });
-  }
-  return { providerId, totalProviderChannelsConsidered: liveChannels.length, resolvedChannels: resolved, unresolvedChannels: liveChannels.length - resolved, resolvedBySource, resolvedByMatchType, duplicateCandidateConflicts, samples: { resolved: resolvedSamples, unresolved: unresolvedSamples } };
+  const { data, error } = await client.from('managed_provider_epg_combined_coverage')
+    .select('id,managed_provider_id,snapshot_generation,created_at,provider_rows,resolved,unresolved,mapping_percent,enabled_source_count,by_source,by_match,candidate_conflicts,resolved_conflicts,unresolved_conflicts,duplicate_provider_variants,current_programme_coverage,future_programme_coverage,source_generations,samples')
+    .eq('managed_provider_id', providerId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error('admin_query_failed');
+  if (!data) return { coverage: null, refreshRequired: true };
+  const coverage = {
+    providerId,
+    totalProviderChannelsConsidered: data.provider_rows,
+    resolvedChannels: data.resolved,
+    unresolvedChannels: data.unresolved,
+    mappingPercent: data.mapping_percent,
+    enabledSourceCount: data.enabled_source_count,
+    resolvedBySource: data.by_source,
+    resolvedByMatchType: { ...(data.by_match ?? {}), same_target_overlap: data.samples?.sameTargetOverlap?.length ?? 0, different_target_conflict: data.unresolved_conflicts + data.resolved_conflicts },
+    candidateConflicts: data.candidate_conflicts,
+    sameTargetOverlaps: data.samples?.sameTargetOverlap?.length ?? 0,
+    resolvedConflicts: data.resolved_conflicts,
+    unresolvedConflicts: data.unresolved_conflicts,
+    duplicateProviderVariants: data.duplicate_provider_variants,
+    currentProgrammeCoverage: data.current_programme_coverage,
+    futureProgrammeCoverage: data.future_programme_coverage,
+    sourceGenerations: data.source_generations,
+    samples: data.samples,
+    createdAt: data.created_at,
+  };
+  return { ...coverage, duplicateCandidateConflicts: coverage.candidateConflicts, coverage, refreshRequired: false };
 }
 
 async function readPersistedEpgMappingAudit(client: Awaited<ReturnType<typeof requireAdmin>>['client'], providerId: string, sourceId: string) {
   const source = await loadEpgSource(client, sourceId);
   if (source.managed_provider_id !== providerId) throw new Error('invalid_request');
   const { data, error } = await client.from('managed_provider_epg_mapping_audits')
-    .select('id,managed_provider_id,source_id,snapshot_generation,epg_generation,created_at,provider_rows,unique_provider_canonical_names,provider_rows_with_epg_id,provider_rows_without_epg_id,xmltv_channels,current_mapped,snapshot_expected_rows,snapshot_stored_rows,snapshot_complete,snapshot_page_count,direct_id_potential,case_insensitive_id_potential,exact_name_potential,normalized_name_potential,canonical_potential,ambiguous_potential,additional_deterministic_potential,projected_mapped_total,us_relevant_rows,us_current_mapped,us_additional_potential,us_projected_mapped,us_projected_mapping_percent,groups,many_to_one,samples')
+    .select('id,managed_provider_id,source_id,snapshot_generation,epg_generation,created_at,provider_rows,unique_provider_canonical_names,provider_rows_with_epg_id,provider_rows_without_epg_id,xmltv_channels,current_mapped,snapshot_expected_rows,snapshot_stored_rows,snapshot_complete,snapshot_page_count,direct_id_potential,case_insensitive_id_potential,exact_name_potential,normalized_name_potential,canonical_potential,ambiguous_potential,additional_deterministic_potential,projected_mapped_total,us_relevant_rows,us_current_mapped,us_additional_potential,us_projected_mapped,us_projected_mapping_percent,xmltv_display_names,unique_xmltv_canonicals,duplicate_xmltv_canonicals,ambiguous_xmltv_canonicals,groups_are_non_exclusive,phase2c_direct_id_potential,phase2c_case_insensitive_id_potential,phase2c_exact_name_potential,phase2c_normalized_name_potential,phase2c_canonical_potential,phase2c_quality_variant_potential,phase2c_additional_deterministic_potential,phase2c_projected_mapped_total,phase2c_ambiguous_potential,phase2c_unmatched,us_phase2c_additional_potential,us_phase2c_projected_mapped,us_phase2c_projected_mapping_ratio,us_phase2c_projected_mapping_percent,phase2c_rule_breakdown,groups,many_to_one,samples')
     .eq('managed_provider_id', providerId)
     .eq('source_id', sourceId)
     .order('created_at', { ascending: false })
@@ -599,8 +595,10 @@ async function readPersistedEpgMappingAudit(client: Awaited<ReturnType<typeof re
     snapshot: { providerRows: data.provider_rows, snapshotGeneration: data.snapshot_generation, snapshotExpectedRows: data.snapshot_expected_rows, snapshotStoredRows: data.snapshot_stored_rows, snapshotComplete: data.snapshot_complete },
     providerRows: data.provider_rows, uniqueProviderCanonicalNames: data.unique_provider_canonical_names, providerRowsWithEpgId: data.provider_rows_with_epg_id, providerRowsWithoutEpgId: data.provider_rows_without_epg_id, xmltvChannels: data.xmltv_channels, currentMapped: data.current_mapped,
     snapshotRowsLoaded: data.snapshot_stored_rows, snapshotPageCount: data.snapshot_page_count, snapshotExpectedRows: data.snapshot_expected_rows, snapshotStoredRows: data.snapshot_stored_rows, snapshotComplete: data.snapshot_complete,
-    groups: data.groups, directIdPotential: data.direct_id_potential, caseInsensitiveIdPotential: data.case_insensitive_id_potential, exactNamePotential: data.exact_name_potential, normalizedNamePotential: data.normalized_name_potential, canonicalPotential: data.canonical_potential, ambiguousPotential: data.ambiguous_potential,
+    groups: data.groups, groupsAreNonExclusive: data.groups_are_non_exclusive, directIdPotential: data.direct_id_potential, caseInsensitiveIdPotential: data.case_insensitive_id_potential, exactNamePotential: data.exact_name_potential, normalizedNamePotential: data.normalized_name_potential, canonicalPotential: data.canonical_potential, ambiguousPotential: data.ambiguous_potential,
     additionalDeterministicPotential: data.additional_deterministic_potential, projectedMappedTotal: data.projected_mapped_total, usRelevantRows: data.us_relevant_rows, usCurrentMapped: data.us_current_mapped, usAdditionalPotential: data.us_additional_potential, usProjectedMapped: data.us_projected_mapped, usProjectedMappingPercent: data.us_projected_mapping_percent, manyToOne: data.many_to_one, samples: data.samples,
+    xmltvDisplayNames: data.xmltv_display_names, uniqueXmltvCanonicals: data.unique_xmltv_canonicals, duplicateXmltvCanonicals: data.duplicate_xmltv_canonicals, ambiguousXmltvCanonicals: data.ambiguous_xmltv_canonicals,
+    phase2cDirectIdPotential: data.phase2c_direct_id_potential, phase2cCaseInsensitiveIdPotential: data.phase2c_case_insensitive_id_potential, phase2cExactNamePotential: data.phase2c_exact_name_potential, phase2cNormalizedNamePotential: data.phase2c_normalized_name_potential, phase2cCanonicalPotential: data.phase2c_canonical_potential, phase2cQualityVariantPotential: data.phase2c_quality_variant_potential, phase2cAdditionalDeterministicPotential: data.phase2c_additional_deterministic_potential, phase2cProjectedMappedTotal: data.phase2c_projected_mapped_total, phase2cAmbiguousPotential: data.phase2c_ambiguous_potential, phase2cUnmatched: data.phase2c_unmatched, usPhase2cAdditionalPotential: data.us_phase2c_additional_potential, usPhase2cProjectedMapped: data.us_phase2c_projected_mapped, usPhase2cProjectedMappingRatio: data.us_phase2c_projected_mapping_ratio, usPhase2cProjectedMappingPercent: data.us_phase2c_projected_mapping_percent, phase2cRuleBreakdown: data.phase2c_rule_breakdown,
   };
 }
 
@@ -756,9 +754,11 @@ Deno.serve(async (request) => {
     if (action === 'test_epg_source') {
       const sourceId = typeof body?.sourceId === 'string' ? body.sourceId : '';
       const source = await loadEpgSource(client, sourceId, true);
-      const result = await runEpgSourceTest(client, source, 'diagnostic');
-      const epg = { ...publicEpgResult(result as unknown as Record<string, unknown>), sourceId: source.id, sourceKind: source.source_kind, safeLabel: source.safe_label };
-      return adminJsonResponse(request, { ok: result.status === 'success', source: toPublicEpgSource(source), epg });
+      if (!source.url_ciphertext || !source.url_iv) throw new Error('invalid_request');
+      const url = await decryptSecret(source.url_ciphertext, source.url_iv);
+      const result = await probeXmltvFeed({ url });
+      const epg = { ...result, sourceId: source.id, sourceKind: source.source_kind, safeLabel: source.safe_label };
+      return adminJsonResponse(request, { ok: result.status === 'reachable', source: toPublicEpgSource(source), epg });
     }
 
     if (action === 'preview_epg_resolution') {

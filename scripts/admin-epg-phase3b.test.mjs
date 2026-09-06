@@ -40,7 +40,7 @@ test('source testing is diagnostic-only while source refresh explicitly enables 
   assert.match(admin, /action === 'start_epg_refresh' \|\| action === 'refresh_epg_source'/);
   assert.match(admin, /await enqueueEpgRefresh\(client, source\)/);
   assert.match(admin, /action === 'continue_epg_refresh'/);
-  assert.match(admin, /runEpgSourceTest\(client, source, 'diagnostic'\)/);
+  assert.match(admin, /const result = await probeXmltvFeed\(\{ url \}\)/);
   assert.match(admin, /testXmltvFeed\(\{ url, liveChannels, mode, sink \}\)/);
   assert.match(xmltv, /mode\?: 'diagnostic' \| 'cache'/);
   assert.match(xmltv, /const retainCache = input\.mode === 'cache'/);
@@ -84,9 +84,10 @@ test('mapping provenance and preview use deterministic winning-source rules', ()
   assert.match(xmltv, /matchConfidenceClass: 'proven' \| 'ambiguous' \| 'unmatched'/);
   for (const kind of ['direct_id', 'case_insensitive_id', 'exact_name', 'normalized_name', 'canonical', 'alias', 'local_affiliate']) assert.match(migration, new RegExp(kind));
   assert.match(admin, /action === 'preview_epg_resolution'/);
-  assert.match(admin, /order\('priority', \{ ascending: true \}\)/);
-  assert.match(admin, /const winner = candidates\[0\]/);
-  assert.match(admin, /duplicateCandidateConflicts/);
+  assert.match(admin, /managed_provider_epg_combined_coverage/);
+  assert.match(admin, /refreshRequired: true/);
+  assert.match(worker, /sort\(\(a, b\) => a\.priority - b\.priority/);
+  assert.match(worker, /candidate_conflicts/);
 });
 
 test('provider catalog snapshot is bounded, provider-scoped, generation-safe, and audit-only', () => {
@@ -151,7 +152,7 @@ test('admin preview is compact and does not expose cached programme payloads or 
   assert.match(ui, /resolvedByMatchType/);
   assert.doesNotMatch(ui, /sourceForm\.url\s*=\s*source\./);
   const preview = admin.slice(admin.indexOf('async function previewEpgResolution'), admin.indexOf('async function loadPublicProviders'));
-  assert.doesNotMatch(preview, /programme|title|url_ciphertext|url_iv|password|username/);
+  assert.doesNotMatch(preview, /managed_provider_epg_source_programmes|url_ciphertext|url_iv|password|username/);
 });
 
 test('source deletion is cascade-safe and public access is revoked', () => {

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 const admin = fs.readFileSync(new URL('../supabase/functions/admin-providers/index.ts', import.meta.url), 'utf8');
+const xmltv = fs.readFileSync(new URL('../supabase/functions/_shared/xmltvEpg.ts', import.meta.url), 'utf8');
 const ui = fs.readFileSync(new URL('../pairing-web/src/AdminProviders.tsx', import.meta.url), 'utf8');
 const migration = fs.readFileSync(new URL('../supabase/migrations/20260905224113_managed_provider_epg_sources.sql', import.meta.url), 'utf8');
 
@@ -30,10 +31,23 @@ test('EPG source actions are admin-only and use safe public projections', () => 
 
 test('source tests and refreshes reuse the existing XMLTV feed path and preserve failed counts', () => {
   assert.match(admin, /return await testXmltvFeed\(\{ url, liveChannels, mode, sink \}\)/);
+  assert.match(admin, /const result = await probeXmltvFeed\(\{ url \}\)/);
   assert.match(admin, /action === 'start_epg_refresh'/);
   assert.match(admin, /checkpoint/);
   assert.match(admin, /active_cache_generation: job\.generation/);
   assert.match(admin, /status: 'complete'/);
+});
+
+test('source Test is a bounded probe and leaves full validation to the worker', () => {
+  assert.match(admin, /probeXmltvFeed/);
+  const testBranch = admin.slice(admin.indexOf("if (action === 'test_epg_source'"), admin.indexOf("if (action === 'preview_epg_resolution'"));
+  assert.doesNotMatch(testBranch, /runEpgSourceTest|testXmltvFeed|fetchLiveChannelsForEpgMapping|decryptXtream/);
+  assert.match(xmltv, /method: 'GET', redirect: 'manual'/);
+  assert.match(xmltv, /response\.body\?\.cancel\(\)/);
+  assert.match(xmltv, /MAX_PROBE_REDIRECTS = 5/);
+  assert.match(xmltv, /await validateDns\(next\.hostname\)/);
+  assert.match(xmltv, /workerValidationRequired: true/);
+  assert.doesNotMatch(testBranch, /xmltvChannels|xmltvPrograms|DecompressionStream|parseXmltv|countXmltvStream/);
 });
 
 test('admin UI exposes source controls without displaying saved URLs', () => {

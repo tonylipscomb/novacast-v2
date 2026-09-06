@@ -11,6 +11,7 @@ process.env.PROVIDER_ENCRYPTION_KEY = '00'.repeat(32);
 const { buildMappingAudit, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
 
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
+const combinedMigration = fs.readFileSync(new URL('../supabase/migrations/20260906165500_managed_provider_epg_combined_coverage.sql', import.meta.url), 'utf8');
 const workflow = fs.readFileSync(new URL('../.github/workflows/epg-refresh.yml', import.meta.url), 'utf8');
 const admin = fs.readFileSync(new URL('../supabase/functions/admin-providers/index.ts', import.meta.url), 'utf8');
 const migration = fs.readFileSync(new URL('../supabase/migrations/20260906043251_managed_provider_epg_refresh_requests.sql', import.meta.url), 'utf8');
@@ -152,6 +153,25 @@ test('workflow runs every six hours with manual filtering and a concurrency guar
   assert.match(workflow, /concurrency:/);
   assert.match(workflow, /SUPABASE_SERVICE_ROLE_KEY/);
   assert.match(workflow, /PROVIDER_ENCRYPTION_KEY/);
+});
+
+test('combined coverage is persisted off Edge from complete paginated cached data', () => {
+  assert.match(combinedMigration, /create table public\.managed_provider_epg_combined_coverage/);
+  assert.match(combinedMigration, /enable row level security/);
+  assert.match(combinedMigration, /revoke all on table public\.managed_provider_epg_combined_coverage from anon, authenticated/);
+  for (const field of ['provider_rows', 'resolved', 'unresolved', 'mapping_percent', 'by_source', 'by_match', 'candidate_conflicts', 'resolved_conflicts', 'unresolved_conflicts', 'source_generations']) assert.match(combinedMigration, new RegExp(field));
+  assert.match(worker, /async function loadAllRows/);
+  assert.match(worker, /limit=' \+ pageSize \+ '&offset=' \+ offset/);
+  assert.match(worker, /async function persistCombinedCoverage/);
+  assert.match(worker, /load_combined_snapshot_rows/);
+  assert.match(worker, /load_combined_mappings/);
+  assert.match(worker, /equal_priority_conflict/);
+  assert.match(worker, /priority/);
+  assert.match(worker, /persist_combined_coverage/);
+  const preview = admin.slice(admin.indexOf('async function previewEpgResolution'), admin.indexOf('async function readPersistedEpgMappingAudit'));
+  assert.doesNotMatch(preview, /loadProvider|decryptXtream|fetchLiveChannelsForEpgMapping|managed_provider_epg_source_mappings/);
+  assert.match(preview, /managed_provider_epg_combined_coverage/);
+  assert.match(preview, /refreshRequired: true/);
 });
 
 test('worker reclaims stale active jobs without deleting the active cache and handles races safely', () => {

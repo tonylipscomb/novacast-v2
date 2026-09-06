@@ -139,6 +139,95 @@ async function db(path, init = {}, operation = 'supabase_request') {
   } catch { throw new DatabaseFailure(operation, response.status, { message: 'invalid_database_response' }); }
 }
 
+async function loadAllRows(path, operation, pageSize = BATCH_SIZE) {
+  const rows = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const separator = path.includes('?') ? '&' : '?';
+    const page = await db(path + separator + 'limit=' + pageSize + '&offset=' + offset, {}, operation);
+    if (!Array.isArray(page) || page.length === 0) return rows;
+    rows.push(...page);
+    if (page.length < pageSize) return rows;
+  }
+}
+
+async function persistCombinedCoverage(providerId) {
+  const snapshotQuery = 'managed_provider_epg_catalog_snapshot?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&is_active=eq.true&snapshot_complete=eq.true&select=snapshot_generation&order=captured_at.desc&limit=1';
+  const snapshotHead = (await db(snapshotQuery, {}, 'load_combined_snapshot'))?.[0];
+  if (!snapshotHead?.snapshot_generation) return null;
+  const snapshotGeneration = requireUuid(snapshotHead.snapshot_generation, 'load_combined_snapshot', 'snapshot_generation');
+  const snapshotPath = 'managed_provider_epg_catalog_snapshot?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&snapshot_generation=eq.' + encodeURIComponent(snapshotGeneration) + '&is_active=eq.true&snapshot_complete=eq.true&select=provider_stream_id,channel_name';
+  const snapshotRows = await loadAllRows(snapshotPath, 'load_combined_snapshot_rows');
+  const sources = await db('managed_provider_epg_sources?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&enabled=eq.true&select=id,safe_label,priority,active_cache_generation', {}, 'load_combined_sources');
+  const candidatesByStream = new Map();
+  for (const source of sources ?? []) {
+    if (!source.active_cache_generation) continue;
+    const mappingPath = 'managed_provider_epg_source_mappings?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&source_id=eq.' + encodeURIComponent(source.id) + '&cache_generation=eq.' + encodeURIComponent(source.active_cache_generation) + '&match_confidence_class=eq.proven&select=provider_stream_id,xmltv_channel_id,match_type';
+    const mappings = await loadAllRows(mappingPath, 'load_combined_mappings');
+    for (const mapping of mappings) {
+      const list = candidatesByStream.get(mapping.provider_stream_id) ?? [];
+      list.push({ sourceId: source.id, sourceLabel: source.safe_label, priority: Number(source.priority), xmltvChannelId: mapping.xmltv_channel_id, matchType: mapping.match_type });
+      candidatesByStream.set(mapping.provider_stream_id, list);
+    }
+  }
+  const bySource = {};
+  const byMatch = {};
+  const samples = { sameTargetOverlap: [], differentTargetConflict: [] };
+  const snapshotByStream = new Map(snapshotRows.map((row) => [row.provider_stream_id, row]));
+  const chosen = [];
+  let resolved = 0;
+  let candidateConflicts = 0;
+  let resolvedConflicts = 0;
+  let unresolvedConflicts = 0;
+  for (const [streamId, candidates] of candidatesByStream) {
+    const provider = snapshotByStream.get(streamId);
+    if (!provider) continue;
+    const ordered = [...candidates].sort((a, b) => a.priority - b.priority || a.sourceId.localeCompare(b.sourceId) || String(a.xmltvChannelId).localeCompare(String(b.xmltvChannelId)));
+    const distinctTargets = new Set(ordered.map((candidate) => candidate.xmltvChannelId));
+    if (ordered.length > 1) candidateConflicts += 1;
+    if (distinctTargets.size === 1 && ordered.length > 1) {
+      if (samples.sameTargetOverlap.length < 10) samples.sameTargetOverlap.push({ providerStreamId: streamId, providerName: String(provider.channel_name ?? '').slice(0, 200), candidates: ordered.map((candidate) => candidate.sourceLabel), xmltvChannelIds: [...distinctTargets] });
+    } else if (distinctTargets.size > 1) {
+      const samePriority = ordered[0].priority === ordered[ordered.length - 1].priority;
+      if (samePriority) {
+        unresolvedConflicts += 1;
+        if (samples.differentTargetConflict.length < 10) samples.differentTargetConflict.push({ providerStreamId: streamId, providerName: String(provider.channel_name ?? '').slice(0, 200), candidates: ordered.map((candidate) => candidate.sourceLabel), xmltvChannelIds: ordered.map((candidate) => candidate.xmltvChannelId), winningSource: null, reason: 'equal_priority_conflict' });
+        continue;
+      }
+      resolvedConflicts += 1;
+      if (samples.differentTargetConflict.length < 10) samples.differentTargetConflict.push({ providerStreamId: streamId, providerName: String(provider.channel_name ?? '').slice(0, 200), candidates: ordered.map((candidate) => candidate.sourceLabel), xmltvChannelIds: ordered.map((candidate) => candidate.xmltvChannelId), winningSource: ordered[0].sourceLabel, reason: 'priority' });
+    }
+    const winner = ordered[0];
+    resolved += 1;
+    bySource[winner.sourceLabel] = (bySource[winner.sourceLabel] ?? 0) + 1;
+    byMatch[winner.matchType] = (byMatch[winner.matchType] ?? 0) + 1;
+    chosen.push({ providerStreamId: streamId, sourceId: winner.sourceId, xmltvChannelId: winner.xmltvChannelId });
+  }
+  const distinctChosenTargets = new Set(chosen.map((row) => row.xmltvChannelId));
+  const summary = {
+    id: crypto.randomUUID(),
+    managed_provider_id: providerId,
+    snapshot_generation: snapshotGeneration,
+    provider_rows: snapshotRows.length,
+    resolved,
+    unresolved: snapshotRows.length - resolved,
+    mapping_percent: snapshotRows.length ? resolved / snapshotRows.length : 0,
+    enabled_source_count: (sources ?? []).filter((source) => source.active_cache_generation).length,
+    by_source: bySource,
+    by_match: byMatch,
+    candidate_conflicts: candidateConflicts,
+    resolved_conflicts: resolvedConflicts,
+    unresolved_conflicts: unresolvedConflicts,
+    duplicate_provider_variants: chosen.length - distinctChosenTargets.size,
+    current_programme_coverage: null,
+    future_programme_coverage: null,
+    source_generations: Object.fromEntries((sources ?? []).filter((source) => source.active_cache_generation).map((source) => [source.safe_label, source.active_cache_generation])),
+    samples,
+  };
+  await db('managed_provider_epg_combined_coverage', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(summary) }, 'persist_combined_coverage');
+  await db('managed_provider_epg_combined_coverage?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&id=neq.' + encodeURIComponent(summary.id), { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_combined_coverage');
+  return summary;
+}
+
 function returnedRow(result, operation) {
   const row = Array.isArray(result) ? result[0] : result;
   if (!row || typeof row !== 'object') throw new WorkerValidationFailure(operation, 'missing_returned_row');
@@ -576,6 +665,13 @@ async function processRequest(request) {
       else if (error instanceof Error && error.message === 'invalid_mapping_audit_totals') process.stderr.write('EPG mapping audit skipped: invalid totals.\n');
       else { logDatabaseFailure(error); process.stderr.write('EPG mapping audit unavailable.\n'); }
     }
+  }
+  try {
+    const combined = await persistCombinedCoverage(providerId);
+    if (combined) process.stdout.write('combinedEpgCoveragePersisted=' + combined.provider_rows + ' resolved=' + combined.resolved + '\n');
+  } catch (error) {
+    logDatabaseFailure(error);
+    process.stderr.write('Combined EPG coverage unavailable.\n');
   }
   return { channels: channels.length, programmes: programmes.length, mapped: mappings.length };
   } catch (error) {

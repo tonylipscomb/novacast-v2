@@ -31,9 +31,38 @@ type FormState = {
   baseUrl: string;
   username: string;
   password: string;
+  epgMode: 'provider' | 'custom' | 'provider_fallback_custom';
+  customEpgUrl: string;
 };
 
-const emptyForm: FormState = { displayName: '', baseUrl: '', username: '', password: '' };
+const emptyForm: FormState = { displayName: '', baseUrl: '', username: '', password: '', epgMode: 'provider', customEpgUrl: '' };
+type EpgResult = Record<string, unknown>;
+type EpgSource = {
+  id: string;
+  sourceKind: 'national' | 'local' | 'sports' | 'fallback';
+  safeLabel: string;
+  priority: number;
+  enabled: boolean;
+  urlConfigured: boolean;
+  lastRefreshAt: string | null;
+  lastRefreshStatus: string | null;
+  channelCount: number | null;
+  programmeCount: number | null;
+  mappedChannels: number | null;
+  mappingPercentage: number | null;
+  currentProgramCoverage: number | null;
+  futureProgramCoverage: number | null;
+  activeCacheGeneration: string | null;
+  diagnosticSummary: EpgResult | null;
+};
+type EpgSourceForm = {
+  sourceKind: EpgSource['sourceKind'];
+  safeLabel: string;
+  priority: string;
+  enabled: boolean;
+  url: string;
+};
+const emptySourceForm: EpgSourceForm = { sourceKind: 'national', safeLabel: '', priority: '100', enabled: true, url: '' };
 
 export function AdminProviders({
   token,
@@ -58,12 +87,20 @@ export function AdminProviders({
   const [testingId, setTestingId] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [liveSummary, setLiveSummary] = useState<Summary | null>(null);
+  const [epgResult, setEpgResult] = useState<EpgResult | null>(null);
+  const [epgTrace, setEpgTrace] = useState<EpgResult | null>(null);
+  const [sourceModal, setSourceModal] = useState(false);
+  const [sourceEditing, setSourceEditing] = useState<EpgSource | null>(null);
+  const [sourceForm, setSourceForm] = useState<EpgSourceForm>(emptySourceForm);
+  const [resolutionPreview, setResolutionPreview] = useState<EpgResult | null>(null);
 
   useEffect(() => {
     if (openCreate) {
       setSelected(null);
       setForm(emptyForm);
       setLiveSummary(null);
+      setEpgResult(null);
+      setEpgTrace(null);
       setModal('add');
       onOpenCreateHandled?.();
     }
@@ -186,6 +223,8 @@ export function AdminProviders({
                 },
               }
             : {}),
+          epgMode: form.epgMode,
+          ...(form.customEpgUrl.trim() ? { customEpgUrl: form.customEpgUrl.trim() } : form.epgMode === 'provider' ? { customEpgUrl: null } : {}),
         },
         'PATCH',
       );
@@ -195,6 +234,141 @@ export function AdminProviders({
     } catch (error) {
       const category = error instanceof Error ? error.message : 'admin_request_failed';
       onMessage(`Provider could not be updated (${category}).`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runEpgAction = async (action: 'test_epg' | 'refresh_epg') => {
+    if (!selected?.id || busy) return;
+    setBusy(true);
+    try {
+      const result = await request({ action, id: String(selected.id) });
+      setEpgResult((result.epg as EpgResult) ?? null);
+      onMessage(action === 'test_epg' ? 'Custom EPG test completed.' : 'Custom EPG refresh completed.');
+      await onRefresh();
+    } catch (error) {
+      const category = error instanceof Error ? error.message : 'admin_request_failed';
+      onMessage(`Custom EPG action failed (${friendlyEpgFailure(category)}).`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runEpgTrace = async () => {
+    if (!selected?.id || busy) return;
+    setBusy(true);
+    try {
+      const result = await request({ action: 'trace_epg', id: String(selected.id) });
+      setEpgTrace((result as EpgResult) ?? null);
+      onMessage('Custom EPG trace completed.');
+    } catch {
+      onMessage('Custom EPG trace failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openSourceEditor = (provider: Row, source?: EpgSource) => {
+    setSelected(provider);
+    setSourceEditing(source ?? null);
+    setSourceForm(source ? { sourceKind: source.sourceKind, safeLabel: source.safeLabel, priority: String(source.priority), enabled: source.enabled, url: '' } : emptySourceForm);
+    setSourceModal(true);
+  };
+
+  const saveSource = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!selected?.id || busy) return;
+    setBusy(true);
+    try {
+      const body: Record<string, unknown> = sourceEditing
+        ? { action: 'update_epg_source', sourceId: sourceEditing.id, sourceKind: sourceForm.sourceKind, safeLabel: sourceForm.safeLabel, priority: Number(sourceForm.priority), enabled: sourceForm.enabled }
+        : { action: 'create_epg_source', managedProviderId: String(selected.id), sourceKind: sourceForm.sourceKind, safeLabel: sourceForm.safeLabel, priority: Number(sourceForm.priority), enabled: sourceForm.enabled, url: sourceForm.url.trim() };
+      if (sourceEditing && sourceForm.url.trim()) body.url = sourceForm.url.trim();
+      await request(body);
+      setSourceModal(false);
+      onMessage(sourceEditing ? 'EPG source updated.' : 'EPG source added.');
+      await onRefresh();
+    } catch (error) {
+      const category = error instanceof Error ? error.message : 'admin_request_failed';
+      onMessage(`EPG source could not be saved (${friendlyEpgFailure(category)}).`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runSourceTest = async (source: EpgSource) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await request({ action: 'test_epg_source', sourceId: source.id });
+      setEpgResult((result.epg as EpgResult) ?? null);
+      onMessage('EPG source test completed.');
+      await onRefresh();
+    } catch (error) {
+      const category = error instanceof Error ? error.message : 'admin_request_failed';
+      onMessage(`EPG source action failed (${friendlyEpgFailure(category)}).`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refreshSource = async (source: EpgSource) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const started = await request({ action: 'start_epg_refresh', sourceId: source.id });
+      const refresh = (started.refresh as EpgResult) ?? null;
+      if (!refresh) throw new Error('admin_refresh_job_failed');
+      setEpgResult(refresh);
+      onMessage('EPG source refresh queued for the ingestion worker.');
+      await onRefresh();
+    } catch (error) {
+      const category = error instanceof Error ? error.message : 'admin_request_failed';
+      onMessage(`EPG source refresh failed (${friendlyEpgFailure(category)}).`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleSource = async (source: EpgSource) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await request({ action: 'update_epg_source', sourceId: source.id, enabled: !source.enabled });
+      onMessage(source.enabled ? 'EPG source disabled.' : 'EPG source enabled.');
+      await onRefresh();
+    } catch (error) {
+      onMessage(`EPG source could not be updated (${error instanceof Error ? error.message : 'admin_request_failed'}).`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteSource = async (source: EpgSource) => {
+    if (busy || !window.confirm(`Delete EPG source "${source.safeLabel}"?`)) return;
+    setBusy(true);
+    try {
+      await request({ action: 'delete_epg_source', sourceId: source.id });
+      onMessage('EPG source deleted.');
+      await onRefresh();
+    } catch (error) {
+      onMessage(`EPG source could not be deleted (${error instanceof Error ? error.message : 'admin_request_failed'}).`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const previewResolution = async (provider: Row) => {
+    if (!provider.id || busy) return;
+    setSelected(provider);
+    setBusy(true);
+    try {
+      const result = await request({ action: 'preview_epg_resolution', managedProviderId: String(provider.id) });
+      setResolutionPreview((result.preview as EpgResult) ?? null);
+      onMessage('Combined EPG coverage preview completed.');
+    } catch (error) {
+      onMessage(`Combined EPG preview failed (${error instanceof Error ? error.message : 'admin_request_failed'}).`);
     } finally {
       setBusy(false);
     }
@@ -295,6 +469,8 @@ export function AdminProviders({
                 </dl>
                 <p>Last tested: {formatTimestamp(provider.last_tested_at)}</p>
                 <p>Last successful: {formatTimestamp(provider.last_successful_test_at)}</p>
+                <p>Custom EPG: {provider.custom_url_configured ? 'Configured' : 'Not Configured'}</p>
+                <EpgSourcesPanel provider={provider} result={selected?.id === id ? epgResult : null} preview={selected?.id === id ? resolutionPreview : null} busy={busy} onAdd={() => openSourceEditor(provider)} onEdit={(source) => openSourceEditor(provider, source)} onToggle={(source) => void toggleSource(source)} onTest={(source) => void runSourceTest(source)} onRefresh={(source) => void refreshSource(source)} onDelete={(source) => void deleteSource(source)} onPreview={() => void previewResolution(provider)} />
                 {provider.goldAccount ? <p className="providerNote">Gold: {String((provider.goldAccount as Row).gold_country ?? '—') === 'ALL' ? 'ALL — VPN / All Countries' : String((provider.goldAccount as Row).gold_country ?? '—')} · expires {String((provider.goldAccount as Row).gold_expiration ?? 'unknown')}</p> : null}
                 {summary?.overallLabel ? <p className="providerNote">{String(summary.overallLabel)}</p> : null}
                 {summary?.cloudPlaybackProbeRestricted ? <p className="providerNote">Cloud playback probe restricted. Device playback test recommended.</p> : null}
@@ -315,8 +491,10 @@ export function AdminProviders({
                     disabled={busy}
                     onClick={() => {
                       setSelected(provider);
-                      setForm({ displayName: String(provider.display_name ?? ''), baseUrl: '', username: '', password: '' });
+                      setForm({ displayName: String(provider.display_name ?? ''), baseUrl: '', username: '', password: '', epgMode: provider.epg_mode === 'custom' || provider.epg_mode === 'provider_fallback_custom' ? provider.epg_mode : 'provider', customEpgUrl: '' });
                       setLiveSummary(null);
+                      setEpgResult(null);
+                      setEpgTrace(null);
                       setModal('edit');
                     }}
                   >
@@ -383,6 +561,21 @@ export function AdminProviders({
                 Password
                 <input type="password" value={form.password} onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))} autoComplete="new-password" required={modal === 'add'} placeholder={modal === 'edit' ? 'Leave blank to keep the saved password' : ''} />
               </label>
+              {modal === 'edit' ? (
+                <div className="providerDiagnostics compact">
+                  <strong>EPG source</strong>
+                  <label><select value={form.epgMode} onChange={(event) => setForm((current) => ({ ...current, epgMode: event.target.value as FormState['epgMode'] }))}><option value="provider">Provider Default</option><option value="custom">Custom XMLTV</option><option value="provider_fallback_custom">Provider + Custom Fallback</option></select></label>
+                  <label>Custom XMLTV URL<input value={form.customEpgUrl} onChange={(event) => setForm((current) => ({ ...current, customEpgUrl: event.target.value }))} placeholder={selected?.custom_url_configured ? 'Custom XMLTV URL configured' : 'https://example.com/guide.xml'} autoComplete="off" /></label>
+                  <small>Custom EPG: {selected?.custom_url_configured ? 'Configured' : 'Not Configured'}</small>
+                  <div className="modalActions">
+                    <button type="button" disabled={busy || !selected?.custom_url_configured} onClick={() => void runEpgAction('test_epg')}>Test Feed</button>
+                    <button type="button" disabled={busy || !selected?.custom_url_configured} onClick={() => void runEpgAction('refresh_epg')}>Refresh</button>
+                    <button type="button" disabled={busy || !selected?.custom_url_configured} onClick={() => void runEpgTrace()}>Trace Feed</button>
+                  </div>
+                  {epgResult ? <EpgResultPanel result={epgResult} /> : null}
+                  {epgTrace ? <EpgTracePanel trace={epgTrace} /> : null}
+                </div>
+              ) : null}
               {testingId === 'new' ? <ProgressPanel elapsed={elapsed} /> : null}
               {liveSummary ? <DiagnosticsBody summary={liveSummary} compact /> : null}
               <div className="modalActions">
@@ -403,7 +596,7 @@ export function AdminProviders({
                     </button>
                   </>
                 ) : (
-                  <button className="submit" disabled={busy}>{busy ? 'Saving' : 'Save changes'}</button>
+                  <button className="submit" disabled={busy}>{busy ? 'Saving' : 'Save EPG & changes'}</button>
                 )}
               </div>
             </form>
@@ -427,8 +620,31 @@ export function AdminProviders({
           </section>
         </div>
       ) : null}
+      {sourceModal && selected ? (
+        <div className="modalBackdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setSourceModal(false); }}>
+          <section className="inviteModal providerModal" role="dialog" aria-modal="true">
+            <button className="modalClose" aria-label="Close EPG source editor" disabled={busy} onClick={() => setSourceModal(false)} />
+            <span className="eyebrow">EPG SOURCES</span>
+            <h2>{sourceEditing ? 'Edit EPG source' : 'Add EPG source'}</h2>
+            <p>The URL is encrypted server-side and is never shown after saving.</p>
+            <form onSubmit={(event) => void saveSource(event)}>
+              <label>Source kind<select value={sourceForm.sourceKind} onChange={(event) => setSourceForm((current) => ({ ...current, sourceKind: event.target.value as EpgSource['sourceKind'] }))}><option value="national">National</option><option value="local">Local</option><option value="sports">Sports</option><option value="fallback">Fallback</option></select></label>
+              <label>Safe label<input value={sourceForm.safeLabel} onChange={(event) => setSourceForm((current) => ({ ...current, safeLabel: event.target.value }))} maxLength={120} required placeholder="US national" /></label>
+              <label>Priority<input type="number" min="0" max="1000000" value={sourceForm.priority} onChange={(event) => setSourceForm((current) => ({ ...current, priority: event.target.value }))} required /></label>
+              <label>Custom XMLTV URL<input value={sourceForm.url} onChange={(event) => setSourceForm((current) => ({ ...current, url: event.target.value }))} placeholder={sourceEditing ? 'Leave blank to keep the saved URL' : 'https://example.com/guide.xml.gz'} autoComplete="off" required={!sourceEditing} /></label>
+              <label><input type="checkbox" checked={sourceForm.enabled} onChange={(event) => setSourceForm((current) => ({ ...current, enabled: event.target.checked }))} /> Enabled</label>
+              <div className="modalActions"><button type="button" className="ghost" disabled={busy} onClick={() => setSourceModal(false)}>Cancel</button><button type="submit" className="submit" disabled={busy || !sourceForm.safeLabel.trim() || (!sourceEditing && !sourceForm.url.trim())}>{busy ? 'Saving' : 'Save source'}</button></div>
+            </form>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function EpgSourcesPanel({ provider, result, preview, busy, onAdd, onEdit, onToggle, onTest, onRefresh, onDelete, onPreview }: { provider: Row; result: EpgResult | null; preview: EpgResult | null; busy: boolean; onAdd: () => void; onEdit: (source: EpgSource) => void; onToggle: (source: EpgSource) => void; onTest: (source: EpgSource) => void; onRefresh: (source: EpgSource) => void; onDelete: (source: EpgSource) => void; onPreview: () => void }) {
+  const sources = Array.isArray(provider.epgSources) ? provider.epgSources as EpgSource[] : [];
+  return <div className="providerDiagnostics compact"><div className="modalActions"><strong>EPG Sources</strong><button type="button" disabled={busy} onClick={onAdd}>Add source</button><button type="button" disabled={busy || !sources.length} onClick={onPreview}>Preview Combined Coverage</button></div>{sources.length ? sources.map((source) => <div key={source.id} className="providerNote"><strong>{source.safeLabel}</strong> · {source.sourceKind} · priority {source.priority} · {source.enabled ? 'Enabled' : 'Disabled'}<br /><small>Channels: {source.channelCount ?? '—'} · Programs: {source.programmeCount ?? '—'} · Mapped: {source.mappedChannels ?? '—'} · Mapping: {source.mappingPercentage == null ? '—' : `${(source.mappingPercentage * 100).toFixed(1)}%`} · Current: {source.currentProgramCoverage == null ? '—' : `${(source.currentProgramCoverage * 100).toFixed(1)}%`} · Future: {source.futureProgramCoverage == null ? '—' : `${(source.futureProgramCoverage * 100).toFixed(1)}%`}<br />Last refresh: {formatTimestamp(source.lastRefreshAt)} · Status: {source.lastRefreshStatus ?? 'Never'}</small><div className="modalActions"><button type="button" disabled={busy} onClick={() => onEdit(source)}>Edit</button><button type="button" disabled={busy} onClick={() => onToggle(source)}>{source.enabled ? 'Disable' : 'Enable'}</button><button type="button" disabled={busy} onClick={() => onTest(source)}>Test</button><button type="button" disabled={busy} onClick={() => onRefresh(source)}>Refresh</button><button type="button" disabled={busy} onClick={() => onDelete(source)}>Delete</button></div></div>) : <small>No additional EPG sources configured.</small>}{result ? <EpgResultPanel result={result} /> : null}{preview ? <div className="providerDiagnostics compact"><strong>Combined coverage preview</strong><p>Resolved: {value(preview, 'resolvedChannels')} · Unresolved: {value(preview, 'unresolvedChannels')} · Considered: {value(preview, 'totalProviderChannelsConsidered')}</p><p>By source: {JSON.stringify(preview.resolvedBySource ?? {})}</p><p>By match: {JSON.stringify(preview.resolvedByMatchType ?? {})}</p><p>Candidate conflicts: {value(preview, 'duplicateCandidateConflicts')}</p></div> : null}</div>;
 }
 
 function GoldDiagnostic({ account }: { account: Row }) {
@@ -437,6 +653,61 @@ function GoldDiagnostic({ account }: { account: Row }) {
 
 function canActivateFromSummary(summary: Summary | null) {
   return summary?.overall === 'healthy' || summary?.overall === 'degraded';
+}
+
+function friendlyEpgFailure(value: string) {
+  const labels: Record<string, string> = { unsafe_url: 'unsafe URL', dns_failure: 'DNS failure', timeout: 'timeout', http_403: 'HTTP 403', http_404: 'HTTP 404', http_5xx: 'provider server error', compressed_response_too_large: 'compressed feed exceeds safe size limit', decompressed_response_too_large: 'decompressed XMLTV exceeds safe size limit', response_too_large: 'feed exceeds safe size limit', WORKER_RESOURCE_LIMIT: 'EPG processing exceeded server resource limits', worker_resource_limit: 'EPG processing exceeded server resource limits', unsupported_compression: 'unsupported compression', invalid_xmltv: 'invalid XMLTV', empty_feed: 'empty feed', parse_failure: 'parse failure' };
+  return labels[value] ?? 'request failed';
+}
+
+function EpgResultPanelLegacy({ result }: { result: EpgResult }) {
+  const value = (key: string) => result[key] == null ? '—' : String(result[key]);
+  return <div className="providerDiagnostics compact"><strong>EPG Test Result</strong><p>Status: {result.status === 'success' ? 'Success' : `Failed (${friendlyEpgFailure(String(result.status))})`}</p><p>HTTP: {value('httpStatus')} · Content type: {value('contentType')} · Download: {value('downloadBytes')} bytes</p><p>Channels: {value('xmltvChannels')} · Programs: {value('xmltvPrograms')} · Invalid timestamps: {value('invalidTimestamps')}</p><p>Mapped: {value('mappedChannels')} · Unmatched: {value('unmatchedChannels')} · Current: {value('currentProgramCoverage')} · Future: {value('futureProgramCoverage')}</p><p>Last refresh: {value('lastRefreshAt')}</p></div>;
+}
+
+function EpgResultPanelWithSize({ result }: { result: EpgResult }) {
+  return <><EpgResultPanelLegacy result={result} /><div className="providerDiagnostics compact"><p>Compressed: {megabytes(result, 'compressedBytes')} · Expanded: {megabytes(result, 'decompressedBytes')}</p></div></>;
+}
+
+function EpgResultPanel({ result }: { result: EpgResult }) {
+  if (typeof result.jobId === 'string') return <div className="providerDiagnostics compact"><strong>EPG Refresh</strong><p>Status: {String(result.status ?? 'processing')} Â· Stage: {String(result.stage ?? '—')}</p><p>Programs: {String(result.processedProgrammes ?? 0)} / {String(result.totalProgrammes ?? '—')} Â· Progress: {result.progressPercent == null ? '—' : `${String(result.progressPercent)}%`}</p></div>;
+  return <><EpgResultPanelWithSize result={result} /><EpgMappingPanel result={result} /></>;
+}
+
+function EpgMappingPanelLegacy({ result }: { result: EpgResult }) {
+  const value = (key: string) => result[key] == null ? 'N/A' : String(result[key]);
+  const samples = (key: string) => Array.isArray(result[key]) ? result[key].slice(0, 10).map((row: unknown, index: number) => <li key={index}>{typeof row === 'object' && row !== null ? JSON.stringify(row) : String(row)}</li>) : null;
+  return <div className="providerDiagnostics compact"><p>Mapped: {value('mappedChannels')} Â· Unmatched: {value('unmatchedChannels')} Â· Ambiguous: {value('ambiguousChannels')}</p><p>Direct ID: {value('directIdMatches')} Â· Exact name: {value('exactNameMatches')} Â· Normalized name: {value('normalizedNameMatches')}</p><p>Current coverage: {value('currentProgramCoverage')} Â· Future coverage: {value('futureProgramCoverage')}</p>{samples('unmatchedSamples') ? <><strong>Unmatched samples</strong><ul>{samples('unmatchedSamples')}</ul></> : null}{samples('ambiguousSamples') ? <><strong>Ambiguous samples</strong><ul>{samples('ambiguousSamples')}</ul></> : null}</div>;
+}
+
+function EpgMappingPanelBase({ result }: { result: EpgResult }) {
+  return <><EpgMappingPanelLegacy result={result} /><div className="providerDiagnostics compact"><p>US scoped: {value(result, 'usRelevantProviderChannels')} relevant Â· {value(result, 'usMappedChannels')} mapped Â· {value(result, 'usUnmatchedChannels')} unmatched Â· {value(result, 'usAmbiguousChannels')} ambiguous</p><p>US mapping: {percentage(result, 'usMappingPercentage')} Â· Canonical: {value(result, 'canonicalNameMatches')} Â· Aliases: {value(result, 'aliasMatches')}</p><p>US current coverage: {percentage(result, 'usCurrentProgramCoverage')} Â· Future coverage: {percentage(result, 'usFutureProgramCoverage')}</p>{sampleList(result, 'matchedSamples', 'Matched samples')}{sampleList(result, 'usUnmatchedSamples', 'US unmatched samples')}</div></>;
+}
+
+function EpgMappingPanel({ result }: { result: EpgResult }) {
+  return <><EpgMappingPanelBase result={result} /><div className="providerDiagnostics compact"><p>Provider scanned: {value(result, 'providerChannelsScanned')} Â· Non-US: {value(result, 'nonUsProviderChannels')}</p><p>Explicit US prefix: {value(result, 'classifiedByUsPrefix')} Â· Explicit non-US prefix: {value(result, 'excludedByNonUsPrefix')} Â· US category: {value(result, 'classifiedByUsCategory')} Â· Non-US category: {value(result, 'excludedByNonUsCategory')} Â· US network heuristic: {value(result, 'classifiedByUsNetworkHeuristic')}</p></div></>;
+}
+
+function value(result: EpgResult, key: string) {
+  return result[key] == null ? 'N/A' : String(result[key]);
+}
+
+function percentage(result: EpgResult, key: string) {
+  return result[key] == null ? 'N/A' : `${(Number(result[key]) * 100).toFixed(1)}%`;
+}
+
+function sampleList(result: EpgResult, key: string, label: string) {
+  if (!Array.isArray(result[key]) || result[key].length === 0) return null;
+  return <><strong>{label}</strong><ul>{result[key].slice(0, 10).map((row: unknown, index: number) => <li key={index}>{typeof row === 'object' && row !== null ? JSON.stringify(row) : String(row)}</li>)}</ul></>;
+}
+
+function megabytes(result: EpgResult, key: string) {
+  return result[key] == null ? 'N/A' : `${(Number(result[key]) / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function EpgTracePanel({ trace }: { trace: EpgResult }) {
+  const keys = ['errorCategory', 'requestedHost', 'requestedPath', 'method', 'redirectCount', 'finalHost', 'finalPath', 'status', 'contentType', 'contentLengthHeader', 'serverHeaderPresent', 'locationHeaderPresent'];
+  return <div className="providerDiagnostics compact"><strong>EPG Trace</strong>{keys.filter((key) => trace[key] !== undefined).map((key) => <p key={key}>{key}: {trace[key] == null ? '—' : String(trace[key])}</p>)}</div>;
 }
 
 function MiniMetric({ label, value, detail, tone }: { label: string; value: number; detail: string; tone: string }) {

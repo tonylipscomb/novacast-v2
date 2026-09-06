@@ -1,0 +1,239 @@
+import { createGunzip } from 'node:zlib';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
+
+const SUPABASE_URL = required('SUPABASE_URL').replace(/\/$/, '');
+const SERVICE_ROLE_KEY = required('SUPABASE_SERVICE_ROLE_KEY');
+const NOW = Date.now();
+const BATCH_SIZE = 1_000;
+const PAST_RETENTION_MS = 6 * 60 * 60 * 1000;
+const FUTURE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 60_000;
+const headers = { apikey: SERVICE_ROLE_KEY, authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'content-type': 'application/json' };
+
+function required(name) {
+  const value = process.env[name];
+  if (!value) throw new Error(`missing_${name.toLowerCase()}`);
+  return value;
+}
+
+function decodeKey(value) {
+  if (/^[0-9a-f]{64}$/i.test(value)) return Buffer.from(value, 'hex');
+  return Buffer.from(value, 'base64');
+}
+
+async function decryptSecret(ciphertext, iv) {
+  const key = await crypto.subtle.importKey('raw', decodeKey(required('PROVIDER_ENCRYPTION_KEY')), 'AES-GCM', false, ['decrypt']);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: Buffer.from(iv, 'base64') }, key, Buffer.from(ciphertext, 'base64'));
+  return Buffer.from(plaintext).toString('utf8');
+}
+
+async function db(path, init = {}) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { ...init, headers: { ...headers, ...(init.headers ?? {}) } });
+  if (!response.ok) throw new Error('database_failure');
+  if (response.status === 204) return null;
+  return response.json();
+}
+
+async function patch(table, id, values, extra = '') {
+  await db(`${table}?id=eq.${encodeURIComponent(id)}${extra}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(values) });
+}
+
+async function insertBatches(table, rows, onConflict = '') {
+  for (let offset = 0; offset < rows.length; offset += BATCH_SIZE) {
+    const suffix = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
+    await db(`${table}${suffix}`, { method: 'POST', headers: { Prefer: onConflict ? 'resolution=ignore-duplicates,return=minimal' : 'return=minimal' }, body: JSON.stringify(rows.slice(offset, offset + BATCH_SIZE)) });
+  }
+}
+
+function canonicalize(value) {
+  return String(value ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/&/g, ' AND ').replace(/[^A-Z0-9]+/g, ' ').replace(/\b(?:4K|UHD|FHD|HD)\b/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function parseTimestamp(value) {
+  const match = String(value ?? '').trim().match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\s*([+-])(\d{2})(\d{2}))?/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second, sign, offsetHour, offsetMinute] = match;
+  const base = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  if (!sign) return base;
+  const offset = (Number(offsetHour) * 60 + Number(offsetMinute)) * 60_000 * (sign === '+' ? 1 : -1);
+  return base - offset;
+}
+
+function attr(tag, name) {
+  return tag.match(new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, 'i'))?.[1] ?? null;
+}
+
+class XmltvParser {
+  constructor(onChannel, onProgramme) {
+    this.carry = '';
+    this.channels = new Map();
+    this.programmes = [];
+    this.activeChannel = null;
+    this.activeProgramme = null;
+    this.field = null;
+    this.onChannel = onChannel;
+    this.onProgramme = onProgramme;
+    this.invalidTimestamps = 0;
+  }
+  text(chunk) {
+    this.carry += chunk;
+    let cursor = 0;
+    while (true) {
+      const open = this.carry.indexOf('<', cursor);
+      if (open < 0) break;
+      const close = this.carry.indexOf('>', open + 1);
+      if (close < 0) { this.carry = this.carry.slice(open); return; }
+      this.handleText(this.carry.slice(cursor, open));
+      this.handleTag(this.carry.slice(open, close + 1));
+      cursor = close + 1;
+    }
+    this.carry = this.carry.slice(cursor);
+    if (this.carry.length > 65_536) this.carry = this.carry.slice(-65_536);
+  }
+  handleText(value) {
+    if (this.field && this.activeProgramme) this.activeProgramme[this.field] += value;
+    if (this.activeChannel?.field) this.activeChannel.text += value;
+  }
+  handleTag(tag) {
+    const opening = tag.match(/^<(channel|programme)\b/i);
+    if (opening?.[1].toLowerCase() === 'channel') {
+      const id = String(attr(tag, 'id') ?? '').trim();
+      if (id) this.activeChannel = { id, text: '', names: [] };
+      if (/\/\s*>$/.test(tag)) this.finishChannel();
+      return;
+    }
+    if (/^<display-name(?:\s|>)/i.test(tag)) { if (this.activeChannel) this.activeChannel.field = 'display'; return; }
+    if (/^<\/display-name\s*>/i.test(tag)) { if (this.activeChannel?.text.trim()) this.activeChannel.names.push(this.activeChannel.text.trim()); if (this.activeChannel) { this.activeChannel.text = ''; this.activeChannel.field = null; } return; }
+    if (/^<\/channel\s*>/i.test(tag)) { this.finishChannel(); return; }
+    if (opening?.[1].toLowerCase() === 'programme') {
+      const start = parseTimestamp(attr(tag, 'start'));
+      const stop = parseTimestamp(attr(tag, 'stop') ?? attr(tag, 'end'));
+      if (start == null || stop == null || stop <= start) this.invalidTimestamps += 1;
+      this.activeProgramme = { channelId: String(attr(tag, 'channel') ?? '').trim(), start, stop, title: '', subtitle: '', description: '', category: '' };
+      if (/\/\s*>$/.test(tag)) this.finishProgramme();
+      return;
+    }
+    for (const field of ['title', 'sub-title', 'desc', 'category']) {
+      if (new RegExp(`^<${field}(?:\\s|>)`, 'i').test(tag)) { this.field = field === 'sub-title' ? 'subtitle' : field === 'desc' ? 'description' : field; return; }
+      if (new RegExp(`^</${field}\\s*>`, 'i').test(tag)) { this.field = null; return; }
+    }
+    if (/^<\/programme\s*>/i.test(tag)) this.finishProgramme();
+  }
+  finishChannel() {
+    if (this.activeChannel) { this.channels.set(this.activeChannel.id, { id: this.activeChannel.id, displayNames: this.activeChannel.names.slice(0, 6) }); this.onChannel(this.channels.get(this.activeChannel.id)); }
+    this.activeChannel = null;
+  }
+  finishProgramme() {
+    const programme = this.activeProgramme;
+    if (programme?.start != null && programme.stop != null && programme.stop > programme.start) this.onProgramme({ ...programme, title: programme.title.trim() || 'Untitled', subtitle: programme.subtitle.trim() || null, description: programme.description.trim() || null, category: programme.category.trim() || null, startAt: new Date(programme.start).toISOString(), stopAt: new Date(programme.stop).toISOString() });
+    this.activeProgramme = null;
+    this.field = null;
+  }
+  finish() { this.finishChannel(); if (this.activeProgramme) this.finishProgramme(); }
+}
+
+function isPrivateAddress(address) {
+  if (isIP(address) === 4) { const [a, b] = address.split('.').map(Number); return a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168); }
+  return address === '::1' || address.startsWith('fc') || address.startsWith('fd') || address.startsWith('fe80:');
+}
+
+async function assertSafeUrl(raw) {
+  const url = new URL(raw);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('unsafe_url');
+  const addresses = await lookup(url.hostname, { all: true });
+  if (addresses.some(({ address }) => isPrivateAddress(address))) throw new Error('unsafe_url');
+  return url;
+}
+
+async function fetchLiveChannels(provider) {
+  const credentials = JSON.parse(await decryptSecret(provider.credentials_ciphertext, provider.credentials_iv));
+  const base = new URL(credentials.baseUrl);
+  base.pathname = `${base.pathname.replace(/\/$/, '')}/player_api.php`;
+  base.searchParams.set('username', credentials.username);
+  base.searchParams.set('password', credentials.password);
+  base.searchParams.set('action', 'get_live_streams');
+  const response = await fetch(base, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!response.ok) throw new Error('provider_unreachable');
+  const rows = await response.json();
+  return { credentials, items: Array.isArray(rows) ? rows.map((row) => ({ streamId: String(row.stream_id ?? ''), name: String(row.name ?? ''), epgChannelId: row.epg_channel_id ? String(row.epg_channel_id) : null })) : [] };
+}
+
+async function processRequest(request) {
+  const [source] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(request.source_id)}&select=id,managed_provider_id,url_ciphertext,url_iv,priority,active_cache_generation`);
+  const [provider] = await db(`managed_providers?id=eq.${encodeURIComponent(request.managed_provider_id)}&select=id,credentials_ciphertext,credentials_iv`);
+  if (!source || !provider) throw new Error('source_not_found');
+  const generation = crypto.randomUUID();
+  const refreshedAt = new Date().toISOString();
+  let promoted = false;
+  try {
+  const channels = [];
+  const programmes = [];
+  const mappings = [];
+  const live = await fetchLiveChannels(provider);
+  const xmltvUrl = await decryptSecret(source.url_ciphertext, source.url_iv);
+  const url = await assertSafeUrl(xmltvUrl);
+  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  if (!response.ok || !response.body) throw new Error(response.status === 404 ? 'http_404' : response.status >= 500 ? 'http_5xx' : 'feed_unavailable');
+  const parser = new XmltvParser((channel) => channels.push(channel), (programme) => {
+    if (programme.stopAt >= new Date(NOW - PAST_RETENTION_MS).toISOString() && programme.startAt <= new Date(NOW + FUTURE_RETENTION_MS).toISOString()) programmes.push(programme);
+  });
+  const input = Readable.fromWeb(response.body);
+  const stream = url.pathname.toLowerCase().endsWith('.gz') ? input.pipe(createGunzip()) : input;
+  stream.setEncoding('utf8');
+  stream.on('data', (chunk) => parser.text(chunk));
+  await new Promise((resolve, reject) => { stream.once('end', resolve); stream.once('error', reject); });
+  parser.finish();
+  if (!channels.length || !programmes.length) throw new Error('empty_feed');
+  await insertBatches('managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalize(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1), refreshed_at: refreshedAt })));
+  const byId = new Map(channels.map((channel) => [channel.id, channel]));
+  const byName = new Map(channels.flatMap((channel) => { const key = canonicalize(channel.displayNames[0] || channel.id); return key ? [[key, channel]] : []; }));
+  for (const channel of live.items) {
+    const direct = channel.epgChannelId && byId.get(channel.epgChannelId);
+    const named = direct ?? byName.get(canonicalize(channel.name));
+    if (named) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: channel.streamId, xmltv_channel_id: named.id, match_type: direct ? 'direct_id' : 'normalized_name', match_confidence_class: 'proven', provider_canonical: canonicalize(channel.name), xmltv_canonical: canonicalize(named.displayNames[0] || named.id), mapped_at: refreshedAt });
+  }
+  await insertBatches('managed_provider_epg_source_programmes', programmes.map((programme) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: programme.channelId, start_at: programme.startAt, stop_at: programme.stopAt, title: programme.title, subtitle: programme.subtitle, description: programme.description, category: programme.category, refreshed_at: refreshedAt })), 'source_id,cache_generation,xmltv_channel_id,start_at,stop_at,title');
+  await insertBatches('managed_provider_epg_source_mappings', mappings);
+  await patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: channels.length, programme_count: programmes.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, invalidTimestamps: parser.invalidTimestamps }, updated_at: refreshedAt });
+  promoted = true;
+  if (source.active_cache_generation) {
+    for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }).catch(() => {});
+  }
+  return { channels: channels.length, programmes: programmes.length, mapped: mappings.length };
+  } catch (error) {
+    if (!promoted) for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }).catch(() => {});
+    throw error;
+  }
+}
+
+async function main() {
+  const providerId = process.argv[2] ?? '';
+  const sourceId = process.argv[3] ?? '';
+  if (!providerId && !sourceId) {
+    const sources = await db('managed_provider_epg_sources?enabled=eq.true&select=id,managed_provider_id');
+    for (const source of sources ?? []) await db('managed_provider_epg_refresh_requests', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' }, body: JSON.stringify({ managed_provider_id: source.managed_provider_id, source_id: source.id, status: 'pending', requested_at: new Date().toISOString() }) }).catch(() => {});
+  }
+  const query = ['status=eq.pending', 'order=requested_at.asc', 'limit=20', providerId && `managed_provider_id=eq.${encodeURIComponent(providerId)}`, sourceId && `source_id=eq.${encodeURIComponent(sourceId)}`].filter(Boolean).join('&');
+  const requests = await db(`managed_provider_epg_refresh_requests?select=id,managed_provider_id,source_id,refresh_job_id,status&${query}`);
+  for (const request of requests ?? []) {
+    const claimed = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(request.id)}&status=eq.pending`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }) });
+    if (!claimed?.length) continue;
+    try {
+      await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'processing', stage: 'worker_ingest', updated_at: new Date().toISOString() });
+      const result = await processRequest(request);
+      await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'complete', stage: null, progress_percent: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+      await patch('managed_provider_epg_refresh_requests', request.id, { status: 'complete', completed_at: new Date().toISOString() });
+      process.stdout.write(`EPG refresh completed: channels=${result.channels} programmes=${result.programmes} mapped=${result.mapped}\n`);
+    } catch (error) {
+      const code = error instanceof Error && /^[a-z0-9_]+$/.test(error.message) ? error.message : 'worker_failure';
+      if (request.refresh_job_id) await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }).catch(() => {});
+      await patch('managed_provider_epg_refresh_requests', request.id, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() });
+      process.stderr.write(`EPG refresh failed: ${code}\n`);
+    }
+  }
+}
+
+main().catch((error) => { process.stderr.write(`EPG worker failed: ${error instanceof Error ? error.message : 'worker_failure'}\n`); process.exitCode = 1; });

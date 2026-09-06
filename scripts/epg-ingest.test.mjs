@@ -52,13 +52,19 @@ test('worker reclaims stale active jobs without deleting the active cache and ha
   assert.match(worker, /STALE_REFRESH_JOB_MS = 30 \* 60 \* 1000/);
   assert.match(worker, /ACTIVE_REFRESH_JOB_STATUSES = \['queued', 'fetching', 'processing', 'finalizing'\]/);
   assert.match(worker, /loadActiveRefreshJob/);
+  assert.match(worker, /loadRunningRefreshJobOwner/);
+  assert.match(worker, /refresh_job_id=eq\.\$\{encodeURIComponent\(safeJobId\)\}&status=eq\.running/);
+  assert.match(worker, /failure_code: ownerRequestId \? 'stale_refresh_job' : 'orphaned_refresh_job'/);
+  assert.match(worker, /reclaim_orphaned_refresh_job/);
   assert.match(worker, /failure_code: 'stale_refresh_job'/);
   assert.match(worker, /reclaim_stale_refresh_job/);
   assert.match(worker, /cleanupStagedGeneration/);
   assert.match(worker, /generation === activeCacheGeneration/);
   assert.match(worker, /error\.code !== '23505'/);
   assert.match(worker, /active_job_exists/);
-  assert.match(worker, /skip_active_refresh_request/);
+  assert.match(worker, /defer_active_refresh_request/);
+  assert.match(worker, /status: 'pending', started_at: null/);
+  assert.doesNotMatch(worker, /status: 'complete', failure_code: 'active_job_exists'/);
   assert.match(jobsMigration, /status in \('queued', 'fetching', 'processing', 'finalizing'\)/);
 });
 

@@ -436,7 +436,7 @@ function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings,
     }
     if (selected) {
       projections[selected.key] += 1;
-      additional.set(item.streamId, { item, target: selected.rows[0], kind: selected.kind, qualityResolved });
+      additional.set(item.streamId, { item, target: selected.rows[0], kind: selected.kind, key: selected.key, qualityResolved });
       ruleBreakdown[matchRule(item.name, selected.rows[0], selected.kind, qualityResolved)] += 1;
     } else {
       if (normalized.length > 1 || canonical.length > 1) projections.ambiguousPotential += 1;
@@ -469,6 +469,7 @@ function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings,
   const usRows = items.filter(isUs);
   const usCurrentMapped = usRows.filter((item) => mapped.has(item.streamId)).length;
   const usAdditionalPotential = [...additional.values()].filter(({ item }) => isUs(item)).length;
+  const phase2cMappingRecords = [...additional.values()].map(({ item, target, key, qualityResolved }) => ({ providerStreamId: item.streamId, xmltvChannelId: target.id, matchType: qualityResolved ? 'quality_variant' : key === 'directIdPotential' ? 'direct_id' : key === 'caseInsensitiveIdPotential' ? 'case_insensitive_id' : key === 'exactNamePotential' ? 'exact_name' : key === 'normalizedNamePotential' ? 'normalized_name' : 'canonical', providerCanonical: canonicalizePhase2c(item.name), xmltvCanonical: canonicalizePhase2c(target.name) }));
   const sanityNames = ['ESPN', 'ESPN2', 'TNT', 'TBS', 'USA NETWORK', 'CNN', 'FOX NEWS', 'MSNBC', 'AMC', 'HBO', 'CBS SPORTS NETWORK', 'NFL NETWORK', 'NBA TV'];
   const sanity = sanityNames.map((requestedName) => {
     const provider = items.find((item) => canonicalizePhase2c(item.name) === canonicalizePhase2c(requestedName));
@@ -490,7 +491,7 @@ function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings,
     usRelevantRows: usRows.length, usCurrentMapped, usAdditionalPotential, usProjectedMapped: usCurrentMapped + usAdditionalPotential, usProjectedMappingPercent: usRows.length ? (usCurrentMapped + usAdditionalPotential) / usRows.length : 0,
     usPhase2cAdditionalPotential: usAdditionalPotential, usPhase2cProjectedMapped: usCurrentMapped + usAdditionalPotential, usPhase2cProjectedMappingRatio: usRows.length ? (usCurrentMapped + usAdditionalPotential) / usRows.length : 0, usPhase2cProjectedMappingPercent: usRows.length ? ((usCurrentMapped + usAdditionalPotential) / usRows.length) * 100 : 0,
     groups, groupsAreNonExclusive: true, manyToOne: { providerRowCount: duplicateProviderVariants.reduce((sum, row) => sum + row.providerRowCount, 0), uniqueXmltvTargetCount: duplicateProviderVariants.length, duplicateQualityVariantCount: duplicateProviderVariants.filter((row) => row.names.some((name) => /\b(?:HD|FHD|UHD|4K)\b/i.test(name))).length, ambiguityCount: projections.ambiguousPotential },
-    phase2cDirectIdPotential: projections.directIdPotential, phase2cCaseInsensitiveIdPotential: projections.caseInsensitiveIdPotential, phase2cExactNamePotential: projections.exactNamePotential, phase2cNormalizedNamePotential: projections.normalizedNamePotential, phase2cCanonicalPotential: projections.canonicalPotential, phase2cQualityVariantPotential: projections.qualityVariantPotential, phase2cAdditionalDeterministicPotential: additionalDeterministicPotential, phase2cProjectedMappedTotal: currentMapped + additionalDeterministicPotential, phase2cAmbiguousPotential: projections.ambiguousPotential, phase2cUnmatched: projections.unmatched, phase2cRuleBreakdown: ruleBreakdown, sanityChannels: sanity, localAffiliateAudit,
+    phase2cDirectIdPotential: projections.directIdPotential, phase2cCaseInsensitiveIdPotential: projections.caseInsensitiveIdPotential, phase2cExactNamePotential: projections.exactNamePotential, phase2cNormalizedNamePotential: projections.normalizedNamePotential, phase2cCanonicalPotential: projections.canonicalPotential, phase2cQualityVariantPotential: projections.qualityVariantPotential, phase2cAdditionalDeterministicPotential: additionalDeterministicPotential, phase2cProjectedMappedTotal: currentMapped + additionalDeterministicPotential, phase2cAmbiguousPotential: projections.ambiguousPotential, phase2cUnmatched: projections.unmatched, phase2cRuleBreakdown: ruleBreakdown, phase2cMappingRecords, sanityChannels: sanity, localAffiliateAudit,
     xmltvChannelObjects: adaptedXmltvChannels.length, xmltvChannelsWithDisplayNames: channelsWithDisplayNames, xmltvDisplayNames: xmltv.reduce((count, row) => count + 1 + row.alternates.length, 0), uniqueXmltvCanonicals: indexes.canonical.size, duplicateXmltvCanonicals: [...indexes.canonical.values()].filter((rows) => unique(rows).length > 1).length, ambiguousXmltvCanonicals: [...indexes.canonical.values()].filter((rows) => unique(rows).length > 1).length,
     samples: { unmatchedNational: sample((item) => isUs(item) && !mapped.has(item.streamId) && !isLocal(item)), unmatchedLocal: sample((item) => isUs(item) && !mapped.has(item.streamId) && isLocal(item)), duplicateProviderVariants, namespaceFamilies: [...namespace.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([suffix, count]) => ({ suffix, count, scope: 'global' })) },
   };
@@ -550,14 +551,15 @@ async function processRequest(request) {
     parser.finish();
     if (!channels.length || !programmes.length) throw new Error('empty_feed');
   });
+  const existingMappings = await runWorkerStage('load_current_mappings', async () => source.active_cache_generation ? db(`managed_provider_epg_source_mappings?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}&select=provider_stream_id,xmltv_channel_id,match_type,provider_canonical,xmltv_canonical`, {}, 'load_current_mappings') : []);
   const mappingsResult = await runWorkerStage('build_mappings', async () => {
-  const byId = new Map(channels.map((channel) => [channel.id, channel]));
-  const byName = new Map(channels.flatMap((channel) => { const key = canonicalize(channel.displayNames[0] || channel.id); return key ? [[key, channel]] : []; }));
-  for (const channel of live.items) {
-    const direct = channel.epgChannelId && byId.get(channel.epgChannelId);
-    const named = direct ?? byName.get(canonicalize(channel.name));
-    if (named) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: channel.streamId, xmltv_channel_id: named.id, match_type: direct ? 'direct_id' : 'normalized_name', match_confidence_class: 'proven', provider_canonical: canonicalize(channel.name), xmltv_canonical: canonicalize(named.displayNames[0] || named.id), mapped_at: refreshedAt });
-  }
+  const liveStreamIds = new Set(live.items.map((item) => item.streamId));
+  const xmltvIds = new Set(channels.map((channel) => channel.id));
+  const validExistingMappings = existingMappings.filter((mapping) => liveStreamIds.has(mapping.provider_stream_id) && xmltvIds.has(mapping.xmltv_channel_id));
+  const audit = buildMappingAudit(providerId, sourceId, live.items, channels, validExistingMappings, { generation: crypto.randomUUID(), expectedRows: live.items.length, storedRows: live.items.length, complete: true }, generation);
+  const existingByStream = new Map(validExistingMappings.map((mapping) => [mapping.provider_stream_id, mapping]));
+  for (const mapping of validExistingMappings) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: mapping.provider_stream_id, xmltv_channel_id: mapping.xmltv_channel_id, match_type: mapping.match_type, match_confidence_class: 'proven', provider_canonical: mapping.provider_canonical, xmltv_canonical: mapping.xmltv_canonical, mapped_at: refreshedAt });
+  for (const mapping of audit.phase2cMappingRecords) if (!existingByStream.has(mapping.providerStreamId)) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: mapping.providerStreamId, xmltv_channel_id: mapping.xmltvChannelId, match_type: mapping.matchType, match_confidence_class: 'proven', provider_canonical: mapping.providerCanonical, xmltv_canonical: mapping.xmltvCanonical, mapped_at: refreshedAt });
   return mappings;
   });
   await runWorkerStage('persist_cache', async () => {

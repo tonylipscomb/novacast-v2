@@ -95,6 +95,16 @@ test('XMLTV audit adapter accepts in-memory/cache shapes and rejects misleading 
   assert.throws(() => buildMappingAudit('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', [], [{ id: 'xml-1', displayNames: [] }], [], { generation: 'snapshot-generation', expectedRows: 0, storedRows: 0, complete: true }, 'epg-generation'), /invalid_epg_channel_metadata/);
 });
 
+test('Phase 2C eligible matches are staged for promotion without replacing the existing mapping path', () => {
+  assert.match(worker, /load_current_mappings/);
+  assert.match(worker, /phase2cMappingRecords/);
+  assert.match(worker, /existingByStream/);
+  assert.match(worker, /insertBatches\('managed_provider_epg_source_mappings', mappings/);
+  assert.match(worker, /cache_generation: generation/);
+  assert.match(worker, /promote_generation/);
+  assert.doesNotMatch(worker, /fuzzy|edit distance/i);
+});
+
 test('worker uses server-only secrets and streams XMLTV outside Edge', () => {
   assert.match(worker, /SUPABASE_SERVICE_ROLE_KEY/);
   assert.match(worker, /PROVIDER_ENCRYPTION_KEY/);

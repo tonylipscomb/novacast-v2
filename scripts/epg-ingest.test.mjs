@@ -4,11 +4,56 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import test from 'node:test';
 
+process.env.EPG_INGEST_TEST_IMPORT = '1';
+process.env.SUPABASE_URL = 'https://example.supabase.co';
+process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
+process.env.PROVIDER_ENCRYPTION_KEY = '00'.repeat(32);
+const { buildMappingAudit } = await import('./epg-ingest/index.mjs');
+
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
 const workflow = fs.readFileSync(new URL('../.github/workflows/epg-refresh.yml', import.meta.url), 'utf8');
 const admin = fs.readFileSync(new URL('../supabase/functions/admin-providers/index.ts', import.meta.url), 'utf8');
 const migration = fs.readFileSync(new URL('../supabase/migrations/20260906043251_managed_provider_epg_refresh_requests.sql', import.meta.url), 'utf8');
 const jobsMigration = fs.readFileSync(new URL('../supabase/migrations/20260906090000_managed_provider_epg_refresh_jobs.sql', import.meta.url), 'utf8');
+
+test('full mapping audit completes for a 12,000-row provider catalog and 765 XMLTV channels', () => {
+  const providerRows = Array.from({ length: 12000 }, (_, index) => ({
+    streamId: `stream-${index}`,
+    name: index === 0 ? 'MATCH' : index < 3000 ? `UK: ESPN ${index}` : index < 4000 ? `NZ: NBA ${index}` : index < 5000 ? `IT: TNT ${index}` : index < 8000 ? `US: CHANNEL ${index}` : `NBA CHANNEL ${index}`,
+    epgChannelId: null,
+    categoryId: null,
+    categoryName: null,
+  }));
+  const xmltvChannels = Array.from({ length: 765 }, (_, index) => ({
+    id: index === 0 ? 'xml-match' : `xml-${index}`,
+    displayNames: [index === 0 ? 'MATCH' : `CHANNEL ${index}`],
+    alternateNames: [],
+  }));
+  const audit = buildMappingAudit(
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    providerRows,
+    xmltvChannels,
+    [],
+    { generation: 'snapshot-generation', expectedRows: 12000, storedRows: 12000, complete: true },
+    'epg-generation',
+  );
+
+  assert.equal(audit.providerRows, 12000);
+  assert.equal(audit.snapshotStoredRows, 12000);
+  assert.equal(audit.snapshotComplete, true);
+  assert.equal(audit.xmltvChannels, 765);
+  assert.equal(audit.currentMapped, 0);
+  assert.equal(audit.additionalDeterministicPotential, 1);
+  assert.equal(audit.projectedMappedTotal, 1);
+  assert.ok(audit.groups.explicitForeign.rows >= 4999);
+  assert.ok(audit.usRelevantRows < audit.providerRows);
+  assert.ok(audit.samples.unmatchedNational.length <= 10);
+  assert.ok(audit.samples.unmatchedLocal.length <= 10);
+  assert.ok(audit.samples.duplicateProviderVariants.length <= 10);
+  assert.ok(audit.samples.namespaceFamilies.length <= 10);
+  assert.doesNotMatch(JSON.stringify(audit), /password|token|authorization|https?:\/\//i);
+});
 
 test('worker uses server-only secrets and streams XMLTV outside Edge', () => {
   assert.match(worker, /SUPABASE_SERVICE_ROLE_KEY/);
@@ -86,7 +131,7 @@ function runWorker(port, secret = 'super-secret-provider-token', args = []) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ['./scripts/epg-ingest/index.mjs', ...args], {
       cwd: process.cwd(),
-      env: { ...process.env, SUPABASE_URL: `http://127.0.0.1:${port}`, SUPABASE_SERVICE_ROLE_KEY: secret, PROVIDER_ENCRYPTION_KEY: '00'.repeat(32) },
+      env: { ...process.env, EPG_INGEST_TEST_IMPORT: undefined, SUPABASE_URL: `http://127.0.0.1:${port}`, SUPABASE_SERVICE_ROLE_KEY: secret, PROVIDER_ENCRYPTION_KEY: '00'.repeat(32) },
     });
     let stdout = '';
     let stderr = '';

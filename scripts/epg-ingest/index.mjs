@@ -302,12 +302,13 @@ async function persistProviderCatalogSnapshot(providerId, items) {
       snapshot_expected_rows: items.length,
       snapshot_complete: false,
     }));
-  if (!rows.length) return;
+  if (!rows.length) return { generation, expectedRows: items.length, storedRows: 0, complete: false };
   const [previous] = await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&is_active=eq.true&select=snapshot_generation&order=captured_at.desc&limit=1`, {}, 'load_previous_catalog_snapshot');
   let previousDeactivated = false;
   try {
     await insertBatches('managed_provider_epg_catalog_snapshot', rows, 'managed_provider_id,snapshot_generation,provider_stream_id', 'insert_catalog_snapshot');
-    await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ snapshot_expected_rows: items.length, snapshot_complete: true }) }, 'complete_catalog_snapshot');
+    const complete = rows.length === items.length;
+    await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ snapshot_expected_rows: items.length, snapshot_complete: complete }) }, 'complete_catalog_snapshot');
     if (previous?.snapshot_generation && previous.snapshot_generation !== generation) {
       await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(previous.snapshot_generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ is_active: false }) }, 'deactivate_previous_catalog_snapshot');
       previousDeactivated = true;
@@ -318,9 +319,114 @@ async function persistProviderCatalogSnapshot(providerId, items) {
     }
   } catch (error) {
     if (previousDeactivated && previous?.snapshot_generation) await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(previous.snapshot_generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ is_active: true }) }, 'restore_previous_catalog_snapshot').catch(() => {});
-    await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_catalog_snapshot').catch(() => {});
+      await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_catalog_snapshot').catch(() => {});
     logDatabaseFailure(error);
     process.stderr.write('EPG provider catalog snapshot unavailable.\n');
+    return { generation, expectedRows: items.length, storedRows: rows.length, complete: false };
+  }
+  return { generation, expectedRows: items.length, storedRows: rows.length, complete: rows.length === items.length };
+}
+
+const AUDIT_REGION_CODES = new Set(['AF', 'AR', 'AT', 'AU', 'BE', 'BR', 'CA', 'CH', 'CL', 'CN', 'CO', 'CR', 'CZ', 'DE', 'DK', 'DO', 'EC', 'ES', 'FI', 'FR', 'GB', 'GR', 'HK', 'HU', 'IE', 'IL', 'IN', 'IS', 'IT', 'JP', 'KR', 'LV', 'MX', 'MY', 'NL', 'NO', 'NZ', 'PE', 'PH', 'PL', 'PT', 'RO', 'RU', 'SE', 'SG', 'SK', 'TR', 'TW', 'UA', 'UK', 'ZA']);
+const AUDIT_NON_GEOGRAPHIC_PREFIXES = new Set(['NBA', 'NFL', 'NHL', 'MLB', 'F1', 'HD', 'FHD', 'UHD', 'PRIME', 'RAW', 'LIVE']);
+const AUDIT_NETWORK_TERMS = ['ABC', 'CBS', 'NBC', 'FOX', 'ESPN', 'TNT', 'TBS', 'USA NETWORK', 'NFL', 'NBA', 'HBO', 'CNN', 'MSNBC', 'CNBC'];
+
+function normalizeAuditName(value) {
+  return String(value ?? '').trim().toLocaleLowerCase().replace(/[._-]+/g, ' ').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function classifyAuditItem(item) {
+  const name = String(item.name ?? '').toLocaleUpperCase();
+  const category = String(item.categoryName ?? item.categoryId ?? '').toLocaleUpperCase();
+  const prefix = (value) => {
+    const token = value.match(/^([A-Z]{2,3}):/)?.[1] ?? null;
+    if (!token || AUDIT_NON_GEOGRAPHIC_PREFIXES.has(token)) return null;
+    if (token === 'US' || token === 'USA') return 'us';
+    return AUDIT_REGION_CODES.has(token) ? 'foreign' : null;
+  };
+  const categoryPrefix = prefix(category);
+  const namePrefix = prefix(name);
+  if (categoryPrefix === 'foreign' || namePrefix === 'foreign') return { isUs: false, reason: 'explicit_foreign' };
+  if (categoryPrefix === 'us' || namePrefix === 'us' || /(^|[^A-Z])(US|USA|UNITED STATES)([^A-Z]|$)/.test(category)) return { isUs: true, reason: categoryPrefix === 'us' ? 'us_prefix' : 'us_category' };
+  if (AUDIT_NETWORK_TERMS.some((term) => new RegExp(`(^|[^A-Z])${term.replace(/[+&]/g, '\\$&')}(?=[^A-Z]|$)`).test(name))) return { isUs: true, reason: 'network_heuristic' };
+  return { isUs: false, reason: 'other' };
+}
+
+function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings, snapshot, epgGeneration) {
+  const xmltv = xmltvChannels.map((channel) => ({ id: channel.id, name: channel.displayNames[0] || channel.id, alternates: channel.displayNames.slice(1) }));
+  const indexes = { ids: new Map(), lowerIds: new Map(), raw: new Map(), normalized: new Map(), canonical: new Map() };
+  const add = (index, key, row) => { if (key) index.set(key, [...(index.get(key) ?? []), row]); };
+  for (const row of xmltv) {
+    add(indexes.ids, row.id, row);
+    add(indexes.lowerIds, row.id.toLocaleLowerCase(), row);
+    for (const value of [row.name, ...row.alternates]) {
+      add(indexes.raw, value.trim(), row);
+      add(indexes.normalized, normalizeAuditName(value), row);
+      add(indexes.canonical, canonicalize(value), row);
+    }
+  }
+  const unique = (rows) => [...new Map(rows.map((row) => [row.id, row])).values()];
+  const mapped = new Set(mappings.map((row) => row.provider_stream_id));
+  const projections = { directIdPotential: 0, caseInsensitiveIdPotential: 0, exactNamePotential: 0, normalizedNamePotential: 0, canonicalPotential: 0, ambiguousPotential: 0 };
+  const additional = new Map();
+  for (const item of items) {
+    if (mapped.has(item.streamId)) continue;
+    const direct = item.epgChannelId ? unique(indexes.ids.get(item.epgChannelId) ?? []) : [];
+    const lower = item.epgChannelId ? unique(indexes.lowerIds.get(item.epgChannelId.toLocaleLowerCase()) ?? []) : [];
+    const exact = unique(indexes.raw.get(item.name.trim()) ?? []);
+    const normalized = unique(indexes.normalized.get(normalizeAuditName(item.name)) ?? []);
+    const canonical = unique(indexes.canonical.get(canonicalize(item.name)) ?? []);
+    const candidates = [{ key: 'directIdPotential', rows: direct }, { key: 'caseInsensitiveIdPotential', rows: lower }, { key: 'exactNamePotential', rows: exact }, { key: 'normalizedNamePotential', rows: normalized }, { key: 'canonicalPotential', rows: canonical }];
+    const selected = candidates.find((candidate) => candidate.rows.length === 1);
+    if (selected) { projections[selected.key] += 1; additional.set(item.streamId, { item, target: selected.rows[0] }); }
+    else if (normalized.length > 1 || canonical.length > 1) projections.ambiguousPotential += 1;
+  }
+  const group = (predicate) => { const rows = items.filter(predicate); return { rows: rows.length, uniqueCanonicalNames: new Set(rows.map((row) => canonicalize(row.name)).filter(Boolean)).size }; };
+  const classify = (item) => classifyAuditItem(item);
+  const isUs = (item) => classify(item).isUs;
+  const isLocal = (item) => /\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${item.name} ${item.categoryName ?? ''}`);
+  const groups = {
+    PRIME: group((item) => /\bPRIME\b/i.test(`${item.name} ${item.categoryName ?? ''}`)),
+    US: group((item) => classify(item).reason === 'us_prefix' || classify(item).reason === 'us_category'),
+    USA: group((item) => /(^|[^A-Z])USA([^A-Z]|$)/i.test(`${item.name} ${item.categoryName ?? ''}`)),
+    NBA: group((item) => /\bNBA\b/i.test(`${item.name} ${item.categoryName ?? ''}`)),
+    NFL: group((item) => /\bNFL\b/i.test(`${item.name} ${item.categoryName ?? ''}`)),
+    majorNationalNetworks: group((item) => isUs(item) && AUDIT_NETWORK_TERMS.some((term) => new RegExp(`(^|[^A-Z])${term.replace(/[+&]/g, '\\$&')}(?=[^A-Z]|$)`).test(item.name))),
+    likelyLocals: group((item) => isUs(item) && isLocal(item)),
+    explicitForeign: group((item) => classify(item).reason === 'explicit_foreign'),
+    other: group((item) => classify(item).reason === 'other'),
+  };
+  const targetVariants = new Map();
+  for (const { item, target } of additional.values()) targetVariants.set(target.id, [...(targetVariants.get(target.id) ?? []), item]);
+  const duplicateProviderVariants = [...targetVariants.entries()].filter(([, rows]) => rows.length > 1).slice(0, 10).map(([xmltvChannelId, rows]) => ({ xmltvChannelId, providerRowCount: rows.length, providerStreamIds: rows.slice(0, 10).map((row) => row.streamId), names: rows.slice(0, 10).map((row) => row.name) }));
+  const namespace = new Map();
+  for (const item of items) { const suffix = item.epgChannelId?.match(/\.([A-Za-z0-9]{2,})$/)?.[1]; const key = suffix ? `.${suffix.toLowerCase()}` : '(no suffix)'; namespace.set(key, (namespace.get(key) ?? 0) + 1); }
+  const sample = (predicate) => items.filter(predicate).slice(0, 10).map((item) => ({ providerStreamId: item.streamId, channelName: item.name, epgChannelId: item.epgChannelId ?? null }));
+  const currentMapped = mapped.size;
+  const additionalDeterministicPotential = additional.size;
+  const usRows = items.filter(isUs);
+  const usCurrentMapped = usRows.filter((item) => mapped.has(item.streamId)).length;
+  const usAdditionalPotential = [...additional.values()].filter(({ item }) => isUs(item)).length;
+  return {
+    providerId, sourceId, snapshotGeneration: snapshot.generation, epgGeneration, providerRows: items.length, uniqueProviderCanonicalNames: new Set(items.map((item) => canonicalize(item.name)).filter(Boolean)).size,
+    providerRowsWithEpgId: items.filter((item) => item.epgChannelId).length, providerRowsWithoutEpgId: items.filter((item) => !item.epgChannelId).length, xmltvChannels: xmltv.length, currentMapped,
+    snapshotExpectedRows: snapshot.expectedRows, snapshotStoredRows: snapshot.storedRows, snapshotComplete: snapshot.complete, snapshotPageCount: 1,
+    directIdPotential: projections.directIdPotential, caseInsensitiveIdPotential: projections.caseInsensitiveIdPotential, exactNamePotential: projections.exactNamePotential, normalizedNamePotential: projections.normalizedNamePotential, canonicalPotential: projections.canonicalPotential, ambiguousPotential: projections.ambiguousPotential,
+    additionalDeterministicPotential, projectedMappedTotal: currentMapped + additionalDeterministicPotential,
+    usRelevantRows: usRows.length, usCurrentMapped, usAdditionalPotential, usProjectedMapped: usCurrentMapped + usAdditionalPotential, usProjectedMappingPercent: usRows.length ? (usCurrentMapped + usAdditionalPotential) / usRows.length : 0,
+    groups, manyToOne: { providerRowCount: duplicateProviderVariants.reduce((sum, row) => sum + row.providerRowCount, 0), uniqueXmltvTargetCount: duplicateProviderVariants.length, duplicateQualityVariantCount: duplicateProviderVariants.filter((row) => row.names.some((name) => /\b(?:HD|FHD|UHD|4K)\b/i.test(name))).length, ambiguityCount: projections.ambiguousPotential },
+    samples: { unmatchedNational: sample((item) => isUs(item) && !mapped.has(item.streamId) && !isLocal(item)), unmatchedLocal: sample((item) => isUs(item) && !mapped.has(item.streamId) && isLocal(item)), duplicateProviderVariants, namespaceFamilies: [...namespace.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([suffix, count]) => ({ suffix, count, scope: 'global' })) },
+  };
+}
+
+async function persistMappingAudit(audit) {
+  const auditId = crypto.randomUUID();
+  try {
+    await db('managed_provider_epg_mapping_audits', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ id: auditId, managed_provider_id: audit.providerId, source_id: audit.sourceId, snapshot_generation: audit.snapshotGeneration ?? crypto.randomUUID(), epg_generation: audit.epgGeneration ?? null, provider_rows: audit.providerRows, unique_provider_canonical_names: audit.uniqueProviderCanonicalNames, provider_rows_with_epg_id: audit.providerRowsWithEpgId, provider_rows_without_epg_id: audit.providerRowsWithoutEpgId, xmltv_channels: audit.xmltvChannels, current_mapped: audit.currentMapped, snapshot_expected_rows: audit.snapshotExpectedRows, snapshot_stored_rows: audit.snapshotStoredRows, snapshot_complete: audit.snapshotComplete, snapshot_page_count: audit.snapshotPageCount, direct_id_potential: audit.directIdPotential, case_insensitive_id_potential: audit.caseInsensitiveIdPotential, exact_name_potential: audit.exactNamePotential, normalized_name_potential: audit.normalizedNamePotential, canonical_potential: audit.canonicalPotential, ambiguous_potential: audit.ambiguousPotential, additional_deterministic_potential: audit.additionalDeterministicPotential, projected_mapped_total: audit.projectedMappedTotal, us_relevant_rows: audit.usRelevantRows, us_current_mapped: audit.usCurrentMapped, us_additional_potential: audit.usAdditionalPotential, us_projected_mapped: audit.usProjectedMapped, us_projected_mapping_percent: audit.usProjectedMappingPercent, groups: audit.groups, many_to_one: audit.manyToOne, samples: audit.samples }) }, 'persist_mapping_audit');
+    await db(`managed_provider_epg_mapping_audits?managed_provider_id=eq.${encodeURIComponent(audit.providerId)}&source_id=eq.${encodeURIComponent(audit.sourceId)}&id=neq.${encodeURIComponent(auditId)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_mapping_audits');
+  } catch (error) {
+    logDatabaseFailure(error);
+    process.stderr.write('EPG mapping audit unavailable.\n');
   }
 }
 
@@ -339,7 +445,8 @@ async function processRequest(request) {
   const programmes = [];
   const mappings = [];
   const live = await runWorkerStage('fetch_provider_live_channels', () => fetchLiveChannels(provider));
-  await persistProviderCatalogSnapshot(providerId, live.items);
+  const snapshot = await persistProviderCatalogSnapshot(providerId, live.items);
+  process.stdout.write(`providerCatalogFetched=${live.items.length} snapshotStored=${snapshot?.storedRows ?? 0} snapshotComplete=${snapshot?.complete === true}\n`);
   const xmltvUrl = await runWorkerStage('decrypt_epg_url', () => decryptSecret(source.url_ciphertext, source.url_iv));
   const url = await runWorkerStage('validate_epg_url', () => assertSafeUrl(xmltvUrl));
   const response = await runWorkerStage('fetch_epg_feed', async () => {
@@ -386,6 +493,7 @@ async function processRequest(request) {
   if (source.active_cache_generation) {
     for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_generation').catch(() => {});
   }
+  if (snapshot?.complete === true) await persistMappingAudit(buildMappingAudit(providerId, sourceId, live.items, channels, mappings, snapshot, generation));
   return { channels: channels.length, programmes: programmes.length, mapped: mappings.length };
   } catch (error) {
     if (!promoted) for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_generation').catch(() => {});
@@ -530,10 +638,14 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 
-main().catch((error) => {
-  logDatabaseFailure(error);
-  logWorkerFailure(error);
-  const code = error instanceof WorkerValidationFailure ? error.safeMessage : error instanceof DatabaseFailure ? error.message : 'worker_failure';
-  process.stderr.write(`EPG worker failed: ${code}\n`);
-  process.exitCode = 1;
-});
+export { buildMappingAudit };
+
+if (process.env.EPG_INGEST_TEST_IMPORT !== '1') {
+  main().catch((error) => {
+    logDatabaseFailure(error);
+    logWorkerFailure(error);
+    const code = error instanceof WorkerValidationFailure ? error.safeMessage : error instanceof DatabaseFailure ? error.message : 'worker_failure';
+    process.stderr.write(`EPG worker failed: ${code}\n`);
+    process.exitCode = 1;
+  });
+}

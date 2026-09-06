@@ -47,6 +47,20 @@ test('workflow runs every six hours with manual filtering and a concurrency guar
   assert.match(workflow, /PROVIDER_ENCRYPTION_KEY/);
 });
 
+test('worker reports safe non-database stages and validates credentials without exposing secrets', () => {
+  for (const stage of ['load_source', 'load_provider', 'decrypt_provider_credentials', 'parse_provider_credentials', 'fetch_provider_live_channels', 'decrypt_epg_url', 'validate_epg_url', 'fetch_epg_feed', 'gunzip_epg_feed', 'parse_epg_feed', 'build_mappings', 'persist_cache', 'promote_generation']) assert.match(worker, new RegExp(`['"]${stage}['"]`));
+  assert.match(worker, /class WorkerStageFailure/);
+  assert.match(worker, /stage: error\.stage/);
+  assert.match(worker, /invalid_encryption_key_length/);
+  assert.match(worker, /typeof parsed\.baseUrl !== 'string'/);
+  assert.match(worker, /typeof parsed\.username !== 'string'/);
+  assert.match(worker, /typeof parsed\.password !== 'string'/);
+  assert.match(worker, /decrypt_provider_credentials/);
+  assert.match(worker, /decrypt_epg_url/);
+  assert.match(worker, /safeStageMessage/);
+  assert.doesNotMatch(worker, /EPG worker failed: \$\{error instanceof Error \? error\.message/);
+});
+
 function runWorker(port, secret = 'super-secret-provider-token', args = []) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ['./scripts/epg-ingest/index.mjs', ...args], {

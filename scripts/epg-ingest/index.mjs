@@ -35,6 +35,15 @@ class WorkerValidationFailure extends Error {
   }
 }
 
+class WorkerStageFailure extends Error {
+  constructor(stage, safeMessage, name = 'Error') {
+    super(safeMessage);
+    this.name = name;
+    this.stage = stage;
+    this.safeMessage = safeMessage;
+  }
+}
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function requireUuid(value, operation, field) {
@@ -60,8 +69,11 @@ function logDatabaseFailure(error) {
 }
 
 function logWorkerFailure(error) {
-  if (!(error instanceof WorkerValidationFailure)) return;
-  process.stderr.write(`${JSON.stringify({ workerFailure: { operation: error.operation, message: error.safeMessage } })}\n`);
+  if (error instanceof WorkerValidationFailure) {
+    process.stderr.write(`${JSON.stringify({ workerFailure: { operation: error.operation, message: error.safeMessage } })}\n`);
+  } else if (error instanceof WorkerStageFailure) {
+    process.stderr.write(`${JSON.stringify({ workerFailure: { stage: error.stage, name: error.name, message: error.safeMessage } })}\n`);
+  }
 }
 
 function required(name) {
@@ -76,9 +88,35 @@ function decodeKey(value) {
 }
 
 async function decryptSecret(ciphertext, iv) {
-  const key = await crypto.subtle.importKey('raw', decodeKey(required('PROVIDER_ENCRYPTION_KEY')), 'AES-GCM', false, ['decrypt']);
+  const decodedKey = decodeKey(required('PROVIDER_ENCRYPTION_KEY'));
+  if (![16, 24, 32].includes(decodedKey.length)) throw new Error('invalid_encryption_key_length');
+  const key = await crypto.subtle.importKey('raw', decodedKey, 'AES-GCM', false, ['decrypt']);
   const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: Buffer.from(iv, 'base64') }, key, Buffer.from(ciphertext, 'base64'));
   return Buffer.from(plaintext).toString('utf8');
+}
+
+function safeStageMessage(error, stage) {
+  const message = error instanceof Error ? error.message : '';
+  if (/^(invalid_encryption_key_length|unsafe_url|provider_unreachable|feed_unavailable|http_404|http_5xx|gzip_failed|xmltv_parse_failed|empty_feed)$/.test(message)) return message;
+  if (stage === 'decrypt_provider_credentials' || stage === 'decrypt_epg_url') return 'decrypt_failed';
+  if (stage === 'parse_provider_credentials') return 'invalid_provider_credentials';
+  if (stage === 'fetch_provider_live_channels') return 'provider_unreachable';
+  if (stage === 'validate_epg_url') return 'unsafe_url';
+  if (stage === 'fetch_epg_feed') return 'feed_unavailable';
+  if (stage === 'gunzip_epg_feed') return 'gzip_failed';
+  if (stage === 'parse_epg_feed') return 'xmltv_parse_failed';
+  if (stage === 'persist_cache') return 'persist_failed';
+  if (stage === 'promote_generation') return 'promote_failed';
+  return 'worker_failure';
+}
+
+async function runWorkerStage(stage, action) {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof DatabaseFailure || error instanceof WorkerValidationFailure || error instanceof WorkerStageFailure) throw error;
+    throw new WorkerStageFailure(stage, safeStageMessage(error, stage), error instanceof Error ? error.name : 'Error');
+  }
 }
 
 async function db(path, init = {}, operation = 'supabase_request') {
@@ -219,24 +257,32 @@ async function assertSafeUrl(raw) {
 }
 
 async function fetchLiveChannels(provider) {
-  const credentials = JSON.parse(await decryptSecret(provider.credentials_ciphertext, provider.credentials_iv));
-  const base = new URL(credentials.baseUrl);
-  base.pathname = `${base.pathname.replace(/\/$/, '')}/player_api.php`;
-  base.searchParams.set('username', credentials.username);
-  base.searchParams.set('password', credentials.password);
-  base.searchParams.set('action', 'get_live_streams');
-  const response = await fetch(base, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  if (!response.ok) throw new Error('provider_unreachable');
-  const rows = await response.json();
+  const credentialsText = await runWorkerStage('decrypt_provider_credentials', () => decryptSecret(provider.credentials_ciphertext, provider.credentials_iv));
+  const credentials = await runWorkerStage('parse_provider_credentials', () => {
+    const parsed = JSON.parse(credentialsText);
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.baseUrl !== 'string' || typeof parsed.username !== 'string' || typeof parsed.password !== 'string') throw new Error('invalid_provider_credentials');
+    return parsed;
+  });
+  const rows = await runWorkerStage('fetch_provider_live_channels', async () => {
+    const base = new URL(credentials.baseUrl);
+    base.pathname = `${base.pathname.replace(/\/$/, '')}/player_api.php`;
+    base.searchParams.set('username', credentials.username);
+    base.searchParams.set('password', credentials.password);
+    base.searchParams.set('action', 'get_live_streams');
+    const response = await fetch(base, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!response.ok) throw new Error('provider_unreachable');
+    return response.json();
+  });
   return { credentials, items: Array.isArray(rows) ? rows.map((row) => ({ streamId: String(row.stream_id ?? ''), name: String(row.name ?? ''), epgChannelId: row.epg_channel_id ? String(row.epg_channel_id) : null })) : [] };
 }
 
 async function processRequest(request) {
   const sourceId = requireUuid(request.source_id, 'load_source', 'source_id');
   const providerId = requireUuid(request.managed_provider_id, 'load_provider', 'provider_id');
-  const [source] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(sourceId)}&select=id,managed_provider_id,url_ciphertext,url_iv,priority,active_cache_generation`, {}, 'load_source');
-  const [provider] = await db(`managed_providers?id=eq.${encodeURIComponent(providerId)}&select=id,credentials_ciphertext,credentials_iv`, {}, 'load_provider');
-  if (!source || !provider) throw new Error('source_not_found');
+  const [source] = await runWorkerStage('load_source', () => db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(sourceId)}&select=id,managed_provider_id,url_ciphertext,url_iv,priority,active_cache_generation`, {}, 'load_source'));
+  const [provider] = await runWorkerStage('load_provider', () => db(`managed_providers?id=eq.${encodeURIComponent(providerId)}&select=id,credentials_ciphertext,credentials_iv`, {}, 'load_provider'));
+  if (!source) throw new WorkerStageFailure('load_source', 'source_not_found');
+  if (!provider) throw new WorkerStageFailure('load_provider', 'provider_not_found');
   const generation = crypto.randomUUID();
   const refreshedAt = new Date().toISOString();
   let promoted = false;
@@ -244,22 +290,34 @@ async function processRequest(request) {
   const channels = [];
   const programmes = [];
   const mappings = [];
-  const live = await fetchLiveChannels(provider);
-  const xmltvUrl = await decryptSecret(source.url_ciphertext, source.url_iv);
-  const url = await assertSafeUrl(xmltvUrl);
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  if (!response.ok || !response.body) throw new Error(response.status === 404 ? 'http_404' : response.status >= 500 ? 'http_5xx' : 'feed_unavailable');
+  const live = await runWorkerStage('fetch_provider_live_channels', () => fetchLiveChannels(provider));
+  const xmltvUrl = await runWorkerStage('decrypt_epg_url', () => decryptSecret(source.url_ciphertext, source.url_iv));
+  const url = await runWorkerStage('validate_epg_url', () => assertSafeUrl(xmltvUrl));
+  const response = await runWorkerStage('fetch_epg_feed', async () => {
+    const fetched = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    if (!fetched.ok || !fetched.body) throw new Error(fetched.status === 404 ? 'http_404' : fetched.status >= 500 ? 'http_5xx' : 'feed_unavailable');
+    return fetched;
+  });
   const parser = new XmltvParser((channel) => channels.push(channel), (programme) => {
     if (programme.stopAt >= new Date(NOW - PAST_RETENTION_MS).toISOString() && programme.startAt <= new Date(NOW + FUTURE_RETENTION_MS).toISOString()) programmes.push(programme);
   });
-  const input = Readable.fromWeb(response.body);
-  const stream = url.pathname.toLowerCase().endsWith('.gz') ? input.pipe(createGunzip()) : input;
-  stream.setEncoding('utf8');
-  stream.on('data', (chunk) => parser.text(chunk));
-  await new Promise((resolve, reject) => { stream.once('end', resolve); stream.once('error', reject); });
-  parser.finish();
-  if (!channels.length || !programmes.length) throw new Error('empty_feed');
-  await insertBatches('managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalize(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1), refreshed_at: refreshedAt })), '', 'insert_channels');
+  await runWorkerStage('gunzip_epg_feed', async () => {
+    const input = Readable.fromWeb(response.body);
+    const stream = url.pathname.toLowerCase().endsWith('.gz') ? input.pipe(createGunzip()) : input;
+    stream.setEncoding('utf8');
+    await new Promise((resolve, reject) => {
+      stream.on('data', (chunk) => {
+        try { parser.text(chunk); } catch (error) { reject(error); }
+      });
+      stream.once('end', resolve);
+      stream.once('error', reject);
+    });
+  });
+  await runWorkerStage('parse_epg_feed', async () => {
+    parser.finish();
+    if (!channels.length || !programmes.length) throw new Error('empty_feed');
+  });
+  const mappingsResult = await runWorkerStage('build_mappings', async () => {
   const byId = new Map(channels.map((channel) => [channel.id, channel]));
   const byName = new Map(channels.flatMap((channel) => { const key = canonicalize(channel.displayNames[0] || channel.id); return key ? [[key, channel]] : []; }));
   for (const channel of live.items) {
@@ -267,9 +325,14 @@ async function processRequest(request) {
     const named = direct ?? byName.get(canonicalize(channel.name));
     if (named) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: channel.streamId, xmltv_channel_id: named.id, match_type: direct ? 'direct_id' : 'normalized_name', match_confidence_class: 'proven', provider_canonical: canonicalize(channel.name), xmltv_canonical: canonicalize(named.displayNames[0] || named.id), mapped_at: refreshedAt });
   }
+  return mappings;
+  });
+  await runWorkerStage('persist_cache', async () => {
+  await insertBatches('managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalize(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1), refreshed_at: refreshedAt })), '', 'insert_channels');
   await insertBatches('managed_provider_epg_source_programmes', programmes.map((programme) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: programme.channelId, start_at: programme.startAt, stop_at: programme.stopAt, title: programme.title, subtitle: programme.subtitle, description: programme.description, category: programme.category, refreshed_at: refreshedAt })), 'source_id,cache_generation,xmltv_channel_id,start_at,stop_at,title', 'insert_programmes');
   await insertBatches('managed_provider_epg_source_mappings', mappings, '', 'insert_mappings');
-  await patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: channels.length, programme_count: programmes.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, invalidTimestamps: parser.invalidTimestamps }, updated_at: refreshedAt }, '', 'promote_generation');
+  });
+  await runWorkerStage('promote_generation', () => patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: channels.length, programme_count: programmes.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, invalidTimestamps: parser.invalidTimestamps }, updated_at: refreshedAt }, '', 'promote_generation'));
   promoted = true;
   if (source.active_cache_generation) {
     for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_generation').catch(() => {});
@@ -337,6 +400,7 @@ async function main() {
     } catch (error) {
       failed = true;
       logDatabaseFailure(error);
+      logWorkerFailure(error);
       const code = error instanceof Error && /^[a-z0-9_]+$/.test(error.message) ? error.message : 'worker_failure';
       if (request.refresh_job_id && UUID_PATTERN.test(request.refresh_job_id)) await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }, '', 'fail_refresh_job').catch((patchError) => { logDatabaseFailure(patchError); });
       if (UUID_PATTERN.test(requestId)) await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() }, '', 'fail_request').catch((patchError) => { logDatabaseFailure(patchError); });

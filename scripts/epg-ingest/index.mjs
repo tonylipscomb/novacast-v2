@@ -299,12 +299,15 @@ async function persistProviderCatalogSnapshot(providerId, items) {
       captured_at: capturedAt,
       snapshot_generation: generation,
       is_active: false,
+      snapshot_expected_rows: items.length,
+      snapshot_complete: false,
     }));
   if (!rows.length) return;
   const [previous] = await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&is_active=eq.true&select=snapshot_generation&order=captured_at.desc&limit=1`, {}, 'load_previous_catalog_snapshot');
   let previousDeactivated = false;
   try {
     await insertBatches('managed_provider_epg_catalog_snapshot', rows, 'managed_provider_id,snapshot_generation,provider_stream_id', 'insert_catalog_snapshot');
+    await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ snapshot_expected_rows: items.length, snapshot_complete: true }) }, 'complete_catalog_snapshot');
     if (previous?.snapshot_generation && previous.snapshot_generation !== generation) {
       await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(previous.snapshot_generation)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ is_active: false }) }, 'deactivate_previous_catalog_snapshot');
       previousDeactivated = true;

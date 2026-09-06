@@ -663,8 +663,9 @@ function EpgSourcesPanel({ provider, result, preview, mappingAudit, busy, onAdd,
 
 function EpgMappingAuditPanel({ result }: { result: EpgResult }) {
   const groups = (result.groups ?? {}) as Record<string, unknown>;
+  const groupRows = (key: string) => { const group = groups[key]; return group && typeof group === 'object' ? String((group as Record<string, unknown>).rows ?? 0) : String(group ?? 0); };
   const potential = ['directIdPotential', 'caseInsensitiveIdPotential', 'exactNamePotential', 'normalizedNamePotential', 'canonicalPotential', 'ambiguousPotential'];
-  return <div className="providerDiagnostics compact"><strong>Mapping audit</strong><p>Provider rows: {value(result, 'providerRows')} · Current mapped: {value(result, 'currentMapped')} · Canonical identities: {value(result, 'uniqueProviderCanonicalNames')}</p><p>PRIME: {String(groups.PRIME ?? 0)} · US: {String(groups.US ?? 0)} · USA: {String(groups.USA ?? 0)} · NBA: {String(groups.NBA ?? 0)} · NFL: {String(groups.NFL ?? 0)}</p><p>National networks: {String(groups.majorNationalNetworks ?? 0)} · Likely locals: {String(groups.likelyLocals ?? 0)}</p><p>{potential.map((key) => `${key}: ${value(result, key)}`).join(' · ')}</p></div>;
+  return <div className="providerDiagnostics compact"><strong>Mapping audit</strong><p>Provider rows: {value(result, 'providerRows')} · Current mapped: {value(result, 'currentMapped')} · Canonical identities: {value(result, 'uniqueProviderCanonicalNames')}</p><p>PRIME: {groupRows('PRIME')} · US: {groupRows('US')} · USA: {groupRows('USA')} · NBA: {groupRows('NBA')} · NFL: {groupRows('NFL')}</p><p>National networks: {groupRows('majorNationalNetworks')} · Likely locals: {groupRows('likelyLocals')} · Foreign: {groupRows('explicitForeign')}</p><p>Additional potential: {value(result, 'additionalDeterministicPotential')} · Projected total: {value(result, 'projectedMappedTotal')} · Ambiguous: {value(result, 'ambiguousPotential')}</p><p>{potential.map((key) => `${key}: ${value(result, key)}`).join(' · ')}</p></div>;
 }
 
 function GoldDiagnostic({ account }: { account: Row }) {

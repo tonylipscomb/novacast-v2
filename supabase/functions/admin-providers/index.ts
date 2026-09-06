@@ -11,7 +11,7 @@ import {
 } from '../_shared/providerHealth.ts';
 import { runProviderHealthCheck } from '../_shared/providerHealthRunner.ts';
 import { fetchLiveChannelsForEpgMapping } from '../_shared/providerHealthRunner.ts';
-import { canonicalizeEpgName, normalizeEpgName, normalizeEpgMode, safeEpgUrl, testXmltvFeed, traceXmltvFeed, type EpgLiveChannel, type EpgMode, type XmltvStreamSink } from '../_shared/xmltvEpg.ts';
+import { canonicalizeEpgName, classifyEpgChannel, normalizeEpgName, normalizeEpgMode, safeEpgUrl, testXmltvFeed, traceXmltvFeed, type EpgLiveChannel, type EpgMode, type XmltvStreamSink } from '../_shared/xmltvEpg.ts';
 
 const PROVIDER_SELECT =
   'id,slug,display_name,status,content_policy,notes,last_validated_at,last_tested_at,last_successful_test_at,health_status,live_channel_count,movie_count,series_count,validation_stale,last_health_summary,epg_mode,custom_epg_url_ciphertext,epg_last_refresh_at,epg_last_refresh_status,epg_last_refresh_summary,created_at,updated_at';
@@ -66,6 +66,8 @@ type ProviderCatalogSnapshotRow = {
   category_name?: string | null;
   canonical_name?: string | null;
   snapshot_generation: string;
+  snapshot_expected_rows?: number | null;
+  snapshot_complete?: boolean;
 };
 
 type EpgRefreshJobRow = {
@@ -583,13 +585,35 @@ async function previewEpgResolution(client: Awaited<ReturnType<typeof requireAdm
 async function previewEpgMappingAudit(client: Awaited<ReturnType<typeof requireAdmin>>['client'], providerId: string, sourceId: string) {
   const source = await loadEpgSource(client, sourceId);
   if (source.managed_provider_id !== providerId) throw new Error('invalid_request');
-  const { data: snapshotRows, error: snapshotError } = await client
-    .from('managed_provider_epg_catalog_snapshot')
-    .select('provider_stream_id,channel_name,epg_channel_id,category_id,category_name,canonical_name,snapshot_generation')
-    .eq('managed_provider_id', providerId)
-    .eq('is_active', true)
-    .order('captured_at', { ascending: false });
-  if (snapshotError) throw new Error('admin_query_failed');
+  const snapshotPageSize = 1_000;
+  const snapshotHardMax = 50_000;
+  const snapshotRows: ProviderCatalogSnapshotRow[] = [];
+  let snapshotPageCount = 0;
+  let snapshotGeneration: string | null = null;
+  let snapshotExpectedRows: number | null = null;
+  let snapshotComplete = false;
+  for (let offset = 0; offset < snapshotHardMax; offset += snapshotPageSize) {
+    let snapshotQuery = client
+      .from('managed_provider_epg_catalog_snapshot')
+      .select('provider_stream_id,channel_name,epg_channel_id,category_id,category_name,canonical_name,snapshot_generation,snapshot_expected_rows,snapshot_complete')
+      .eq('managed_provider_id', providerId)
+      .eq('is_active', true)
+      .order('provider_stream_id', { ascending: true });
+    if (snapshotGeneration) snapshotQuery = snapshotQuery.eq('snapshot_generation', snapshotGeneration);
+    const { data, error } = await snapshotQuery.range(offset, offset + snapshotPageSize - 1);
+    if (error) throw new Error('admin_query_failed');
+    const page = (data ?? []) as ProviderCatalogSnapshotRow[];
+    snapshotPageCount += 1;
+    snapshotRows.push(...page);
+    if (snapshotGeneration == null && page[0]?.snapshot_generation) snapshotGeneration = page[0].snapshot_generation;
+    if (snapshotExpectedRows == null && page[0]?.snapshot_expected_rows != null) snapshotExpectedRows = page[0].snapshot_expected_rows;
+    if (page[0]?.snapshot_complete === true) snapshotComplete = true;
+    if (page.length < snapshotPageSize) break;
+    if (snapshotRows.length >= snapshotHardMax) break;
+  }
+  const snapshotHardBoundHit = snapshotRows.length >= snapshotHardMax;
+  const snapshotStoredRows = snapshotRows.length;
+  snapshotComplete = snapshotComplete && !snapshotHardBoundHit && (snapshotExpectedRows == null || snapshotExpectedRows === snapshotStoredRows);
   const { data: xmltvRows, error: xmltvError } = source.active_cache_generation
     ? await client.from('managed_provider_epg_source_channels').select('xmltv_channel_id,display_name,canonical_name,alternate_names').eq('source_id', sourceId).eq('cache_generation', source.active_cache_generation)
     : { data: [], error: null };
@@ -599,7 +623,7 @@ async function previewEpgMappingAudit(client: Awaited<ReturnType<typeof requireA
     : { data: [], error: null };
   if (mappingError) throw new Error('admin_query_failed');
 
-  const providers = (snapshotRows ?? []) as ProviderCatalogSnapshotRow[];
+  const providers = snapshotRows;
   const xmltv = (xmltvRows ?? []) as Array<{ xmltv_channel_id: string; display_name: string; canonical_name: string; alternate_names?: unknown }>;
   const byId = new Map(xmltv.map((row) => [row.xmltv_channel_id, row]));
   const byLowerId = new Map<string, typeof xmltv>([]);
@@ -620,21 +644,42 @@ async function previewEpgMappingAudit(client: Awaited<ReturnType<typeof requireA
     }
   }
   const unique = (rows: typeof xmltv) => [...new Map(rows.map((row) => [row.xmltv_channel_id, row])).values()];
-  const directIdPotential = providers.filter((row) => row.epg_channel_id && byId.has(row.epg_channel_id)).length;
-  const caseInsensitiveIdPotential = providers.filter((row) => row.epg_channel_id && !byId.has(row.epg_channel_id) && unique(byLowerId.get(row.epg_channel_id.toLocaleLowerCase()) ?? []).length === 1).length;
-  const exactNamePotential = providers.filter((row) => unique(byRawName.get(row.channel_name.trim()) ?? []).length === 1).length;
-  const normalizedNamePotential = providers.filter((row) => unique(byNormalized.get(normalizeEpgName(row.channel_name)) ?? []).length === 1).length;
-  const canonicalPotential = providers.filter((row) => unique(byCanonical.get(canonicalizeEpgName(row.channel_name)) ?? []).length === 1).length;
-  const ambiguousPotential = providers.filter((row) => unique(byNormalized.get(normalizeEpgName(row.channel_name)) ?? []).length > 1 || unique(byCanonical.get(canonicalizeEpgName(row.channel_name)) ?? []).length > 1).length;
+  const mapped = new Set((mappingRows ?? []).filter((row) => row.match_confidence_class === 'proven').map((row) => row.provider_stream_id));
+  const projected = { directIdPotential: 0, caseInsensitiveIdPotential: 0, exactNamePotential: 0, normalizedNamePotential: 0, canonicalPotential: 0, ambiguousPotential: 0 };
+  const additionalMatches = new Map<string, ProviderCatalogSnapshotRow>();
+  const isUsRow = (row: ProviderCatalogSnapshotRow) => classifyEpgChannel({ name: row.channel_name, epgChannelId: row.epg_channel_id ?? null, category: row.category_name ?? row.category_id ?? null }).isUs;
+  for (const row of providers) {
+    if (mapped.has(row.provider_stream_id)) continue;
+    const exactId = row.epg_channel_id ? unique(byId.has(row.epg_channel_id) ? [byId.get(row.epg_channel_id)!] : []) : [];
+    const lowerId = row.epg_channel_id ? unique(byLowerId.get(row.epg_channel_id.toLocaleLowerCase()) ?? []) : [];
+    const exactName = unique(byRawName.get(row.channel_name.trim()) ?? []);
+    const normalizedName = unique(byNormalized.get(normalizeEpgName(row.channel_name)) ?? []);
+    const canonicalName = unique(byCanonical.get(canonicalizeEpgName(row.channel_name)) ?? []);
+    let matchedBy: string | null = null;
+    if (exactId.length === 1) matchedBy = 'directIdPotential';
+    else if (lowerId.length === 1) matchedBy = 'caseInsensitiveIdPotential';
+    else if (exactName.length === 1) matchedBy = 'exactNamePotential';
+    else if (normalizedName.length === 1) matchedBy = 'normalizedNamePotential';
+    else if (canonicalName.length === 1) matchedBy = 'canonicalPotential';
+    else if (normalizedName.length > 1 || canonicalName.length > 1) projected.ambiguousPotential += 1;
+    if (matchedBy) { projected[matchedBy as keyof typeof projected] += 1; additionalMatches.set(row.provider_stream_id, row); }
+  }
   const nationalTerms = ['ABC', 'CBS', 'NBC', 'FOX', 'ESPN', 'TNT', 'TBS', 'USA NETWORK', 'NFL', 'NBA', 'HBO', 'CNN', 'MSNBC', 'CNBC'];
+  const classify = (row: ProviderCatalogSnapshotRow) => classifyEpgChannel({ name: row.channel_name, epgChannelId: row.epg_channel_id ?? null, category: row.category_name ?? row.category_id ?? null });
+  const group = (predicate: (row: ProviderCatalogSnapshotRow) => boolean) => {
+    const rows = providers.filter(predicate);
+    return { rows: rows.length, uniqueCanonicalNames: new Set(rows.map((row) => row.canonical_name || canonicalizeEpgName(row.channel_name)).filter(Boolean)).size };
+  };
   const groupCounts = {
-    PRIME: providers.filter((row) => /\bPRIME\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
-    US: providers.filter((row) => /(^|[^A-Z])(US|USA|UNITED STATES)([^A-Z]|$)/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
-    USA: providers.filter((row) => /(^|[^A-Z])USA([^A-Z]|$)/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
-    NBA: providers.filter((row) => /\bNBA\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
-    NFL: providers.filter((row) => /\bNFL\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
-    majorNationalNetworks: providers.filter((row) => nationalTerms.some((term) => new RegExp(`(^|[^A-Z])${term.replace(/[+&]/g, '\\$&')}(?=[^A-Z]|$)`, 'i').test(row.channel_name))).length,
-    likelyLocals: providers.filter((row) => /\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
+    PRIME: group((row) => /\bPRIME\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)),
+    US: group((row) => classify(row).reason === 'us_prefix' || classify(row).reason === 'us_category'),
+    USA: group((row) => /(^|[^A-Z])USA([^A-Z]|$)/i.test(row.channel_name) || /(^|[^A-Z])USA([^A-Z]|$)/i.test(row.category_name ?? '')),
+    NBA: group((row) => /\bNBA\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)),
+    NFL: group((row) => /\bNFL\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)),
+    majorNationalNetworks: group((row) => classify(row).isUs && nationalTerms.some((term) => new RegExp(`(^|[^A-Z])${term.replace(/[+&]/g, '\\$&')}(?=[^A-Z]|$)`, 'i').test(row.channel_name))),
+    likelyLocals: group((row) => classify(row).isUs && /\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)),
+    explicitForeign: group((row) => !classify(row).isUs && (classify(row).reason === 'explicit_non_us_prefix' || classify(row).reason === 'explicit_non_us_category')),
+    other: group((row) => !classify(row).isUs && classify(row).reason === 'no_us_signal'),
   };
   const targetVariants = new Map<string, ProviderCatalogSnapshotRow[]>();
   for (const row of providers) {
@@ -645,27 +690,39 @@ async function previewEpgMappingAudit(client: Awaited<ReturnType<typeof requireA
   const namespaceCounts = new Map<string, number>();
   for (const row of providers) { const match = row.epg_channel_id?.match(/\.([A-Za-z0-9]{2,})$/); const key = match ? `.${match[1].toLowerCase()}` : '(no suffix)'; namespaceCounts.set(key, (namespaceCounts.get(key) ?? 0) + 1); }
   const namespaceFamilies = [...namespaceCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([suffix, count]) => ({ suffix, count }));
-  const mapped = new Set((mappingRows ?? []).filter((row) => row.match_confidence_class === 'proven').map((row) => row.provider_stream_id));
   const sample = (predicate: (row: ProviderCatalogSnapshotRow) => boolean) => providers.filter((row) => predicate(row)).slice(0, 10).map((row) => ({ providerStreamId: row.provider_stream_id, channelName: row.channel_name, epgChannelId: row.epg_channel_id ?? null }));
+  const currentMapped = mapped.size;
+  const additionalDeterministicPotential = additionalMatches.size;
+  const usRows = providers.filter(isUsRow);
+  const usMapped = usRows.filter((row) => mapped.has(row.provider_stream_id)).length;
+  const usAdditional = [...additionalMatches.values()].filter(isUsRow).length;
   return {
     providerId,
     sourceId,
-    snapshot: { providerRows: providers.length, snapshotGeneration: providers[0]?.snapshot_generation ?? null },
+    snapshot: { providerRows: providers.length, snapshotGeneration },
+    snapshotRowsLoaded: providers.length,
+    snapshotPageCount,
+    snapshotExpectedRows,
+    snapshotStoredRows,
+    snapshotComplete,
+    snapshotHardBoundHit,
     providerRows: providers.length,
     uniqueProviderCanonicalNames: new Set(providers.map((row) => row.canonical_name || canonicalizeEpgName(row.channel_name)).filter(Boolean)).size,
     providerRowsWithEpgId: providers.filter((row) => Boolean(row.epg_channel_id)).length,
     providerRowsWithoutEpgId: providers.filter((row) => !row.epg_channel_id).length,
     xmltvChannels: xmltv.length,
-    currentMapped: mapped.size,
+    currentMapped,
     groups: groupCounts,
-    directIdPotential,
-    caseInsensitiveIdPotential,
-    exactNamePotential,
-    normalizedNamePotential,
-    canonicalPotential,
-    ambiguousPotential,
-    manyToOne: { providerRowCount: duplicateVariants.reduce((sum, row) => sum + row.providerRowCount, 0), uniqueXmltvTargetCount: duplicateVariants.length, duplicateQualityVariantCount: duplicateVariants.filter((row) => row.names.some((name) => /\b(?:HD|FHD|UHD|4K)\b/i.test(name))).length, ambiguityCount: ambiguousPotential },
-    samples: { unmatchedNational: sample((row) => !mapped.has(row.provider_stream_id) && /\b(?:US|USA|ESPN|FOX|NBC|CBS|ABC|TNT|TBS|NFL|NBA)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)), unmatchedLocal: sample((row) => !mapped.has(row.provider_stream_id) && /\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)), duplicateProviderVariants: duplicateVariants, namespaceFamilies },
+    ...projected,
+    additionalDeterministicPotential,
+    projectedMappedTotal: currentMapped + additionalDeterministicPotential,
+    usRelevantRows: usRows.length,
+    usCurrentMapped: usMapped,
+    usAdditionalPotential: usAdditional,
+    usProjectedMapped: usMapped + usAdditional,
+    usProjectedMappingPercent: usRows.length ? (usMapped + usAdditional) / usRows.length : 0,
+    manyToOne: { providerRowCount: duplicateVariants.reduce((sum, row) => sum + row.providerRowCount, 0), uniqueXmltvTargetCount: duplicateVariants.length, duplicateQualityVariantCount: duplicateVariants.filter((row) => row.names.some((name) => /\b(?:HD|FHD|UHD|4K)\b/i.test(name))).length, ambiguityCount: projected.ambiguousPotential },
+    samples: { unmatchedNational: sample((row) => isUsRow(row) && !mapped.has(row.provider_stream_id) && !/\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)), unmatchedLocal: sample((row) => isUsRow(row) && !mapped.has(row.provider_stream_id) && /\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)), duplicateProviderVariants: duplicateVariants, namespaceFamilies },
   };
 }
 

@@ -109,6 +109,27 @@ test('provider catalog snapshot is bounded, provider-scoped, generation-safe, an
   assert.match(ui, /Mapping Audit/);
 });
 
+test('mapping audit pages the complete snapshot and applies geographic classification before projections', () => {
+  assert.match(admin, /const snapshotPageSize = 1_000/);
+  assert.match(admin, /const snapshotHardMax = 50_000/);
+  assert.match(admin, /\.range\(offset, offset \+ snapshotPageSize - 1\)/);
+  assert.match(admin, /if \(page\.length < snapshotPageSize\) break/);
+  assert.match(admin, /snapshotRowsLoaded/);
+  assert.match(admin, /snapshotPageCount/);
+  assert.match(admin, /snapshotExpectedRows/);
+  assert.match(admin, /snapshotStoredRows/);
+  assert.match(admin, /snapshotComplete/);
+  assert.match(admin, /classifyEpgChannel\(\{ name: row\.channel_name/);
+  assert.match(admin, /if \(mapped\.has\(row\.provider_stream_id\)\) continue/);
+  assert.match(admin, /additionalDeterministicPotential/);
+  assert.match(admin, /projectedMappedTotal: currentMapped \+ additionalDeterministicPotential/);
+  assert.match(admin, /usRelevantRows/);
+  assert.match(admin, /usProjectedMappingPercent/);
+  assert.match(admin, /unmatchedNational: sample\(\(row\) => isUsRow\(row\)/);
+  const audit = admin.slice(admin.indexOf('async function previewEpgMappingAudit'), admin.indexOf('async function loadPublicProviders'));
+  assert.doesNotMatch(audit, /fetchLiveChannelsForEpgMapping|fetch\(|decrypt/);
+});
+
 test('admin preview is compact and does not expose cached programme payloads or secrets', () => {
   assert.match(ui, /Preview Combined Coverage/);
   assert.match(ui, /resolvedBySource/);

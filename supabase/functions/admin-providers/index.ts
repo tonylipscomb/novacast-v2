@@ -11,7 +11,7 @@ import {
 } from '../_shared/providerHealth.ts';
 import { runProviderHealthCheck } from '../_shared/providerHealthRunner.ts';
 import { fetchLiveChannelsForEpgMapping } from '../_shared/providerHealthRunner.ts';
-import { canonicalizeEpgName, normalizeEpgMode, safeEpgUrl, testXmltvFeed, traceXmltvFeed, type EpgLiveChannel, type EpgMode, type XmltvStreamSink } from '../_shared/xmltvEpg.ts';
+import { canonicalizeEpgName, normalizeEpgName, normalizeEpgMode, safeEpgUrl, testXmltvFeed, traceXmltvFeed, type EpgLiveChannel, type EpgMode, type XmltvStreamSink } from '../_shared/xmltvEpg.ts';
 
 const PROVIDER_SELECT =
   'id,slug,display_name,status,content_policy,notes,last_validated_at,last_tested_at,last_successful_test_at,health_status,live_channel_count,movie_count,series_count,validation_stale,last_health_summary,epg_mode,custom_epg_url_ciphertext,epg_last_refresh_at,epg_last_refresh_status,epg_last_refresh_summary,created_at,updated_at';
@@ -58,6 +58,16 @@ type ManagedProviderEpgSourceRow = {
   active_cache_generation?: string | null;
 };
 
+type ProviderCatalogSnapshotRow = {
+  provider_stream_id: string;
+  channel_name: string;
+  epg_channel_id?: string | null;
+  category_id?: string | null;
+  category_name?: string | null;
+  canonical_name?: string | null;
+  snapshot_generation: string;
+};
+
 type EpgRefreshJobRow = {
   id: string;
   managed_provider_id: string;
@@ -82,6 +92,53 @@ type EpgRefreshJobRow = {
 };
 
 type XtreamCredentials = { type: 'xtream'; baseUrl: string; username: string; password: string };
+
+type AdminRefreshDiagnostic = { operation: string; code?: string; message?: string; details?: string; hint?: string };
+
+class AdminRefreshRequestFailure extends Error {
+  errorCategory = 'admin_refresh_job_failed' as const;
+  diagnostic: AdminRefreshDiagnostic;
+
+  constructor(operation: string, error: { code?: unknown; message?: unknown; details?: unknown; hint?: unknown }) {
+    super('admin_refresh_request_failed');
+    this.name = 'AdminRefreshRequestFailure';
+    const fields = Object.fromEntries(
+      Object.entries({ code: error.code, message: error.message, details: error.details, hint: error.hint })
+        .map(([key, value]) => [key, safeRefreshDatabaseField(value)])
+        .filter(([, value]) => value !== null),
+    ) as Omit<AdminRefreshDiagnostic, 'operation'>;
+    this.diagnostic = { operation, ...fields };
+  }
+}
+
+class AdminRefreshRequestLookupFailure extends AdminRefreshRequestFailure {
+  constructor(error: { code?: unknown; message?: unknown; details?: unknown; hint?: unknown }) {
+    super('lookup_active_refresh_request', error);
+    this.name = 'AdminRefreshRequestLookupFailure';
+  }
+}
+
+class AdminRefreshRequestInsertFailure extends AdminRefreshRequestFailure {
+  constructor(error: { code?: unknown; message?: unknown; details?: unknown; hint?: unknown }) {
+    super('insert_refresh_request', error);
+    this.name = 'AdminRefreshRequestInsertFailure';
+  }
+}
+
+function isAdminRefreshRequestDiagnostic(error: unknown): error is AdminRefreshRequestFailure {
+  return Boolean(error && typeof error === 'object' && (error as { errorCategory?: unknown }).errorCategory === 'admin_refresh_job_failed' && (error as { diagnostic?: unknown }).diagnostic);
+}
+
+function safeRefreshDatabaseField(value: unknown) {
+  if (typeof value !== 'string') return null;
+  return value
+    .replace(/https?:\/\/[^\s"']+/gi, '[redacted-url]')
+    .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
+    .replace(/(password|passwd|username|user|token|secret|authorization|api[_-]?key|key)\s*[=:]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .slice(0, 240) || null;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function slugify(value: string) {
   return value
@@ -124,6 +181,7 @@ function mapError(error: unknown) {
     'refresh_in_progress',
     'refresh_job_not_found',
     'admin_refresh_job_failed',
+    'admin_refresh_request_lookup_failed',
     'admin_refresh_artifact_failed',
     'refresh_failed',
     'refresh_expired',
@@ -342,22 +400,18 @@ async function markRefreshJobFailed(client: Awaited<ReturnType<typeof requireAdm
 }
 
 async function enqueueEpgRefresh(client: Awaited<ReturnType<typeof requireAdmin>>['client'], source: ManagedProviderEpgSourceRow) {
-  const { data: active, error: activeError } = await client.from('managed_provider_epg_refresh_requests').select('id,status').eq('managed_provider_id', source.managed_provider_id).eq('source_id', source.id).in('status', ['pending', 'running']).maybeSingle();
-  if (activeError) throw new Error('admin_refresh_job_failed');
+  if (!UUID_PATTERN.test(source.id) || !UUID_PATTERN.test(source.managed_provider_id)) {
+    throw new AdminRefreshRequestInsertFailure({ message: 'invalid_refresh_request_identity' });
+  }
+  const { data: active, error: activeError } = await client.from('managed_provider_epg_refresh_requests').select('id,status').eq('managed_provider_id', source.managed_provider_id).eq('source_id', source.id).in('status', ['pending', 'running']).order('requested_at', { ascending: false }).limit(1).maybeSingle();
+  if (activeError) throw new AdminRefreshRequestLookupFailure(activeError);
   if (active) throw new Error('refresh_in_progress');
   const now = new Date().toISOString();
   const { data: request, error: requestError } = await client.from('managed_provider_epg_refresh_requests').insert({ managed_provider_id: source.managed_provider_id, source_id: source.id, status: 'pending', requested_at: now }).select('id').single();
-  if (requestError || !request) throw new Error(requestError?.code === '23505' ? 'refresh_in_progress' : 'admin_refresh_job_failed');
-  const jobId = crypto.randomUUID();
-  const generation = crypto.randomUUID();
-  const { error: jobError } = await client.from('managed_provider_epg_refresh_jobs').insert({ id: jobId, managed_provider_id: source.managed_provider_id, source_id: source.id, generation, status: 'queued', stage: 'queued', updated_at: now });
-  if (jobError) {
-    await client.from('managed_provider_epg_refresh_requests').update({ status: 'failed', failure_code: 'admin_refresh_job_failed', failure_message: 'admin_refresh_job_failed', completed_at: new Date().toISOString() }).eq('id', request.id);
-    throw new Error('admin_refresh_job_failed');
-  }
-  const { error: linkError } = await client.from('managed_provider_epg_refresh_requests').update({ refresh_job_id: jobId }).eq('id', request.id);
-  if (linkError) throw new Error('admin_refresh_job_failed');
-  return { jobId, sourceId: source.id, status: 'queued', startedAt: null };
+  if (requestError?.code === '23505') throw new Error('refresh_in_progress');
+  if (requestError) throw new AdminRefreshRequestInsertFailure(requestError);
+  if (!request) throw new AdminRefreshRequestInsertFailure({ message: 'invalid_database_response' });
+  return { requestId: request.id, sourceId: source.id, status: 'pending', requestedAt: now };
 }
 
 async function startEpgRefresh(client: Awaited<ReturnType<typeof requireAdmin>>['client'], source: ManagedProviderEpgSourceRow) {
@@ -526,6 +580,95 @@ async function previewEpgResolution(client: Awaited<ReturnType<typeof requireAdm
   return { providerId, totalProviderChannelsConsidered: liveChannels.length, resolvedChannels: resolved, unresolvedChannels: liveChannels.length - resolved, resolvedBySource, resolvedByMatchType, duplicateCandidateConflicts, samples: { resolved: resolvedSamples, unresolved: unresolvedSamples } };
 }
 
+async function previewEpgMappingAudit(client: Awaited<ReturnType<typeof requireAdmin>>['client'], providerId: string, sourceId: string) {
+  const source = await loadEpgSource(client, sourceId);
+  if (source.managed_provider_id !== providerId) throw new Error('invalid_request');
+  const { data: snapshotRows, error: snapshotError } = await client
+    .from('managed_provider_epg_catalog_snapshot')
+    .select('provider_stream_id,channel_name,epg_channel_id,category_id,category_name,canonical_name,snapshot_generation')
+    .eq('managed_provider_id', providerId)
+    .eq('is_active', true)
+    .order('captured_at', { ascending: false });
+  if (snapshotError) throw new Error('admin_query_failed');
+  const { data: xmltvRows, error: xmltvError } = source.active_cache_generation
+    ? await client.from('managed_provider_epg_source_channels').select('xmltv_channel_id,display_name,canonical_name,alternate_names').eq('source_id', sourceId).eq('cache_generation', source.active_cache_generation)
+    : { data: [], error: null };
+  if (xmltvError) throw new Error('admin_query_failed');
+  const { data: mappingRows, error: mappingError } = source.active_cache_generation
+    ? await client.from('managed_provider_epg_source_mappings').select('provider_stream_id,xmltv_channel_id,match_type,match_confidence_class').eq('source_id', sourceId).eq('cache_generation', source.active_cache_generation)
+    : { data: [], error: null };
+  if (mappingError) throw new Error('admin_query_failed');
+
+  const providers = (snapshotRows ?? []) as ProviderCatalogSnapshotRow[];
+  const xmltv = (xmltvRows ?? []) as Array<{ xmltv_channel_id: string; display_name: string; canonical_name: string; alternate_names?: unknown }>;
+  const byId = new Map(xmltv.map((row) => [row.xmltv_channel_id, row]));
+  const byLowerId = new Map<string, typeof xmltv>([]);
+  const byRawName = new Map<string, typeof xmltv>([]);
+  const byNormalized = new Map<string, typeof xmltv>([]);
+  const byCanonical = new Map<string, typeof xmltv>([]);
+  const add = (index: Map<string, typeof xmltv>, key: string, row: typeof xmltv[number]) => { if (key) index.set(key, [...(index.get(key) ?? []), row]); };
+  for (const row of xmltv) {
+    add(byLowerId, row.xmltv_channel_id.toLocaleLowerCase(), row);
+    add(byRawName, row.display_name.trim(), row);
+    add(byNormalized, normalizeEpgName(row.display_name), row);
+    add(byCanonical, canonicalizeEpgName(row.display_name), row);
+    const alternates = Array.isArray(row.alternate_names) ? row.alternate_names.filter((value): value is string => typeof value === 'string') : [];
+    for (const alternate of alternates) {
+      add(byRawName, alternate.trim(), row);
+      add(byNormalized, normalizeEpgName(alternate), row);
+      add(byCanonical, canonicalizeEpgName(alternate), row);
+    }
+  }
+  const unique = (rows: typeof xmltv) => [...new Map(rows.map((row) => [row.xmltv_channel_id, row])).values()];
+  const directIdPotential = providers.filter((row) => row.epg_channel_id && byId.has(row.epg_channel_id)).length;
+  const caseInsensitiveIdPotential = providers.filter((row) => row.epg_channel_id && !byId.has(row.epg_channel_id) && unique(byLowerId.get(row.epg_channel_id.toLocaleLowerCase()) ?? []).length === 1).length;
+  const exactNamePotential = providers.filter((row) => unique(byRawName.get(row.channel_name.trim()) ?? []).length === 1).length;
+  const normalizedNamePotential = providers.filter((row) => unique(byNormalized.get(normalizeEpgName(row.channel_name)) ?? []).length === 1).length;
+  const canonicalPotential = providers.filter((row) => unique(byCanonical.get(canonicalizeEpgName(row.channel_name)) ?? []).length === 1).length;
+  const ambiguousPotential = providers.filter((row) => unique(byNormalized.get(normalizeEpgName(row.channel_name)) ?? []).length > 1 || unique(byCanonical.get(canonicalizeEpgName(row.channel_name)) ?? []).length > 1).length;
+  const nationalTerms = ['ABC', 'CBS', 'NBC', 'FOX', 'ESPN', 'TNT', 'TBS', 'USA NETWORK', 'NFL', 'NBA', 'HBO', 'CNN', 'MSNBC', 'CNBC'];
+  const groupCounts = {
+    PRIME: providers.filter((row) => /\bPRIME\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
+    US: providers.filter((row) => /(^|[^A-Z])(US|USA|UNITED STATES)([^A-Z]|$)/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
+    USA: providers.filter((row) => /(^|[^A-Z])USA([^A-Z]|$)/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
+    NBA: providers.filter((row) => /\bNBA\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
+    NFL: providers.filter((row) => /\bNFL\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
+    majorNationalNetworks: providers.filter((row) => nationalTerms.some((term) => new RegExp(`(^|[^A-Z])${term.replace(/[+&]/g, '\\$&')}(?=[^A-Z]|$)`, 'i').test(row.channel_name))).length,
+    likelyLocals: providers.filter((row) => /\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)).length,
+  };
+  const targetVariants = new Map<string, ProviderCatalogSnapshotRow[]>();
+  for (const row of providers) {
+    const targets = unique(byCanonical.get(canonicalizeEpgName(row.channel_name)) ?? []);
+    if (targets.length === 1) targetVariants.set(targets[0].xmltv_channel_id, [...(targetVariants.get(targets[0].xmltv_channel_id) ?? []), row]);
+  }
+  const duplicateVariants = [...targetVariants.entries()].filter(([, rows]) => rows.length > 1).slice(0, 10).map(([xmltvChannelId, rows]) => ({ xmltvChannelId, providerRowCount: rows.length, providerStreamIds: rows.slice(0, 10).map((row) => row.provider_stream_id), names: rows.slice(0, 10).map((row) => row.channel_name) }));
+  const namespaceCounts = new Map<string, number>();
+  for (const row of providers) { const match = row.epg_channel_id?.match(/\.([A-Za-z0-9]{2,})$/); const key = match ? `.${match[1].toLowerCase()}` : '(no suffix)'; namespaceCounts.set(key, (namespaceCounts.get(key) ?? 0) + 1); }
+  const namespaceFamilies = [...namespaceCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([suffix, count]) => ({ suffix, count }));
+  const mapped = new Set((mappingRows ?? []).filter((row) => row.match_confidence_class === 'proven').map((row) => row.provider_stream_id));
+  const sample = (predicate: (row: ProviderCatalogSnapshotRow) => boolean) => providers.filter((row) => predicate(row)).slice(0, 10).map((row) => ({ providerStreamId: row.provider_stream_id, channelName: row.channel_name, epgChannelId: row.epg_channel_id ?? null }));
+  return {
+    providerId,
+    sourceId,
+    snapshot: { providerRows: providers.length, snapshotGeneration: providers[0]?.snapshot_generation ?? null },
+    providerRows: providers.length,
+    uniqueProviderCanonicalNames: new Set(providers.map((row) => row.canonical_name || canonicalizeEpgName(row.channel_name)).filter(Boolean)).size,
+    providerRowsWithEpgId: providers.filter((row) => Boolean(row.epg_channel_id)).length,
+    providerRowsWithoutEpgId: providers.filter((row) => !row.epg_channel_id).length,
+    xmltvChannels: xmltv.length,
+    currentMapped: mapped.size,
+    groups: groupCounts,
+    directIdPotential,
+    caseInsensitiveIdPotential,
+    exactNamePotential,
+    normalizedNamePotential,
+    canonicalPotential,
+    ambiguousPotential,
+    manyToOne: { providerRowCount: duplicateVariants.reduce((sum, row) => sum + row.providerRowCount, 0), uniqueXmltvTargetCount: duplicateVariants.length, duplicateQualityVariantCount: duplicateVariants.filter((row) => row.names.some((name) => /\b(?:HD|FHD|UHD|4K)\b/i.test(name))).length, ambiguityCount: ambiguousPotential },
+    samples: { unmatchedNational: sample((row) => !mapped.has(row.provider_stream_id) && /\b(?:US|USA|ESPN|FOX|NBC|CBS|ABC|TNT|TBS|NFL|NBA)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)), unmatchedLocal: sample((row) => !mapped.has(row.provider_stream_id) && /\b(?:LOCAL|LOCALS|AFFILIATE)\b/i.test(`${row.channel_name} ${row.category_name ?? ''}`)), duplicateProviderVariants: duplicateVariants, namespaceFamilies },
+  };
+}
+
 async function loadPublicProviders(client: Awaited<ReturnType<typeof requireAdmin>>['client']) {
   const { data, error } = await client.from('managed_providers').select(PROVIDER_SELECT).order('created_at', { ascending: false });
   if (error) throw new Error('admin_query_failed');
@@ -687,6 +830,13 @@ Deno.serve(async (request) => {
       const providerId = typeof body.managedProviderId === 'string' ? body.managedProviderId : typeof body.id === 'string' ? body.id : '';
       if (!providerId) throw new Error('invalid_request');
       return adminJsonResponse(request, { preview: await previewEpgResolution(client, providerId) });
+    }
+
+    if (action === 'preview_epg_mapping_audit') {
+      const providerId = typeof body.managedProviderId === 'string' ? body.managedProviderId : '';
+      const sourceId = typeof body.sourceId === 'string' ? body.sourceId : '';
+      if (!providerId || !sourceId) throw new Error('invalid_request');
+      return adminJsonResponse(request, { audit: await previewEpgMappingAudit(client, providerId, sourceId) });
     }
 
     if (action === 'probe') {
@@ -934,7 +1084,8 @@ Deno.serve(async (request) => {
 
       return adminJsonResponse(request, { provider: toPublicProvider(data as Record<string, unknown>) });
   } catch (error) {
-    const category = mapError(error);
-    return adminJsonResponse(request, { errorCategory: category }, statusCodeFor(category));
+    const category = isAdminRefreshRequestDiagnostic(error) ? error.errorCategory : mapError(error);
+    const diagnostic = isAdminRefreshRequestDiagnostic(error) ? { diagnostic: error.diagnostic } : {};
+    return adminJsonResponse(request, { errorCategory: category, ...diagnostic }, statusCodeFor(category));
   }
 });

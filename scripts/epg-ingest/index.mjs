@@ -396,7 +396,18 @@ async function processRequest(request) {
 async function enqueueScheduledRefresh(source) {
   const providerId = requireUuid(source.managed_provider_id, 'enqueue_scheduled_refresh', 'provider_id');
   const sourceId = requireUuid(source.id, 'enqueue_scheduled_refresh', 'source_id');
-  const result = await db('managed_provider_epg_refresh_requests', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=representation' }, body: JSON.stringify({ managed_provider_id: providerId, source_id: sourceId, status: 'pending', requested_at: new Date().toISOString() }) }, 'enqueue_scheduled_refresh');
+  let result;
+  try {
+    result = await db('managed_provider_epg_refresh_requests', { method: 'POST', headers: { Prefer: 'resolution=ignore-duplicates,return=representation' }, body: JSON.stringify({ managed_provider_id: providerId, source_id: sourceId, status: 'pending', requested_at: new Date().toISOString() }) }, 'enqueue_scheduled_refresh');
+  } catch (error) {
+    const conflictText = [error?.safeMessage, error?.details, error?.hint].filter(Boolean).join(' ');
+    const expectedActiveConflict = error instanceof DatabaseFailure && error.httpStatus === 409 && error.code === '23505' && conflictText.includes('managed_provider_epg_refresh_requests_one_active_idx');
+    if (!expectedActiveConflict) throw error;
+    const [existing] = await db(`managed_provider_epg_refresh_requests?managed_provider_id=eq.${encodeURIComponent(providerId)}&source_id=eq.${encodeURIComponent(sourceId)}&status=in.(pending,running)&select=id,status&limit=1`, {}, 'load_existing_refresh_request');
+    if (!existing) throw error;
+    process.stdout.write('Active EPG refresh request already exists; reusing it.\n');
+    return requireUuid(existing.id, 'enqueue_scheduled_refresh', 'request_id');
+  }
   const inserted = Array.isArray(result) ? result[0] : result;
   if (inserted?.id != null) return requireUuid(inserted.id, 'enqueue_scheduled_refresh', 'request_id');
   const [existing] = await db(`managed_provider_epg_refresh_requests?managed_provider_id=eq.${encodeURIComponent(providerId)}&source_id=eq.${encodeURIComponent(sourceId)}&status=in.(pending,running)&select=id,refresh_job_id&limit=1`, {}, 'load_existing_refresh_request');

@@ -129,6 +129,46 @@ test('HTTP 201 representation returns a valid enqueued request UUID and omits em
   assert.doesNotMatch(enqueue.url, /null|undefined/i);
 });
 
+test('duplicate active-request enqueue is benign and reuses the existing pending request', async () => {
+  const seen = [];
+  const server = await serverFor((request, response) => {
+    seen.push({ method: request.method, url: request.url });
+    if (request.url.includes('managed_provider_epg_sources')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: sourceUuid, managed_provider_id: providerUuid }]));
+      return;
+    }
+    if (request.method === 'POST' && request.url.includes('managed_provider_epg_refresh_requests')) {
+      response.writeHead(409, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ code: '23505', message: 'duplicate key value violates unique constraint managed_provider_epg_refresh_requests_one_active_idx' }));
+      return;
+    }
+    if (request.url.includes('select=id,status')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: requestUuid, status: 'pending' }]));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('[]');
+  });
+  const result = await runWorker(server.address().port);
+  server.close();
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /Active EPG refresh request already exists; reusing it\./);
+  assert.equal(result.stderr, '');
+  assert.ok(seen.some((entry) => entry.method === 'POST' && entry.url.includes('managed_provider_epg_refresh_requests')));
+  assert.ok(seen.some((entry) => entry.url.includes('select=id,status')));
+});
+
+test('scheduled enqueue only treats the named active-request uniqueness conflict as benign', () => {
+  assert.match(worker, /error\.httpStatus === 409/);
+  assert.match(worker, /error\.code === '23505'/);
+  assert.match(worker, /managed_provider_epg_refresh_requests_one_active_idx/);
+  assert.match(worker, /load_existing_refresh_request/);
+  assert.match(worker, /Active EPG refresh request already exists; reusing it/);
+  assert.match(worker, /if \(!expectedActiveConflict\) throw error/);
+});
+
 test('HTTP 201 with an empty body fails when the inserted request UUID is required', async () => {
   const server = await serverFor((request, response) => {
     if (request.url.includes('managed_provider_epg_sources')) {

@@ -17,6 +17,7 @@ Deno.test('XMLTV parser returns bounded safe counts and invalid timestamp count'
 
 Deno.test('custom EPG URL validation blocks unsafe targets and credentials in authority', () => {
   assertEquals(safeEpgUrl('https://guide.example/lineup.xml?token=secret').hostname, 'guide.example');
+  assertEquals(safeEpgUrl('https://raw.githubusercontent.com/example/project/main/guide.xml.gz').hostname, 'raw.githubusercontent.com');
   assertThrows(() => safeEpgUrl('http://127.0.0.1/guide.xml'), Error, 'unsafe_url');
   assertThrows(() => safeEpgUrl('https://user:pass@guide.example/guide.xml'), Error, 'unsafe_url');
 });

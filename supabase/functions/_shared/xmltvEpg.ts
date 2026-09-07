@@ -60,6 +60,17 @@ export type EpgTraceResult = {
   serverHeaderPresent: boolean;
   locationHeaderPresent: boolean;
 } | { errorCategory: 'dns_failure' | 'timeout' | 'network_failure' | 'unsafe_url' };
+export type EpgProbeResult = {
+  status: 'reachable' | 'http_failure' | 'unsafe_url' | 'dns_failure' | 'timeout' | 'network_failure';
+  httpStatus: number | null;
+  contentType: string | null;
+  contentLength: string | null;
+  finalHost: string | null;
+  finalPath: string | null;
+  redirectCount: number;
+  safeUrl: boolean;
+  workerValidationRequired: true;
+};
 
 export const MAX_COMPRESSED_BYTES = 20 * 1024 * 1024;
 export const MAX_DECOMPRESSED_BYTES = 128 * 1024 * 1024;
@@ -317,12 +328,17 @@ export function classifyEpgChannel(channel: EpgLiveChannel) {
 
 export function canonicalizeEpgName(value: string) {
   const normalized = value.normalize('NFKC').replace(/[\u1d00-\u1d7f]/gu, (character) => character === '\u1d18' ? 'P' : character);
-  return normalizeEpgName(normalized)
-    .replace(/^(?:4k|hd|fhd|uhd|us|usa|prime)\s*[:\-]?\s*/i, '')
-    .replace(/\b(?:hd|fhd|uhd|4k|3840p|2160p|1080p|720p|event|live event|live-event|backup|raw)\b/gi, ' ')
-    .replace(/[#=\-]{2,}/g, ' ')
+  return normalized
+    .replace(/^\s*(?:4k|hd|fhd|uhd|us|usa|prime)\s*:\s*/i, '')
+    .replace(/\(\s*([WK][A-Z]{2,4})\s*\)/g, ' $1 ')
+    .replace(/\(\s*(?:event|live[\s-]*event)\s*\)/gi, ' ')
+    .replace(/\b(?:hd|fhd|uhd|4k|3840p|2160p|1080p|720p|event|live[\s-]*event|backup|raw)\b/gi, ' ')
+    .replace(/[._-]+/g, ' ')
+    .replace(/[&#=]+/g, ' ')
+    .replace(/[^\p{L}\p{N}\s()]/gu, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
+    .trim()
+    .toLocaleLowerCase();
 }
 
 function addIndexValue(index: Map<string, EpgChannelMetadata[]>, key: string, channel: EpgChannelMetadata) {
@@ -371,6 +387,10 @@ export function mapEpgChannels(liveChannels: EpgLiveChannel[], channelIndex: Map
   let usAmbiguousChannels = 0;
   let usCurrent = 0;
   let usFuture = 0;
+  const currentCoverageIds = new Set<string>();
+  const futureCoverageIds = new Set<string>();
+  const usCurrentCoverageIds = new Set<string>();
+  const usFutureCoverageIds = new Set<string>();
   let excludedByExplicitNonUsRegion = 0;
   let classifiedByUsCategory = 0;
   let classifiedByUsPrefix = 0;
@@ -455,11 +475,24 @@ export function mapEpgChannels(liveChannels: EpgLiveChannel[], channelIndex: Map
       if (matchedSamples.length < 10) matchedSamples.push({ providerName: name, providerCanonical: canonicalizeEpgName(name), xmltvDisplayName: candidates[0]!.displayNames[0] ?? candidates[0]!.id, xmltvCanonical: canonicalizeEpgName(candidates[0]!.displayNames[0] ?? candidates[0]!.id), matchType: matchKind });
     }
     const coverage = programCoverage.get(candidates[0]!.id);
-    if (coverage?.hasCurrent) current += 1;
-    if (coverage?.hasFuture) future += 1;
+    const targetId = candidates[0]!.id;
+    if (coverage?.hasCurrent && !currentCoverageIds.has(targetId)) {
+      currentCoverageIds.add(targetId);
+      current += 1;
+    }
+    if (coverage?.hasFuture && !futureCoverageIds.has(targetId)) {
+      futureCoverageIds.add(targetId);
+      future += 1;
+    }
     if (isUs) {
-      if (coverage?.hasCurrent) usCurrent += 1;
-      if (coverage?.hasFuture) usFuture += 1;
+      if (coverage?.hasCurrent && !usCurrentCoverageIds.has(targetId)) {
+        usCurrentCoverageIds.add(targetId);
+        usCurrent += 1;
+      }
+      if (coverage?.hasFuture && !usFutureCoverageIds.has(targetId)) {
+        usFutureCoverageIds.add(targetId);
+        usFuture += 1;
+      }
     }
   }
   const mappedChannels = directIdMatches + exactNameMatches + normalizedNameMatches + canonicalNameMatches + aliasMatches;
@@ -617,5 +650,57 @@ export async function traceXmltvFeed(input: { url: string }): Promise<EpgTraceRe
   } catch (error) {
     const category = classifyFetchError(error);
     return { errorCategory: category === 'timeout' ? 'timeout' : category === 'unsafe_url' ? 'unsafe_url' : category === 'dns_failure' ? 'dns_failure' : 'network_failure' };
+  } finally { clearTimeout(timer); }
+}
+
+const MAX_PROBE_REDIRECTS = 5;
+
+function classifyProbeHttpStatus(status: number) {
+  return status >= 200 && status < 400 ? 'reachable' as const : 'http_failure' as const;
+}
+
+export async function probeXmltvFeed(input: { url: string }): Promise<EpgProbeResult> {
+  let current: URL;
+  try {
+    current = safeEpgUrl(input.url);
+    await validateDns(current.hostname);
+  } catch (error) {
+    const category = classifyFetchError(error);
+    return { status: category === 'unsafe_url' ? 'unsafe_url' : category === 'dns_failure' ? 'dns_failure' : 'network_failure', httpStatus: null, contentType: null, contentLength: null, finalHost: null, finalPath: null, redirectCount: 0, safeUrl: category !== 'unsafe_url', workerValidationRequired: true };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  let redirectCount = 0;
+  try {
+    while (true) {
+      const response = await fetch(current, { method: 'GET', redirect: 'manual', signal: controller.signal });
+      const location = response.headers.get('location');
+      if (response.status >= 300 && response.status < 400 && location) {
+        if (redirectCount >= MAX_PROBE_REDIRECTS) throw new Error('unsafe_url');
+        let next: URL;
+        try { next = new URL(location, current); } catch { throw new Error('unsafe_url'); }
+        try { next = safeEpgUrl(next.toString()); await validateDns(next.hostname); } catch { throw new Error('unsafe_url'); }
+        redirectCount += 1;
+        await response.body?.cancel();
+        current = next;
+        continue;
+      }
+      await response.body?.cancel();
+      return {
+        status: classifyProbeHttpStatus(response.status),
+        httpStatus: response.status,
+        contentType: response.headers.get('content-type')?.split(';')[0].trim().slice(0, 80) ?? null,
+        contentLength: response.headers.get('content-length')?.slice(0, 32) ?? null,
+        finalHost: current.hostname,
+        finalPath: current.pathname,
+        redirectCount,
+        safeUrl: true,
+        workerValidationRequired: true,
+      };
+    }
+  } catch (error) {
+    const category = classifyFetchError(error);
+    return { status: category === 'timeout' ? 'timeout' : category === 'unsafe_url' ? 'unsafe_url' : category === 'dns_failure' ? 'dns_failure' : 'network_failure', httpStatus: null, contentType: null, contentLength: null, finalHost: null, finalPath: null, redirectCount, safeUrl: category !== 'unsafe_url', workerValidationRequired: true };
   } finally { clearTimeout(timer); }
 }

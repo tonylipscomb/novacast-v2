@@ -174,6 +174,16 @@ test('combined coverage is persisted off Edge from complete paginated cached dat
   assert.match(preview, /refreshRequired: true/);
 });
 
+test('combined readiness uses cached programme windows and preserves deterministic conflicts', () => {
+  for (const expression of ['Date.parse(programme.start_at)', 'start <= NOW && stop > NOW', 'start > NOW', 'sameTargetOverlap', 'different_target_conflict', 'us_combined_mapping_percent', 'managed_guide_delivery_ready']) assert.ok(worker.includes(expression), expression);
+  assert.match(worker, /programmeCoverageBySource/);
+  assert.match(worker, /load_combined_programmes/);
+  assert.match(worker, /mapping_ready/);
+  assert.match(worker, /programme_coverage_ready/);
+  assert.match(worker, /conflict_risk_acceptable/);
+  assert.doesNotMatch(worker, /fetchXmltv.*combined/i);
+});
+
 test('worker reclaims stale active jobs without deleting the active cache and handles races safely', () => {
   assert.match(worker, /STALE_REFRESH_JOB_MS = 30 \* 60 \* 1000/);
   assert.match(worker, /ACTIVE_REFRESH_JOB_STATUSES = \['queued', 'fetching', 'processing', 'finalizing'\]/);

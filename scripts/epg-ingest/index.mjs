@@ -155,14 +155,27 @@ async function persistCombinedCoverage(providerId) {
   const snapshotHead = (await db(snapshotQuery, {}, 'load_combined_snapshot'))?.[0];
   if (!snapshotHead?.snapshot_generation) return null;
   const snapshotGeneration = requireUuid(snapshotHead.snapshot_generation, 'load_combined_snapshot', 'snapshot_generation');
-  const snapshotPath = 'managed_provider_epg_catalog_snapshot?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&snapshot_generation=eq.' + encodeURIComponent(snapshotGeneration) + '&is_active=eq.true&snapshot_complete=eq.true&select=provider_stream_id,channel_name';
+  const snapshotPath = 'managed_provider_epg_catalog_snapshot?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&snapshot_generation=eq.' + encodeURIComponent(snapshotGeneration) + '&is_active=eq.true&snapshot_complete=eq.true&select=provider_stream_id,channel_name,category_name';
   const snapshotRows = await loadAllRows(snapshotPath, 'load_combined_snapshot_rows');
   const sources = await db('managed_provider_epg_sources?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&enabled=eq.true&select=id,safe_label,priority,active_cache_generation', {}, 'load_combined_sources');
   const candidatesByStream = new Map();
+  const programmeCoverageBySource = new Map();
   for (const source of sources ?? []) {
     if (!source.active_cache_generation) continue;
     const mappingPath = 'managed_provider_epg_source_mappings?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&source_id=eq.' + encodeURIComponent(source.id) + '&cache_generation=eq.' + encodeURIComponent(source.active_cache_generation) + '&match_confidence_class=eq.proven&select=provider_stream_id,xmltv_channel_id,match_type';
     const mappings = await loadAllRows(mappingPath, 'load_combined_mappings');
+    const programmePath = 'managed_provider_epg_source_programmes?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&source_id=eq.' + encodeURIComponent(source.id) + '&cache_generation=eq.' + encodeURIComponent(source.active_cache_generation) + '&select=xmltv_channel_id,start_at,stop_at';
+    const programmeCoverage = new Map();
+    for (const programme of await loadAllRows(programmePath, 'load_combined_programmes')) {
+      const start = Date.parse(programme.start_at);
+      const stop = Date.parse(programme.stop_at);
+      if (!Number.isFinite(start) || !Number.isFinite(stop)) continue;
+      const coverage = programmeCoverage.get(programme.xmltv_channel_id) ?? { current: false, future: false };
+      if (start <= NOW && stop > NOW) coverage.current = true;
+      if (start > NOW) coverage.future = true;
+      programmeCoverage.set(programme.xmltv_channel_id, coverage);
+    }
+    programmeCoverageBySource.set(source.id, programmeCoverage);
     for (const mapping of mappings) {
       const list = candidatesByStream.get(mapping.provider_stream_id) ?? [];
       list.push({ sourceId: source.id, sourceLabel: source.safe_label, priority: Number(source.priority), xmltvChannelId: mapping.xmltv_channel_id, matchType: mapping.match_type });
@@ -178,6 +191,16 @@ async function persistCombinedCoverage(providerId) {
   let candidateConflicts = 0;
   let resolvedConflicts = 0;
   let unresolvedConflicts = 0;
+  let sameTargetOverlap = 0;
+  let epgeniusOnly = 0;
+  let us2Only = 0;
+  const programmeStats = { current: 0, future: 0, both: 0, without: 0 };
+  const usProgrammeStats = { current: 0, future: 0, both: 0, without: 0 };
+  const usBySource = {};
+  const usByMatch = {};
+  let usRelevantRows = 0;
+  let usResolved = 0;
+  const sourceSamples = {};
   for (const [streamId, candidates] of candidatesByStream) {
     const provider = snapshotByStream.get(streamId);
     if (!provider) continue;
@@ -185,6 +208,7 @@ async function persistCombinedCoverage(providerId) {
     const distinctTargets = new Set(ordered.map((candidate) => candidate.xmltvChannelId));
     if (ordered.length > 1) candidateConflicts += 1;
     if (distinctTargets.size === 1 && ordered.length > 1) {
+      sameTargetOverlap += 1;
       if (samples.sameTargetOverlap.length < 10) samples.sameTargetOverlap.push({ providerStreamId: streamId, providerName: String(provider.channel_name ?? '').slice(0, 200), candidates: ordered.map((candidate) => candidate.sourceLabel), xmltvChannelIds: [...distinctTargets] });
     } else if (distinctTargets.size > 1) {
       const samePriority = ordered[0].priority === ordered[ordered.length - 1].priority;
@@ -200,8 +224,33 @@ async function persistCombinedCoverage(providerId) {
     resolved += 1;
     bySource[winner.sourceLabel] = (bySource[winner.sourceLabel] ?? 0) + 1;
     byMatch[winner.matchType] = (byMatch[winner.matchType] ?? 0) + 1;
+    const programme = programmeCoverageBySource.get(winner.sourceId)?.get(winner.xmltvChannelId) ?? { current: false, future: false };
+    if (programme.current) programmeStats.current += 1;
+    if (programme.future) programmeStats.future += 1;
+    if (programme.current && programme.future) programmeStats.both += 1;
+    if (!programme.current && !programme.future) programmeStats.without += 1;
+    const classification = classifyAuditItem({ name: provider.channel_name, categoryName: provider.category_name });
+    if (classification.isUs) {
+      usResolved += 1;
+      usBySource[winner.sourceLabel] = (usBySource[winner.sourceLabel] ?? 0) + 1;
+      usByMatch[winner.matchType] = (usByMatch[winner.matchType] ?? 0) + 1;
+      if (programme.current) usProgrammeStats.current += 1;
+      if (programme.future) usProgrammeStats.future += 1;
+      if (programme.current && programme.future) usProgrammeStats.both += 1;
+      if (!programme.current && !programme.future) usProgrammeStats.without += 1;
+    }
+    const label = String(winner.sourceLabel);
+    if (!sourceSamples[label]) sourceSamples[label] = [];
+    if (sourceSamples[label].length < 10) sourceSamples[label].push({ providerStreamId: streamId, providerName: String(provider.channel_name ?? '').slice(0, 200), xmltvChannelId: winner.xmltvChannelId, matchType: winner.matchType });
     chosen.push({ providerStreamId: streamId, sourceId: winner.sourceId, xmltvChannelId: winner.xmltvChannelId });
   }
+  for (const row of candidatesByStream.values()) {
+    const labels = new Set(row.map((candidate) => candidate.sourceLabel));
+    if (labels.size === 1) continue;
+    if (labels.has('EPGenius Strong') && !labels.has('US2 National')) epgeniusOnly += 1;
+    if (labels.has('US2 National') && !labels.has('EPGenius Strong')) us2Only += 1;
+  }
+  for (const row of snapshotRows) if (classifyAuditItem({ name: row.channel_name, categoryName: row.category_name }).isUs) usRelevantRows += 1;
   const distinctChosenTargets = new Set(chosen.map((row) => row.xmltvChannelId));
   const summary = {
     id: crypto.randomUUID(),
@@ -218,10 +267,43 @@ async function persistCombinedCoverage(providerId) {
     resolved_conflicts: resolvedConflicts,
     unresolved_conflicts: unresolvedConflicts,
     duplicate_provider_variants: chosen.length - distinctChosenTargets.size,
-    current_programme_coverage: null,
-    future_programme_coverage: null,
+    current_programme_coverage: programmeStats.current,
+    future_programme_coverage: programmeStats.future,
     source_generations: Object.fromEntries((sources ?? []).filter((source) => source.active_cache_generation).map((source) => [source.safe_label, source.active_cache_generation])),
-    samples,
+    samples: { ...samples, sourceContributions: sourceSamples },
+    us_relevant_rows: usRelevantRows,
+    us_combined_resolved: usResolved,
+    us_combined_unresolved: usRelevantRows - usResolved,
+    us_combined_mapping_ratio: usRelevantRows ? usResolved / usRelevantRows : 0,
+    us_combined_mapping_percent: usRelevantRows ? (usResolved / usRelevantRows) * 100 : 0,
+    us_by_source: usBySource,
+    us_by_match: usByMatch,
+    resolved_with_current_programme: programmeStats.current,
+    resolved_with_future_programme: programmeStats.future,
+    resolved_with_current_and_future: programmeStats.both,
+    resolved_without_programme_data: programmeStats.without,
+    current_programme_percent: resolved ? (programmeStats.current / resolved) * 100 : 0,
+    future_programme_percent: resolved ? (programmeStats.future / resolved) * 100 : 0,
+    us_resolved_with_current_programme: usProgrammeStats.current,
+    us_resolved_with_future_programme: usProgrammeStats.future,
+    us_resolved_with_current_and_future: usProgrammeStats.both,
+    us_resolved_without_programme_data: usProgrammeStats.without,
+    us_current_programme_percent: usResolved ? (usProgrammeStats.current / usResolved) * 100 : 0,
+    us_future_programme_percent: usResolved ? (usProgrammeStats.future / usResolved) * 100 : 0,
+    epgenius_only: epgeniusOnly,
+    us2_only: us2Only,
+    same_target_overlap: sameTargetOverlap,
+    different_target_conflict: resolvedConflicts + unresolvedConflicts,
+    mapping_ready: usRelevantRows > 0 && usResolved > 0,
+    programme_coverage_ready: usResolved > 0 && usProgrammeStats.current > 0 && usProgrammeStats.future > 0,
+    conflict_risk_acceptable: unresolvedConflicts === 0,
+    managed_guide_delivery_ready: usRelevantRows > 0 && usResolved > 0 && usProgrammeStats.current > 0 && usProgrammeStats.future > 0 && unresolvedConflicts === 0,
+    readiness_reasons: [
+      usRelevantRows > 0 ? 'us_denominator_available' : 'no_us_rows',
+      usResolved > 0 ? 'us_mappings_available' : 'no_us_mappings',
+      usProgrammeStats.current > 0 && usProgrammeStats.future > 0 ? 'current_and_future_programmes_available' : 'insufficient_us_programme_coverage',
+      unresolvedConflicts === 0 ? 'conflicts_deterministic' : 'equal_priority_conflicts_present',
+    ],
   };
   await db('managed_provider_epg_combined_coverage', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(summary) }, 'persist_combined_coverage');
   await db('managed_provider_epg_combined_coverage?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&id=neq.' + encodeURIComponent(summary.id), { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_combined_coverage');

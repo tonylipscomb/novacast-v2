@@ -548,7 +548,7 @@ async function updateRefreshJob(client: Awaited<ReturnType<typeof requireAdmin>>
 
 async function previewEpgResolution(client: Awaited<ReturnType<typeof requireAdmin>>['client'], providerId: string) {
   const { data, error } = await client.from('managed_provider_epg_combined_coverage')
-    .select('id,managed_provider_id,snapshot_generation,created_at,provider_rows,resolved,unresolved,mapping_percent,enabled_source_count,by_source,by_match,candidate_conflicts,resolved_conflicts,unresolved_conflicts,duplicate_provider_variants,current_programme_coverage,future_programme_coverage,source_generations,samples')
+    .select('id,managed_provider_id,snapshot_generation,created_at,provider_rows,resolved,unresolved,mapping_percent,enabled_source_count,by_source,by_match,candidate_conflicts,resolved_conflicts,unresolved_conflicts,duplicate_provider_variants,current_programme_coverage,future_programme_coverage,source_generations,samples,us_relevant_rows,us_combined_resolved,us_combined_unresolved,us_combined_mapping_ratio,us_combined_mapping_percent,us_by_source,us_by_match,resolved_with_current_programme,resolved_with_future_programme,resolved_with_current_and_future,resolved_without_programme_data,current_programme_percent,future_programme_percent,us_resolved_with_current_programme,us_resolved_with_future_programme,us_resolved_with_current_and_future,us_resolved_without_programme_data,us_current_programme_percent,us_future_programme_percent,epgenius_only,us2_only,same_target_overlap,different_target_conflict,mapping_ready,programme_coverage_ready,conflict_risk_acceptable,managed_guide_delivery_ready,readiness_reasons')
     .eq('managed_provider_id', providerId)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -574,6 +574,30 @@ async function previewEpgResolution(client: Awaited<ReturnType<typeof requireAdm
     sourceGenerations: data.source_generations,
     samples: data.samples,
     createdAt: data.created_at,
+    usRelevantRows: data.us_relevant_rows,
+    usCombinedResolved: data.us_combined_resolved,
+    usCombinedUnresolved: data.us_combined_unresolved,
+    usCombinedMappingRatio: data.us_combined_mapping_ratio,
+    usCombinedMappingPercent: data.us_combined_mapping_percent,
+    usBySource: data.us_by_source,
+    usByMatch: data.us_by_match,
+    resolvedWithCurrentProgramme: data.resolved_with_current_programme,
+    resolvedWithFutureProgramme: data.resolved_with_future_programme,
+    resolvedWithCurrentAndFuture: data.resolved_with_current_and_future,
+    resolvedWithoutProgrammeData: data.resolved_without_programme_data,
+    currentProgrammePercent: data.current_programme_percent,
+    futureProgrammePercent: data.future_programme_percent,
+    usResolvedWithCurrentProgramme: data.us_resolved_with_current_programme,
+    usResolvedWithFutureProgramme: data.us_resolved_with_future_programme,
+    usResolvedWithCurrentAndFuture: data.us_resolved_with_current_and_future,
+    usResolvedWithoutProgrammeData: data.us_resolved_without_programme_data,
+    usCurrentProgrammePercent: data.us_current_programme_percent,
+    usFutureProgrammePercent: data.us_future_programme_percent,
+    epgeniusOnly: data.epgenius_only,
+    us2Only: data.us2_only,
+    sameTargetOverlap: data.same_target_overlap,
+    differentTargetConflict: data.different_target_conflict,
+    readiness: { mappingReady: data.mapping_ready, programmeCoverageReady: data.programme_coverage_ready, conflictRiskAcceptable: data.conflict_risk_acceptable, managedGuideDeliveryReady: data.managed_guide_delivery_ready, reasons: data.readiness_reasons },
   };
   return { ...coverage, duplicateCandidateConflicts: coverage.candidateConflicts, coverage, refreshRequired: false };
 }

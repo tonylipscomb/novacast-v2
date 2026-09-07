@@ -692,6 +692,7 @@ function EpgResultPanelWithSize({ result }: { result: EpgResult }) {
 
 function EpgResultPanel({ result }: { result: EpgResult }) {
   if (typeof result.jobId === 'string') return <div className="providerDiagnostics compact"><strong>EPG Refresh</strong><p>Status: {String(result.status ?? 'processing')} Â· Stage: {String(result.stage ?? '—')}</p><p>Programs: {String(result.processedProgrammes ?? 0)} / {String(result.totalProgrammes ?? '—')} Â· Progress: {result.progressPercent == null ? '—' : `${String(result.progressPercent)}%`}</p></div>;
+  if (result.workerValidationRequired === true) return <div className="providerDiagnostics compact"><strong>EPG Source Test</strong><p>Status: {String(result.status ?? 'network_failure')}</p><p>{result.status === 'reachable' ? 'Source is reachable. Run Refresh for full XMLTV validation.' : 'The source probe did not confirm a usable feed.'}</p><p>HTTP: {result.httpStatus == null ? '—' : String(result.httpStatus)} · Content type: {result.contentType == null ? '—' : String(result.contentType)} · Content length: {result.contentLength == null ? '—' : String(result.contentLength)}</p><p>Host: {result.finalHost == null ? '—' : String(result.finalHost)} · Path: {result.finalPath == null ? '—' : String(result.finalPath)} · Redirects: {String(result.redirectCount ?? 0)}</p></div>;
   return <><EpgResultPanelWithSize result={result} /><EpgMappingPanel result={result} /></>;
 }
 

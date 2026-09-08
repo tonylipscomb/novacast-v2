@@ -852,15 +852,15 @@ async function enqueueScheduledRefresh(source) {
     const conflictText = [error?.safeMessage, error?.details, error?.hint].filter(Boolean).join(' ');
     const expectedActiveConflict = error instanceof DatabaseFailure && error.httpStatus === 409 && error.code === '23505' && conflictText.includes('managed_provider_epg_refresh_requests_one_active_idx');
     if (!expectedActiveConflict) throw error;
-    const [existing] = await db(`managed_provider_epg_refresh_requests?managed_provider_id=eq.${encodeURIComponent(providerId)}&source_id=eq.${encodeURIComponent(sourceId)}&status=in.(pending,running)&select=id,status&limit=1`, {}, 'load_existing_refresh_request');
+    const [existing] = await db(`managed_provider_epg_refresh_requests?managed_provider_id=eq.${encodeURIComponent(providerId)}&source_id=eq.${encodeURIComponent(sourceId)}&status=in.(pending,running)&select=id,status,refresh_job_id&limit=1`, {}, 'load_existing_refresh_request');
     if (!existing) throw error;
     process.stdout.write('Active EPG refresh request already exists; reusing it.\n');
-    return requireUuid(existing.id, 'enqueue_scheduled_refresh', 'request_id');
+    return { requestId: requireUuid(existing.id, 'enqueue_scheduled_refresh', 'request_id'), status: existing.status, refreshJobId: existing.refresh_job_id ?? null, reused: true };
   }
   const inserted = Array.isArray(result) ? result[0] : result;
-  if (inserted?.id != null) return requireUuid(inserted.id, 'enqueue_scheduled_refresh', 'request_id');
-  const [existing] = await db(`managed_provider_epg_refresh_requests?managed_provider_id=eq.${encodeURIComponent(providerId)}&source_id=eq.${encodeURIComponent(sourceId)}&status=in.(pending,running)&select=id,refresh_job_id&limit=1`, {}, 'load_existing_refresh_request');
-  return requireUuid(existing?.id, 'enqueue_scheduled_refresh', 'request_id');
+  if (inserted?.id != null) return { requestId: requireUuid(inserted.id, 'enqueue_scheduled_refresh', 'request_id'), status: 'pending', refreshJobId: inserted.refresh_job_id ?? null, reused: false };
+  const [existing] = await db(`managed_provider_epg_refresh_requests?managed_provider_id=eq.${encodeURIComponent(providerId)}&source_id=eq.${encodeURIComponent(sourceId)}&status=in.(pending,running)&select=id,status,refresh_job_id&limit=1`, {}, 'load_existing_refresh_request');
+  return { requestId: requireUuid(existing?.id, 'enqueue_scheduled_refresh', 'request_id'), status: existing.status, refreshJobId: existing.refresh_job_id ?? null, reused: true };
 }
 
 const ACTIVE_REFRESH_JOB_STATUSES = ['queued', 'fetching', 'processing', 'finalizing'];
@@ -891,9 +891,36 @@ async function reclaimActiveRefreshJob(source, activeJob, ownerRequestId = null)
   const [providerSource] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(requireUuid(source.id, 'load_source_for_job_reclaim', 'source_id'))}&select=active_cache_generation`, {}, 'load_source_for_job_reclaim');
   const now = new Date().toISOString();
   await patch('managed_provider_epg_refresh_jobs', activeJob.id, { status: 'failed', stage: null, failure_code: ownerRequestId ? 'stale_refresh_job' : 'orphaned_refresh_job', failure_message: ownerRequestId ? 'stale_refresh_job' : 'orphaned_refresh_job', completed_at: now, updated_at: now }, '', ownerRequestId ? 'reclaim_stale_refresh_job' : 'reclaim_orphaned_refresh_job');
-  if (ownerRequestId) await patch('managed_provider_epg_refresh_requests', ownerRequestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: now }, '', 'fail_stale_refresh_request');
+  if (ownerRequestId) await patch('managed_provider_epg_refresh_requests', ownerRequestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: now, updated_at: now }, '', 'fail_stale_refresh_request');
   await cleanupStagedGeneration(source.id, activeJob.generation, providerSource?.active_cache_generation, ownerRequestId ? 'cleanup_stale_refresh_job' : 'cleanup_orphaned_refresh_job');
   if (!ownerRequestId) process.stdout.write('Reclaimed orphaned EPG refresh job.\n');
+}
+
+async function prepareTargetedRefresh(providerId, sourceId) {
+  const source = { id: sourceId, managed_provider_id: providerId };
+  let queued = await enqueueScheduledRefresh(source);
+  if (queued.status !== 'running') return queued;
+  const requestId = requireUuid(queued.requestId, 'targeted_refresh', 'request_id');
+  const linkedJobId = typeof queued.refreshJobId === 'string' && UUID_PATTERN.test(queued.refreshJobId) ? queued.refreshJobId : null;
+  if (!linkedJobId) {
+    await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'fail_broken_target_refresh_request');
+    return enqueueScheduledRefresh(source);
+  }
+  const [job] = await db(`managed_provider_epg_refresh_jobs?id=eq.${encodeURIComponent(linkedJobId)}&source_id=eq.${encodeURIComponent(sourceId)}&select=id,source_id,generation,status,created_at,started_at,updated_at&limit=1`, {}, 'load_target_refresh_job');
+  const activeJob = job && ACTIVE_REFRESH_JOB_STATUSES.includes(job.status) ? await loadActiveRefreshJob(sourceId) : null;
+  const owner = activeJob?.id === job?.id ? await loadRunningRefreshJobOwner(job.id) : null;
+  if (!job || !activeJob || !owner || owner.id !== requestId) {
+    await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'fail_broken_target_refresh_request');
+    return enqueueScheduledRefresh(source);
+  }
+  const timestamp = Date.parse(job.updated_at ?? job.started_at ?? job.created_at ?? '');
+  const isStale = !Number.isFinite(timestamp) || Date.now() - timestamp > STALE_REFRESH_JOB_MS;
+  if (!isStale) {
+    process.stdout.write('Target EPG refresh is already active.\n');
+    return null;
+  }
+  await reclaimActiveRefreshJob(source, job, requestId);
+  return enqueueScheduledRefresh(source);
 }
 
 async function ensureRefreshJob(source, requestId) {
@@ -937,7 +964,8 @@ async function main() {
   const targetedRun = Boolean(providerId && sourceId);
   let failed = false;
   if (targetedRun) {
-    await enqueueScheduledRefresh({ id: sourceId, managed_provider_id: providerId });
+    const targetRequest = await prepareTargetedRefresh(providerId, sourceId);
+    if (!targetRequest) return;
   } else if (!providerId && !sourceId) {
     const sources = await db('managed_provider_epg_sources?enabled=eq.true&select=id,managed_provider_id', {}, 'load_sources');
     for (const source of sources ?? []) await enqueueScheduledRefresh(source).catch((error) => { logDatabaseFailure(error); logWorkerFailure(error); failed = true; });

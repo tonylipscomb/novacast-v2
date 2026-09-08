@@ -202,11 +202,119 @@ test('combined readiness enforces the documented US coverage floors', () => {
 
 test('targeted worker runs enqueue and process only the exact provider/source pair', () => {
   assert.match(worker, /const targetedRun = Boolean\(providerId && sourceId\)/);
-  assert.match(worker, /if \(targetedRun\) \{\s*await enqueueScheduledRefresh\(\{ id: sourceId, managed_provider_id: providerId \}\);/s);
+  assert.match(worker, /if \(targetedRun\) \{\s*const targetRequest = await prepareTargetedRefresh\(providerId, sourceId\);/s);
   assert.match(worker, /if \(targetedRun\) \{\s*if \(failed\) process\.exitCode = 1;\s*return;/s);
   const main = worker.slice(worker.indexOf('async function main()'), worker.indexOf('export {'));
   assert.match(main, /sourceId && `source_id=eq\.\$\{encodeURIComponent\(sourceId\)\}`/);
   assert.match(main, /\} else if \(!providerId && !sourceId\) \{/);
+});
+
+test('targeted fresh running request is not duplicated or reclaimed', async () => {
+  const seen = [];
+  const jobId = '44444444-4444-4444-8444-444444444444';
+  const server = await serverFor((request, response) => {
+    seen.push({ method: request.method, url: request.url });
+    if (request.method === 'POST' && request.url.includes('managed_provider_epg_refresh_requests')) {
+      response.writeHead(409, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ code: '23505', message: 'duplicate key value violates unique constraint managed_provider_epg_refresh_requests_one_active_idx' }));
+      return;
+    }
+    if (request.url.includes('select=id,status,refresh_job_id')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: requestUuid, status: 'running', refresh_job_id: jobId }]));
+      return;
+    }
+    if (request.url.includes(`managed_provider_epg_refresh_jobs?id=eq.${jobId}`)) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: jobId, source_id: sourceUuid, generation: null, status: 'processing', updated_at: new Date().toISOString() }]));
+      return;
+    }
+    if (request.url.includes('managed_provider_epg_refresh_jobs?source_id=eq.')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: jobId, source_id: sourceUuid, generation: null, status: 'processing', updated_at: new Date().toISOString() }]));
+      return;
+    }
+    if (request.url.includes(`refresh_job_id=eq.${jobId}`)) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: requestUuid }]));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('[]');
+  });
+  const result = await runWorker(server.address().port, 'test-service-role-key', [providerUuid, sourceUuid]);
+  server.close();
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /Target EPG refresh is already active\./);
+  assert.equal(seen.filter((entry) => entry.url.includes('status=eq.pending')).length, 0);
+  assert.equal(seen.filter((entry) => entry.method === 'PATCH').length, 0);
+});
+
+test('targeted running request with a missing job is failed and re-enqueued for the exact target', async () => {
+  const seen = [];
+  const server = await serverFor((request, response) => {
+    seen.push({ method: request.method, url: request.url });
+    if (request.method === 'POST' && request.url.includes('managed_provider_epg_refresh_requests')) {
+      const posts = seen.filter((entry) => entry.method === 'POST' && entry.url.includes('managed_provider_epg_refresh_requests')).length;
+      response.writeHead(posts === 1 ? 409 : 201, { 'content-type': 'application/json' });
+      response.end(posts === 1 ? JSON.stringify({ code: '23505', message: 'duplicate key value violates unique constraint managed_provider_epg_refresh_requests_one_active_idx' }) : JSON.stringify([{ id: requestUuid }]));
+      return;
+    }
+    if (request.url.includes('select=id,status,refresh_job_id')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: requestUuid, status: 'running', refresh_job_id: null }]));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('[]');
+  });
+  const result = await runWorker(server.address().port, 'test-service-role-key', [providerUuid, sourceUuid]);
+  server.close();
+  assert.equal(result.code, 0);
+  assert.equal(seen.filter((entry) => entry.method === 'PATCH' && entry.url.includes(`id=eq.${requestUuid}`)).length, 1);
+  assert.equal(seen.filter((entry) => entry.method === 'POST' && entry.url.includes('managed_provider_epg_refresh_requests')).length, 2);
+  assert.equal(seen.filter((entry) => entry.url.includes('status=eq.pending')).length, 1);
+});
+
+test('targeted stale running request is reclaimed and replaced without touching another source', async () => {
+  const seen = [];
+  const jobId = '44444444-4444-4444-8444-444444444444';
+  const staleJob = { id: jobId, source_id: sourceUuid, generation: null, status: 'processing', updated_at: '2026-09-07T00:00:00.000Z' };
+  const server = await serverFor((request, response) => {
+    seen.push({ method: request.method, url: request.url });
+    if (request.method === 'POST' && request.url.includes('managed_provider_epg_refresh_requests')) {
+      const posts = seen.filter((entry) => entry.method === 'POST' && entry.url.includes('managed_provider_epg_refresh_requests')).length;
+      response.writeHead(posts === 1 ? 409 : 201, { 'content-type': 'application/json' });
+      response.end(posts === 1 ? JSON.stringify({ code: '23505', message: 'duplicate key value violates unique constraint managed_provider_epg_refresh_requests_one_active_idx' }) : JSON.stringify([{ id: requestUuid }]));
+      return;
+    }
+    if (request.url.includes('select=id,status,refresh_job_id')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: requestUuid, status: 'running', refresh_job_id: jobId }]));
+      return;
+    }
+    if (request.url.includes(`managed_provider_epg_refresh_jobs?id=eq.${jobId}`) || request.url.includes('managed_provider_epg_refresh_jobs?source_id=eq.')) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([staleJob]));
+      return;
+    }
+    if (request.url.includes(`refresh_job_id=eq.${jobId}`)) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ id: requestUuid }]));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('[]');
+  });
+  const result = await runWorker(server.address().port, 'test-service-role-key', [providerUuid, sourceUuid]);
+  server.close();
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /Active EPG refresh request already exists; reusing it\./);
+  assert.equal(seen.filter((entry) => entry.method === 'POST' && entry.url.includes('managed_provider_epg_refresh_requests')).length, 2);
+  assert.ok(seen.some((entry) => entry.method === 'PATCH' && entry.url.includes(`managed_provider_epg_refresh_jobs?id=eq.${jobId}`)));
+  assert.ok(seen.some((entry) => entry.method === 'PATCH' && entry.url.includes(`managed_provider_epg_refresh_requests?id=eq.${requestUuid}`)));
+  assert.equal(seen.filter((entry) => entry.url.includes('managed_provider_epg_refresh_jobs?source_id=eq.')).length, 1);
+  assert.equal(seen.filter((entry) => entry.url.includes('status=eq.pending')).length, 1);
 });
 
 test('provider catalog acquisition reuses only complete, bounded-age snapshots', () => {

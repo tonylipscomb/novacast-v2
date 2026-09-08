@@ -16,6 +16,8 @@ const MIN_US_MAPPING_PERCENT = 65;
 const MIN_US_CURRENT_PROGRAMME_PERCENT = 60;
 const MIN_US_FUTURE_PROGRAMME_PERCENT = 60;
 const MAX_UNRESOLVED_CONFLICTS = 0;
+const FRESH_PROVIDER_CATALOG_SNAPSHOT_MS = 30 * 60 * 1000;
+const MAX_PROVIDER_CATALOG_FALLBACK_AGE_MS = 24 * 60 * 60 * 1000;
 const headers = { apikey: SERVICE_ROLE_KEY, authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'content-type': 'application/json' };
 
 class DatabaseFailure extends Error {
@@ -493,6 +495,55 @@ async function fetchLiveChannels(provider) {
   })) : [] };
 }
 
+function snapshotWithinAge(snapshot, maxAgeMs, now = Date.now()) {
+  const capturedAt = Date.parse(snapshot?.capturedAt ?? '');
+  const expectedRows = Number(snapshot?.expectedRows);
+  const storedRows = Number(snapshot?.storedRows);
+  return snapshot?.complete === true && Number.isInteger(expectedRows) && expectedRows >= 0 && storedRows === expectedRows && Number.isFinite(capturedAt) && now - capturedAt <= maxAgeMs;
+}
+
+async function loadCompleteProviderCatalogSnapshot(providerId, maxAgeMs, operation = 'load_provider_catalog_snapshot') {
+  const safeProviderId = requireUuid(providerId, operation, 'provider_id');
+  const [head] = await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(safeProviderId)}&is_active=eq.true&snapshot_complete=eq.true&select=snapshot_generation,snapshot_expected_rows,snapshot_complete,is_active,captured_at&order=captured_at.desc&limit=1`, {}, operation);
+  if (!head?.snapshot_generation) return null;
+  const generation = requireUuid(head.snapshot_generation, operation, 'snapshot_generation');
+  const expectedRows = Number(head.snapshot_expected_rows);
+  if (!Number.isInteger(expectedRows) || expectedRows < 0) return null;
+  const rows = await loadAllRows(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(safeProviderId)}&snapshot_generation=eq.${encodeURIComponent(generation)}&is_active=eq.true&snapshot_complete=eq.true&select=provider_stream_id,channel_name,epg_channel_id,category_id,category_name,canonical_name`, operation);
+  const snapshot = { generation, expectedRows, storedRows: rows.length, complete: head.snapshot_complete === true && head.is_active === true, capturedAt: head.captured_at };
+  if (!snapshotWithinAge(snapshot, maxAgeMs)) return null;
+  return {
+    ...snapshot,
+    items: rows.filter((row) => row.provider_stream_id != null).map((row) => ({
+      streamId: String(row.provider_stream_id),
+      name: String(row.channel_name ?? ''),
+      epgChannelId: row.epg_channel_id == null ? null : String(row.epg_channel_id),
+      categoryId: row.category_id == null ? null : String(row.category_id),
+      categoryName: row.category_name == null ? null : String(row.category_name),
+    })),
+  };
+}
+
+async function acquireProviderCatalog(providerId, provider) {
+  const fresh = await loadCompleteProviderCatalogSnapshot(providerId, FRESH_PROVIDER_CATALOG_SNAPSHOT_MS, 'load_fresh_provider_catalog_snapshot');
+  if (fresh) {
+    process.stdout.write(`providerCatalogSource=snapshot snapshotStored=${fresh.storedRows} snapshotComplete=true\n`);
+    return { items: fresh.items, snapshot: fresh };
+  }
+  try {
+    const live = await runWorkerStage('fetch_provider_live_channels', () => fetchLiveChannels(provider));
+    const snapshot = await persistProviderCatalogSnapshot(providerId, live.items);
+    process.stdout.write(`providerCatalogSource=live providerCatalogFetched=${live.items.length} snapshotStored=${snapshot?.storedRows ?? 0} snapshotComplete=${snapshot?.complete === true}\n`);
+    return { items: live.items, snapshot };
+  } catch (error) {
+    if (!(error instanceof WorkerStageFailure) || error.safeMessage !== 'provider_unreachable') throw error;
+    const fallback = await loadCompleteProviderCatalogSnapshot(providerId, MAX_PROVIDER_CATALOG_FALLBACK_AGE_MS, 'load_provider_catalog_fallback');
+    if (!fallback) throw error;
+    process.stdout.write(`providerCatalogSource=fallback snapshotStored=${fallback.storedRows} snapshotComplete=true\n`);
+    return { items: fallback.items, snapshot: fallback };
+  }
+}
+
 async function persistProviderCatalogSnapshot(providerId, items) {
   const generation = crypto.randomUUID();
   const capturedAt = new Date().toISOString();
@@ -512,7 +563,7 @@ async function persistProviderCatalogSnapshot(providerId, items) {
       snapshot_expected_rows: items.length,
       snapshot_complete: false,
     }));
-  if (!rows.length) return { generation, expectedRows: items.length, storedRows: 0, complete: false };
+  if (!rows.length) return { generation, expectedRows: items.length, storedRows: 0, complete: false, capturedAt };
   const [previous] = await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&is_active=eq.true&select=snapshot_generation&order=captured_at.desc&limit=1`, {}, 'load_previous_catalog_snapshot');
   try {
     await insertBatches('managed_provider_epg_catalog_snapshot', rows, 'managed_provider_id,snapshot_generation,provider_stream_id', 'insert_catalog_snapshot');
@@ -526,9 +577,9 @@ async function persistProviderCatalogSnapshot(providerId, items) {
       await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(providerId)}&snapshot_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_catalog_snapshot').catch(() => {});
     logDatabaseFailure(error);
     process.stderr.write('EPG provider catalog snapshot unavailable.\n');
-    return { generation, expectedRows: items.length, storedRows: rows.length, complete: false };
+    return { generation, expectedRows: items.length, storedRows: rows.length, complete: false, capturedAt };
   }
-  return { generation, expectedRows: items.length, storedRows: rows.length, complete: rows.length === items.length };
+  return { generation, expectedRows: items.length, storedRows: rows.length, complete: rows.length === items.length, capturedAt };
 }
 
 const AUDIT_REGION_CODES = new Set(['AF', 'AR', 'AT', 'AU', 'BE', 'BR', 'CA', 'CH', 'CL', 'CN', 'CO', 'CR', 'CZ', 'DE', 'DK', 'DO', 'EC', 'ES', 'FI', 'FR', 'GB', 'GR', 'HK', 'HU', 'IE', 'IL', 'IN', 'IS', 'IT', 'JP', 'KR', 'LV', 'MX', 'MY', 'NL', 'NO', 'NZ', 'PE', 'PH', 'PL', 'PT', 'RO', 'RU', 'SE', 'SG', 'SK', 'TR', 'TW', 'UA', 'UK', 'ZA']);
@@ -716,9 +767,9 @@ async function processRequest(request) {
   const channels = [];
   const programmes = [];
   const mappings = [];
-  const live = await runWorkerStage('fetch_provider_live_channels', () => fetchLiveChannels(provider));
-  const snapshot = await persistProviderCatalogSnapshot(providerId, live.items);
-  process.stdout.write(`providerCatalogFetched=${live.items.length} snapshotStored=${snapshot?.storedRows ?? 0} snapshotComplete=${snapshot?.complete === true}\n`);
+  const catalog = await acquireProviderCatalog(providerId, provider);
+  const live = { items: catalog.items };
+  const snapshot = catalog.snapshot;
   const xmltvUrl = await runWorkerStage('decrypt_epg_url', () => decryptSecret(source.url_ciphertext, source.url_iv));
   const url = await runWorkerStage('validate_epg_url', () => assertSafeUrl(xmltvUrl));
   const response = await runWorkerStage('fetch_epg_feed', async () => {
@@ -935,7 +986,7 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 
-export { assessGuideReadiness, buildMappingAudit, toAuditXmltvChannel };
+export { assessGuideReadiness, buildMappingAudit, snapshotWithinAge, toAuditXmltvChannel };
 
 if (process.env.EPG_INGEST_TEST_IMPORT !== '1') {
   main().catch((error) => {

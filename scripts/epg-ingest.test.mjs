@@ -8,7 +8,7 @@ process.env.EPG_INGEST_TEST_IMPORT = '1';
 process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
 process.env.PROVIDER_ENCRYPTION_KEY = '00'.repeat(32);
-const { assessGuideReadiness, buildMappingAudit, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
+const { assessGuideReadiness, buildMappingAudit, snapshotWithinAge, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
 
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
 const combinedMigration = fs.readFileSync(new URL('../supabase/migrations/20260906165500_managed_provider_epg_combined_coverage.sql', import.meta.url), 'utf8');
@@ -207,6 +207,30 @@ test('targeted worker runs enqueue and process only the exact provider/source pa
   const main = worker.slice(worker.indexOf('async function main()'), worker.indexOf('export {'));
   assert.match(main, /sourceId && `source_id=eq\.\$\{encodeURIComponent\(sourceId\)\}`/);
   assert.match(main, /\} else if \(!providerId && !sourceId\) \{/);
+});
+
+test('provider catalog acquisition reuses only complete, bounded-age snapshots', () => {
+  const now = Date.parse('2026-09-07T12:00:00.000Z');
+  const recent = { capturedAt: '2026-09-07T11:45:00.000Z', expectedRows: 57189, storedRows: 57189, complete: true };
+  assert.equal(snapshotWithinAge(recent, 30 * 60 * 1000, now), true);
+  assert.equal(snapshotWithinAge({ ...recent, storedRows: 57188 }, 30 * 60 * 1000, now), false);
+  assert.equal(snapshotWithinAge({ ...recent, complete: false }, 30 * 60 * 1000, now), false);
+  assert.equal(snapshotWithinAge({ ...recent, capturedAt: '2026-09-06T11:00:00.000Z' }, 24 * 60 * 60 * 1000, now), false);
+});
+
+test('provider catalog refresh uses fresh snapshot reuse and reachability-only fallback', () => {
+  assert.match(worker, /FRESH_PROVIDER_CATALOG_SNAPSHOT_MS = 30 \* 60 \* 1000/);
+  assert.match(worker, /MAX_PROVIDER_CATALOG_FALLBACK_AGE_MS = 24 \* 60 \* 60 \* 1000/);
+  assert.match(worker, /async function loadCompleteProviderCatalogSnapshot/);
+  assert.match(worker, /snapshot_complete=eq\.true/);
+  assert.match(worker, /snapshotWithinAge/);
+  assert.match(worker, /async function acquireProviderCatalog/);
+  assert.match(worker, /providerCatalogSource=snapshot/);
+  assert.match(worker, /providerCatalogSource=fallback/);
+  assert.match(worker, /error\.safeMessage !== 'provider_unreachable'/);
+  const process = worker.slice(worker.indexOf('async function processRequest'), worker.indexOf('async function enqueueScheduledRefresh'));
+  assert.match(process, /acquireProviderCatalog\(providerId, provider\)/);
+  assert.doesNotMatch(process, /persistProviderCatalogSnapshot\(providerId, live\.items\)/);
 });
 
 test('worker reclaims stale active jobs without deleting the active cache and handles races safely', () => {

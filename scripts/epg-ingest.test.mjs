@@ -317,6 +317,15 @@ test('targeted stale running request is reclaimed and replaced without touching 
   assert.equal(seen.filter((entry) => entry.url.includes('status=eq.pending')).length, 1);
 });
 
+test('refresh-request recovery patches use only columns present in the request schema', () => {
+  const requestPatchLines = worker.split('\n').filter((line) => line.includes("patch('managed_provider_epg_refresh_requests'"));
+  assert.ok(requestPatchLines.length > 0);
+  for (const line of requestPatchLines) assert.doesNotMatch(line, /updated_at/);
+  assert.match(worker, /fail_stale_refresh_request/);
+  assert.match(worker, /fail_broken_target_refresh_request/);
+  assert.match(worker, /managed_provider_epg_refresh_jobs.*updated_at/);
+});
+
 test('provider catalog acquisition reuses only complete, bounded-age snapshots', () => {
   const now = Date.parse('2026-09-07T12:00:00.000Z');
   const recent = { capturedAt: '2026-09-07T11:45:00.000Z', expectedRows: 57189, storedRows: 57189, complete: true };

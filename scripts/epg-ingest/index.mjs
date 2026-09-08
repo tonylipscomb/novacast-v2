@@ -891,7 +891,7 @@ async function reclaimActiveRefreshJob(source, activeJob, ownerRequestId = null)
   const [providerSource] = await db(`managed_provider_epg_sources?id=eq.${encodeURIComponent(requireUuid(source.id, 'load_source_for_job_reclaim', 'source_id'))}&select=active_cache_generation`, {}, 'load_source_for_job_reclaim');
   const now = new Date().toISOString();
   await patch('managed_provider_epg_refresh_jobs', activeJob.id, { status: 'failed', stage: null, failure_code: ownerRequestId ? 'stale_refresh_job' : 'orphaned_refresh_job', failure_message: ownerRequestId ? 'stale_refresh_job' : 'orphaned_refresh_job', completed_at: now, updated_at: now }, '', ownerRequestId ? 'reclaim_stale_refresh_job' : 'reclaim_orphaned_refresh_job');
-  if (ownerRequestId) await patch('managed_provider_epg_refresh_requests', ownerRequestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: now, updated_at: now }, '', 'fail_stale_refresh_request');
+  if (ownerRequestId) await patch('managed_provider_epg_refresh_requests', ownerRequestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: now }, '', 'fail_stale_refresh_request');
   await cleanupStagedGeneration(source.id, activeJob.generation, providerSource?.active_cache_generation, ownerRequestId ? 'cleanup_stale_refresh_job' : 'cleanup_orphaned_refresh_job');
   if (!ownerRequestId) process.stdout.write('Reclaimed orphaned EPG refresh job.\n');
 }
@@ -903,14 +903,14 @@ async function prepareTargetedRefresh(providerId, sourceId) {
   const requestId = requireUuid(queued.requestId, 'targeted_refresh', 'request_id');
   const linkedJobId = typeof queued.refreshJobId === 'string' && UUID_PATTERN.test(queued.refreshJobId) ? queued.refreshJobId : null;
   if (!linkedJobId) {
-    await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'fail_broken_target_refresh_request');
+    await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: new Date().toISOString() }, '', 'fail_broken_target_refresh_request');
     return enqueueScheduledRefresh(source);
   }
   const [job] = await db(`managed_provider_epg_refresh_jobs?id=eq.${encodeURIComponent(linkedJobId)}&source_id=eq.${encodeURIComponent(sourceId)}&select=id,source_id,generation,status,created_at,started_at,updated_at&limit=1`, {}, 'load_target_refresh_job');
   const activeJob = job && ACTIVE_REFRESH_JOB_STATUSES.includes(job.status) ? await loadActiveRefreshJob(sourceId) : null;
   const owner = activeJob?.id === job?.id ? await loadRunningRefreshJobOwner(job.id) : null;
   if (!job || !activeJob || !owner || owner.id !== requestId) {
-    await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'fail_broken_target_refresh_request');
+    await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: 'stale_refresh_job', failure_message: 'stale_refresh_job', completed_at: new Date().toISOString() }, '', 'fail_broken_target_refresh_request');
     return enqueueScheduledRefresh(source);
   }
   const timestamp = Date.parse(job.updated_at ?? job.started_at ?? job.created_at ?? '');

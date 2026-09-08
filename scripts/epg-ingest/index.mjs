@@ -12,6 +12,10 @@ const PAST_RETENTION_MS = 6 * 60 * 60 * 1000;
 const FUTURE_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 60_000;
 const STALE_REFRESH_JOB_MS = 30 * 60 * 1000;
+const MIN_US_MAPPING_PERCENT = 65;
+const MIN_US_CURRENT_PROGRAMME_PERCENT = 60;
+const MIN_US_FUTURE_PROGRAMME_PERCENT = 60;
+const MAX_UNRESOLVED_CONFLICTS = 0;
 const headers = { apikey: SERVICE_ROLE_KEY, authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'content-type': 'application/json' };
 
 class DatabaseFailure extends Error {
@@ -62,6 +66,33 @@ function safeErrorText(value) {
     .slice(0, 300);
   for (const secret of [process.env.SUPABASE_SERVICE_ROLE_KEY, process.env.PROVIDER_ENCRYPTION_KEY].filter(Boolean)) safe = safe.split(secret).join('[redacted]');
   return safe || null;
+}
+
+function assessGuideReadiness({ usRelevantRows, usCombinedResolved, usCurrentProgrammePercent, usFutureProgrammePercent, unresolvedConflicts }) {
+  const denominator = Number(usRelevantRows);
+  const resolved = Number(usCombinedResolved);
+  const current = Number(usCurrentProgrammePercent);
+  const future = Number(usFutureProgrammePercent);
+  const conflicts = Number(unresolvedConflicts);
+  const hasDenominator = Number.isFinite(denominator) && denominator > 0;
+  const mappingPercent = hasDenominator && Number.isFinite(resolved) ? (resolved / denominator) * 100 : 0;
+  const mappingReady = hasDenominator && mappingPercent >= MIN_US_MAPPING_PERCENT;
+  const programmeCoverageReady = hasDenominator && current >= MIN_US_CURRENT_PROGRAMME_PERCENT && future >= MIN_US_FUTURE_PROGRAMME_PERCENT;
+  const conflictRiskAcceptable = Number.isFinite(conflicts) && conflicts <= MAX_UNRESOLVED_CONFLICTS;
+  const readinessReasons = [
+    hasDenominator ? 'us_denominator_available' : 'no_us_denominator',
+    mappingReady ? 'us_mapping_meets_65_percent_floor' : `us_mapping_below_${MIN_US_MAPPING_PERCENT}_percent_floor`,
+    current >= MIN_US_CURRENT_PROGRAMME_PERCENT ? 'current_programmes_meet_60_percent_floor' : 'current_programmes_below_60_percent_floor',
+    future >= MIN_US_FUTURE_PROGRAMME_PERCENT ? 'future_programmes_meet_60_percent_floor' : 'future_programmes_below_60_percent_floor',
+    conflictRiskAcceptable ? 'no_unresolved_conflicts' : 'unresolved_conflicts_exceed_zero',
+  ];
+  return {
+    mappingReady,
+    programmeCoverageReady,
+    conflictRiskAcceptable,
+    managedGuideDeliveryReady: mappingReady && programmeCoverageReady && conflictRiskAcceptable,
+    readinessReasons,
+  };
 }
 
 function logDatabaseFailure(error) {
@@ -252,6 +283,9 @@ async function persistCombinedCoverage(providerId) {
   }
   for (const row of snapshotRows) if (classifyAuditItem({ name: row.channel_name, categoryName: row.category_name }).isUs) usRelevantRows += 1;
   const distinctChosenTargets = new Set(chosen.map((row) => row.xmltvChannelId));
+  const usCurrentProgrammePercent = usResolved ? (usProgrammeStats.current / usResolved) * 100 : 0;
+  const usFutureProgrammePercent = usResolved ? (usProgrammeStats.future / usResolved) * 100 : 0;
+  const readiness = assessGuideReadiness({ usRelevantRows, usCombinedResolved: usResolved, usCurrentProgrammePercent, usFutureProgrammePercent, unresolvedConflicts });
   const summary = {
     id: crypto.randomUUID(),
     managed_provider_id: providerId,
@@ -288,22 +322,17 @@ async function persistCombinedCoverage(providerId) {
     us_resolved_with_future_programme: usProgrammeStats.future,
     us_resolved_with_current_and_future: usProgrammeStats.both,
     us_resolved_without_programme_data: usProgrammeStats.without,
-    us_current_programme_percent: usResolved ? (usProgrammeStats.current / usResolved) * 100 : 0,
-    us_future_programme_percent: usResolved ? (usProgrammeStats.future / usResolved) * 100 : 0,
+    us_current_programme_percent: usCurrentProgrammePercent,
+    us_future_programme_percent: usFutureProgrammePercent,
     epgenius_only: epgeniusOnly,
     us2_only: us2Only,
     same_target_overlap: sameTargetOverlap,
     different_target_conflict: resolvedConflicts + unresolvedConflicts,
-    mapping_ready: usRelevantRows > 0 && usResolved > 0,
-    programme_coverage_ready: usResolved > 0 && usProgrammeStats.current > 0 && usProgrammeStats.future > 0,
-    conflict_risk_acceptable: unresolvedConflicts === 0,
-    managed_guide_delivery_ready: usRelevantRows > 0 && usResolved > 0 && usProgrammeStats.current > 0 && usProgrammeStats.future > 0 && unresolvedConflicts === 0,
-    readiness_reasons: [
-      usRelevantRows > 0 ? 'us_denominator_available' : 'no_us_rows',
-      usResolved > 0 ? 'us_mappings_available' : 'no_us_mappings',
-      usProgrammeStats.current > 0 && usProgrammeStats.future > 0 ? 'current_and_future_programmes_available' : 'insufficient_us_programme_coverage',
-      unresolvedConflicts === 0 ? 'conflicts_deterministic' : 'equal_priority_conflicts_present',
-    ],
+    mapping_ready: readiness.mappingReady,
+    programme_coverage_ready: readiness.programmeCoverageReady,
+    conflict_risk_acceptable: readiness.conflictRiskAcceptable,
+    managed_guide_delivery_ready: readiness.managedGuideDeliveryReady,
+    readiness_reasons: readiness.readinessReasons,
   };
   await db('managed_provider_epg_combined_coverage', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify(summary) }, 'persist_combined_coverage');
   await db('managed_provider_epg_combined_coverage?managed_provider_id=eq.' + encodeURIComponent(providerId) + '&id=neq.' + encodeURIComponent(summary.id), { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_combined_coverage');
@@ -854,8 +883,11 @@ async function main() {
   const sourceInput = process.argv[3] ?? '';
   const providerId = providerInput ? requireUuid(providerInput, 'provider_filter', 'provider_id') : '';
   const sourceId = sourceInput ? requireUuid(sourceInput, 'source_filter', 'source_id') : '';
+  const targetedRun = Boolean(providerId && sourceId);
   let failed = false;
-  if (!providerId && !sourceId) {
+  if (targetedRun) {
+    await enqueueScheduledRefresh({ id: sourceId, managed_provider_id: providerId });
+  } else if (!providerId && !sourceId) {
     const sources = await db('managed_provider_epg_sources?enabled=eq.true&select=id,managed_provider_id', {}, 'load_sources');
     for (const source of sources ?? []) await enqueueScheduledRefresh(source).catch((error) => { logDatabaseFailure(error); logWorkerFailure(error); failed = true; });
   }
@@ -896,10 +928,14 @@ async function main() {
       process.stderr.write(`EPG refresh failed: ${code}\n`);
     }
   }
+  if (targetedRun) {
+    if (failed) process.exitCode = 1;
+    return;
+  }
   if (failed) process.exitCode = 1;
 }
 
-export { buildMappingAudit, toAuditXmltvChannel };
+export { assessGuideReadiness, buildMappingAudit, toAuditXmltvChannel };
 
 if (process.env.EPG_INGEST_TEST_IMPORT !== '1') {
   main().catch((error) => {

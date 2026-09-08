@@ -8,7 +8,7 @@ process.env.EPG_INGEST_TEST_IMPORT = '1';
 process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
 process.env.PROVIDER_ENCRYPTION_KEY = '00'.repeat(32);
-const { buildMappingAudit, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
+const { assessGuideReadiness, buildMappingAudit, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
 
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
 const combinedMigration = fs.readFileSync(new URL('../supabase/migrations/20260906165500_managed_provider_epg_combined_coverage.sql', import.meta.url), 'utf8');
@@ -182,6 +182,31 @@ test('combined readiness uses cached programme windows and preserves determinist
   assert.match(worker, /programme_coverage_ready/);
   assert.match(worker, /conflict_risk_acceptable/);
   assert.doesNotMatch(worker, /fetchXmltv.*combined/i);
+});
+
+test('combined readiness enforces the documented US coverage floors', () => {
+  const base = { usRelevantRows: 100, usCombinedResolved: 65, usCurrentProgrammePercent: 60, usFutureProgrammePercent: 60, unresolvedConflicts: 0 };
+  assert.deepEqual(assessGuideReadiness(base), {
+    mappingReady: true,
+    programmeCoverageReady: true,
+    conflictRiskAcceptable: true,
+    managedGuideDeliveryReady: true,
+    readinessReasons: ['us_denominator_available', 'us_mapping_meets_65_percent_floor', 'current_programmes_meet_60_percent_floor', 'future_programmes_meet_60_percent_floor', 'no_unresolved_conflicts'],
+  });
+  assert.equal(assessGuideReadiness({ ...base, usCombinedResolved: 64 }).mappingReady, false);
+  assert.equal(assessGuideReadiness({ ...base, usCurrentProgrammePercent: 59.99 }).programmeCoverageReady, false);
+  assert.equal(assessGuideReadiness({ ...base, usFutureProgrammePercent: 59.99 }).programmeCoverageReady, false);
+  assert.equal(assessGuideReadiness({ ...base, unresolvedConflicts: 1 }).conflictRiskAcceptable, false);
+  assert.equal(assessGuideReadiness({ ...base, usRelevantRows: 0 }).managedGuideDeliveryReady, false);
+});
+
+test('targeted worker runs enqueue and process only the exact provider/source pair', () => {
+  assert.match(worker, /const targetedRun = Boolean\(providerId && sourceId\)/);
+  assert.match(worker, /if \(targetedRun\) \{\s*await enqueueScheduledRefresh\(\{ id: sourceId, managed_provider_id: providerId \}\);/s);
+  assert.match(worker, /if \(targetedRun\) \{\s*if \(failed\) process\.exitCode = 1;\s*return;/s);
+  const main = worker.slice(worker.indexOf('async function main()'), worker.indexOf('export {'));
+  assert.match(main, /sourceId && `source_id=eq\.\$\{encodeURIComponent\(sourceId\)\}`/);
+  assert.match(main, /\} else if \(!providerId && !sourceId\) \{/);
 });
 
 test('worker reclaims stale active jobs without deleting the active cache and handles races safely', () => {

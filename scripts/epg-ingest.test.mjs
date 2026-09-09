@@ -8,7 +8,7 @@ process.env.EPG_INGEST_TEST_IMPORT = '1';
 process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
 process.env.PROVIDER_ENCRYPTION_KEY = '00'.repeat(32);
-const { assessGuideReadiness, buildMappingAudit, snapshotWithinAge, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
+const { assessGuideReadiness, buildMappingAudit, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
 
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
 const combinedMigration = fs.readFileSync(new URL('../supabase/migrations/20260906165500_managed_provider_epg_combined_coverage.sql', import.meta.url), 'utf8');
@@ -348,6 +348,31 @@ test('provider catalog refresh uses fresh snapshot reuse and reachability-only f
   const process = worker.slice(worker.indexOf('async function processRequest'), worker.indexOf('async function enqueueScheduledRefresh'));
   assert.match(process, /acquireProviderCatalog\(providerId, provider\)/);
   assert.doesNotMatch(process, /persistProviderCatalogSnapshot\(providerId, live\.items\)/);
+});
+
+test('programme persistence is bounded to final mapped XMLTV targets without changing coverage inputs', () => {
+  const programmes = [
+    { channelId: 'mapped-1', startAt: '2026-09-08T12:00:00.000Z' },
+    { channelId: 'mapped-1', startAt: '2026-09-08T13:00:00.000Z' },
+    { channelId: 'unmapped', startAt: '2026-09-08T14:00:00.000Z' },
+  ];
+  const mappings = [{ xmltv_channel_id: ' mapped-1 ' }, { xmltv_channel_id: 'mapped-1' }];
+  const result = retainMappedProgrammes(programmes, mappings);
+  assert.equal(result.retentionIds.size, 1);
+  assert.equal(result.retained.length, 2);
+  assert.equal(result.dropped, 1);
+  assert.equal(normalizeXmltvChannelId(' mapped-1 '), 'mapped-1');
+  assert.deepEqual(result.retained.map((programme) => programme.channelId), ['mapped-1', 'mapped-1']);
+});
+
+test('EPG parsing and mapping still see the complete XMLTV channel universe before programme retention', () => {
+  assert.match(worker, /const xmltvIds = new Set\(channels\.map\(\(channel\) => channel\.id\)\)/);
+  assert.match(worker, /const audit = buildMappingAudit\(providerId, sourceId, live\.items, channels/);
+  assert.match(worker, /retainMappedProgrammes\(programmes, mappingsResult\)/);
+  assert.match(worker, /programmeRowsPersisted=/);
+  assert.match(worker, /programmeRowsDroppedUnmapped=/);
+  assert.match(worker, /insertBatches\('managed_provider_epg_source_programmes', programmeRetention\.retained\.map/);
+  assert.doesNotMatch(worker, /programmes\.filter\(.*xmltv/);
 });
 
 test('worker reclaims stale active jobs without deleting the active cache and handles races safely', () => {

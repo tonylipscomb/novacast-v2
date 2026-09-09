@@ -502,6 +502,20 @@ function snapshotWithinAge(snapshot, maxAgeMs, now = Date.now()) {
   return snapshot?.complete === true && Number.isInteger(expectedRows) && expectedRows >= 0 && storedRows === expectedRows && Number.isFinite(capturedAt) && now - capturedAt <= maxAgeMs;
 }
 
+function normalizeXmltvChannelId(value) {
+  return String(value ?? '').trim();
+}
+
+function retainMappedProgrammes(programmes, mappings) {
+  const retentionIds = new Set((mappings ?? []).map((mapping) => normalizeXmltvChannelId(mapping.xmltv_channel_id ?? mapping.xmltvChannelId)).filter(Boolean));
+  const retained = (programmes ?? []).filter((programme) => retentionIds.has(normalizeXmltvChannelId(programme.channelId ?? programme.xmltv_channel_id)));
+  return {
+    retentionIds,
+    retained,
+    dropped: Math.max(0, (programmes ?? []).length - retained.length),
+  };
+}
+
 async function loadCompleteProviderCatalogSnapshot(providerId, maxAgeMs, operation = 'load_provider_catalog_snapshot') {
   const safeProviderId = requireUuid(providerId, operation, 'provider_id');
   const [head] = await db(`managed_provider_epg_catalog_snapshot?managed_provider_id=eq.${encodeURIComponent(safeProviderId)}&is_active=eq.true&snapshot_complete=eq.true&select=snapshot_generation,snapshot_expected_rows,snapshot_complete,is_active,captured_at&order=captured_at.desc&limit=1`, {}, operation);
@@ -767,6 +781,7 @@ async function processRequest(request) {
   const channels = [];
   const programmes = [];
   const mappings = [];
+  let xmltvProgrammeRowsParsed = 0;
   const catalog = await acquireProviderCatalog(providerId, provider);
   const live = { items: catalog.items };
   const snapshot = catalog.snapshot;
@@ -778,6 +793,7 @@ async function processRequest(request) {
     return fetched;
   });
   const parser = new XmltvParser((channel) => channels.push(channel), (programme) => {
+    xmltvProgrammeRowsParsed += 1;
     if (programme.stopAt >= new Date(NOW - PAST_RETENTION_MS).toISOString() && programme.startAt <= new Date(NOW + FUTURE_RETENTION_MS).toISOString()) programmes.push(programme);
   });
   await runWorkerStage('gunzip_epg_feed', async () => {
@@ -807,12 +823,14 @@ async function processRequest(request) {
   for (const mapping of audit.phase2cMappingRecords) if (!existingByStream.has(mapping.providerStreamId)) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: mapping.providerStreamId, xmltv_channel_id: mapping.xmltvChannelId, match_type: mapping.matchType, match_confidence_class: 'proven', provider_canonical: mapping.providerCanonical, xmltv_canonical: mapping.xmltvCanonical, mapped_at: refreshedAt });
   return mappings;
   });
+  const programmeRetention = retainMappedProgrammes(programmes, mappingsResult);
+  process.stdout.write(`xmltvProgrammeRowsParsed=${xmltvProgrammeRowsParsed} programmeRetentionChannelCount=${programmeRetention.retentionIds.size} programmeRowsEligibleForPersistence=${programmeRetention.retained.length} programmeRowsDroppedUnmapped=${programmeRetention.dropped} programmeRowsPersisted=${programmeRetention.retained.length}\n`);
   await runWorkerStage('persist_cache', async () => {
   await insertBatches('managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalize(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1), refreshed_at: refreshedAt })), '', 'insert_channels');
-  await insertBatches('managed_provider_epg_source_programmes', programmes.map((programme) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: programme.channelId, start_at: programme.startAt, stop_at: programme.stopAt, title: programme.title, subtitle: programme.subtitle, description: programme.description, category: programme.category, refreshed_at: refreshedAt })), 'source_id,cache_generation,xmltv_channel_id,start_at,stop_at,title', 'insert_programmes');
+  await insertBatches('managed_provider_epg_source_programmes', programmeRetention.retained.map((programme) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: programme.channelId, start_at: programme.startAt, stop_at: programme.stopAt, title: programme.title, subtitle: programme.subtitle, description: programme.description, category: programme.category, refreshed_at: refreshedAt })), 'source_id,cache_generation,xmltv_channel_id,start_at,stop_at,title', 'insert_programmes');
   await insertBatches('managed_provider_epg_source_mappings', mappings, '', 'insert_mappings');
   });
-  await runWorkerStage('promote_generation', () => patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: channels.length, programme_count: programmes.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, invalidTimestamps: parser.invalidTimestamps }, updated_at: refreshedAt }, '', 'promote_generation'));
+  await runWorkerStage('promote_generation', () => patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: channels.length, programme_count: programmeRetention.retained.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, invalidTimestamps: parser.invalidTimestamps, xmltvProgrammeRowsParsed, programmeRetentionChannelCount: programmeRetention.retentionIds.size, programmeRowsEligibleForPersistence: programmeRetention.retained.length, programmeRowsDroppedUnmapped: programmeRetention.dropped, programmeRowsPersisted: programmeRetention.retained.length }, updated_at: refreshedAt }, '', 'promote_generation'));
   promoted = true;
   if (source.active_cache_generation) {
     for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_generation').catch(() => {});
@@ -835,7 +853,7 @@ async function processRequest(request) {
     logDatabaseFailure(error);
     process.stderr.write('Combined EPG coverage unavailable.\n');
   }
-  return { channels: channels.length, programmes: programmes.length, mapped: mappings.length };
+  return { channels: channels.length, programmes: programmeRetention.retained.length, parsedProgrammes: xmltvProgrammeRowsParsed, programmeRetentionChannelCount: programmeRetention.retentionIds.size, programmeRowsDroppedUnmapped: programmeRetention.dropped, mapped: mappings.length };
   } catch (error) {
     if (!promoted) for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_generation').catch(() => {});
     throw error;
@@ -1014,7 +1032,7 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 
-export { assessGuideReadiness, buildMappingAudit, snapshotWithinAge, toAuditXmltvChannel };
+export { assessGuideReadiness, buildMappingAudit, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel };
 
 if (process.env.EPG_INGEST_TEST_IMPORT !== '1') {
   main().catch((error) => {

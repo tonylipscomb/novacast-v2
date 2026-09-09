@@ -67,7 +67,15 @@ export async function searchGlobalGroupedIncremental(
         });
       })
       .catch(() => undefined),
-    searchMovies(bundle.providerId, bundle.movies, { ...requestBase, offset: 0, limit: GLOBAL_PREVIEW_LIMIT })
+    resolveMoviesSearchDatasource({
+      providerId: bundle.providerId,
+      query,
+      bundleMovies: bundle.movies,
+    })
+      .then((selection) => {
+        novacastTrace('[NovaCast Global Search Datasource] ' + JSON.stringify({ scope: 'movie', selectedDatasource: selection.selectedDatasource, readableGeneration: selection.readableGeneration }));
+        return searchMovies(bundle.providerId, selection.dataSource, { ...requestBase, offset: 0, limit: GLOBAL_PREVIEW_LIMIT });
+      })
       .then((movie) => {
         if (signal?.aborted) {
           return;
@@ -85,7 +93,19 @@ export async function searchGlobalGroupedIncremental(
         });
       })
       .catch(() => undefined),
-    searchSeries(bundle.providerId, bundle.seriesDataSource, { ...requestBase, offset: 0, limit: GLOBAL_PREVIEW_LIMIT })
+    resolveSeriesSearchDatasource({
+      providerId: bundle.providerId,
+      query,
+      offset: 0,
+      limit: GLOBAL_PREVIEW_LIMIT,
+      bundleSeriesDataSource: bundle.seriesDataSource,
+    })
+      .then((selection) => {
+        novacastTrace('[NovaCast Global Search Datasource] ' + JSON.stringify({ scope: 'series', selectedDatasource: selection.selectedDatasource, readableGeneration: selection.readableGeneration }));
+        return selection.selectedDatasource === 'sqlite-v2'
+          ? searchSeriesDataSourceDirect(bundle.providerId, selection.dataSource, { ...requestBase, offset: 0, limit: GLOBAL_PREVIEW_LIMIT })
+          : searchSeries(bundle.providerId, selection.dataSource, { ...requestBase, offset: 0, limit: GLOBAL_PREVIEW_LIMIT });
+      })
       .then((series) => {
         if (signal?.aborted) {
           return;

@@ -26,6 +26,7 @@ import {
 import { logProviderBoundary, safeProviderRuntimeFlags } from './providerBoundaryDiagnostics.ts';
 import { summarizeXtreamAccountEntitlements } from './providerEntitlementAudit.ts';
 import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
+import { CATALOG_FRESHNESS_MS, decideCatalogFreshness } from '../catalog/catalogFreshness.ts';
 
 /** Stage 4.2O.2 — Series SQLite Parity. Mirrors Movies' build-time kill switch. */
 const SERIES_SQLITE_READS_ENABLED = process.env.EXPO_PUBLIC_SERIES_SQLITE_READS === 'true';
@@ -136,13 +137,44 @@ async function requestCatalogBootstrap(bundle: ProviderRepositoryBundle) {
     const movieUpgrade = await shouldRequestSortMetadataUpgrade(bundle.providerId, 'movie');
     const seriesUpgrade = await shouldRequestSortMetadataUpgrade(bundle.providerId, 'series');
     if (!movieUpgrade && !seriesUpgrade) {
+      const { getCatalogProvider } = await import('../catalog/catalogRepository.ts');
+      const providerState = await getCatalogProvider(bundle.providerId);
+      const freshness = decideCatalogFreshness({
+        hasReadableGeneration: state.durableReadyGeneration > 0,
+        lastSuccessfulSyncAt: providerState?.lastSuccessfulSyncAt,
+      });
+      const catalogFreshnessAgeMs = freshness.ageMs;
+      const catalogFreshnessState = freshness.state;
+      const catalogFreshnessAction = freshness.action;
+      logFreshProviderBootstrap('catalog-freshness-decision', {
+        providerId: bundle.providerId,
+        catalogFreshnessAgeMs,
+        catalogFreshnessThresholdMs: CATALOG_FRESHNESS_MS,
+        catalogFreshnessState,
+        catalogFreshnessAction,
+        durableReadyGeneration: state.durableReadyGeneration,
+      });
+      if (catalogFreshnessAction === 'background_refresh') {
+        void bundle.syncCatalog('provider-bundle-stale-while-revalidate').catch((error) => {
+          logFreshProviderBootstrap('catalog-background-refresh-failed', {
+            providerId: bundle.providerId,
+            catalogFreshnessAgeMs,
+            catalogFreshnessThresholdMs: CATALOG_FRESHNESS_MS,
+            catalogFreshnessState,
+            catalogFreshnessAction,
+            errorCode: error instanceof Error ? error.message : 'catalog_refresh_failed',
+          });
+        });
+      }
       logFreshProviderBootstrap('bootstrap-skipped-ready', {
         providerId: bundle.providerId,
         providerCatalogGeneration: state.providerCatalogGeneration,
         currentAttemptGeneration: state.currentAttemptGeneration,
         currentStatus: state.currentStatus,
         durableReadyGeneration: state.durableReadyGeneration,
-        decisionReason: 'durable-movie-ready-generation-present',
+        decisionReason: catalogFreshnessAction === 'skip'
+          ? 'durable-movie-ready-generation-present'
+          : 'durable-movie-ready-generation-background-refresh',
       });
       return;
     }
@@ -161,6 +193,10 @@ async function requestCatalogBootstrap(bundle: ProviderRepositoryBundle) {
     currentAttemptGeneration: state.currentAttemptGeneration,
     currentStatus: state.currentStatus,
     durableReadyGeneration: state.durableReadyGeneration,
+    catalogFreshnessAgeMs: null,
+    catalogFreshnessThresholdMs: CATALOG_FRESHNESS_MS,
+    catalogFreshnessState: 'missing',
+    catalogFreshnessAction: 'bootstrap',
     decisionReason: 'no-ready-movie-generation-and-no-syncing-attempt',
   });
   logFreshProviderBootstrap('catalog-bootstrap-request', {

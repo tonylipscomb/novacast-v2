@@ -110,7 +110,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       });
       return bundle?.seriesDataSource ?? null;
     }
-    const network = createProviderSeriesDataSource(bundle.series, bundle.mediaBaseUrl);
+    const network = createProviderSeriesDataSource(bundle.series, bundle.mediaBaseUrl, selectedProvider.id);
     const sqliteFirst = createSqliteFirstSeriesDataSource(selectedProvider.id, network);
     logSeriesDataSourceAudit({
       event: 'data-source-selection',

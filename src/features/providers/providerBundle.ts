@@ -236,7 +236,7 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
   // calls base.getCategories()/getSeriesPage() for the flat provider rail,
   // and that "base" now prefers a readable local generation, falling back
   // to the real provider network call only when none exists.
-  const rawSeriesDataSource = createProviderSeriesDataSource(base.series, base.mediaBaseUrl);
+  const rawSeriesDataSource = createProviderSeriesDataSource(base.series, base.mediaBaseUrl, provider.id);
   const seriesSqliteSelected = SERIES_SQLITE_READS_ENABLED;
   logSeriesDataSourceAudit({
     event: 'data-source-selection',

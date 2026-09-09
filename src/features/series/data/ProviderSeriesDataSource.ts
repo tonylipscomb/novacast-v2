@@ -18,9 +18,23 @@ import {
 
 import type { SeriesDataSource } from './SeriesDataSource';
 import { logSeriesDataSourceAudit } from '../seriesDataSourceAudit';
+import { findCatalogSeriesCandidates, resolveReadableCatalogGeneration } from '../../catalog/catalogRepository.ts';
+import { normalizeProviderTitle, extractYearFromTitle } from '../metadata/titleNormalization.ts';
+import {
+  dedupeAndBoundSeriesCandidates,
+  probeSeriesCandidates,
+  scoreSeriesDetail,
+  selectSeriesCompletenessWinner,
+  isCandidateYearCompatible,
+  type SeriesCompletenessCache,
+  readSeriesWinnerCache,
+  writeSeriesWinnerCache,
+  classifySeriesCompleteness,
+} from '../seriesCompletenessRescue.ts';
 
 const POSTER_STYLE_KEYS = ['ember', 'signal', 'glacier', 'orbit', 'midnight', 'onyx', 'aurora', 'dune'] as const;
 const MAX_CACHED_CATEGORY_ITEMS = 100_000;
+const seriesWinnerCache = new Map<string, SeriesCompletenessCache>();
 
 // TEMPORARY: remove after The Chi provider response is diagnosed. This is
 // deliberately limited to shape/count metadata and never logs credentials or
@@ -180,6 +194,7 @@ export function buildSeriesPreviewDetail(series: SeriesSummary): SeriesDetail {
 export function createProviderSeriesDataSource(
   repository: ProviderSeriesRepository,
   mediaBaseUrl?: string,
+  providerId?: string,
 ): SeriesDataSource {
   const categoryCache = new Map<string, SeriesSummary[]>();
 
@@ -252,7 +267,24 @@ export function createProviderSeriesDataSource(
     async getSeriesInfo(seriesId) {
       const startedAt = Date.now();
       try {
-        const info = await repository.getSeriesInfo(seriesId);
+        const generation = providerId
+          ? await resolveReadableCatalogGeneration(providerId, 'series').catch(() => 0)
+          : 0;
+        const cachedBySelectedId = providerId ? readSeriesWinnerCache(seriesWinnerCache, `${providerId}:selected:${seriesId}`, generation) : undefined;
+        let requestedSeriesId = String(seriesId);
+        let info = await repository.getSeriesInfo(
+          cachedBySelectedId?.generation === generation ? cachedBySelectedId.winnerProviderSeriesId : seriesId,
+        ).catch(() => null);
+        if (cachedBySelectedId?.generation === generation && cachedBySelectedId.winnerProviderSeriesId !== String(seriesId)) {
+          const cachedDetail = info ? mapSeriesInfo(cachedBySelectedId.winnerProviderSeriesId, info, mediaBaseUrl) : null;
+          if (!cachedDetail || scoreSeriesDetail(cachedDetail).playableSeasonCount === 0) {
+            seriesWinnerCache.delete(`${providerId}:selected:${seriesId}`);
+            requestedSeriesId = String(seriesId);
+            info = await repository.getSeriesInfo(seriesId).catch(() => null);
+          } else {
+            requestedSeriesId = cachedBySelectedId.winnerProviderSeriesId;
+          }
+        }
         const rawEpisodes = info?.episodes;
         const episodeSeasonKeys = rawEpisodes && typeof rawEpisodes === 'object'
           ? Object.keys(rawEpisodes)
@@ -263,7 +295,7 @@ export function createProviderSeriesDataSource(
             return [key, Array.isArray(value) ? value.length : value && typeof value === 'object' ? Object.keys(value).length : 0];
           }),
         );
-        const detail = mapSeriesInfo(seriesId, info, mediaBaseUrl);
+        const detail = mapSeriesInfo(requestedSeriesId, info, mediaBaseUrl);
         logSeriesInfoAudit({
           origin: 'series-detail',
           title: typeof info?.info?.name === 'string' ? info.info.name : null,
@@ -290,7 +322,82 @@ export function createProviderSeriesDataSource(
           selectedSeasonEpisodeCount: null,
           errorCategory: null,
         });
-        return detail;
+        if (!detail || !providerId) return detail;
+
+        if (requestedSeriesId !== String(seriesId)) {
+          logSeriesInfoAudit({
+            origin: 'series-completeness-rescue',
+            providerId,
+            seriesCompletenessSelectedProviderId: String(seriesId),
+            seriesCompletenessCandidateCount: 0,
+            seriesCompletenessProbedCount: 0,
+            seriesCompletenessWinningProviderId: requestedSeriesId,
+            seriesCompletenessOriginalSeasonCount: scoreSeriesDetail(detail).playableSeasonCount,
+            seriesCompletenessWinningSeasonCount: scoreSeriesDetail(detail).playableSeasonCount,
+            seriesCompletenessOriginalEpisodeCount: scoreSeriesDetail(detail).totalEpisodeCount,
+            seriesCompletenessWinningEpisodeCount: scoreSeriesDetail(detail).totalEpisodeCount,
+            seriesCompletenessResult: 'cached_winner',
+          });
+          return detail;
+        }
+
+        const candidates = generation > 0
+          ? await findCatalogSeriesCandidates(providerId, detail.title, { year: detail.year ? Number(detail.year) : undefined, generation })
+              .catch(() => [])
+          : [];
+        const boundedCandidates = dedupeAndBoundSeriesCandidates(
+          candidates
+            .filter((candidate) => normalizeProviderTitle(candidate.title) === normalizeProviderTitle(detail.title))
+            .filter((candidate) => isCandidateYearCompatible(candidate.year, detail.year ? Number(detail.year) : extractYearFromTitle(detail.title)))
+            .map((candidate) => ({ ...candidate, providerSeriesId: String(candidate.providerSeriesId) })),
+          String(seriesId),
+        );
+        const cacheKey = `${providerId}:${normalizeProviderTitle(detail.title)}`;
+        const cached = readSeriesWinnerCache(seriesWinnerCache, cacheKey, generation);
+        const cachedCandidate = cached
+          ? boundedCandidates.find((candidate) => candidate.providerSeriesId === cached.winnerProviderSeriesId)
+          : undefined;
+        const probed = cachedCandidate
+          ? await probeSeriesCandidates([cachedCandidate], async (candidate) => {
+              const cachedInfo = await repository.getSeriesInfo(candidate.providerSeriesId);
+              const cachedDetail = mapSeriesInfo(candidate.providerSeriesId, cachedInfo, mediaBaseUrl);
+              return cachedDetail ? { providerSeriesId: candidate.providerSeriesId, detail: cachedDetail } : null;
+            })
+          : await probeSeriesCandidates(boundedCandidates, async (candidate) => {
+              const alternateInfo = await repository.getSeriesInfo(candidate.providerSeriesId);
+              const alternateDetail = mapSeriesInfo(candidate.providerSeriesId, alternateInfo, mediaBaseUrl);
+              return alternateDetail ? { providerSeriesId: candidate.providerSeriesId, detail: alternateDetail } : null;
+            });
+        const winner = selectSeriesCompletenessWinner(
+          [{ providerSeriesId: String(seriesId), detail }, ...probed],
+          String(seriesId),
+        );
+        if (winner && winner.providerSeriesId !== String(seriesId)) {
+          writeSeriesWinnerCache(seriesWinnerCache, cacheKey, { generation, winnerProviderSeriesId: winner.providerSeriesId });
+          writeSeriesWinnerCache(seriesWinnerCache, `${providerId}:selected:${seriesId}`, { generation, winnerProviderSeriesId: winner.providerSeriesId });
+        }
+        if (boundedCandidates.length > 0 || cachedCandidate) {
+          logSeriesInfoAudit({
+            origin: 'series-completeness-rescue',
+            providerId,
+            seriesCompletenessSelectedProviderId: String(seriesId),
+            seriesCompletenessCandidateCount: boundedCandidates.length,
+            seriesCompletenessProbedCount: probed.length,
+            seriesCompletenessWinningProviderId: winner?.providerSeriesId ?? String(seriesId),
+            seriesCompletenessOriginalSeasonCount: scoreSeriesDetail(detail).playableSeasonCount,
+            seriesCompletenessWinningSeasonCount: winner ? scoreSeriesDetail(winner.detail).playableSeasonCount : scoreSeriesDetail(detail).playableSeasonCount,
+            seriesCompletenessOriginalEpisodeCount: scoreSeriesDetail(detail).totalEpisodeCount,
+            seriesCompletenessWinningEpisodeCount: winner ? scoreSeriesDetail(winner.detail).totalEpisodeCount : scoreSeriesDetail(detail).totalEpisodeCount,
+            seriesCompletenessResult: cachedCandidate
+              ? 'cached_winner'
+              : classifySeriesCompleteness(
+                  scoreSeriesDetail(winner?.detail ?? detail),
+                  undefined,
+                  winner?.providerSeriesId !== String(seriesId),
+                ),
+          });
+        }
+        return winner?.detail ?? detail;
       } catch (error) {
         const safeError = error as { httpStatus?: number; classification?: string; name?: string; message?: string };
         logSeriesInfoAudit({

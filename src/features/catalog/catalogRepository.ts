@@ -4102,6 +4102,34 @@ export async function getCatalogSeriesItem(
   return mapped;
 }
 
+/** Bounded duplicate lookup for Series detail rescue. It is pinned to the
+ * currently readable generation and never crawls provider categories. */
+export async function findCatalogSeriesCandidates(
+  providerId: string,
+  title: string,
+  options?: { year?: number; generation?: number; limit?: number },
+): Promise<Array<{ providerSeriesId: string; title: string; year?: number }>> {
+  const generation = options?.generation ?? (await resolveReadableCatalogGeneration(providerId, 'series'));
+  if (!providerId || generation <= 0 || !title.trim()) return [];
+  const db = await getCatalogReadDatabase();
+  const normalizedTitle = normalizeCatalogTitle(title);
+  const limit = Math.min(Math.max(options?.limit ?? 12, 1), 24);
+  const rows = await db.getAll<{ content_id: string; series_id: string | null; title: string; release_year: number | null }>(
+    `SELECT content_id, series_id, title, release_year
+       FROM ${catalogItemsTable('series')}
+      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
+        AND normalized_title LIKE ?
+      ORDER BY content_id ASC
+      LIMIT ?`,
+    [providerId, 'series', generation, `%${normalizedTitle}%`, limit],
+  );
+  return rows.map((row) => ({
+    providerSeriesId: String(row.series_id ?? row.content_id),
+    title: String(row.title ?? ''),
+    ...(row.release_year == null ? {} : { year: Number(row.release_year) }),
+  }));
+}
+
 export async function getCatalogDiagnosticSnapshot(
   providerId: string,
   mediaType: CatalogMediaType,

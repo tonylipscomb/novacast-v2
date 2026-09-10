@@ -254,6 +254,12 @@ export interface ProviderGuideRepository {
   getChannelCount?(categoryId?: string, signal?: AbortSignal): Promise<number>;
 }
 
+export type ManagedEpgResolver = (
+  streamId: string,
+  limit: number,
+  signal?: AbortSignal,
+) => Promise<ProviderGuideProgram[] | null>;
+
 export type ProviderGuideQuery = {
   /** Scopes paging to a single provider category. Omitted or `'all'` pages across every channel. */
   categoryId?: string;
@@ -1249,7 +1255,10 @@ function bindStreamUrlBuilder(
     `novacast://xtream/${fallbackPrefix}/${streamId}.${extension}`;
 }
 
-export function createXtreamProviderRepositories(client: XtreamClient): ProviderRepositories {
+export function createXtreamProviderRepositories(
+  client: XtreamClient,
+  repositoryOptions?: { managedEpgResolver?: ManagedEpgResolver },
+): ProviderRepositories {
   const vodStreamCache = new Map<string, XtreamVodStreamResponse[]>();
   const categoryCountCache = new Map<string, number>();
   const vodCategoryIds = new Set<string>();
@@ -1847,6 +1856,10 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
       return mapLiveStream(stream, index, assignLiveStreamCategoryId(stream.category_id));
     },
     async getShortEpg(channelId: string, limit = 3, signal, epgChannelId?: string) {
+      const managed = repositoryOptions?.managedEpgResolver
+        ? await repositoryOptions.managedEpgResolver(channelId, limit, signal).catch(() => null)
+        : null;
+      if (managed?.length) return managed.slice(0, Math.min(12, Math.max(1, limit)));
       const result = await fetchShortEpgWithFallback(client, channelId, epgChannelId, limit, signal);
       return result.programs;
     },
@@ -2054,8 +2067,25 @@ export function createXtreamProviderRepositories(client: XtreamClient): Provider
         });
 
         const epgByChannel = new Map<string, ProviderGuideProgram[]>();
+        const managedEpgByChannel = new Map<string, ProviderGuideProgram[]>();
+        if (repositoryOptions?.managedEpgResolver && resolvedMappedChannels.length) {
+          let nextManagedChannel = 0;
+          await Promise.all(Array.from({ length: Math.min(6, resolvedMappedChannels.length) }, async () => {
+            while (nextManagedChannel < resolvedMappedChannels.length) {
+              const channel = resolvedMappedChannels[nextManagedChannel++];
+              const managed = await repositoryOptions.managedEpgResolver!(channel.id, epgLimit, signal).catch(() => null);
+              if (managed?.length) managedEpgByChannel.set(channel.id, managed);
+              if (signal?.aborted) return;
+            }
+          }));
+        }
 
         for (const channel of resolvedMappedChannels) {
+          const managedPrograms = managedEpgByChannel.get(channel.id);
+          if (managedPrograms?.length) {
+            epgByChannel.set(channel.id, managedPrograms);
+            continue;
+          }
           const xmltvId = normalizeXmltvChannelId(channel.epgChannelId);
 
           if (!xmltvId) {

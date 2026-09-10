@@ -227,7 +227,12 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
 } {
   const base =
     provider.connection?.type === 'xtream'
-      ? createXtreamProviderRepositories(new XtreamClient(credentials!, { providerId: provider.id }))
+      ? createXtreamProviderRepositories(new XtreamClient(credentials!, { providerId: provider.id }), {
+          managedEpgResolver: async (streamId, limit, signal) => {
+            const { fetchManagedEpg } = await import('../guide/managedEpgClient.ts');
+            return fetchManagedEpg(streamId, limit, signal);
+          },
+        })
       : createMockProviderRepositories(provider.id);
 
   // Stage 4.2O.2: insert the SQLite-first composite *below* the smart

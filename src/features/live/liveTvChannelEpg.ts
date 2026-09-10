@@ -47,6 +47,20 @@ function epgProgressFromProgram(program: ProviderGuideProgram) {
   return program.meta.includes('left') ? 50 : 0;
 }
 
+function isTimedCurrent(program: ProviderGuideProgram, now: number) {
+  return program.startAt != null && program.endAt != null && program.startAt <= now && program.endAt > now;
+}
+
+export function orderTimedEpgPrograms(programs: ProviderGuideProgram[], now = Date.now()) {
+  const timed = programs.filter((program) => program.startAt != null && program.endAt != null);
+  if (!timed.length) return programs;
+  const current = timed.find((program) => isTimedCurrent(program, now));
+  const future = timed
+    .filter((program) => (program.startAt as number) > now)
+    .sort((left, right) => (left.startAt as number) - (right.startAt as number));
+  return current ? [current, ...future] : future;
+}
+
 export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: ProviderGuideProgram[]): ProviderLiveChannel {
   if (!programs.length) {
     const title = displayLiveProgramText(channel.current, '');
@@ -57,22 +71,26 @@ export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: Pro
     };
   }
 
-  const now = programs[0];
-  const next = programs[1];
-  const following = programs[2];
+  const orderedPrograms = orderTimedEpgPrograms(programs);
+  const hasTimedPrograms = programs.some((program) => program.startAt != null && program.endAt != null);
+  const now = hasTimedPrograms ? orderedPrograms[0] : programs[0];
+  const hasCurrent = hasTimedPrograms && isTimedCurrent(now, Date.now());
+  const next = hasTimedPrograms ? orderedPrograms[hasCurrent ? 1 : 0] : programs[1];
+  const following = hasTimedPrograms ? orderedPrograms[hasCurrent ? 2 : 1] : programs[2];
   const programTitle = displayLiveProgramText(now.title, '');
   const channelLabel = displayStreamTitle(channel.name);
+  const current = hasCurrent || !hasTimedPrograms;
 
   return {
     ...channel,
-    current: programTitle && programTitle !== channelLabel && programTitle !== channel.name.trim() ? programTitle : '',
+    current: current && programTitle && programTitle !== channelLabel && programTitle !== channel.name.trim() ? programTitle : '',
     next: next?.title ? displayLiveProgramText(next.title, channel.next) : channel.next,
     following: following?.title ? displayLiveProgramText(following.title, channel.following) : channel.following,
-    currentStart: now.start ?? channel.currentStart,
-    currentEnd: now.end ?? channel.currentEnd,
-    remaining: now.meta.includes('left') ? now.meta : channel.remaining,
-    progress: epgProgressFromProgram(now),
-    description: displayLiveProgramText(now.description, 'No program information available.'),
+    currentStart: current ? (now.start ?? channel.currentStart) : '',
+    currentEnd: current ? (now.end ?? channel.currentEnd) : '',
+    remaining: current && now.meta.includes('left') ? now.meta : '',
+    progress: current ? epgProgressFromProgram(now) : 0,
+    description: current ? displayLiveProgramText(now.description, 'No program information available.') : 'No program information available.',
   };
 }
 

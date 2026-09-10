@@ -402,7 +402,14 @@ test('Search Live rows use the native TV hold bridge and retain short-press play
   assert.match(searchResults, /onNovaCastNativeTvKey/);
   assert.match(searchResults, /event\.keyCode === 23/);
   assert.match(searchResults, /favoriteHoldRef\.current\?\.handleEvent/);
+  assert.match(searchResults, /if \(!isFocusedRef\.current\)/);
   assert.match(searchResults, /nativeTvHold/);
   assert.match(searchResults, /onPress=\{\(\) =>/);
   assert.match(focusRow, /onBlur\?\.\(\)/);
+});
+
+test('Search-origin hydrated category collisions keep Search playback ownership', () => {
+  assert.match(liveScreen, /preferSearch: searchPlaybackSessionActive \|\| directPlayRequested/);
+  assert.match(liveScreen, /directPlayRequested \? routeChannelId/);
+  assert.match(liveScreen, /searchOverlayVisibleRef\.current/);
 });

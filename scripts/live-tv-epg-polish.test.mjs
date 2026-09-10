@@ -56,11 +56,21 @@ test('Live presentation keeps category rows text-only and marquee behavior focus
   const detail = read('src/features/live/LiveTvProgramDetailPanel.tsx');
   const marquee = read('src/features/live/LiveTvMarqueeText.tsx');
   assert.doesNotMatch(category, /ProviderCategoryMarker|showMarker|markerSlot/);
-  assert.match(channel, /<LiveTvMarqueeText focused=\{isFocused\}/);
-  assert.match(channel, /focused=\{isFocused && hasProgram\}/);
+  assert.match(channel, /isFocused \?/);
+  assert.match(channel, /<LiveTvMarqueeText focused/);
+  assert.match(channel, /<Text numberOfLines=\{1\} ellipsizeMode="tail"/);
+  assert.match(channel, /isFocused && hasProgram/);
   assert.match(detail, /<LiveTvMarqueeText focused/);
   assert.match(marquee, /if \(!focused \|\| distance <= 0\)/);
   assert.match(marquee, /useNativeDriver: true/);
+});
+
+test('unfocused channel rows do not mount marquee measurement work', () => {
+  const channel = read('src/features/live/LiveTvChannelRow.tsx');
+  const marquee = read('src/features/live/LiveTvMarqueeText.tsx');
+  assert.match(channel, /isFocused \?/);
+  assert.match(channel, /isFocused && hasProgram \?/);
+  assert.match(marquee, /recordLiveTvMarqueeMount/);
 });
 
 test('device EPG batch remains custom-device-authenticated and configured without JWT', () => {

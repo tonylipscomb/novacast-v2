@@ -131,6 +131,7 @@ function ResultRow({
   const key = searchResultKey(result);
   const isLive = result.type === 'live';
   const [isFocused, setIsFocused] = useState(false);
+  const isFocusedRef = useRef(false);
   const isFavorite = isLive && Boolean(favoriteContentIds?.has(result.id));
   const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
   const holdSuppressedRef = useRef(false);
@@ -151,6 +152,9 @@ function ResultRow({
       repeatCount?: number;
     }) => {
       if (event.keyCode === 23 || event.keyCode === 66 || event.keyCode === 160) {
+        if (!isFocusedRef.current) {
+          return;
+        }
         favoriteHoldRef.current?.handleEvent({
           keyCode: event.keyCode,
           eventKeyAction: event.action,
@@ -180,10 +184,12 @@ function ResultRow({
       nextFocusUp={index === 0 ? focusUpHandle : undefined}
       nextFocusLeft={index === 0 ? focusLeftHandle : undefined}
       onFocus={() => {
+        isFocusedRef.current = true;
         setIsFocused(true);
         onFocusResult?.(key);
       }}
       onBlur={() => {
+        isFocusedRef.current = false;
         setIsFocused(false);
         favoriteHoldRef.current?.cancel('search-row-blur');
       }}

@@ -439,6 +439,14 @@ test('playback lookup prefers search session channels over missing category rows
   assert.equal(resolveLivePlaybackChannel('cnn', category, searchMap)?.id, 'cnn');
 });
 
+test('Search-origin playback keeps the Search channel when category hydration collides', () => {
+  const category = [channel('espn2', 'Category ESPN 2')];
+  const searchChannel = channel('espn2', 'Search ESPN 2');
+  const searchMap = new Map([['espn2', searchChannel]]);
+  assert.equal(resolveLivePlaybackChannel('espn2', category, searchMap, { preferSearch: true }), searchChannel);
+  assert.equal(resolveLivePlaybackChannel('espn2', category, searchMap), category[0]);
+});
+
 test('liveSearchRepository is reused rather than duplicated', () => {
   assert.match(liveScreen, /searchLiveChannels\(activeProviderId, bundle, request\)/);
   assert.match(liveSearchRepo, /searchLiveSqliteCatalog/);

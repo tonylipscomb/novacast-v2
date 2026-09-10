@@ -114,9 +114,14 @@ export function resolveLivePlaybackChannel<T extends { id: string }>(
   channelId: string | null | undefined,
   categoryChannels: readonly T[],
   searchChannels: ReadonlyMap<string, T>,
+  options?: { preferSearch?: boolean },
 ): T | null {
   if (!channelId) {
     return null;
+  }
+
+  if (options?.preferSearch) {
+    return searchChannels.get(channelId) ?? categoryChannels.find((channel) => channel.id === channelId) ?? null;
   }
 
   return categoryChannels.find((channel) => channel.id === channelId) ?? searchChannels.get(channelId) ?? null;

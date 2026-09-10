@@ -10,6 +10,9 @@ type LiveTvScrollPerfSnapshot = {
   channelTuneEvents: number;
   manualScrollCalls: number;
   memorySyncCalls: number;
+  marqueeMounts: number;
+  marqueeLayoutCallbacks: number;
+  marqueeTextLayoutCallbacks: number;
 };
 
 const counters: LiveTvScrollPerfSnapshot = {
@@ -20,6 +23,9 @@ const counters: LiveTvScrollPerfSnapshot = {
   channelTuneEvents: 0,
   manualScrollCalls: 0,
   memorySyncCalls: 0,
+  marqueeMounts: 0,
+  marqueeLayoutCallbacks: 0,
+  marqueeTextLayoutCallbacks: 0,
 };
 
 let perfCountersForced = false;
@@ -92,6 +98,21 @@ export function recordLiveTvMemorySync() {
   counters.memorySyncCalls += 1;
 }
 
+export function recordLiveTvMarqueeMount() {
+  if (!isLiveTvScrollPerfEnabled()) return;
+  counters.marqueeMounts += 1;
+}
+
+export function recordLiveTvMarqueeLayout() {
+  if (!isLiveTvScrollPerfEnabled()) return;
+  counters.marqueeLayoutCallbacks += 1;
+}
+
+export function recordLiveTvMarqueeTextLayout() {
+  if (!isLiveTvScrollPerfEnabled()) return;
+  counters.marqueeTextLayoutCallbacks += 1;
+}
+
 export function getLiveTvScrollPerfSnapshot(): LiveTvScrollPerfSnapshot {
   return { ...counters };
 }
@@ -104,4 +125,7 @@ export function resetLiveTvScrollPerf() {
   counters.channelTuneEvents = 0;
   counters.manualScrollCalls = 0;
   counters.memorySyncCalls = 0;
+  counters.marqueeMounts = 0;
+  counters.marqueeLayoutCallbacks = 0;
+  counters.marqueeTextLayoutCallbacks = 0;
 }

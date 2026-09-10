@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Animated, StyleSheet, Text, View, type StyleProp, type TextStyle } from 'react-native';
 
+import { recordLiveTvMarqueeLayout, recordLiveTvMarqueeMount, recordLiveTvMarqueeTextLayout } from './liveTvScrollPerf';
+
 type LiveTvMarqueeTextProps = {
   children: ReactNode;
   focused: boolean;
@@ -10,6 +12,9 @@ type LiveTvMarqueeTextProps = {
 
 /** Keeps long Live labels quiet until focus, then gives the viewer a bounded read-through. */
 export function LiveTvMarqueeText({ children, focused, style, numberOfLines = 1 }: LiveTvMarqueeTextProps) {
+  useEffect(() => {
+    recordLiveTvMarqueeMount();
+  }, []);
   const offset = useRef(new Animated.Value(0)).current;
   const animation = useRef<Animated.CompositeAnimation | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
@@ -42,11 +47,17 @@ export function LiveTvMarqueeText({ children, focused, style, numberOfLines = 1 
   }, [distance, focused, offset, text]);
 
   return (
-    <View style={styles.viewport} onLayout={(event) => setViewportWidth(event.nativeEvent.layout.width)}>
+    <View style={styles.viewport} onLayout={(event) => {
+      recordLiveTvMarqueeLayout();
+      setViewportWidth(event.nativeEvent.layout.width);
+    }}>
       <Animated.Text
         numberOfLines={numberOfLines}
         ellipsizeMode="tail"
-        onTextLayout={(event) => setContentWidth(event.nativeEvent.lines[0]?.width ?? 0)}
+        onTextLayout={(event) => {
+          recordLiveTvMarqueeTextLayout();
+          setContentWidth(event.nativeEvent.lines[0]?.width ?? 0);
+        }}
         style={[style, styles.content, { transform: [{ translateX: offset }] }]}
       >{children}</Animated.Text>
     </View>

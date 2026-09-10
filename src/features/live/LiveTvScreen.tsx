@@ -352,6 +352,7 @@ export function LiveTvScreen() {
   const liveSearchResultIdsRef = useRef<string[]>([]);
   const liveSearchSurfQueueRef = useRef<string[] | null>(null);
   const liveSearchQueueActiveRef = useRef(false);
+  const [searchPlaybackSessionActive, setSearchPlaybackSessionActive] = useState(false);
   const liveSearchSelectedIdRef = useRef<string | null>(null);
   const liveSearchPlaybackByIdRef = useRef<Map<string, LiveSearchPlaybackChannel>>(new Map());
   useEffect(() => {
@@ -361,6 +362,7 @@ export function LiveTvScreen() {
     }
     liveSearchSurfQueueRef.current = handoff.resultIds;
     liveSearchQueueActiveRef.current = true;
+    setSearchPlaybackSessionActive(true);
     liveSearchSelectedIdRef.current = handoff.selected.id;
     liveSearchPlaybackByIdRef.current.set(handoff.selected.id, handoff.selected);
   }, [activeProviderId]);
@@ -372,14 +374,14 @@ export function LiveTvScreen() {
     }
 
     const categoryId = selectedCategoryId || channels[0]?.categoryId || '';
-    const channelId = initialChannel?.id ?? channels[0]?.id ?? '';
+    const channelId = directPlayRequested ? routeChannelId ?? initialChannel?.id ?? channels[0]?.id ?? '' : initialChannel?.id ?? channels[0]?.id ?? '';
     // Search direct-play still bootstraps an explicit preview so the existing
     // ready → tuneChannel fullscreen path can run. Normal open stays idle.
     if (directPlayRequested) {
       return createInitialLiveTvState(categoryId, channelId);
     }
     return createLiveTvLandingState(categoryId, channelId);
-  }, [channels, directPlayRequested, initialChannel, selectedCategoryId]);
+  }, [channels, directPlayRequested, initialChannel, routeChannelId, selectedCategoryId]);
   const liveState = interactionState ?? bootstrapState;
   liveStateRef.current = liveState;
   const shellLiveState = useMemo(() => {
@@ -549,6 +551,8 @@ export function LiveTvScreen() {
     const isFullscreen = Boolean(liveState?.fullscreenChannelId);
     if (wasFullscreenRef.current && !isFullscreen && !searchOpenRef.current) {
       liveSearchSurfQueueRef.current = null;
+      liveSearchQueueActiveRef.current = false;
+      setSearchPlaybackSessionActive(false);
     }
     wasFullscreenRef.current = isFullscreen;
   }, [liveState?.fullscreenChannelId]);
@@ -598,16 +602,16 @@ export function LiveTvScreen() {
 
   const selectedChannel = useMemo(
     () =>
-      resolveLivePlaybackChannel(liveState?.selectedChannelId, channels, liveSearchPlaybackByIdRef.current) ??
+      resolveLivePlaybackChannel(liveState?.selectedChannelId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: searchPlaybackSessionActive || directPlayRequested }) ??
       channels[0] ??
       null,
-    [channels, liveState?.selectedChannelId],
+    [channels, directPlayRequested, liveState?.selectedChannelId, searchPlaybackSessionActive],
   );
   const previewChannel = useMemo(
     () =>
-      resolveLivePlaybackChannel(liveState?.previewChannelId, channels, liveSearchPlaybackByIdRef.current) ??
+      resolveLivePlaybackChannel(liveState?.previewChannelId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: searchPlaybackSessionActive || directPlayRequested }) ??
       selectedChannel,
-    [channels, selectedChannel, liveState?.previewChannelId],
+    [channels, directPlayRequested, selectedChannel, liveState?.previewChannelId, searchPlaybackSessionActive],
   );
   const [, setFocusedChannelId] = useState<string | null>(
     liveMemory.focusedChannelId ?? null,
@@ -682,8 +686,8 @@ export function LiveTvScreen() {
     [personalizationState.liveFavorites],
   );
   const fullscreenChannel = useMemo(
-    () => resolveLivePlaybackChannel(liveState?.fullscreenChannelId, channels, liveSearchPlaybackByIdRef.current),
-    [channels, liveState?.fullscreenChannelId],
+    () => resolveLivePlaybackChannel(liveState?.fullscreenChannelId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: searchPlaybackSessionActive || directPlayRequested }),
+    [channels, directPlayRequested, liveState?.fullscreenChannelId, searchPlaybackSessionActive],
   );
   useEffect(() => {
     if (!liveState?.fullscreenChannelId) {
@@ -883,7 +887,7 @@ export function LiveTvScreen() {
 
     const channelId = liveState.previewChannelId;
     const requestId = liveState.previewRequestId;
-    const channel = resolveLivePlaybackChannel(channelId, channels, liveSearchPlaybackByIdRef.current);
+    const channel = resolveLivePlaybackChannel(channelId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: searchPlaybackSessionActive || directPlayRequested });
     const timer = setTimeout(() => {
       const latest = liveStateRef.current;
       const surfSessionActive = Boolean(surfSessionIdRef.current && latest?.fullscreenChannelId);
@@ -948,7 +952,7 @@ export function LiveTvScreen() {
   // The request id and preview channel fields are the intentional debounce
   // boundary; the full state object would restart the timer on every update.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- keep preview debounce scoped to its request fields.
-  }, [channels, resolvePlaybackSource, liveState?.previewChannelId, liveState?.previewRequestId, liveState?.previewStatus]);
+  }, [channels, directPlayRequested, resolvePlaybackSource, liveState?.previewChannelId, liveState?.previewRequestId, liveState?.previewStatus, searchPlaybackSessionActive]);
 
   useEffect(() => {
     if (liveState?.previewStatus === 'idle' || !liveState?.previewChannelId) {
@@ -1437,6 +1441,7 @@ export function LiveTvScreen() {
     const snapshot = liveSearchBrowseSnapshotRef.current;
     liveSearchSurfQueueRef.current = null;
     liveSearchQueueActiveRef.current = false;
+    setSearchPlaybackSessionActive(false);
     liveSearchSelectedIdRef.current = null;
     liveSearchBrowseSnapshotRef.current = null;
     setSearchRestoreChannelId(null);
@@ -1501,6 +1506,7 @@ export function LiveTvScreen() {
     });
     liveSearchSurfQueueRef.current = null;
     liveSearchQueueActiveRef.current = false;
+    setSearchPlaybackSessionActive(false);
     setSearchRestoreChannelId(null);
     setSearchOpen(true);
   }, [closeLiveSearch, searchOpen, selectedCategoryId]);
@@ -1517,7 +1523,8 @@ export function LiveTvScreen() {
       liveSearchPlaybackByIdRef.current.set(result.id, toLiveSearchPlaybackChannel(result));
       preferredChannelFocusId.current = result.id;
       preferChannelFocusRef.current = true;
-      const channel = resolveLivePlaybackChannel(result.id, channels, liveSearchPlaybackByIdRef.current);
+      setSearchPlaybackSessionActive(true);
+      const channel = resolveLivePlaybackChannel(result.id, channels, liveSearchPlaybackByIdRef.current, { preferSearch: true });
       if (channel) {
         void recordRecentItem({
           providerId: activeProviderId,
@@ -2204,7 +2211,7 @@ export function LiveTvScreen() {
         });
       }
       intendedSurfChannelIdRef.current = nextId;
-      const nextChannel = surfQueue?.find((candidate) => candidate.id === nextId) ?? resolveLivePlaybackChannel(nextId, channels, liveSearchPlaybackByIdRef.current);
+      const nextChannel = surfQueue?.find((candidate) => candidate.id === nextId) ?? resolveLivePlaybackChannel(nextId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: liveSearchQueueActiveRef.current || directPlayRequested });
       if (discoverContext && nextChannel) {
         const canonicalId = nextChannel.id.trim();
         if (canonicalId) {
@@ -2291,7 +2298,7 @@ export function LiveTvScreen() {
       }, LIVE_CHANNEL_SURF_DEBOUNCE_MS);
       return true;
     },
-    [channels, guide.visible, searchOverlayVisible],
+    [channels, directPlayRequested, guide.visible, searchOverlayVisible],
   );
 
   const visibleSurfOverlay = surfOverlay;
@@ -2399,6 +2406,9 @@ export function LiveTvScreen() {
         return;
       }
       if (!focusedChannelIdRef.current || focusedActionChannelIdRef.current) {
+        return;
+      }
+      if (searchOverlayVisibleRef.current) {
         return;
       }
       favoriteHoldRef.current?.handleEvent({

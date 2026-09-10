@@ -176,15 +176,25 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
       <View style={[styles.channelRail, selected && styles.selectedRail, isFocused && styles.focusRail]} />
       <View style={styles.channelCopy}>
         <View style={styles.channelTitleRow}>
-          <LiveTvMarqueeText focused={isFocused} style={[styles.channelName, selected && styles.selectedText, isFocused && styles.focusedText]}>
-            {displayName}
-          </LiveTvMarqueeText>
+          {isFocused ? (
+            <LiveTvMarqueeText focused style={[styles.channelName, selected && styles.selectedText, styles.focusedText]}>
+              {displayName}
+            </LiveTvMarqueeText>
+          ) : (
+            <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.channelName, selected && styles.selectedText]}>
+              {displayName}
+            </Text>
+          )}
         </View>
-        <LiveTvMarqueeText
-          focused={isFocused && hasProgram}
-          style={[styles.nowPlaying, hasProgram && isFocused && styles.focusedSecondaryText, !hasProgram && styles.nowPlayingEmpty]}>
-          {showEpgLoading ? 'Loading program…' : displayCurrent}
-        </LiveTvMarqueeText>
+        {isFocused && hasProgram ? (
+          <LiveTvMarqueeText focused style={[styles.nowPlaying, styles.focusedSecondaryText]}>
+            {displayCurrent}
+          </LiveTvMarqueeText>
+        ) : (
+          <Text numberOfLines={1} ellipsizeMode="tail" style={[styles.nowPlaying, !hasProgram && styles.nowPlayingEmpty]}>
+            {showEpgLoading ? 'Loading program…' : displayCurrent}
+          </Text>
+        )}
       </View>
       {Number.isFinite(data.number) && data.number > 0 ? (
         <Text

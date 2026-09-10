@@ -35,7 +35,11 @@
                                      "expo-splash-screen",
                                      {
                                          "backgroundColor":  "#000000",
-                                         "resizeMode":  "cover"
+                                         "android":  {
+                                             "drawable":  {
+                                                 "icon":  "./assets/images/transparent-splash.xml"
+                                             }
+                                         }
                                      }
                                  ],
                                  "expo-secure-store",

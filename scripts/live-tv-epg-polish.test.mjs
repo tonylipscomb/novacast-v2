@@ -50,6 +50,19 @@ test('EPG warmup cannot gate playback and temporary release audits are absent', 
   assert.doesNotMatch(live, /NovaCast Live EPG Classification Audit/);
 });
 
+test('Live presentation keeps category rows text-only and marquee behavior focus-scoped', () => {
+  const category = read('src/features/live/LiveTvCategoryRow.tsx');
+  const channel = read('src/features/live/LiveTvChannelRow.tsx');
+  const detail = read('src/features/live/LiveTvProgramDetailPanel.tsx');
+  const marquee = read('src/features/live/LiveTvMarqueeText.tsx');
+  assert.doesNotMatch(category, /ProviderCategoryMarker|showMarker|markerSlot/);
+  assert.match(channel, /<LiveTvMarqueeText focused=\{isFocused\}/);
+  assert.match(channel, /focused=\{isFocused && hasProgram\}/);
+  assert.match(detail, /<LiveTvMarqueeText focused/);
+  assert.match(marquee, /if \(!focused \|\| distance <= 0\)/);
+  assert.match(marquee, /useNativeDriver: true/);
+});
+
 test('device EPG batch remains custom-device-authenticated and configured without JWT', () => {
   const edge = read('supabase/functions/device-epg/index.ts');
   const config = read('supabase/config.toml');

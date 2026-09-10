@@ -42,6 +42,7 @@ const liveLogic = read('src/features/live/liveTvLogic.ts');
 const liveRouter = read('src/features/live/LiveTvFocusRouter.tsx');
 const overlay = read('src/features/search/SearchOverlay.tsx');
 const searchResults = read('src/features/search/SearchResults.tsx');
+const focusRow = read('src/components/nova/NovaFocusRow.tsx');
 const moviesScreen = read('src/features/movies/MoviesScreen.tsx');
 const seriesScreen = read('src/features/series/SeriesScreen.tsx');
 const searchScreen = read('src/features/search/SearchScreen.tsx');
@@ -383,4 +384,25 @@ test('Live overlay BACK still dismisses IME before close', () => {
     suppressOverlayCloseUntilMs: null,
   });
   assert.equal(afterIme.action, 'close-overlay');
+});
+
+test('Search Live direct play masks the browser during the existing ready-to-fullscreen handoff', () => {
+  assert.match(liveScreen, /directPlayRequested && !renderState\.fullscreenChannelId/);
+  assert.match(liveScreen, /styles\.directPlayCurtain/);
+  assert.match(liveScreen, /tuneChannel\(routeChannelId\)/);
+});
+
+test('Search Live category hydration preserves the authoritative search surf queue', () => {
+  assert.match(liveScreen, /liveSearchQueueActiveRef\.current = true/);
+  assert.match(liveScreen, /if \(!liveSearchQueueActiveRef\.current\) \{\s*liveSearchSurfQueueRef\.current = null;/);
+  assert.match(liveScreen, /resolveLiveSearchSurfQueue\(\s*liveSearchSurfQueueRef\.current/);
+});
+
+test('Search Live rows use the native TV hold bridge and retain short-press playback', () => {
+  assert.match(searchResults, /onNovaCastNativeTvKey/);
+  assert.match(searchResults, /event\.keyCode === 23/);
+  assert.match(searchResults, /favoriteHoldRef\.current\?\.handleEvent/);
+  assert.match(searchResults, /nativeTvHold/);
+  assert.match(searchResults, /onPress=\{\(\) =>/);
+  assert.match(focusRow, /onBlur\?\.\(\)/);
 });

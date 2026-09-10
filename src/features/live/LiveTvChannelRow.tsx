@@ -10,6 +10,7 @@ import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
 import { LIVE_TV_NO_PROGRAM_LABEL, resolveLiveTvNowPlaying } from './liveTvProgramText';
+import { LiveTvMarqueeText } from './LiveTvMarqueeText';
 
 import type { LiveTvChannelEpgData, LiveTvChannelRowShellData } from './liveTvChannelRowData';
 import { notifyLiveTvChannelFocusMove } from './liveTvFocusIdle';
@@ -175,15 +176,15 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
       <View style={[styles.channelRail, selected && styles.selectedRail, isFocused && styles.focusRail]} />
       <View style={styles.channelCopy}>
         <View style={styles.channelTitleRow}>
-          <Text numberOfLines={1} style={[styles.channelName, selected && styles.selectedText, isFocused && styles.focusedText]}>
+          <LiveTvMarqueeText focused={isFocused} style={[styles.channelName, selected && styles.selectedText, isFocused && styles.focusedText]}>
             {displayName}
-          </Text>
+          </LiveTvMarqueeText>
         </View>
-        <Text
-          numberOfLines={1}
+        <LiveTvMarqueeText
+          focused={isFocused && hasProgram}
           style={[styles.nowPlaying, hasProgram && isFocused && styles.focusedSecondaryText, !hasProgram && styles.nowPlayingEmpty]}>
           {showEpgLoading ? 'Loading program…' : displayCurrent}
-        </Text>
+        </LiveTvMarqueeText>
       </View>
       {Number.isFinite(data.number) && data.number > 0 ? (
         <Text

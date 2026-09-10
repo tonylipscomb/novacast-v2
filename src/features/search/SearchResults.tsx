@@ -1,9 +1,11 @@
 import type { RefObject } from 'react';
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import {
   FlatList,
+  DeviceEventEmitter,
+  Platform,
   StyleSheet,
   View,
   type ListRenderItemInfo,
@@ -128,9 +130,11 @@ function ResultRow({
 }) {
   const key = searchResultKey(result);
   const isLive = result.type === 'live';
+  const [isFocused, setIsFocused] = useState(false);
   const isFavorite = isLive && Boolean(favoriteContentIds?.has(result.id));
   const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
   const holdSuppressedRef = useRef(false);
+  const nativeTvHold = isLive && Platform.OS === 'android' && Platform.isTV === true;
   if (isLive && onToggleLiveFavorite && !favoriteHoldRef.current) {
     favoriteHoldRef.current = createFavoriteHoldDetector({
       onTriggered: () => {
@@ -139,6 +143,26 @@ function ResultRow({
       },
     });
   }
+  useEffect(() => {
+    if (!nativeTvHold || !favoriteHoldRef.current) return;
+    const subscription = DeviceEventEmitter.addListener('onNovaCastNativeTvKey', (event: {
+      keyCode?: number;
+      action?: number;
+      repeatCount?: number;
+    }) => {
+      if (event.keyCode === 23 || event.keyCode === 66 || event.keyCode === 160) {
+        favoriteHoldRef.current?.handleEvent({
+          keyCode: event.keyCode,
+          eventKeyAction: event.action,
+          repeatCount: event.repeatCount,
+        });
+      }
+    });
+    return () => {
+      subscription.remove();
+      favoriteHoldRef.current?.cancel('search-row-blur');
+    };
+  }, [nativeTvHold, isFocused]);
   const nativeRef =
     restoreResultKey && key === restoreResultKey ? restoreRowRef : index === 0 ? firstRowRef : undefined;
 
@@ -155,12 +179,19 @@ function ResultRow({
       nativeRef={nativeRef}
       nextFocusUp={index === 0 ? focusUpHandle : undefined}
       nextFocusLeft={index === 0 ? focusLeftHandle : undefined}
-      onFocus={() => onFocusResult?.(key)}
+      onFocus={() => {
+        setIsFocused(true);
+        onFocusResult?.(key);
+      }}
+      onBlur={() => {
+        setIsFocused(false);
+        favoriteHoldRef.current?.cancel('search-row-blur');
+      }}
       onPressIn={isLive ? () => {
         holdSuppressedRef.current = false;
-        favoriteHoldRef.current?.pressIn();
+        if (!nativeTvHold) favoriteHoldRef.current?.pressIn();
       } : undefined}
-      onPressOut={isLive ? () => favoriteHoldRef.current?.pressOut() : undefined}
+      onPressOut={isLive ? () => { if (!nativeTvHold) favoriteHoldRef.current?.pressOut(); } : undefined}
       onPress={() => {
         if (isLive && (holdSuppressedRef.current || favoriteHoldRef.current?.consumeSuppressedPress())) {
           holdSuppressedRef.current = false;

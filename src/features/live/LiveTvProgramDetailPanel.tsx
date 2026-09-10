@@ -7,6 +7,7 @@ import type { NovaTheme } from '@/theme/tokens';
 import type { ProviderLiveChannel } from '@/features/providers/providerRepositories';
 import { LiveGlassBadge } from './LiveGlassBadge';
 import { displayLiveProgramText } from './liveTvProgramText';
+import { LiveTvMarqueeText } from './LiveTvMarqueeText';
 
 const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false } as const) : {};
 
@@ -61,19 +62,19 @@ export const LiveTvProgramDetailPanel = memo(function LiveTvProgramDetailPanel({
       <View style={styles.programTopRow}>
         <View style={styles.programCopy}>
           <View style={styles.titleRow}>
-            <Text numberOfLines={1} style={styles.previewChannelName}>
+            <LiveTvMarqueeText focused style={styles.previewChannelName}>
               {channelName}
-            </Text>
+            </LiveTvMarqueeText>
             <LiveGlassBadge />
           </View>
-          <Text numberOfLines={2} style={styles.previewProgram}>
+          <LiveTvMarqueeText focused numberOfLines={2} style={styles.previewProgram}>
             {currentProgram}
-          </Text>
+          </LiveTvMarqueeText>
           <Text style={styles.previewWindow}>{previewWindow}</Text>
           {upNextProgram ? (
-            <Text numberOfLines={1} style={styles.upNext}>
+            <LiveTvMarqueeText focused style={styles.upNext}>
               Up next · {upNextProgram}
-            </Text>
+            </LiveTvMarqueeText>
           ) : null}
         </View>
       </View>

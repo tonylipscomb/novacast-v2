@@ -1,7 +1,6 @@
 import { memo, useMemo, useState, type ElementRef } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { ProviderCategoryMarker } from '@/components/ProviderCategoryMarker';
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import type { ProviderLiveCategory } from '@/features/providers/providerRepositories';
@@ -47,7 +46,6 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
     countryCode: category.countryCode,
     contentType: 'live',
   });
-  const showMarker = Boolean(category.countryCode) || category.regionMarker === 'multi';
 
   return (
     <Pressable
@@ -63,15 +61,6 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
       onBlur={() => setIsFocused(false)}
       onPress={onPress}
       style={[styles.categoryRow, styles.categoryDefault, selected && styles.categoryActive, isFocused && (selected ? styles.categoryActiveFocused : styles.categoryRowFocused)]}>
-      {showMarker ? (
-        <View style={styles.markerSlot}>
-          <ProviderCategoryMarker
-            countryCode={category.countryCode}
-            regionMarker={category.regionMarker}
-            size="md"
-          />
-        </View>
-      ) : null}
       <Text
         numberOfLines={2}
         ellipsizeMode="tail"
@@ -84,8 +73,6 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
     </Pressable>
   );
 }, areLiveTvCategoryRowPropsEqual);
-
-const MARKER_SLOT_WIDTH = 28;
 
 function createStyles(theme: NovaTheme) {
   const focusText = createNovaTvFocusTextStyles(theme);
@@ -122,11 +109,6 @@ function createStyles(theme: NovaTheme) {
       backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
       borderColor: NOVA_GLASS.activeFocused.borderColor,
       borderRadius: NOVA_GLASS.radius.base,
-    },
-    markerSlot: {
-      width: MARKER_SLOT_WIDTH,
-      alignItems: 'center',
-      justifyContent: 'center',
     },
     categoryName: {
       flex: 1,

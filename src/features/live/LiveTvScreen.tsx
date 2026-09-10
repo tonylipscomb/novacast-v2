@@ -351,6 +351,7 @@ export function LiveTvScreen() {
   const liveSearchBrowseSnapshotRef = useRef<LiveSearchBrowseSnapshot | null>(null);
   const liveSearchResultIdsRef = useRef<string[]>([]);
   const liveSearchSurfQueueRef = useRef<string[] | null>(null);
+  const liveSearchQueueActiveRef = useRef(false);
   const liveSearchSelectedIdRef = useRef<string | null>(null);
   const liveSearchPlaybackByIdRef = useRef<Map<string, LiveSearchPlaybackChannel>>(new Map());
   useEffect(() => {
@@ -359,6 +360,7 @@ export function LiveTvScreen() {
       return;
     }
     liveSearchSurfQueueRef.current = handoff.resultIds;
+    liveSearchQueueActiveRef.current = true;
     liveSearchSelectedIdRef.current = handoff.selected.id;
     liveSearchPlaybackByIdRef.current.set(handoff.selected.id, handoff.selected);
   }, [activeProviderId]);
@@ -1434,6 +1436,7 @@ export function LiveTvScreen() {
     }
     const snapshot = liveSearchBrowseSnapshotRef.current;
     liveSearchSurfQueueRef.current = null;
+    liveSearchQueueActiveRef.current = false;
     liveSearchSelectedIdRef.current = null;
     liveSearchBrowseSnapshotRef.current = null;
     setSearchRestoreChannelId(null);
@@ -1497,6 +1500,7 @@ export function LiveTvScreen() {
       channelId: liveStateRef.current?.selectedChannelId ?? null,
     });
     liveSearchSurfQueueRef.current = null;
+    liveSearchQueueActiveRef.current = false;
     setSearchRestoreChannelId(null);
     setSearchOpen(true);
   }, [closeLiveSearch, searchOpen, selectedCategoryId]);
@@ -1509,6 +1513,7 @@ export function LiveTvScreen() {
 
       liveSearchSelectedIdRef.current = result.id;
       liveSearchSurfQueueRef.current = liveSearchResultIdsRef.current.slice();
+      liveSearchQueueActiveRef.current = true;
       liveSearchPlaybackByIdRef.current.set(result.id, toLiveSearchPlaybackChannel(result));
       preferredChannelFocusId.current = result.id;
       preferChannelFocusRef.current = true;
@@ -1969,7 +1974,9 @@ export function LiveTvScreen() {
   }, []);
 
   const selectCategory = (categoryId: string) => {
-    liveSearchSurfQueueRef.current = null;
+    if (!liveSearchQueueActiveRef.current) {
+      liveSearchSurfQueueRef.current = null;
+    }
     liveRetryAttemptedRef.current = false;
     categorySelectionIsUserRef.current = true;
     preferredCategoryFocusId.current = categoryId;
@@ -2869,6 +2876,15 @@ export function LiveTvScreen() {
       </NovaTvShell>
       ) : null}
 
+      {directPlayRequested && !renderState.fullscreenChannelId ? (
+        <View pointerEvents="none" style={styles.directPlayCurtain}>
+          <NovaSpaceLoader label="Starting playbackâ€¦" />
+          <Text style={styles.directPlayCurtainTitle}>
+            {detailPanelChannel?.name ? displayStreamTitle(detailPanelChannel.name) : 'Live channel'}
+          </Text>
+        </View>
+      ) : null}
+
       {fullscreenChannel ? (
         <View style={[styles.fullscreenOverlay, { width, height }]}>
           <LiveTvFocusRouter
@@ -3080,6 +3096,19 @@ function createStyles(theme: NovaTheme) {
     fontSize: 14,
     textAlign: 'center',
     lineHeight: 20,
+  },
+  directPlayCurtain: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: '#000000',
+  },
+  directPlayCurtainTitle: {
+    color: theme.colors.textPrimary,
+    fontSize: 18,
+    fontWeight: '700',
   },
   inlineStateNotice: {
     flex: 1,

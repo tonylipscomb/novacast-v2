@@ -105,6 +105,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   const displayName = displayStreamTitle(data.name);
   const displayCurrent = resolveLiveTvNowPlaying(epg.current, data.name);
   const hasProgram = displayCurrent !== LIVE_TV_NO_PROGRAM_LABEL;
+  const showEpgLoading = epgPending && !hasProgram;
   const showSelected = rowVisualFlags.showSelectedHighlight && selected;
   const showPreviewing = rowVisualFlags.showPreviewingHighlight && previewing;
   const showRowActions = isFocused || selected;
@@ -168,25 +169,28 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
         styles.channelRow,
         showSelected && styles.selectedRow,
         showPreviewing && styles.previewingRow,
+        isFavorite && styles.favoriteRow,
         isFocused && (selected ? styles.channelRowActiveFocused : styles.channelRowFocused),
       ]}>
       <View style={[styles.channelRail, selected && styles.selectedRail, isFocused && styles.focusRail]} />
-      {Number.isFinite(data.number) ? (
-        <Text numberOfLines={1} style={[styles.channelNumber, selected && styles.selectedText, isFocused && styles.focusedText]}>{`#${data.number}`}</Text>
-      ) : null}
       <View style={styles.channelCopy}>
         <View style={styles.channelTitleRow}>
           <Text numberOfLines={1} style={[styles.channelName, selected && styles.selectedText, isFocused && styles.focusedText]}>
             {displayName}
           </Text>
-          {rowVisualFlags.showResolution ? <Text style={styles.resolution}>{data.resolution}</Text> : null}
         </View>
         <Text
           numberOfLines={1}
           style={[styles.nowPlaying, hasProgram && isFocused && styles.focusedSecondaryText, !hasProgram && styles.nowPlayingEmpty]}>
-          {epgPending ? 'Loading program…' : displayCurrent}
+          {showEpgLoading ? 'Loading program…' : displayCurrent}
         </Text>
       </View>
+      {Number.isFinite(data.number) && data.number > 0 ? (
+        <Text
+          numberOfLines={1}
+          ellipsizeMode="clip"
+          style={[styles.channelNumber, selected && styles.selectedText, isFocused && styles.focusedText]}>{`#${data.number}`}</Text>
+      ) : null}
       {showRowActions ? (
         <View style={styles.rowActions}>
           <Pressable
@@ -263,12 +267,12 @@ function createStyles(theme: NovaTheme) {
       backgroundColor: 'transparent',
     },
     channelNumber: {
-      width: 42,
-      minWidth: 42,
+      width: 64,
+      minWidth: 56,
       flexShrink: 0,
       color: theme.colors.textMuted,
       fontSize: 12,
-      textAlign: 'center',
+      textAlign: 'right',
       fontVariant: ['tabular-nums'],
     },
     channelRail: {
@@ -333,10 +337,11 @@ function createStyles(theme: NovaTheme) {
       fontStyle: 'italic',
       opacity: 0.92,
     },
-    resolution: {
-      color: theme.colors.textSecondary,
-      fontSize: 9,
-      fontWeight: '900',
+    favoriteRow: {
+      backgroundColor: 'rgba(124, 92, 255, 0.08)',
+      borderWidth: 1,
+      borderColor: 'rgba(167, 139, 250, 0.28)',
+      borderRadius: NOVA_GLASS.radius.base,
     },
     selectedRow: {
       backgroundColor: 'transparent',

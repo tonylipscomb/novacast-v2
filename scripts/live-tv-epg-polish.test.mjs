@@ -10,9 +10,20 @@ test('Live TV display text and channel number presentation are bounded', () => {
   assert.match(text, /decodeDisplayTextEntities/);
   assert.match(row, /Loading program…/);
   assert.match(row, /numberOfLines=\{1\}/);
-  assert.match(row, /width: 42/);
+  assert.match(row, /showEpgLoading = epgPending && !hasProgram/);
+  assert.match(row, /width: 64/);
+  assert.match(row, /ellipsizeMode="clip"/);
+  assert.match(row, /data\.number > 0/);
   assert.match(row, /fontVariant: \['tabular-nums'\]/);
   assert.match(row, /Number\.isFinite\(data\.number\)/);
+});
+
+test('loaded EPG wins over a pending refresh and favorites use static row chrome', () => {
+  const row = read('src/features/live/LiveTvChannelRow.tsx');
+  assert.match(row, /const hasProgram = displayCurrent !== LIVE_TV_NO_PROGRAM_LABEL;/);
+  assert.match(row, /isFavorite && styles\.favoriteRow/);
+  assert.match(row, /favoriteRow: \{/);
+  assert.doesNotMatch(row, /showResolution \? <Text style=\{styles\.resolution\}/);
 });
 
 test('category EPG warmup uses bounded batches and one merge callback', () => {

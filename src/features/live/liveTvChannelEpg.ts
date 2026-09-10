@@ -14,7 +14,6 @@ export const LIVE_EPG_WINDOW_RADIUS = 3;
 export const LIVE_EPG_FOCUS_DEBOUNCE_MS = 280;
 export const LIVE_EPG_FETCH_CONCURRENCY = 1;
 export const EPG_CACHE_TTL_MS = 5 * 60 * 1000;
-const LIVE_EPG_CLASSIFICATION_AUDIT = '[NovaCast Live EPG Classification Audit]';
 
 type CachedEpgEntry = {
   programs: ProviderGuideProgram[];
@@ -27,6 +26,7 @@ let epgGeneration = 0;
 
 export type EpgPrefetchOptions = {
   onChannelEnriched?: (channel: ProviderLiveChannel) => void;
+  onBatchEnriched?: (channels: ProviderLiveChannel[]) => void;
   focusedChannelId?: string | null;
   generation?: number;
 };
@@ -48,34 +48,6 @@ function epgProgressFromProgram(program: ProviderGuideProgram) {
   return program.meta.includes('left') ? 50 : 0;
 }
 
-function safeAuditText(value: unknown, maxLength = 160) {
-  if (typeof value !== 'string') return null;
-  return value
-    .replace(/https?:\/\/\S+/gi, '[redacted-url]')
-    .replace(/(?:password|passwd|token|secret|authorization|bearer|api[_ -]?key)\s*[=:]\s*[^\s,;]+/gi, '[redacted]')
-    .trim()
-    .slice(0, maxLength) || null;
-}
-
-function auditProgramRows(programs: ProviderGuideProgram[]) {
-  return programs.slice(0, 3).map((program) => ({
-    title: safeAuditText(program.title),
-    startAt: program.startAt ?? null,
-    endAt: program.endAt ?? null,
-  }));
-}
-
-function logReturnedEpgPrograms(channel: ProviderLiveChannel, programs: ProviderGuideProgram[]) {
-  console.info(LIVE_EPG_CLASSIFICATION_AUDIT, {
-    event: 'programs-returned',
-    channelId: channel.id,
-    programCount: programs.length,
-    programs: auditProgramRows(programs),
-    now: Date.now(),
-    hasTimedPrograms: programs.some((program) => program.startAt != null && program.endAt != null),
-  });
-}
-
 function isTimedCurrent(program: ProviderGuideProgram, now: number) {
   return program.startAt != null && program.endAt != null && program.startAt <= now && program.endAt > now;
 }
@@ -94,17 +66,6 @@ export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: Pro
   if (!programs.length) {
     const title = displayLiveProgramText(channel.current, '');
     const channelLabel = displayStreamTitle(channel.name);
-    console.info(LIVE_EPG_CLASSIFICATION_AUDIT, {
-      channelId: channel.id,
-      programCount: 0,
-      programs: [],
-      now: Date.now(),
-      hasTimedPrograms: false,
-      orderedFirstProgramTitle: null,
-      hasCurrent: false,
-      resultingCurrentTitle: title && title !== channelLabel && title !== channel.name.trim() ? title : null,
-      resultingNextTitle: safeAuditText(channel.next),
-    });
     return {
       ...channel,
       current: title && title !== channelLabel && title !== channel.name.trim() ? title : '',
@@ -114,29 +75,16 @@ export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: Pro
   const orderedPrograms = orderTimedEpgPrograms(programs);
   const hasTimedPrograms = programs.some((program) => program.startAt != null && program.endAt != null);
   const now = hasTimedPrograms ? orderedPrograms[0] : programs[0];
-  const nowMs = Date.now();
-  const hasCurrent = hasTimedPrograms && isTimedCurrent(now, nowMs);
+  const hasCurrent = hasTimedPrograms && isTimedCurrent(now, Date.now());
   const next = hasTimedPrograms ? orderedPrograms[hasCurrent ? 1 : 0] : programs[1];
   const following = hasTimedPrograms ? orderedPrograms[hasCurrent ? 2 : 1] : programs[2];
   const programTitle = displayLiveProgramText(now.title, '');
   const channelLabel = displayStreamTitle(channel.name);
   const current = hasCurrent || !hasTimedPrograms;
-  const resultingCurrentTitle = current && programTitle && programTitle !== channelLabel && programTitle !== channel.name.trim() ? programTitle : null;
-  console.info(LIVE_EPG_CLASSIFICATION_AUDIT, {
-    channelId: channel.id,
-    programCount: programs.length,
-    programs: auditProgramRows(programs),
-    now: nowMs,
-    hasTimedPrograms,
-    orderedFirstProgramTitle: safeAuditText(now.title),
-    hasCurrent,
-    resultingCurrentTitle: safeAuditText(resultingCurrentTitle),
-    resultingNextTitle: safeAuditText(next?.title ?? channel.next),
-  });
 
   return {
     ...channel,
-    current: resultingCurrentTitle ?? '',
+    current: current && programTitle && programTitle !== channelLabel && programTitle !== channel.name.trim() ? programTitle : '',
     next: next?.title ? displayLiveProgramText(next.title, channel.next) : channel.next,
     following: following?.title ? displayLiveProgramText(following.title, channel.following) : channel.following,
     currentStart: current ? (now.start ?? channel.currentStart) : '',
@@ -210,6 +158,10 @@ function readCachedPrograms(channelId: string) {
   return cached.programs;
 }
 
+export function hasCachedLiveTvEpg(channelId: string) {
+  return readCachedPrograms(channelId) != null;
+}
+
 function writeCachedPrograms(channelId: string, programs: ProviderGuideProgram[]) {
   epgCache.set(channelId, {
     programs,
@@ -262,7 +214,6 @@ async function fetchProgramsForChannel(
     .getShortEpg(channel.id, 3, undefined, channel.epgChannelId)
     .catch(() => [] as ProviderGuideProgram[])
     .then((programs) => {
-      logReturnedEpgPrograms(channel, programs);
       writeCachedPrograms(channel.id, programs);
       logLiveEpg('completed', {
         channelId: channel.id,
@@ -299,23 +250,78 @@ export async function enrichChannelsWithPrefetchedEpg(
   }
 
   const generation = options?.generation ?? epgGeneration;
-  const targets = selectVisibleEpgWindow(channels, options?.focusedChannelId);
+  const focusedIndex = options?.focusedChannelId ? channels.findIndex((channel) => channel.id === options.focusedChannelId) : -1;
+  const prioritized = channels.slice().sort((left, right) => {
+    const leftIndex = channels.indexOf(left);
+    const rightIndex = channels.indexOf(right);
+    const leftPriority = leftIndex === focusedIndex ? -1 : leftIndex < 12 ? leftIndex : leftIndex + 1000;
+    const rightPriority = rightIndex === focusedIndex ? -1 : rightIndex < 12 ? rightIndex : rightIndex + 1000;
+    return leftPriority - rightPriority;
+  });
+  const targets = prioritized.slice(0, 12);
   const epgMap = new Map<string, ProviderGuideProgram[]>();
 
-  for (const channel of targets) {
-    if (generation !== epgGeneration || shouldSuspendLiveListEpg(getLiveTvWorkload())) {
-      noteLiveEpgRequestCancelled(1);
-      logLiveEpg('cancelled', { reason: 'stale-or-suspended', channelId: channel.id });
-      break;
+  const loadBatch = async (batch: ProviderLiveChannel[]) => {
+    const result = new Map<string, ProviderGuideProgram[]>();
+    const missing = batch.filter((channel) => {
+      const cached = readCachedPrograms(channel.id);
+      if (!cached) return true;
+      result.set(channel.id, cached);
+      return false;
+    });
+    if (!missing.length) return result;
+    if (bundle.connectionType === 'xtream') {
+      const { fetchManagedEpgBatch } = await import('../guide/managedEpgClient.ts');
+      const managedRequest = fetchManagedEpgBatch(missing.map((channel) => channel.id), 3);
+      const ownedRequests = missing.map((channel) => ({
+        channelId: channel.id,
+        request: managedRequest.then((batch) => batch.get(channel.id) ?? []),
+      }));
+      ownedRequests.forEach(({ channelId, request }) => inFlight.set(channelId, request));
+      const managed = await managedRequest;
+      ownedRequests.forEach(({ channelId, request }) => {
+        if (inFlight.get(channelId) === request) inFlight.delete(channelId);
+      });
+      managed.forEach((programs, channelId) => result.set(channelId, programs));
+      if (managed.size) return result;
     }
+    for (const channel of missing) {
+      result.set(channel.id, await fetchProgramsForChannel(bundle, channel));
+    }
+    return result;
+  };
 
-    const programs = await fetchProgramsForChannel(bundle, channel);
-    if (generation !== epgGeneration) {
-      logLiveEpg('cancelled', { reason: 'stale-after-fetch', channelId: channel.id });
-      break;
+  const applyBatch = (batch: ProviderLiveChannel[], programsById: Map<string, ProviderGuideProgram[]>) => {
+    const enrichedBatch: ProviderLiveChannel[] = [];
+    for (const channel of batch) {
+      const programs = programsById.get(channel.id);
+      if (!programs) continue;
+      epgMap.set(channel.id, programs);
+      const enriched = enrichChannelWithEpg(channel, programs);
+      enrichedBatch.push(enriched);
+      options?.onChannelEnriched?.(enriched);
     }
-    epgMap.set(channel.id, programs);
-    options?.onChannelEnriched?.(enrichChannelWithEpg(channel, programs));
+    if (enrichedBatch.length) options?.onBatchEnriched?.(enrichedBatch);
+    return enrichedBatch;
+  };
+
+  if (generation !== epgGeneration || shouldSuspendLiveListEpg(getLiveTvWorkload())) {
+    return channels;
+  }
+  const firstBatch = await loadBatch(targets);
+  if (generation === epgGeneration) applyBatch(targets, firstBatch);
+
+  const remaining = prioritized.slice(12);
+  if (remaining.length) {
+    void (async () => {
+      for (let offset = 0; offset < remaining.length && generation === epgGeneration; offset += 32) {
+        if (shouldSuspendLiveListEpg(getLiveTvWorkload())) break;
+        const batch = remaining.slice(offset, offset + 32);
+        const result = await loadBatch(batch);
+        if (generation !== epgGeneration) break;
+        applyBatch(batch, result);
+      }
+    })();
   }
 
   return channels.map((channel) => {

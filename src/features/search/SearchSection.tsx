@@ -10,7 +10,7 @@ const focusText = createNovaTvFocusTextStyles(novaTheme);
 import { SearchPosterCard } from './SearchPosterCard';
 import { SearchResults } from './SearchResults';
 import { searchResultKey, searchScopeLabel } from './searchScopes';
-import type { MovieSearchResult, SearchPageResult, SearchResult, SeriesSearchResult } from './searchTypes';
+import type { LiveSearchResult, MovieSearchResult, SearchPageResult, SearchResult, SeriesSearchResult } from './searchTypes';
 
 type SearchSectionProps = {
   scope: SearchResult['type'];
@@ -19,6 +19,7 @@ type SearchSectionProps = {
   focusedResultKey?: string | null;
   onFocusResult?: (key: string) => void;
   onSelectResult: (result: SearchResult) => void;
+  onToggleLiveFavorite?: (result: LiveSearchResult) => void;
   onViewAll?: () => void;
   onFocusViewAll?: () => void;
   focusUpHandle?: number;
@@ -81,6 +82,7 @@ export function SearchSection({
   focusedResultKey,
   onFocusResult,
   onSelectResult,
+  onToggleLiveFavorite,
   onViewAll,
   onFocusViewAll,
   focusUpHandle,
@@ -124,6 +126,7 @@ export function SearchSection({
           focusedResultKey={focusedResultKey}
           onFocusResult={onFocusResult}
           onSelectResult={onSelectResult}
+          onToggleLiveFavorite={onToggleLiveFavorite}
           emphasized
           focusUpHandle={focusUpHandle}
           focusLeftHandle={focusLeftHandle}

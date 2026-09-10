@@ -21,7 +21,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getTvDensity, NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusChrome } from '@/components/nova';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { usePlaybackActivity } from '@/features/playback/usePlaybackActivity';
-import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
+import type { PlayingChangeEventPayload, StatusChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
 import type { LivePlaybackSource } from '@/features/providers/providerPlayback';
 import type { PlaybackItem } from '@/features/playback/unified/types';
@@ -164,6 +164,7 @@ import {
   shouldShowLiveSearchOverlay,
   suppressLiveSearchOverlayClose,
   toLiveSearchPlaybackChannel,
+  consumeLiveSearchNavigationHandoff,
   type LiveSearchBrowseSnapshot,
   type LiveSearchPlaybackChannel,
 } from './liveTvSearchSession';
@@ -174,6 +175,7 @@ import { searchLiveChannels } from '@/features/search/repositories/liveSearchRep
 import type { LiveSearchResult, SearchResult } from '@/features/search/searchTypes';
 import { MovieToolbar } from '@/features/movies/components/MovieToolbar';
 import { createFavoriteHoldDetector } from './liveFavoriteHold';
+import { createLiveTimeshiftProbe } from './liveTimeshiftDiagnostics';
 
 const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false } as const) : {};
 
@@ -290,7 +292,7 @@ export function LiveTvScreen() {
   const directPlayRequested =
     routeParams.returnRoute === 'search' &&
     routeParams.directPlay === '1' &&
-    Boolean(routeChannelId && routeCategoryId);
+    Boolean(routeChannelId);
   const {
     bundle,
     status: loadStatus,
@@ -298,6 +300,7 @@ export function LiveTvScreen() {
     categories,
     categoryTotalCount,
     channels,
+    epgPendingChannelIds,
     selectedCategoryId,
     channelListPending,
     selectCategory: loadCategoryChannels,
@@ -351,6 +354,15 @@ export function LiveTvScreen() {
   const liveSearchSurfQueueRef = useRef<string[] | null>(null);
   const liveSearchSelectedIdRef = useRef<string | null>(null);
   const liveSearchPlaybackByIdRef = useRef<Map<string, LiveSearchPlaybackChannel>>(new Map());
+  useEffect(() => {
+    const handoff = consumeLiveSearchNavigationHandoff(activeProviderId);
+    if (!handoff) {
+      return;
+    }
+    liveSearchSurfQueueRef.current = handoff.resultIds;
+    liveSearchSelectedIdRef.current = handoff.selected.id;
+    liveSearchPlaybackByIdRef.current.set(handoff.selected.id, handoff.selected);
+  }, [activeProviderId]);
   const [fullscreenRetryNodeTag, setFullscreenRetryNodeTag] = useState<number | null>(null);
   const chromeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bootstrapState = useMemo(() => {
@@ -566,6 +578,29 @@ export function LiveTvScreen() {
       },
     },
   );
+
+  const liveTimeshiftProbeRef = useRef<ReturnType<typeof createLiveTimeshiftProbe> | null>(null);
+  useEffect(() => {
+    liveTimeshiftProbeRef.current?.dispose();
+    const probe = liveState?.fullscreenChannelId && previewStreamUrl
+      ? createLiveTimeshiftProbe({
+          channelKey: liveState.fullscreenChannelId,
+          channelName: channels.find((channel) => channel.id === liveState.fullscreenChannelId)?.name ?? null,
+          providerKey: activeProviderId,
+          streamUrl: previewStreamUrl,
+          mediaType: 'live',
+          consideredLive: true,
+        })
+      : null;
+    liveTimeshiftProbeRef.current = probe;
+    if (probe && liveStreamPlayer.playing && liveStreamPlayer.status === 'readyToPlay') {
+      probe.beginPlaying(liveStreamPlayer);
+    }
+    return () => {
+      liveTimeshiftProbeRef.current?.dispose();
+      liveTimeshiftProbeRef.current = null;
+    };
+  }, [activeProviderId, channels, liveState?.fullscreenChannelId, liveStreamPlayer, previewStreamUrl]);
 
   const streamSurfaceInFullscreen = Boolean(liveState?.fullscreenChannelId);
   const livePreviewActive = Boolean(
@@ -1134,8 +1169,14 @@ export function LiveTvScreen() {
       playing: liveStreamPlayer.playing,
     });
     playbackAnalyticsTracker.firstFrame();
+    liveTimeshiftProbeRef.current?.sample(liveStreamPlayer, 'source-ready');
     setFullscreenFrameStatus('ready');
   };
+  const handleLivePlayerStatusChange = useCallback(({ status }: StatusChangeEventPayload) => {
+    if (status === 'readyToPlay') {
+      liveTimeshiftProbeRef.current?.sample(liveStreamPlayer, 'source-ready');
+    }
+  }, [liveStreamPlayer]);
   const handleLivePlayerPlayingChange = useCallback(({ isPlaying }: PlayingChangeEventPayload) => {
     liveLoadAudit('player-playing-change', {
       channelId: liveStateRef.current?.fullscreenChannelId ?? null,
@@ -1144,6 +1185,7 @@ export function LiveTvScreen() {
       currentTime: liveStreamPlayer.currentTime,
     });
     if (liveStateRef.current?.fullscreenChannelId && isPlaying && liveStreamPlayer.status === 'readyToPlay') {
+      liveTimeshiftProbeRef.current?.beginPlaying(liveStreamPlayer);
       logProviderBoundary('[NovaCast Live Provider Request]', {
         event: 'playback-started',
         channelId: liveStateRef.current.fullscreenChannelId,
@@ -2774,6 +2816,7 @@ export function LiveTvScreen() {
               <LiveTvChannelListReveal revealKey={renderState.selectedCategoryId || selectedCategoryId}>
                 <LiveTvChannelList
                   channels={channels}
+                  epgPendingChannelIds={epgPendingChannelIds}
                   selectedChannelId={renderState.selectedChannelId}
                   previewChannelId={renderState.previewChannelId}
                   preferFocusChannelId={preferChannelFocusRef.current ? (preferredChannelFocusId.current ?? channels[0]?.id ?? null) : null}
@@ -2838,7 +2881,7 @@ export function LiveTvScreen() {
                     <Text style={styles.previewLoadingCopy}>{detailPanelChannel?.name ? displayStreamTitle(detailPanelChannel.name) : 'Unknown channel'}</Text>
                   </View>
                 ) : (
-                  <NovaStreamSurface player={liveStreamPlayer} style={styles.previewPlayer} />
+                  <NovaStreamSurface player={liveStreamPlayer} style={styles.previewPlayer} onStatusChange={handleLivePlayerStatusChange} />
                 )}
               </View>
 
@@ -2886,6 +2929,7 @@ export function LiveTvScreen() {
             contentFit="cover"
             style={[styles.fullscreenPlayer, fullscreenFrameStatus !== 'ready' && styles.hiddenStreamSurface]}
             onFirstFrameRender={handleFullscreenFirstFrame}
+            onStatusChange={handleLivePlayerStatusChange}
             onPlayingChange={handleLivePlayerPlayingChange}
             onTimeUpdate={handleLivePlayerTimeUpdate}
           />

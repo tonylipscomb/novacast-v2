@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 import { mapManagedEpgPrograms } from '../src/features/guide/managedEpgMapping.ts';
 import { enrichChannelWithEpg, orderTimedEpgPrograms } from '../src/features/live/liveTvChannelEpg.ts';
+import { decodeDisplayTextEntities, displayLiveProgramText } from '../src/features/live/liveTvProgramText.ts';
 
 const now = Date.parse('2026-09-10T12:00:00Z');
 const program = (id, startAt, stopAt) => ({ id, title: id, startAt, stopAt, description: 'safe', category: 'News' });
@@ -16,6 +17,13 @@ test('managed current, next, and following map in playback order', () => {
   assert.deepEqual(programs.map((item) => item.id), ['current', 'next', 'following']);
   assert.equal(programs[0].startAt, Date.parse('2026-09-10T11:30:00Z'));
   assert.match(programs[0].meta, /left/);
+});
+
+test('EPG display text decodes common entities without changing stream-like values', () => {
+  assert.equal(decodeDisplayTextEntities('Tyler Perry&apos;s House &amp; Payne'), "Tyler Perry's House & Payne");
+  assert.equal(decodeDisplayTextEntities('&#39; &#x27; &quot; &lt; &gt;'), `' ' " < >`);
+  assert.equal(displayLiveProgramText('https://provider.example/live?id=1&token=secret', 'fallback'), 'fallback');
+  assert.equal(displayLiveProgramText('Normal unencoded title', 'fallback'), 'Normal unencoded title');
 });
 
 test('invalid managed timestamps are ignored and limit is bounded', () => {
@@ -56,22 +64,11 @@ test('managed failures and missing client prerequisites fall back without affect
   assert.match(client, /setTimeout\(\(\) => controller\.abort\(\), 3_000\)/);
 });
 
-test('release-visible managed EPG audit is bounded and excludes request secrets', () => {
+test('temporary release-visible managed EPG audit logging is removed', () => {
   const client = fs.readFileSync(new URL('../src/features/guide/managedEpgClient.ts', import.meta.url), 'utf8');
   const live = fs.readFileSync(new URL('../src/features/live/liveTvChannelEpg.ts', import.meta.url), 'utf8');
-  assert.match(client, /\[NovaCast Managed EPG Release Audit\]/);
-  assert.match(client, /console\.info\(MANAGED_EPG_RELEASE_AUDIT/);
-  assert.match(client, /sourceLabel/);
-  assert.match(client, /sourcePriority/);
-  const managedAuditCalls = client.match(/console\.info\([\s\S]*?\);/g) ?? [];
-  assert.ok(managedAuditCalls.length >= 2);
-  managedAuditCalls.forEach((call) => assert.doesNotMatch(call, /apiUrl|anonKey|authHeaders|Authorization/));
-  assert.match(live, /\[NovaCast Live EPG Classification Audit\]/);
-  assert.match(live, /programs\.slice\(0, 3\)/);
-  assert.match(live, /console\.info\(LIVE_EPG_CLASSIFICATION_AUDIT/);
-  const liveAuditCalls = live.match(/console\.info\(LIVE_EPG_CLASSIFICATION_AUDIT[\s\S]*?\);/g) ?? [];
-  assert.ok(liveAuditCalls.length >= 2);
-  liveAuditCalls.forEach((call) => assert.doesNotMatch(call, /streamUrl|password|token|authorization/i));
+  assert.doesNotMatch(client, /NovaCast Managed EPG Release Audit/);
+  assert.doesNotMatch(live, /NovaCast Live EPG Classification Audit/);
 });
 
 test('Edge function authenticates by device assignment and never accepts client provider identity', () => {
@@ -93,12 +90,13 @@ test('managed failure remains a nullable client result', () => {
 test('Edge selection prefers a current programme and then source priority', () => {
   const edge = fs.readFileSync(new URL('../supabase/functions/device-epg/index.ts', import.meta.url), 'utf8');
   assert.match(edge, /order\('priority', \{ ascending: true \}\)/);
+  assert.match(edge, /candidatesByStream/);
   assert.match(edge, /candidates\.find\(\(candidate\) => candidate\.hasCurrent\) \?\? candidates\[0\]/);
   assert.match(edge, /match_confidence_class', 'proven'/);
   assert.match(edge, /cache_generation', generation/);
   assert.match(edge, /managed_provider_id', assignment\.managed_provider_id/);
   assert.match(edge, /source_id', source\.id/);
-  assert.match(edge, /xmltv_channel_id', xmltvChannelId/);
+  assert.match(edge, /\.in\('xmltv_channel_id', xmltvIds\)/);
   assert.match(edge, /\.gt\('stop_at', nowIso\)/);
   assert.match(edge, /\.lt\('start_at', futureIso\)/);
 });
@@ -113,6 +111,19 @@ test('managed delivery preserves identity, generation, confidence, and fallback 
   assert.match(repositories, /channel\.epgChannelId/);
   assert.match(repositories, /fetchShortEpgWithFallback/);
   assert.match(repositories, /getCachedXmltvPrograms/);
+});
+
+test('device-epg batch contract and permanent device authentication config are bounded', () => {
+  const edge = fs.readFileSync(new URL('../supabase/functions/device-epg/index.ts', import.meta.url), 'utf8');
+  const config = fs.readFileSync(new URL('../supabase/config.toml', import.meta.url), 'utf8');
+  const client = fs.readFileSync(new URL('../src/features/guide/managedEpgClient.ts', import.meta.url), 'utf8');
+  assert.match(edge, /Array\.isArray\(body\?\.streamIds\)/);
+  assert.match(edge, /requestedIds\.length > 32/);
+  assert.match(edge, /Object\.fromEntries\(requestedIds\.map/);
+  assert.match(client, /export async function fetchManagedEpgBatch/);
+  assert.match(client, /MANAGED_EPG_BATCH_SIZE = 32/);
+  assert.match(client, /streamIds: chunk/);
+  assert.match(config, /\[functions\.device-epg\]\s+verify_jwt = false/);
 });
 
 test('Guide and Live share managed-first resolution while keeping bounded cancellation', () => {

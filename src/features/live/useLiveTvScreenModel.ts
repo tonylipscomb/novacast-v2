@@ -33,6 +33,7 @@ import {
   cancelLiveTvEpgWork,
   enrichChannelsWithPrefetchedEpg,
   enrichSingleChannelEpg,
+  hasCachedLiveTvEpg,
   mapChannelsWithoutEpg,
   selectVisibleEpgWindow,
   shouldIssueFocusedEpgRequest,
@@ -87,6 +88,13 @@ function buildLiveCategoryOrderSample(
   });
 }
 
+function logCategoryEpgWarmup(
+  event: string,
+  fields: { categoryId: string; channelCount: number; batchSize?: number; loadedCount?: number; currentCount?: number; emptyCount?: number; durationMs?: number },
+) {
+  console.info('[NovaCast Category EPG Warmup]', { event, ...fields });
+}
+
 export function useLiveTvScreenModel(
   initialCategoryId?: string,
   initialChannelId?: string | null,
@@ -101,6 +109,7 @@ export function useLiveTvScreenModel(
   const [channelListPending, setChannelListPending] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [channels, setChannels] = useState<ProviderLiveChannel[]>([]);
+  const [epgPendingChannelIds, setEpgPendingChannelIds] = useState<ReadonlySet<string>>(new Set());
   const [selectedCategoryId, setSelectedCategoryId] = useState(() =>
     isRealProviderLiveCategoryId(initialCategoryId) ? initialCategoryId ?? '' : '',
   );
@@ -110,6 +119,7 @@ export function useLiveTvScreenModel(
   const epgFetchedIdsRef = useRef(new Set<string>());
   const epgInFlightIdsRef = useRef(new Set<string>());
   const focusedEpgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const epgRevealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastFocusedEpgRef = useRef<{ channelId: string; atMs: number } | null>(null);
   const channelsBaselineRef = useRef<ProviderLiveChannel[]>([]);
   const mountStartedAtRef = useRef(0);
@@ -328,14 +338,16 @@ export function useLiveTvScreenModel(
     }
   }, [bundle]);
 
-  const applyIncrementalEpg = useCallback((enriched: ProviderLiveChannel, requestId: number) => {
-    if (requestId !== requestRef.current) {
-      return;
-    }
-
+  const applyEpgBatch = useCallback((enriched: ProviderLiveChannel[], requestId: number) => {
+    if (requestId !== requestRef.current || !enriched.length) return;
+    setEpgPendingChannelIds((current) => {
+      const next = new Set(current);
+      enriched.forEach((channel) => next.delete(channel.id));
+      return next;
+    });
     setChannels((current) => {
       const baseline = current.length >= channelsBaselineRef.current.length ? current : channelsBaselineRef.current;
-      const merged = mergeLiveTvChannelEpg(baseline, [enriched]);
+      const merged = mergeLiveTvChannelEpg(baseline, enriched);
       channelsBaselineRef.current = merged;
       return merged;
     });
@@ -354,11 +366,19 @@ export function useLiveTvScreenModel(
 
       const generation = cancelLiveTvEpgWork('category-prefetch-supersede');
       const epgStartedAt = Date.now();
+      setChannelListPending(true);
+      setEpgPendingChannelIds(new Set(nextChannels.filter((channel) => !hasCachedLiveTvEpg(channel.id)).map((channel) => channel.id)));
+      epgRevealTimerRef.current = setTimeout(() => {
+        epgRevealTimerRef.current = null;
+        setChannelListPending(false);
+      }, 1_500);
       onLoadAudit?.('epg-init', {
         categoryId,
         channelCount: nextChannels.length,
         blocking: false,
       });
+      logCategoryEpgWarmup('category-start', { categoryId, channelCount: nextChannels.length, loadedCount: 0, currentCount: 0, emptyCount: 0 });
+      logCategoryEpgWarmup('first-batch-start', { categoryId, channelCount: nextChannels.length, batchSize: Math.min(12, nextChannels.length) });
       const focusedId = focusedChannelId || initialChannelId || nextChannels[0]?.id || null;
       logLiveEpgTrigger({
         caller: 'useLiveTvScreenModel.prefetchChannelEpg',
@@ -370,15 +390,52 @@ export function useLiveTvScreenModel(
       void enrichChannelsWithPrefetchedEpg(bundle, nextChannels, {
         focusedChannelId: focusedId,
         generation,
-        onChannelEnriched: (enriched) => {
-          applyIncrementalEpg(enriched, requestId);
+        onBatchEnriched: (enriched) => {
+          applyEpgBatch(enriched, requestId);
+          const currentCount = enriched.filter((channel) => Boolean(channel.current)).length;
+          logCategoryEpgWarmup('batch-complete', {
+            categoryId,
+            channelCount: nextChannels.length,
+            batchSize: enriched.length,
+            loadedCount: enriched.length,
+            currentCount,
+            emptyCount: enriched.length - currentCount,
+          });
         },
       }).then((fullyEnriched) => {
         if (requestId !== requestRef.current) {
           return;
         }
 
+        if (epgRevealTimerRef.current) {
+          clearTimeout(epgRevealTimerRef.current);
+          epgRevealTimerRef.current = null;
+        }
+        setEpgPendingChannelIds((current) => {
+          const next = new Set(current);
+          fullyEnriched.forEach((channel) => next.delete(channel.id));
+          return next;
+        });
+        setChannelListPending(false);
         commitChannels(fullyEnriched);
+        logCategoryEpgWarmup('first-batch-complete', {
+          categoryId,
+          channelCount: nextChannels.length,
+          batchSize: Math.min(12, nextChannels.length),
+          loadedCount: fullyEnriched.length,
+          currentCount: fullyEnriched.filter((channel) => Boolean(channel.current)).length,
+          emptyCount: fullyEnriched.filter((channel) => !channel.current).length,
+          durationMs: Date.now() - epgStartedAt,
+        });
+        logCategoryEpgWarmup('first-usable', {
+          categoryId,
+          channelCount: nextChannels.length,
+          batchSize: Math.min(12, nextChannels.length),
+          loadedCount: fullyEnriched.length,
+          currentCount: fullyEnriched.filter((channel) => Boolean(channel.current)).length,
+          emptyCount: fullyEnriched.filter((channel) => !channel.current).length,
+          durationMs: Date.now() - epgStartedAt,
+        });
         onLoadAudit?.('epg-first-usable', {
           categoryId,
           channelCount: fullyEnriched.length,
@@ -387,7 +444,7 @@ export function useLiveTvScreenModel(
         });
       });
     },
-    [applyIncrementalEpg, bundle, commitChannels, initialChannelId, onLoadAudit],
+    [applyEpgBatch, bundle, commitChannels, initialChannelId, onLoadAudit],
   );
 
   const loadCategories = useCallback(async () => {
@@ -960,6 +1017,10 @@ export function useLiveTvScreenModel(
         clearTimeout(focusedEpgTimerRef.current);
         focusedEpgTimerRef.current = null;
       }
+      if (epgRevealTimerRef.current) {
+        clearTimeout(epgRevealTimerRef.current);
+        epgRevealTimerRef.current = null;
+      }
       cancelLiveTvEpgWork('live-model-unmount');
     };
   }, [bundle?.generation]);
@@ -977,6 +1038,7 @@ export function useLiveTvScreenModel(
         resetLiveTvFocusIdle();
         epgFetchedIdsRef.current.clear();
         epgInFlightIdsRef.current.clear();
+        setEpgPendingChannelIds(new Set());
         if (focusedEpgTimerRef.current) {
           clearTimeout(focusedEpgTimerRef.current);
           focusedEpgTimerRef.current = null;
@@ -1009,6 +1071,7 @@ export function useLiveTvScreenModel(
       resetLiveTvFocusIdle();
       epgFetchedIdsRef.current.clear();
       epgInFlightIdsRef.current.clear();
+      setEpgPendingChannelIds(new Set());
       if (focusedEpgTimerRef.current) {
         clearTimeout(focusedEpgTimerRef.current);
         focusedEpgTimerRef.current = null;
@@ -1119,6 +1182,7 @@ export function useLiveTvScreenModel(
           return;
         }
 
+        setEpgPendingChannelIds((current) => new Set(current).add(channelId));
         lastFocusedEpgRef.current = { channelId, atMs: Date.now() };
         epgFetchedIdsRef.current.add(channelId);
         epgInFlightIdsRef.current.add(channelId);
@@ -1130,6 +1194,11 @@ export function useLiveTvScreenModel(
         });
         void enrichSingleChannelEpg(bundle, channel)
           .then((enriched) => {
+            setEpgPendingChannelIds((current) => {
+              const next = new Set(current);
+              next.delete(channelId);
+              return next;
+            });
             if (
               enriched.current === channel.current &&
               enriched.next === channel.next &&
@@ -1207,6 +1276,7 @@ export function useLiveTvScreenModel(
     channels,
     selectedCategoryId,
     channelListPending,
+    epgPendingChannelIds,
     selectCategory,
     enrichFocusedChannelEpg,
     resolvePlaybackUrl,

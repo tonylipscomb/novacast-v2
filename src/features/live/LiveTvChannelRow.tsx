@@ -20,6 +20,7 @@ const rowVisualFlags = getLiveTvRowVisualFlags();
 export type LiveTvChannelRowProps = {
   data: LiveTvChannelRowShellData;
   epg: LiveTvChannelEpgData;
+  epgPending: boolean;
   selected: boolean;
   previewing: boolean;
   preferFocus: boolean;
@@ -44,6 +45,7 @@ function channelRowPropsAreEqual(previous: LiveTvChannelRowProps, next: LiveTvCh
   return (
     previous.data === next.data &&
     previous.epg === next.epg &&
+    previous.epgPending === next.epgPending &&
     previous.selected === next.selected &&
     previous.previewing === next.previewing &&
     previous.preferFocus === next.preferFocus &&
@@ -68,6 +70,7 @@ function channelRowPropsAreEqual(previous: LiveTvChannelRowProps, next: LiveTvCh
 export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   data,
   epg,
+  epgPending,
   selected,
   previewing,
   preferFocus,
@@ -168,7 +171,9 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
         isFocused && (selected ? styles.channelRowActiveFocused : styles.channelRowFocused),
       ]}>
       <View style={[styles.channelRail, selected && styles.selectedRail, isFocused && styles.focusRail]} />
-      <Text style={[styles.channelNumber, selected && styles.selectedText, isFocused && styles.focusedText]}>{data.number}</Text>
+      {Number.isFinite(data.number) ? (
+        <Text numberOfLines={1} style={[styles.channelNumber, selected && styles.selectedText, isFocused && styles.focusedText]}>{`#${data.number}`}</Text>
+      ) : null}
       <View style={styles.channelCopy}>
         <View style={styles.channelTitleRow}>
           <Text numberOfLines={1} style={[styles.channelName, selected && styles.selectedText, isFocused && styles.focusedText]}>
@@ -179,7 +184,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
         <Text
           numberOfLines={1}
           style={[styles.nowPlaying, hasProgram && isFocused && styles.focusedSecondaryText, !hasProgram && styles.nowPlayingEmpty]}>
-          {displayCurrent}
+          {epgPending ? 'Loading program…' : displayCurrent}
         </Text>
       </View>
       {showRowActions ? (
@@ -258,10 +263,13 @@ function createStyles(theme: NovaTheme) {
       backgroundColor: 'transparent',
     },
     channelNumber: {
-      width: 24,
+      width: 42,
+      minWidth: 42,
+      flexShrink: 0,
       color: theme.colors.textMuted,
       fontSize: 12,
       textAlign: 'center',
+      fontVariant: ['tabular-nums'],
     },
     channelRail: {
       width: 3,

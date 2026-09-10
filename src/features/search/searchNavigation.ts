@@ -34,7 +34,7 @@ export function openSearchHit(router: SearchRouter, providerId: string, hit: Pro
         channelId: hit.id,
         categoryId: hit.categoryId,
         returnRoute: 'search',
-        directPlay: hit.categoryId ? '1' : undefined,
+        directPlay: hit.id ? '1' : undefined,
       },
     });
     return;
@@ -65,7 +65,7 @@ export function openSearchResult(
         channelId: result.id,
         categoryId: result.categoryId,
         returnRoute: 'search',
-        directPlay: result.categoryId ? '1' : undefined,
+        directPlay: result.id ? '1' : undefined,
       },
     });
     return;

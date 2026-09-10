@@ -14,6 +14,7 @@ import {
 import { NovaFocusRow } from '@/components/nova/NovaFocusRow';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { novaTheme } from '@/theme';
+import { createFavoriteHoldDetector } from '@/features/live/liveFavoriteHold';
 
 import {
   LIVE_SEARCH_FOCUS_SCROLL_VIEW_POSITION,
@@ -45,6 +46,7 @@ type SearchResultsProps = {
   onEndReached?: () => void;
   queryLength?: number;
   overlayVisible?: boolean;
+  onToggleLiveFavorite?: (result: LiveSearchResult) => void;
 };
 
 function kindLabel(type: SearchResult['type']) {
@@ -110,6 +112,7 @@ function ResultRow({
   favoriteContentIds,
   onFocusResult,
   onSelectResult,
+  onToggleLiveFavorite,
 }: {
   result: SearchResult;
   index: number;
@@ -121,10 +124,21 @@ function ResultRow({
   favoriteContentIds?: ReadonlySet<string>;
   onFocusResult?: (key: string) => void;
   onSelectResult: (result: SearchResult) => void;
+  onToggleLiveFavorite?: (result: LiveSearchResult) => void;
 }) {
   const key = searchResultKey(result);
   const isLive = result.type === 'live';
   const isFavorite = isLive && Boolean(favoriteContentIds?.has(result.id));
+  const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
+  const holdSuppressedRef = useRef(false);
+  if (isLive && onToggleLiveFavorite && !favoriteHoldRef.current) {
+    favoriteHoldRef.current = createFavoriteHoldDetector({
+      onTriggered: () => {
+        holdSuppressedRef.current = true;
+        onToggleLiveFavorite(result);
+      },
+    });
+  }
   const nativeRef =
     restoreResultKey && key === restoreResultKey ? restoreRowRef : index === 0 ? firstRowRef : undefined;
 
@@ -142,7 +156,18 @@ function ResultRow({
       nextFocusUp={index === 0 ? focusUpHandle : undefined}
       nextFocusLeft={index === 0 ? focusLeftHandle : undefined}
       onFocus={() => onFocusResult?.(key)}
-      onPress={() => onSelectResult(result)}
+      onPressIn={isLive ? () => {
+        holdSuppressedRef.current = false;
+        favoriteHoldRef.current?.pressIn();
+      } : undefined}
+      onPressOut={isLive ? () => favoriteHoldRef.current?.pressOut() : undefined}
+      onPress={() => {
+        if (isLive && (holdSuppressedRef.current || favoriteHoldRef.current?.consumeSuppressedPress())) {
+          holdSuppressedRef.current = false;
+          return;
+        }
+        onSelectResult(result);
+      }}
       accessibilityLabel={`Open ${kindLabel(result.type)} ${result.title}`}
       trailing={
         <>
@@ -173,6 +198,7 @@ function StaticSearchResults({
   restoreResultKey,
   restoreRowRef,
   favoriteContentIds,
+  onToggleLiveFavorite,
 }: SearchResultsProps) {
   void focusedResultKey;
   void emphasized;
@@ -193,6 +219,7 @@ function StaticSearchResults({
           favoriteContentIds={favoriteContentIds}
           onFocusResult={onFocusResult}
           onSelectResult={onSelectResult}
+          onToggleLiveFavorite={onToggleLiveFavorite}
         />
       ))}
     </View>
@@ -211,6 +238,7 @@ function FollowFocusSearchResults({
   restoreResultKey,
   restoreRowRef,
   favoriteContentIds,
+  onToggleLiveFavorite,
   onEndReached,
   queryLength = 0,
   overlayVisible = true,
@@ -343,6 +371,7 @@ function FollowFocusSearchResults({
           favoriteContentIds={favoriteContentIds}
           onFocusResult={() => handleResultFocus(key, index, item.id)}
           onSelectResult={onSelectResult}
+          onToggleLiveFavorite={onToggleLiveFavorite}
         />
       );
     },
@@ -353,6 +382,7 @@ function FollowFocusSearchResults({
       focusUpHandle,
       handleResultFocus,
       onSelectResult,
+      onToggleLiveFavorite,
       restoreResultKey,
       restoreRowRef,
     ],

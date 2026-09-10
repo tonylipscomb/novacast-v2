@@ -31,6 +31,9 @@ verify_jwt = false
 [functions.analytics-ingest]
 verify_jwt = false
 
+[functions.device-epg]
+verify_jwt = false
+
 [functions.device-provider-assignment]
 verify_jwt = false
 

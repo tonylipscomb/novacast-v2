@@ -14,6 +14,8 @@ type NovaFocusRowProps = {
   focused?: boolean;
   emphasized?: boolean;
   onPress?: () => void;
+  onPressIn?: () => void;
+  onPressOut?: () => void;
   onFocus?: () => void;
   accessibilityLabel?: string;
   trailing?: React.ReactNode;
@@ -31,6 +33,8 @@ export function NovaFocusRow({
   meta,
   focused = false,
   onPress,
+  onPressIn,
+  onPressOut,
   onFocus,
   accessibilityLabel,
   trailing,
@@ -51,6 +55,8 @@ export function NovaFocusRow({
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel ?? title}
       onPress={onPress}
+      onPressIn={onPressIn}
+      onPressOut={onPressOut}
       onFocus={() => {
         setSelfFocused(true);
         onFocus?.();

@@ -46,5 +46,17 @@ export function displayLiveProgramText(value: string | null | undefined, fallbac
     return fallback;
   }
 
-  return displayStreamTitle(normalized);
+  return displayStreamTitle(decodeDisplayTextEntities(normalized));
+}
+
+export function decodeDisplayTextEntities(value: string) {
+  return value.replace(/&(?:apos|#39|#x27);/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#(x[0-9a-f]+|[0-9]+);/gi, (match, code: string) => {
+      const parsed = code[0]?.toLowerCase() === 'x' ? Number.parseInt(code.slice(1), 16) : Number.parseInt(code, 10);
+      return Number.isFinite(parsed) && parsed > 0 && parsed <= 0x10ffff ? String.fromCodePoint(parsed) : match;
+    });
 }

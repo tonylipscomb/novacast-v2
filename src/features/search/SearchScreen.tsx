@@ -23,6 +23,7 @@ import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 import { useProviderStore } from '@/features/providers/providerStore';
+import { toggleLiveFavorite, usePersonalizationStore } from '@/features/personalization/personalizationStore';
 import { novaTheme } from '@/theme';
 
 const focusText = createNovaTvFocusTextStyles(novaTheme);
@@ -46,6 +47,7 @@ import {
   resolveSearchNotificationForStatus,
 } from './searchScreenLogic';
 import type { SearchResult, SearchScope } from './searchTypes';
+import { rememberLiveSearchNavigationHandoff, toLiveSearchPlaybackChannel } from '@/features/live/liveTvSearchSession';
 import { useSearchMediaDetail } from './useSearchMediaDetail';
 import { useSearchScreenModel } from './useSearchScreenModel';
 import { useStableNodeHandle } from './useStableNodeHandle';
@@ -101,6 +103,11 @@ export function SearchScreen() {
   const { selectedProvider, selectedProviderLabel } = useProviderStore();
   const { bundle } = useActiveProviderBundle();
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
+  const { state: personalizationState } = usePersonalizationStore(activeProviderId);
+  const favoriteContentIds = useMemo(
+    () => new Set(personalizationState.liveFavorites.map((item) => item.contentId)),
+    [personalizationState.liveFavorites],
+  );
   const searchMedia = useSearchMediaDetail(activeProviderId, bundle);
   const [focusedResultKey, setFocusedResultKeyState] = useState<string | null>(
     () => (activeProviderId !== 'no-provider' ? getSearchScreenMemory(activeProviderId).focusedResultKey : null),
@@ -248,16 +255,21 @@ export function SearchScreen() {
       const key = searchResultKey(result);
       setFocusedResultKey(key);
 
-      // search-live-unified-direct-v2
-      // Keep Search mounted under the app-wide Unified Player. That preserves the query,
-      // result list, and native focused row so Back returns to the exact Search context.
       if (result.type === 'live') {
         rememberSearchScreenMemory(activeProviderId, {
           query,
           scope,
           focusedResultKey: key,
         });
-        searchMedia.startLivePlayback(result);
+        const liveResults = scope === 'all' && groupedResults ? groupedResults.live.items : results;
+        rememberLiveSearchNavigationHandoff({
+          providerId: activeProviderId,
+          resultIds: liveResults.filter((item): item is import('./searchTypes').LiveSearchResult => item.type === 'live').map((item) => item.id),
+          selected: toLiveSearchPlaybackChannel(result),
+        });
+        // Live owns its player, EPG, surf queue, and fullscreen chrome. Keep the
+        // search context in memory while crossing the normal Live navigation boundary.
+        openSearchResult(router, activeProviderId, result, { query, scope, focusedResultKey: key });
         return;
       }
 
@@ -273,7 +285,14 @@ export function SearchScreen() {
 
       openSearchResult(router, activeProviderId, result, { query, scope, focusedResultKey: key });
     },
-    [activeProviderId, query, router, scope, searchMedia, setFocusedResultKey],
+    [activeProviderId, groupedResults, query, results, router, scope, searchMedia, setFocusedResultKey],
+  );
+
+  const toggleSearchLiveFavorite = useCallback(
+    (result: import('./searchTypes').LiveSearchResult) => {
+      void toggleLiveFavorite(activeProviderId, toLiveSearchPlaybackChannel(result));
+    },
+    [activeProviderId],
   );
 
   useEffect(() => {
@@ -466,6 +485,7 @@ export function SearchScreen() {
               focusedResultKey={focusedResultKey}
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
+              onToggleLiveFavorite={toggleSearchLiveFavorite}
               onViewAll={groupedResults.live.hasMore ? () => setScope('live') : undefined}
               focusUpHandle={searchFocusUpHandle}
               firstRowRef={groupedResults.live.items.length > 0 ? firstGroupedResultRef : undefined}
@@ -477,6 +497,7 @@ export function SearchScreen() {
               focusedResultKey={focusedResultKey}
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
+              onToggleLiveFavorite={toggleSearchLiveFavorite}
               onViewAll={groupedResults.movie.hasMore ? () => setScope('movie') : undefined}
               firstRowRef={
                 groupedResults.live.items.length === 0 && groupedResults.movie.items.length > 0
@@ -491,6 +512,7 @@ export function SearchScreen() {
               focusedResultKey={focusedResultKey}
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
+              onToggleLiveFavorite={toggleSearchLiveFavorite}
               onViewAll={groupedResults.series.hasMore ? () => setScope('series') : undefined}
               firstRowRef={
                 groupedResults.live.items.length === 0 &&
@@ -507,6 +529,7 @@ export function SearchScreen() {
               focusedResultKey={focusedResultKey}
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
+              onToggleLiveFavorite={toggleSearchLiveFavorite}
               onViewAll={groupedResults.guide.hasMore ? () => setScope('guide') : undefined}
               firstRowRef={
                 groupedResults.live.items.length === 0 &&
@@ -572,6 +595,7 @@ export function SearchScreen() {
                   focusedResultKey={focusedResultKey}
                   onFocusResult={setFocusedResultKey}
                   onSelectResult={handleSelectResult}
+                  onToggleLiveFavorite={toggleSearchLiveFavorite}
                   emphasized
                   focusUpHandle={index === 0 ? searchFocusUpHandle : undefined}
                   firstRowRef={index === 0 ? firstFlatResultRef : undefined}

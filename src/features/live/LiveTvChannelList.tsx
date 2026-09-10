@@ -32,6 +32,7 @@ const VIEWABILITY_CONFIG = {
 
 type LiveTvChannelListProps = {
   channels: ProviderLiveChannel[];
+  epgPendingChannelIds: ReadonlySet<string>;
   selectedChannelId: string;
   previewChannelId: string | null;
   preferFocusChannelId: string | null;
@@ -55,6 +56,7 @@ type LiveTvChannelListProps = {
 
 export const LiveTvChannelList = memo(function LiveTvChannelList({
   channels,
+  epgPendingChannelIds,
   selectedChannelId,
   previewChannelId,
   preferFocusChannelId,
@@ -183,6 +185,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
         <LiveTvChannelRow
           data={item}
           epg={epg}
+          epgPending={epgPendingChannelIds.has(item.id)}
           selected={item.id === selectedChannelId}
           previewing={item.id === previewChannelId}
           preferFocus={preferFocusChannelId === item.id}
@@ -208,6 +211,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       categoryFocusLeftHandle,
       favoriteChannelIds,
       epgByChannelId,
+      epgPendingChannelIds,
       handleChannelFocus,
       onRegister,
       onTune,

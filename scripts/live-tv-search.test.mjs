@@ -377,8 +377,12 @@ test('34. Series Search unchanged', () => {
   assert.match(seriesScreen, /searchByScope\(bundle, 'series'/);
 });
 
-test('35. global/main-menu Search unchanged', () => {
-  assert.doesNotMatch(searchScreen, /liveTvSearchSession/);
+test('35. global/main-menu Search routes Live through the real Live TV screen', () => {
+  assert.match(searchScreen, /openSearchResult\(router, activeProviderId, result/);
+  assert.doesNotMatch(searchScreen, /searchMedia\.startLivePlayback\(result\)/);
+  assert.match(searchScreen, /onToggleLiveFavorite/);
+  assert.match(read('src/features/search/SearchResults.tsx'), /createFavoriteHoldDetector/);
+  assert.match(read('src/features/search/SearchResults.tsx'), /consumeSuppressedPress/);
   assert.match(searchScreen, /SearchScope/);
   assert.match(searchScreen, /'live'/);
   assert.match(searchScreen, /'movie'/);

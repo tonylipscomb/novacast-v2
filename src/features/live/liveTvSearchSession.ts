@@ -11,6 +11,40 @@ export type LiveSearchBrowseSnapshot = {
 
 export type LiveSearchPlaybackChannel = ProviderLiveChannel;
 
+type LiveSearchNavigationHandoff = {
+  providerId: string;
+  resultIds: string[];
+  selected: LiveSearchPlaybackChannel;
+};
+
+let pendingLiveSearchNavigationHandoff: LiveSearchNavigationHandoff | null = null;
+
+export function rememberLiveSearchNavigationHandoff(input: {
+  providerId: string;
+  resultIds: readonly string[];
+  selected: LiveSearchPlaybackChannel;
+}) {
+  const selectedId = input.selected.id.trim();
+  if (!input.providerId || !selectedId) {
+    pendingLiveSearchNavigationHandoff = null;
+    return;
+  }
+  pendingLiveSearchNavigationHandoff = {
+    providerId: input.providerId,
+    resultIds: [...new Set([...input.resultIds, selectedId].map((id) => id.trim()).filter(Boolean))].slice(0, 64),
+    selected: input.selected,
+  };
+}
+
+export function consumeLiveSearchNavigationHandoff(providerId: string) {
+  if (pendingLiveSearchNavigationHandoff?.providerId !== providerId) {
+    return null;
+  }
+  const handoff = pendingLiveSearchNavigationHandoff;
+  pendingLiveSearchNavigationHandoff = null;
+  return handoff;
+}
+
 export function createLiveSearchBrowseSnapshot(input: {
   categoryId?: string | null;
   channelId?: string | null;

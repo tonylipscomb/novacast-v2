@@ -56,6 +56,24 @@ test('managed failures and missing client prerequisites fall back without affect
   assert.match(client, /setTimeout\(\(\) => controller\.abort\(\), 3_000\)/);
 });
 
+test('release-visible managed EPG audit is bounded and excludes request secrets', () => {
+  const client = fs.readFileSync(new URL('../src/features/guide/managedEpgClient.ts', import.meta.url), 'utf8');
+  const live = fs.readFileSync(new URL('../src/features/live/liveTvChannelEpg.ts', import.meta.url), 'utf8');
+  assert.match(client, /\[NovaCast Managed EPG Release Audit\]/);
+  assert.match(client, /console\.info\(MANAGED_EPG_RELEASE_AUDIT/);
+  assert.match(client, /sourceLabel/);
+  assert.match(client, /sourcePriority/);
+  const managedAuditCalls = client.match(/console\.info\([\s\S]*?\);/g) ?? [];
+  assert.ok(managedAuditCalls.length >= 2);
+  managedAuditCalls.forEach((call) => assert.doesNotMatch(call, /apiUrl|anonKey|authHeaders|Authorization/));
+  assert.match(live, /\[NovaCast Live EPG Classification Audit\]/);
+  assert.match(live, /programs\.slice\(0, 3\)/);
+  assert.match(live, /console\.info\(LIVE_EPG_CLASSIFICATION_AUDIT/);
+  const liveAuditCalls = live.match(/console\.info\(LIVE_EPG_CLASSIFICATION_AUDIT[\s\S]*?\);/g) ?? [];
+  assert.ok(liveAuditCalls.length >= 2);
+  liveAuditCalls.forEach((call) => assert.doesNotMatch(call, /streamUrl|password|token|authorization/i));
+});
+
 test('Edge function authenticates by device assignment and never accepts client provider identity', () => {
   const edge = fs.readFileSync(new URL('../supabase/functions/device-epg/index.ts', import.meta.url), 'utf8');
   assert.match(edge, /authenticateDevice\(request, client\)/);

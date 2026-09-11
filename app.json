@@ -2,7 +2,7 @@
     "expo":  {
                  "name":  "NovaCast",
                  "slug":  "novacast-v2",
-                 "version":  "1.0.4-beta19",
+                 "version":  "1.0.4-beta20",
                  "orientation":  "landscape",
                  "icon":  "./assets/images/novacast-launcher-icon.png",
                  "scheme":  "novacastv2",
@@ -20,7 +20,7 @@
                                  "usesCleartextTraffic":  true,
                                  "predictiveBackGestureEnabled":  false,
                                  "package":  "com.novacast.novacastv2",
-                                 "versionCode":  19
+                                 "versionCode":  20
                              },
                  "web":  {
                              "output":  "static",

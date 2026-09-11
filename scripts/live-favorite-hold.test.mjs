@@ -8,6 +8,7 @@ const source = fs.readFileSync(path.join(root, 'src/features/live/liveFavoriteHo
 const rowSource = fs.readFileSync(path.join(root, 'src/features/live/LiveTvChannelRow.tsx'), 'utf8');
 const screenSource = fs.readFileSync(path.join(root, 'src/features/live/LiveTvScreen.tsx'), 'utf8');
 const searchSource = fs.readFileSync(path.join(root, 'src/features/search/SearchResults.tsx'), 'utf8');
+const searchControllerSource = fs.readFileSync(path.join(root, 'src/features/search/searchLiveFavoriteController.ts'), 'utf8');
 const pluginSource = fs.readFileSync(path.join(root, 'plugins/withNovacastNativeTvKeyEvents.js'), 'utf8');
 const compiled = transpileModule(source, { compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2022 } }).outputText;
 const { createFavoriteHoldDetector } = await import(`data:text/javascript,${encodeURIComponent(compiled)}`);
@@ -20,9 +21,10 @@ assert.doesNotMatch(source, /NovaCast Favorite Hold Audit/);
 assert.doesNotMatch(pluginSource, /NovaCastTvKeyBridge|Log\.(?:i|e)\(/);
 assert.match(pluginSource, /KEYCODE_DPAD_CENTER/);
 assert.match(pluginSource, /onNovaCastNativeTvKey/);
-assert.match(searchSource, /onNovaCastNativeTvKey/);
-assert.match(searchSource, /favoriteHoldRef\.current\?\.handleEvent/);
-assert.match(searchSource, /nativeTvHold/);
+assert.doesNotMatch(searchSource, /DeviceEventEmitter\.addListener\('onNovaCastNativeTvKey'/);
+assert.match(searchControllerSource, /onNovaCastNativeTvKey/);
+assert.match(searchControllerSource, /createSearchLiveFavoriteController/);
+assert.match(searchSource, /consumeLiveFavoriteHoldSuppression/);
 
 function harness() {
   let clock = 0;

@@ -11,6 +11,8 @@ import {
 } from '../src/features/live/liveTvLogic.ts';
 import {
   createLiveSearchBrowseSnapshot,
+  createLiveSearchPlaybackSession,
+  advanceLiveSearchPlaybackSession,
   isLiveSearchUiBlockingSurf,
   resolveLivePlaybackChannel,
   resolveLiveSearchSurfQueue,
@@ -30,6 +32,7 @@ import {
 import { computeLiveSearchMatchTier } from '../src/features/search/liveSearchMatching.ts';
 import { isSearchableQuery, normalizeSearchQuery } from '../src/features/search/searchQuery.ts';
 import { SEARCH_PAGE_SIZE } from '../src/features/search/searchConstants.ts';
+import { createSearchLiveFavoriteController } from '../src/features/search/searchLiveFavoriteControllerCore.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relativePath) => readFileSync(join(root, relativePath), 'utf8').replace(/\r\n/g, '\n');
@@ -381,12 +384,61 @@ test('35. global/main-menu Search routes Live through the real Live TV screen', 
   assert.match(searchScreen, /openSearchResult\(router, activeProviderId, result/);
   assert.doesNotMatch(searchScreen, /searchMedia\.startLivePlayback\(result\)/);
   assert.match(searchScreen, /onToggleLiveFavorite/);
-  assert.match(read('src/features/search/SearchResults.tsx'), /createFavoriteHoldDetector/);
-  assert.match(read('src/features/search/SearchResults.tsx'), /consumeSuppressedPress/);
+  assert.match(read('src/features/search/SearchOverlay.tsx'), /useSearchLiveFavoriteController/);
+  assert.doesNotMatch(read('src/features/search/SearchResults.tsx'), /DeviceEventEmitter\.addListener/);
+  assert.match(read('src/features/search/SearchResults.tsx'), /consumeLiveFavoriteHoldSuppression/);
   assert.match(searchScreen, /SearchScope/);
   assert.match(searchScreen, /'live'/);
   assert.match(searchScreen, /'movie'/);
   assert.match(searchScreen, /'series'/);
+});
+
+test('Search-origin session surfs its result order across categories without category fallback', () => {
+  const channels = [
+    channel('a', 'A', { categoryId: 'news' }),
+    channel('b', 'B', { categoryId: 'sports' }),
+    channel('c', 'C', { categoryId: 'movies' }),
+    channel('d', 'D', { categoryId: 'kids' }),
+  ];
+  const session = createLiveSearchPlaybackSession({
+    providerId: 'p1',
+    resultIds: channels.map((item) => item.id),
+    channels,
+    selectedId: 'b',
+  });
+  assert.ok(session);
+  assert.equal(advanceLiveSearchPlaybackSession(session, 1).channel.id, 'c');
+  assert.equal(advanceLiveSearchPlaybackSession({ ...session, currentIndex: 2, selectedId: 'c' }, 1).channel.id, 'd');
+  assert.equal(advanceLiveSearchPlaybackSession({ ...session, currentIndex: 2, selectedId: 'c' }, -1).channel.id, 'b');
+  assert.equal(advanceLiveSearchPlaybackSession({ ...session, currentIndex: 1, selectedId: 'b' }, -1).channel.id, 'a');
+});
+
+test('one Search favorite controller triggers one 425ms hold and suppresses navigation', () => {
+  let now = 1000;
+  const timers = [];
+  const toggled = [];
+  const controller = createSearchLiveFavoriteController({
+    onToggle: (result) => toggled.push(result.id),
+    detectorOptions: {
+      now: () => now,
+      schedule: (callback) => { timers.push(callback); return timers.length; },
+      cancelSchedule: () => undefined,
+    },
+  });
+  const first = { type: 'live', id: 'a', title: 'A' };
+  const second = { type: 'live', id: 'b', title: 'B' };
+  controller.setFocused(first);
+  controller.handleNativeEvent({ keyCode: 23, action: 0 });
+  now += 425;
+  timers[0]();
+  assert.deepEqual(toggled, ['a']);
+  assert.equal(controller.consumeSuppressedPress('a'), true);
+  assert.equal(controller.consumeSuppressedPress('a'), false);
+  controller.setFocused(second);
+  controller.handleNativeEvent({ keyCode: 66, action: 0 });
+  now += 100;
+  controller.handleNativeEvent({ keyCode: 66, action: 1 });
+  assert.deepEqual(toggled, ['a']);
 });
 
 test('36. existing Live first-OK / second-OK contract remains', () => {

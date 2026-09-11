@@ -33,6 +33,7 @@ import { SearchInput } from './SearchInput';
 import { SearchLoadingState } from './SearchLoadingState';
 import { SearchPosterGrid } from './SearchPosterGrid';
 import { SearchResults } from './SearchResults';
+import { useSearchLiveFavoriteController } from './searchLiveFavoriteController';
 import { SearchScopeChips } from './SearchScopeChips';
 import { SearchSection } from './SearchSection';
 import { SearchMediaDetailLayer } from './SearchMediaDetailLayer';
@@ -262,9 +263,13 @@ export function SearchScreen() {
           focusedResultKey: key,
         });
         const liveResults = scope === 'all' && groupedResults ? groupedResults.live.items : results;
+        const livePlaybackChannels = liveResults
+          .filter((item): item is import('./searchTypes').LiveSearchResult => item.type === 'live')
+          .map(toLiveSearchPlaybackChannel);
         rememberLiveSearchNavigationHandoff({
           providerId: activeProviderId,
-          resultIds: liveResults.filter((item): item is import('./searchTypes').LiveSearchResult => item.type === 'live').map((item) => item.id),
+          resultIds: livePlaybackChannels.map((item) => item.id),
+          channels: livePlaybackChannels,
           selected: toLiveSearchPlaybackChannel(result),
         });
         // Live owns its player, EPG, surf queue, and fullscreen chrome. Keep the
@@ -294,6 +299,10 @@ export function SearchScreen() {
     },
     [activeProviderId],
   );
+  const liveFavoriteController = useSearchLiveFavoriteController({
+    enabled: scope === 'live' || Boolean(groupedResults?.live.items.length),
+    onToggle: toggleSearchLiveFavorite,
+  });
 
   useEffect(() => {
     if (!focusedResultKey) {
@@ -486,6 +495,8 @@ export function SearchScreen() {
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
               onToggleLiveFavorite={toggleSearchLiveFavorite}
+              onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}
+              consumeLiveFavoriteHoldSuppression={liveFavoriteController.consumeSuppressedPress}
               onViewAll={groupedResults.live.hasMore ? () => setScope('live') : undefined}
               focusUpHandle={searchFocusUpHandle}
               firstRowRef={groupedResults.live.items.length > 0 ? firstGroupedResultRef : undefined}
@@ -498,6 +509,8 @@ export function SearchScreen() {
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
               onToggleLiveFavorite={toggleSearchLiveFavorite}
+              onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}
+              consumeLiveFavoriteHoldSuppression={liveFavoriteController.consumeSuppressedPress}
               onViewAll={groupedResults.movie.hasMore ? () => setScope('movie') : undefined}
               firstRowRef={
                 groupedResults.live.items.length === 0 && groupedResults.movie.items.length > 0
@@ -513,6 +526,8 @@ export function SearchScreen() {
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
               onToggleLiveFavorite={toggleSearchLiveFavorite}
+              onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}
+              consumeLiveFavoriteHoldSuppression={liveFavoriteController.consumeSuppressedPress}
               onViewAll={groupedResults.series.hasMore ? () => setScope('series') : undefined}
               firstRowRef={
                 groupedResults.live.items.length === 0 &&
@@ -530,6 +545,8 @@ export function SearchScreen() {
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
               onToggleLiveFavorite={toggleSearchLiveFavorite}
+              onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}
+              consumeLiveFavoriteHoldSuppression={liveFavoriteController.consumeSuppressedPress}
               onViewAll={groupedResults.guide.hasMore ? () => setScope('guide') : undefined}
               firstRowRef={
                 groupedResults.live.items.length === 0 &&
@@ -596,6 +613,8 @@ export function SearchScreen() {
                   onFocusResult={setFocusedResultKey}
                   onSelectResult={handleSelectResult}
                   onToggleLiveFavorite={toggleSearchLiveFavorite}
+                  onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}
+                  consumeLiveFavoriteHoldSuppression={liveFavoriteController.consumeSuppressedPress}
                   emphasized
                   focusUpHandle={index === 0 ? searchFocusUpHandle : undefined}
                   firstRowRef={index === 0 ? firstFlatResultRef : undefined}

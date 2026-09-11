@@ -398,18 +398,20 @@ test('Search Live category hydration preserves the authoritative search surf que
   assert.match(liveScreen, /resolveLiveSearchSurfQueue\(\s*liveSearchSurfQueueRef\.current/);
 });
 
-test('Search Live rows use the native TV hold bridge and retain short-press playback', () => {
-  assert.match(searchResults, /onNovaCastNativeTvKey/);
-  assert.match(searchResults, /event\.keyCode === 23/);
-  assert.match(searchResults, /favoriteHoldRef\.current\?\.handleEvent/);
-  assert.match(searchResults, /if \(!isFocusedRef\.current\)/);
+test('Search owns one native TV hold controller and rows retain short-press playback', () => {
+  assert.doesNotMatch(searchResults, /DeviceEventEmitter\.addListener/);
+  assert.match(overlay, /useSearchLiveFavoriteController/);
+  assert.match(read('src/features/search/searchLiveFavoriteController.ts'), /DeviceEventEmitter\.addListener/);
+  assert.match(searchResults, /consumeLiveFavoriteHoldSuppression/);
   assert.match(searchResults, /nativeTvHold/);
   assert.match(searchResults, /onPress=\{\(\) =>/);
   assert.match(focusRow, /onBlur\?\.\(\)/);
 });
 
 test('Search-origin hydrated category collisions keep Search playback ownership', () => {
-  assert.match(liveScreen, /preferSearch: searchPlaybackSessionActive \|\| directPlayRequested/);
+  assert.match(liveScreen, /liveSearchPlaybackSessionRef\.current\?\.channelsById/);
+  assert.match(liveScreen, /searchSession\?\.resultIds/);
+  assert.doesNotMatch(liveScreen, /preferSearch:/);
   assert.match(liveScreen, /directPlayRequested \? routeChannelId/);
   assert.match(liveScreen, /searchOverlayVisibleRef\.current/);
 });

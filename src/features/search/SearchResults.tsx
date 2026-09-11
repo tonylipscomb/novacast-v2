@@ -4,7 +4,6 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import {
   FlatList,
-  DeviceEventEmitter,
   Platform,
   StyleSheet,
   View,
@@ -49,6 +48,8 @@ type SearchResultsProps = {
   queryLength?: number;
   overlayVisible?: boolean;
   onToggleLiveFavorite?: (result: LiveSearchResult) => void;
+  onFocusLiveResult?: (result: LiveSearchResult | null) => void;
+  consumeLiveFavoriteHoldSuppression?: (id: string) => boolean;
 };
 
 function kindLabel(type: SearchResult['type']) {
@@ -115,6 +116,8 @@ function ResultRow({
   onFocusResult,
   onSelectResult,
   onToggleLiveFavorite,
+  onFocusLiveResult,
+  consumeLiveFavoriteHoldSuppression,
 }: {
   result: SearchResult;
   index: number;
@@ -127,16 +130,17 @@ function ResultRow({
   onFocusResult?: (key: string) => void;
   onSelectResult: (result: SearchResult) => void;
   onToggleLiveFavorite?: (result: LiveSearchResult) => void;
+  onFocusLiveResult?: (result: LiveSearchResult | null) => void;
+  consumeLiveFavoriteHoldSuppression?: (id: string) => boolean;
 }) {
   const key = searchResultKey(result);
   const isLive = result.type === 'live';
   const [isFocused, setIsFocused] = useState(false);
-  const isFocusedRef = useRef(false);
   const isFavorite = isLive && Boolean(favoriteContentIds?.has(result.id));
-  const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
-  const holdSuppressedRef = useRef(false);
   const nativeTvHold = isLive && Platform.OS === 'android' && Platform.isTV === true;
-  if (isLive && onToggleLiveFavorite && !favoriteHoldRef.current) {
+  const holdSuppressedRef = useRef(false);
+  const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
+  if (isLive && !nativeTvHold && onToggleLiveFavorite && !favoriteHoldRef.current) {
     favoriteHoldRef.current = createFavoriteHoldDetector({
       onTriggered: () => {
         holdSuppressedRef.current = true;
@@ -144,29 +148,6 @@ function ResultRow({
       },
     });
   }
-  useEffect(() => {
-    if (!nativeTvHold || !favoriteHoldRef.current) return;
-    const subscription = DeviceEventEmitter.addListener('onNovaCastNativeTvKey', (event: {
-      keyCode?: number;
-      action?: number;
-      repeatCount?: number;
-    }) => {
-      if (event.keyCode === 23 || event.keyCode === 66 || event.keyCode === 160) {
-        if (!isFocusedRef.current) {
-          return;
-        }
-        favoriteHoldRef.current?.handleEvent({
-          keyCode: event.keyCode,
-          eventKeyAction: event.action,
-          repeatCount: event.repeatCount,
-        });
-      }
-    });
-    return () => {
-      subscription.remove();
-      favoriteHoldRef.current?.cancel('search-row-blur');
-    };
-  }, [nativeTvHold, isFocused]);
   const nativeRef =
     restoreResultKey && key === restoreResultKey ? restoreRowRef : index === 0 ? firstRowRef : undefined;
 
@@ -184,22 +165,22 @@ function ResultRow({
       nextFocusUp={index === 0 ? focusUpHandle : undefined}
       nextFocusLeft={index === 0 ? focusLeftHandle : undefined}
       onFocus={() => {
-        isFocusedRef.current = true;
         setIsFocused(true);
         onFocusResult?.(key);
+        onFocusLiveResult?.(isLive ? result : null);
       }}
       onBlur={() => {
-        isFocusedRef.current = false;
         setIsFocused(false);
+        if (isLive) onFocusLiveResult?.(null);
         favoriteHoldRef.current?.cancel('search-row-blur');
       }}
-      onPressIn={isLive ? () => {
+      onPressIn={isLive && !nativeTvHold ? () => {
         holdSuppressedRef.current = false;
-        if (!nativeTvHold) favoriteHoldRef.current?.pressIn();
+        favoriteHoldRef.current?.pressIn();
       } : undefined}
-      onPressOut={isLive ? () => { if (!nativeTvHold) favoriteHoldRef.current?.pressOut(); } : undefined}
+      onPressOut={isLive && !nativeTvHold ? () => favoriteHoldRef.current?.pressOut() : undefined}
       onPress={() => {
-        if (isLive && (holdSuppressedRef.current || favoriteHoldRef.current?.consumeSuppressedPress())) {
+        if (isLive && (holdSuppressedRef.current || consumeLiveFavoriteHoldSuppression?.(result.id))) {
           holdSuppressedRef.current = false;
           return;
         }
@@ -236,6 +217,8 @@ function StaticSearchResults({
   restoreRowRef,
   favoriteContentIds,
   onToggleLiveFavorite,
+  onFocusLiveResult,
+  consumeLiveFavoriteHoldSuppression,
 }: SearchResultsProps) {
   void focusedResultKey;
   void emphasized;
@@ -257,6 +240,8 @@ function StaticSearchResults({
           onFocusResult={onFocusResult}
           onSelectResult={onSelectResult}
           onToggleLiveFavorite={onToggleLiveFavorite}
+          onFocusLiveResult={onFocusLiveResult}
+          consumeLiveFavoriteHoldSuppression={consumeLiveFavoriteHoldSuppression}
         />
       ))}
     </View>
@@ -276,6 +261,8 @@ function FollowFocusSearchResults({
   restoreRowRef,
   favoriteContentIds,
   onToggleLiveFavorite,
+  onFocusLiveResult,
+  consumeLiveFavoriteHoldSuppression,
   onEndReached,
   queryLength = 0,
   overlayVisible = true,
@@ -409,6 +396,8 @@ function FollowFocusSearchResults({
           onFocusResult={() => handleResultFocus(key, index, item.id)}
           onSelectResult={onSelectResult}
           onToggleLiveFavorite={onToggleLiveFavorite}
+          onFocusLiveResult={onFocusLiveResult}
+          consumeLiveFavoriteHoldSuppression={consumeLiveFavoriteHoldSuppression}
         />
       );
     },

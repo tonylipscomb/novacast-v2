@@ -165,6 +165,8 @@ import {
   suppressLiveSearchOverlayClose,
   toLiveSearchPlaybackChannel,
   consumeLiveSearchNavigationHandoff,
+  createLiveSearchPlaybackSession,
+  type LiveSearchPlaybackSession,
   type LiveSearchBrowseSnapshot,
   type LiveSearchPlaybackChannel,
 } from './liveTvSearchSession';
@@ -355,6 +357,7 @@ export function LiveTvScreen() {
   const [searchPlaybackSessionActive, setSearchPlaybackSessionActive] = useState(false);
   const liveSearchSelectedIdRef = useRef<string | null>(null);
   const liveSearchPlaybackByIdRef = useRef<Map<string, LiveSearchPlaybackChannel>>(new Map());
+  const liveSearchPlaybackSessionRef = useRef<LiveSearchPlaybackSession | null>(null);
   useEffect(() => {
     const handoff = consumeLiveSearchNavigationHandoff(activeProviderId);
     if (!handoff) {
@@ -364,7 +367,13 @@ export function LiveTvScreen() {
     liveSearchQueueActiveRef.current = true;
     setSearchPlaybackSessionActive(true);
     liveSearchSelectedIdRef.current = handoff.selected.id;
-    liveSearchPlaybackByIdRef.current.set(handoff.selected.id, handoff.selected);
+    liveSearchPlaybackByIdRef.current = new Map(handoff.channels.map((channel) => [channel.id, channel]));
+    liveSearchPlaybackSessionRef.current = createLiveSearchPlaybackSession({
+      providerId: handoff.providerId,
+      resultIds: handoff.resultIds,
+      channels: handoff.channels,
+      selectedId: handoff.selected.id,
+    });
   }, [activeProviderId]);
   const [fullscreenRetryNodeTag, setFullscreenRetryNodeTag] = useState<number | null>(null);
   const chromeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -601,17 +610,23 @@ export function LiveTvScreen() {
   }
 
   const selectedChannel = useMemo(
-    () =>
-      resolveLivePlaybackChannel(liveState?.selectedChannelId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: searchPlaybackSessionActive || directPlayRequested }) ??
-      channels[0] ??
-      null,
-    [channels, directPlayRequested, liveState?.selectedChannelId, searchPlaybackSessionActive],
+    () => {
+      const session = liveSearchPlaybackSessionRef.current;
+      const resolved = session
+        ? session.channelsById.get(liveState?.selectedChannelId ?? '') ?? null
+        : resolveLivePlaybackChannel(liveState?.selectedChannelId, channels, liveSearchPlaybackByIdRef.current);
+      return resolved ?? (session ? null : channels[0] ?? null);
+    },
+    [channels, liveState?.selectedChannelId, searchPlaybackSessionActive],
   );
   const previewChannel = useMemo(
-    () =>
-      resolveLivePlaybackChannel(liveState?.previewChannelId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: searchPlaybackSessionActive || directPlayRequested }) ??
-      selectedChannel,
-    [channels, directPlayRequested, selectedChannel, liveState?.previewChannelId, searchPlaybackSessionActive],
+    () => {
+      const session = liveSearchPlaybackSessionRef.current;
+      return (session
+        ? session.channelsById.get(liveState?.previewChannelId ?? '') ?? null
+        : resolveLivePlaybackChannel(liveState?.previewChannelId, channels, liveSearchPlaybackByIdRef.current)) ?? selectedChannel;
+    },
+    [channels, selectedChannel, liveState?.previewChannelId, searchPlaybackSessionActive],
   );
   const [, setFocusedChannelId] = useState<string | null>(
     liveMemory.focusedChannelId ?? null,
@@ -686,8 +701,9 @@ export function LiveTvScreen() {
     [personalizationState.liveFavorites],
   );
   const fullscreenChannel = useMemo(
-    () => resolveLivePlaybackChannel(liveState?.fullscreenChannelId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: searchPlaybackSessionActive || directPlayRequested }),
-    [channels, directPlayRequested, liveState?.fullscreenChannelId, searchPlaybackSessionActive],
+    () => liveSearchPlaybackSessionRef.current?.channelsById.get(liveState?.fullscreenChannelId ?? '') ??
+      resolveLivePlaybackChannel(liveState?.fullscreenChannelId, channels, liveSearchPlaybackByIdRef.current),
+    [channels, liveState?.fullscreenChannelId, searchPlaybackSessionActive],
   );
   useEffect(() => {
     if (!liveState?.fullscreenChannelId) {
@@ -887,7 +903,9 @@ export function LiveTvScreen() {
 
     const channelId = liveState.previewChannelId;
     const requestId = liveState.previewRequestId;
-    const channel = resolveLivePlaybackChannel(channelId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: searchPlaybackSessionActive || directPlayRequested });
+    const channel = liveSearchPlaybackSessionRef.current
+      ? liveSearchPlaybackSessionRef.current.channelsById.get(channelId) ?? null
+      : resolveLivePlaybackChannel(channelId, channels, liveSearchPlaybackByIdRef.current);
     const timer = setTimeout(() => {
       const latest = liveStateRef.current;
       const surfSessionActive = Boolean(surfSessionIdRef.current && latest?.fullscreenChannelId);
@@ -1441,6 +1459,7 @@ export function LiveTvScreen() {
     const snapshot = liveSearchBrowseSnapshotRef.current;
     liveSearchSurfQueueRef.current = null;
     liveSearchQueueActiveRef.current = false;
+    liveSearchPlaybackSessionRef.current = null;
     setSearchPlaybackSessionActive(false);
     liveSearchSelectedIdRef.current = null;
     liveSearchBrowseSnapshotRef.current = null;
@@ -1520,11 +1539,18 @@ export function LiveTvScreen() {
       liveSearchSelectedIdRef.current = result.id;
       liveSearchSurfQueueRef.current = liveSearchResultIdsRef.current.slice();
       liveSearchQueueActiveRef.current = true;
-      liveSearchPlaybackByIdRef.current.set(result.id, toLiveSearchPlaybackChannel(result));
+      const selectedPlaybackChannel = toLiveSearchPlaybackChannel(result);
+      liveSearchPlaybackByIdRef.current.set(result.id, selectedPlaybackChannel);
+      liveSearchPlaybackSessionRef.current = createLiveSearchPlaybackSession({
+        providerId: activeProviderId,
+        resultIds: liveSearchResultIdsRef.current,
+        channels: [...liveSearchPlaybackByIdRef.current.values()],
+        selectedId: result.id,
+      });
       preferredChannelFocusId.current = result.id;
       preferChannelFocusRef.current = true;
       setSearchPlaybackSessionActive(true);
-      const channel = resolveLivePlaybackChannel(result.id, channels, liveSearchPlaybackByIdRef.current, { preferSearch: true });
+      const channel = liveSearchPlaybackSessionRef.current?.channelsById.get(result.id) ?? selectedPlaybackChannel;
       if (channel) {
         void recordRecentItem({
           providerId: activeProviderId,
@@ -2161,8 +2187,9 @@ export function LiveTvScreen() {
       const currentId = liveStateRef.current?.fullscreenChannelId ?? liveStateRef.current?.previewChannelId ?? null;
       const discoverContext = liveStateRef.current?.fullscreenChannelId ? discoverLivePlaybackContextRef.current : null;
       const surfQueue = discoverContext?.channels ?? null;
+      const searchSession = liveSearchPlaybackSessionRef.current;
       const adjacent = resolveLiveSurfAdjacent({
-        channelIds: surfQueue?.map((channel) => channel.id) ?? resolveLiveSearchSurfQueue(
+        channelIds: surfQueue?.map((channel) => channel.id) ?? searchSession?.resultIds ?? resolveLiveSearchSurfQueue(
           liveSearchSurfQueueRef.current,
           channels.map((channel) => channel.id),
         ),
@@ -2211,7 +2238,16 @@ export function LiveTvScreen() {
         });
       }
       intendedSurfChannelIdRef.current = nextId;
-      const nextChannel = surfQueue?.find((candidate) => candidate.id === nextId) ?? resolveLivePlaybackChannel(nextId, channels, liveSearchPlaybackByIdRef.current, { preferSearch: liveSearchQueueActiveRef.current || directPlayRequested });
+      const nextChannel = surfQueue?.find((candidate) => candidate.id === nextId) ??
+        (searchSession ? searchSession.channelsById.get(nextId) ?? null :
+          resolveLivePlaybackChannel(nextId, channels, liveSearchPlaybackByIdRef.current));
+      if (searchSession && nextChannel) {
+        liveSearchPlaybackSessionRef.current = {
+          ...searchSession,
+          currentIndex: adjacent.toIndex,
+          selectedId: nextId,
+        };
+      }
       if (discoverContext && nextChannel) {
         const canonicalId = nextChannel.id.trim();
         if (canonicalId) {
@@ -2596,6 +2632,15 @@ export function LiveTvScreen() {
   const showFatalPanel = !bundle || (categories.length === 0 && loadStatus !== 'loading');
 
   if (loadStatus === 'loading' && categories.length === 0) {
+    if (directPlayRequested) {
+      return (
+        <View style={styles.root}>
+          <View pointerEvents="none" style={styles.directPlayCurtain}>
+            <NovaSpaceLoader label="Starting playback…" />
+          </View>
+        </View>
+      );
+    }
     return (
       <NovaTvShell activeId="live" title="Live TV" subtitle="Browse channels without losing the picture." preferActiveNavigationFocus={false} compactNavigationRail expirationLabel={selectedProviderExpiration}>
         <View style={styles.statePanel}>
@@ -2606,6 +2651,15 @@ export function LiveTvScreen() {
   }
 
   if (showFatalPanel) {
+    if (directPlayRequested) {
+      return (
+        <View style={styles.root}>
+          <View pointerEvents="none" style={styles.directPlayCurtain}>
+            <NovaSpaceLoader label="Starting playback…" />
+          </View>
+        </View>
+      );
+    }
     return (
       <NovaTvShell activeId="live" title="Live TV" subtitle="Browse channels without losing the picture." preferActiveNavigationFocus={false} compactNavigationRail expirationLabel={selectedProviderExpiration}>
         <View style={styles.statePanel}>
@@ -2650,6 +2704,15 @@ export function LiveTvScreen() {
   }
 
   if (!renderState) {
+    if (directPlayRequested) {
+      return (
+        <View style={styles.root}>
+          <View pointerEvents="none" style={styles.directPlayCurtain}>
+            <NovaSpaceLoader label="Starting playback…" />
+          </View>
+        </View>
+      );
+    }
     return (
       <NovaTvShell activeId="live" title="Live TV" subtitle="Browse channels without losing the picture." preferActiveNavigationFocus={false} compactNavigationRail expirationLabel={selectedProviderExpiration}>
         <View style={styles.statePanel}>
@@ -2664,6 +2727,15 @@ export function LiveTvScreen() {
     // spinner, and render NO category/channel content until the final US-first
     // order + selection + focus target are ready. Prevents any raw/pre-sort or
     // "Live {id}" placeholder flash and any post-paint reorder or focus loss.
+    if (directPlayRequested) {
+      return (
+        <View style={styles.root}>
+          <View pointerEvents="none" style={styles.directPlayCurtain}>
+            <NovaSpaceLoader label="Starting playback…" />
+          </View>
+        </View>
+      );
+    }
     return (
       <View style={styles.root}>
         <NovaTvShell
@@ -2682,7 +2754,7 @@ export function LiveTvScreen() {
 
   return (
     <View style={styles.root}>
-      {!renderState.fullscreenChannelId ? (
+      {!renderState.fullscreenChannelId && !directPlayRequested ? (
       <NovaTvShell
         activeId="live"
         providerLabel={selectedProviderLabel}
@@ -3061,6 +3133,9 @@ export function LiveTvScreen() {
         onClose={closeLiveSearch}
         onSelectResult={handleSearchSelect}
         favoriteContentIds={liveFavoriteContentIds}
+        onToggleLiveFavorite={(result) => {
+          void toggleLiveFavorite(activeProviderId, toLiveSearchPlaybackChannel(result));
+        }}
       />
 
       <WalkthroughOverlay

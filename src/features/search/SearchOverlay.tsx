@@ -30,6 +30,7 @@ import { TvSearchKeyboard } from './TvSearchKeyboard';
 import { logSearchEvent } from './searchDiagnostics';
 import { searchResultKey } from './searchScopes';
 import { createSearchInputActivationGate } from './searchInputActivation';
+import { useSearchLiveFavoriteController } from './searchLiveFavoriteController';
 import {
   cancelMoviesSearchResultFocus,
   getMoviesSearchResultTargetRef,
@@ -105,6 +106,7 @@ type SearchOverlayProps = {
   onQueryCommitted?: (query: string) => void;
   pageSize?: number;
   favoriteContentIds?: ReadonlySet<string>;
+  onToggleLiveFavorite?: (result: import('./searchTypes').LiveSearchResult) => void;
 };
 
 /** Avoid mounting search hooks while the overlay is closed — prevents idle reset loops. */
@@ -136,6 +138,7 @@ function SearchOverlayContent({
   onQueryCommitted,
   pageSize = 50,
   favoriteContentIds,
+  onToggleLiveFavorite,
 }: SearchOverlayProps) {
   const inputRef = useRef<TextInput>(null);
   const searchShellRef = useRef<View | null>(null);
@@ -167,6 +170,10 @@ function SearchOverlayContent({
   const preferSearchFocusRef = useRef(true);
   const imeVisibleRef = useRef(false);
   const handoffGuardRef = useRef(false);
+  const liveFavoriteController = useSearchLiveFavoriteController({
+    enabled: visible && scope === 'live',
+    onToggle: onToggleLiveFavorite ?? (() => undefined),
+  });
 
   useEffect(() => {
     const previous = previousModalStateRef.current;
@@ -900,6 +907,9 @@ function SearchOverlayContent({
         restoreResultKey={restoreFocusLiveChannelId ? `live:${restoreFocusLiveChannelId}` : null}
         restoreRowRef={restoreRowRef}
         favoriteContentIds={favoriteContentIds}
+        onToggleLiveFavorite={onToggleLiveFavorite}
+        onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}
+        consumeLiveFavoriteHoldSuppression={liveFavoriteController.consumeSuppressedPress}
         followFocusedResult={scope === 'live'}
         onEndReached={scope === 'live' ? handleLoadMore : undefined}
         queryLength={trimmedQuery.length}

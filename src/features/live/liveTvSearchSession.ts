@@ -14,7 +14,17 @@ export type LiveSearchPlaybackChannel = ProviderLiveChannel;
 type LiveSearchNavigationHandoff = {
   providerId: string;
   resultIds: string[];
+  channels: LiveSearchPlaybackChannel[];
   selected: LiveSearchPlaybackChannel;
+};
+
+export type LiveSearchPlaybackSession = {
+  providerId: string;
+  resultIds: string[];
+  channelsById: ReadonlyMap<string, LiveSearchPlaybackChannel>;
+  selectedId: string;
+  currentIndex: number;
+  returnRoute: '/search';
 };
 
 let pendingLiveSearchNavigationHandoff: LiveSearchNavigationHandoff | null = null;
@@ -22,6 +32,7 @@ let pendingLiveSearchNavigationHandoff: LiveSearchNavigationHandoff | null = nul
 export function rememberLiveSearchNavigationHandoff(input: {
   providerId: string;
   resultIds: readonly string[];
+  channels?: readonly LiveSearchPlaybackChannel[];
   selected: LiveSearchPlaybackChannel;
 }) {
   const selectedId = input.selected.id.trim();
@@ -32,6 +43,7 @@ export function rememberLiveSearchNavigationHandoff(input: {
   pendingLiveSearchNavigationHandoff = {
     providerId: input.providerId,
     resultIds: [...new Set([...input.resultIds, selectedId].map((id) => id.trim()).filter(Boolean))].slice(0, 64),
+    channels: [...new Map([...(input.channels ?? []), input.selected].map((channel) => [channel.id.trim(), channel] as const)).values()].slice(0, 64),
     selected: input.selected,
   };
 }
@@ -43,6 +55,46 @@ export function consumeLiveSearchNavigationHandoff(providerId: string) {
   const handoff = pendingLiveSearchNavigationHandoff;
   pendingLiveSearchNavigationHandoff = null;
   return handoff;
+}
+
+export function createLiveSearchPlaybackSession(input: {
+  providerId: string;
+  resultIds: readonly string[];
+  channels: readonly LiveSearchPlaybackChannel[];
+  selectedId: string;
+}): LiveSearchPlaybackSession | null {
+  const selectedId = input.selectedId.trim();
+  const resultIds = [...new Set(input.resultIds.map((id) => id.trim()).filter(Boolean))].slice(0, 64);
+  const channelsById = new Map(
+    input.channels
+      .filter((channel) => channel.id.trim())
+      .map((channel) => [channel.id.trim(), channel] as const),
+  );
+  if (!input.providerId || !selectedId || !channelsById.has(selectedId)) {
+    return null;
+  }
+  const orderedIds = resultIds.includes(selectedId) ? resultIds : [selectedId, ...resultIds];
+  return {
+    providerId: input.providerId,
+    resultIds: orderedIds,
+    channelsById,
+    selectedId,
+    currentIndex: orderedIds.indexOf(selectedId),
+    returnRoute: '/search',
+  };
+}
+
+export function advanceLiveSearchPlaybackSession(session: LiveSearchPlaybackSession, delta: 1 | -1) {
+  const nextIndex = session.currentIndex + delta;
+  if (nextIndex < 0 || nextIndex >= session.resultIds.length) {
+    return null;
+  }
+  const nextId = session.resultIds[nextIndex];
+  const channel = session.channelsById.get(nextId);
+  if (!channel) {
+    return null;
+  }
+  return { ...session, currentIndex: nextIndex, selectedId: nextId, channel };
 }
 
 export function createLiveSearchBrowseSnapshot(input: {

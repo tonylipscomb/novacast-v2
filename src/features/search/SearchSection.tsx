@@ -20,6 +20,8 @@ type SearchSectionProps = {
   onFocusResult?: (key: string) => void;
   onSelectResult: (result: SearchResult) => void;
   onToggleLiveFavorite?: (result: LiveSearchResult) => void;
+  onFocusLiveResult?: (result: LiveSearchResult | null) => void;
+  consumeLiveFavoriteHoldSuppression?: (id: string) => boolean;
   onViewAll?: () => void;
   onFocusViewAll?: () => void;
   focusUpHandle?: number;
@@ -83,6 +85,8 @@ export function SearchSection({
   onFocusResult,
   onSelectResult,
   onToggleLiveFavorite,
+  onFocusLiveResult,
+  consumeLiveFavoriteHoldSuppression,
   onViewAll,
   onFocusViewAll,
   focusUpHandle,
@@ -127,6 +131,8 @@ export function SearchSection({
           onFocusResult={onFocusResult}
           onSelectResult={onSelectResult}
           onToggleLiveFavorite={onToggleLiveFavorite}
+          onFocusLiveResult={onFocusLiveResult}
+          consumeLiveFavoriteHoldSuppression={consumeLiveFavoriteHoldSuppression}
           emphasized
           focusUpHandle={focusUpHandle}
           focusLeftHandle={focusLeftHandle}

@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import {
@@ -29,9 +32,19 @@ import {
   visibleRangeFromViewableItems,
 } from '../src/features/live/liveTvFocusScroll.ts';
 import {
+  didFullscreenJustClose,
+  isChannelPressEnteringFullscreen,
+} from '../src/features/live/liveTvFocusRestoration.ts';
+import {
   buildLiveTvChannelEpgMap,
   buildLiveTvChannelRowShellList,
 } from '../src/features/live/liveTvChannelRowData.ts';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const read = (relativePath) => readFileSync(join(root, relativePath), 'utf8').replace(/\r\n/g, '\n');
+const liveScreen = read('src/features/live/LiveTvScreen.tsx');
+const liveModel = read('src/features/live/useLiveTvScreenModel.ts');
+const channelList = read('src/features/live/LiveTvChannelList.tsx');
 
 const CHANNEL_KEY_EXTRACTOR = (item) => item.id;
 
@@ -223,6 +236,48 @@ test('OK still selects and previews immediately', () => {
   assert.equal(tuned.selectedChannelId, 'chan-2');
   assert.equal(tuned.previewChannelId, 'chan-2');
   assert.equal(tuned.previewStatus, 'loading');
+});
+
+test('Recents channel OK preserves channel focus ownership', () => {
+  const recents = createInitialLiveTvState('live-recents', 'recent-b');
+  const selected = chooseLiveChannel(recents, 'recent-b');
+
+  assert.equal(selected.selectedCategoryId, 'live-recents');
+  assert.equal(selected.selectedChannelId, 'recent-b');
+  assert.equal(isChannelPressEnteringFullscreen(recents, 'recent-b'), false);
+  assert.match(liveScreen, /preferredChannelFocusId\.current = channelId;[\s\S]*preferChannelFocusRef\.current = true;/);
+  assert.match(liveScreen, /preferCategoryFocusRef\.current = false;[\s\S]*preferChannelFocusRef\.current = true;/);
+});
+
+test('Recents fullscreen close restores the selected channel row', () => {
+  const recentsReady = {
+    ...createInitialLiveTvState('live-recents', 'recent-b'),
+    previewChannelId: 'recent-b',
+    previewConfirmedChannelId: 'recent-b',
+    previewStatus: 'ready',
+  };
+  const opened = chooseLiveChannel(recentsReady, 'recent-b');
+
+  assert.equal(opened.selectedCategoryId, 'live-recents');
+  assert.equal(opened.fullscreenChannelId, 'recent-b');
+  assert.equal(isChannelPressEnteringFullscreen(recentsReady, 'recent-b'), true);
+  assert.equal(didFullscreenJustClose('recent-b', null), true);
+  assert.match(liveScreen, /reason: opening \? 'fullscreen-open' : 'fullscreen-close-restore'/);
+  assert.match(liveScreen, /targetChannelId \? channelRowRefs\.current\.get\(targetChannelId\) : null/);
+});
+
+test('manual LEFT remains wired from channels to the category rail', () => {
+  assert.match(channelList, /nextFocusLeft=\{categoryFocusLeftHandle\}/);
+});
+
+test('normal provider category selection still owns the category-to-channel handoff', () => {
+  assert.match(liveScreen, /reason: 'category-ok-to-channels'/);
+  assert.match(liveScreen, /selectLiveCategory\(current, categoryId, nextChannelId\)/);
+});
+
+test('My Channels remains a synthetic category without provider loading', () => {
+  assert.match(liveModel, /isSyntheticLivePersonalizationCategoryId\(categoryId\)/);
+  assert.match(liveModel, /isSyntheticLiveMyChannelsCategoryId\(categoryId\)\s*\?\s*myChannelsLiveChannels/);
 });
 
 test('visible range helper still parses viewable tokens', () => {

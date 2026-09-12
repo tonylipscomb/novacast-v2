@@ -2108,6 +2108,14 @@ export function LiveTvScreen() {
 
       recordLiveTvChannelTune();
       preferredChannelFocusId.current = channelId;
+      // Channel focus clears the mount-time preference while the user moves
+      // through the list. Re-arm the selected row after OK so a state update
+      // cannot fall back to the category rail. Fullscreen owns focus while it
+      // is opening; its close transition restores this row imperatively.
+      if (!isChannelPressEnteringFullscreen(base, channelId)) {
+        preferCategoryFocusRef.current = false;
+        preferChannelFocusRef.current = true;
+      }
       enrichFocusedChannelEpg(channelId);
       if (channel) {
         void recordRecentItem({

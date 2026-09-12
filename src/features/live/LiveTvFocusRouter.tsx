@@ -263,6 +263,10 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
     }, [chromeVisible, enabled, restoreAnchorFocus]);
 
     const handleAnchorFocus = useCallback(() => {
+      console.log('[NOVACAST_PLAYER_FOCUS]', 'surf-anchor-focus', {
+        targetType: 'fullscreen',
+        targetId: fromChannelIdRef.current,
+      });
       const result = applyLiveSurfAnchorFocus(machineRef.current);
       machineRef.current = result.next;
       logLiveSurfFocus({
@@ -296,6 +300,11 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
     const handleSentinelNativeFocus = useCallback(
       (direction: LiveSurfDirection) => {
         const sentinelEvent = direction < 0 ? 'left-sentinel-focus' : 'right-sentinel-focus';
+        console.log('[NOVACAST_PLAYER_FOCUS]', 'surf-sentinel-focus', {
+          targetType: 'fullscreen',
+          targetId: fromChannelIdRef.current,
+          direction,
+        });
         logLiveSurfFocus({
           event: sentinelEvent,
           direction,

@@ -134,6 +134,10 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
       {...(Platform.OS === 'android' && nextFocusLeft ? { nextFocusLeft } : null)}
       {...(Platform.OS === 'android' && nextFocusRight ? { nextFocusRight } : null)}
       onFocus={() => {
+        console.log('[NOVACAST_PLAYER_FOCUS]', 'channel-row-focus', {
+          targetType: 'channel',
+          targetId: data.id,
+        });
         isFocusedRef.current = true;
         setIsFocused(true);
         recordLiveTvChannelFocus();
@@ -141,6 +145,10 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
         onFocus(data.id);
       }}
       onBlur={() => {
+        console.log('[NOVACAST_PLAYER_FOCUS]', 'channel-row-blur', {
+          targetType: 'channel',
+          targetId: data.id,
+        });
         isFocusedRef.current = false;
         focusedActionRef.current = null;
         setFocusedAction(null);

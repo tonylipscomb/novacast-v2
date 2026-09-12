@@ -107,6 +107,10 @@ import {
 const MOVIES_SQLITE_READS_ENABLED =
   process.env.EXPO_PUBLIC_MOVIES_SQLITE_READS === 'true';
 
+function logMoviesDiagnostic(event: string, fields: Record<string, unknown> = {}) {
+  console.info('[NOVACAST_MOVIES_DIAG]', event, fields);
+}
+
 export type MoviesScreenModelOptions = {
   initialSelectedCategoryId?: string;
   initialFocusedMovieId?: string | null;
@@ -311,6 +315,28 @@ export function useMoviesScreenModel(
     loadingRequestToken: null as string | null,
     firstPageResolvedCategoryId: null as string | null,
   }));
+
+  useEffect(() => {
+    logMoviesDiagnostic('screen-model-mount', {
+      providerId: activeProviderId,
+      dataSource: dataSource ? 'provided' : MOVIES_SQLITE_READS_ENABLED ? 'sqlite-or-provider' : 'provider',
+    });
+    return () => logMoviesDiagnostic('screen-model-unmount', { providerId: activeProviderId });
+  }, []);
+
+  useEffect(() => {
+    logMoviesDiagnostic('state', {
+      providerId: activeProviderId,
+      activeProviderId,
+      categoryCount: categories.length,
+      selectedCategoryId: selectedCategoryId || null,
+      loadStatus,
+      categoryLoading,
+      catalogRepairing,
+      firstPageLoadGate,
+      requestGeneration: requestGenerationRef.current,
+    });
+  }, [activeProviderId, categories.length, categoryLoading, catalogRepairing, firstPageLoadGate, loadStatus, selectedCategoryId]);
 
   const offsetRef = useRef(0);
   const requestGenerationRef = useRef(0);
@@ -811,6 +837,12 @@ export function useMoviesScreenModel(
       const categoriesBefore = categoriesRef.current.length;
       const moviesBefore = visibleMoviesRef.current.length;
       logMoviesPerf('categories_load_start', { providerId: activeProviderId });
+      logMoviesDiagnostic('categories-load-start', {
+        providerId: activeProviderId,
+        categoryCount: categoriesBefore,
+        selectedCategoryId: selectedCategoryIdRef.current || null,
+        catalogRepairing,
+      });
       if (isOnnMoviesTraceEnabled()) {
         traceOnnMoviesEvent('Catalog', 'load_categories_start', {
           providerId: activeProviderId,
@@ -831,6 +863,13 @@ export function useMoviesScreenModel(
         const hasProviderCategories = warmedCategories.some(
           (category) => category.kind === 'provider' && category.id !== ALL_MOVIES_CATEGORY_ID,
         );
+        logMoviesDiagnostic('categories-loaded', {
+          providerId: activeProviderId,
+          categoryCount: warmedCategories.length,
+          providerCategoryCount: warmedCategories.filter((category) => category.kind === 'provider').length,
+          hasProviderCategories,
+          selectedCategoryId: selectedCategoryIdRef.current || null,
+        });
 
         // Stage 4.2A/C: incomplete category metadata must not become interactive.
         // Keep the loader pending; never select All Movies / arm a gen-0 page query.
@@ -842,6 +881,15 @@ export function useMoviesScreenModel(
           if (!mounted) {
             return;
           }
+
+          logMoviesDiagnostic('catalog-readiness', {
+            providerId: activeProviderId,
+            categoryCount: warmedCategories.length,
+            readableGeneration: readiness?.readableItemGeneration ?? null,
+            syncingGeneration: readiness?.syncingGeneration ?? null,
+            decision: readiness?.decision ?? null,
+            repairing: isMoviesCatalogRepairing(activeProviderId),
+          });
 
           const catalogPending =
             !readiness ||
@@ -914,6 +962,13 @@ export function useMoviesScreenModel(
             logMoviesPerf('categories_load_pending', {
               providerId: activeProviderId,
               elapsedMs: Date.now() - startedAt,
+            });
+            logMoviesDiagnostic('categories-pending', {
+              providerId: activeProviderId,
+              reason: clearReason,
+              categoryCount: 0,
+              readableGeneration: readiness?.readableItemGeneration ?? null,
+              catalogRepairing: repairingWithoutSnapshot,
             });
             return;
           }
@@ -1047,6 +1102,12 @@ export function useMoviesScreenModel(
           elapsedMs: Date.now() - startedAt,
           countQueue: categoryCountQueueRef.current?.getStats() ?? null,
         });
+        logMoviesDiagnostic('categories-ready', {
+          providerId: activeProviderId,
+          categoryCount: warmedCategories.length,
+          selectedCategoryId: selectedCategoryIdRef.current || null,
+          catalogRepairing: false,
+        });
       } catch (error) {
         if (!mounted) {
           return;
@@ -1056,6 +1117,12 @@ export function useMoviesScreenModel(
           providerId: activeProviderId,
           elapsedMs: Date.now() - startedAt,
           message: error instanceof Error ? error.message : String(error),
+        });
+        logMoviesDiagnostic('categories-error', {
+          providerId: activeProviderId,
+          errorName: error instanceof Error ? error.name : 'unknown',
+          errorMessagePresent: Boolean(error),
+          categoryCount: categoriesBefore,
         });
         traceOnnMoviesCategoriesCleared('categories_load_error', {
           providerId: activeProviderId,
@@ -1111,6 +1178,11 @@ export function useMoviesScreenModel(
           generation: payload.generation,
           categoryCount: payload.categoryCount,
         });
+        logMoviesDiagnostic('movie-categories-updated', {
+          providerId: activeProviderId,
+          generation: payload.generation,
+          categoryCount: payload.categoryCount,
+        });
         if (isOnnMoviesTraceEnabled()) {
           traceOnnMoviesEvent('Catalog', 'movie_categories_updated', {
             providerId: activeProviderId,
@@ -1142,6 +1214,12 @@ export function useMoviesScreenModel(
       logMoviesPerf('catalog_ready_received', {
         providerId: activeProviderId,
         generation,
+      });
+      logMoviesDiagnostic('movie-catalog-ready', {
+        providerId: activeProviderId,
+        generation,
+        categoryCount: categoriesRef.current.length,
+        selectedCategoryId: selectedCategoryIdRef.current || null,
       });
       if (firstRunBridgeEligibleRef.current) {
         console.info('[NovaCast Movies First Run Bridge]', JSON.stringify({
@@ -1437,6 +1515,13 @@ export function useMoviesScreenModel(
       if (!mounted) {
         return;
       }
+      logMoviesDiagnostic('catalog-sync-phase', {
+        providerId: activeProviderId,
+        phase,
+        catalogRepairing,
+        categoryCount: categoriesRef.current.length,
+        selectedCategoryId: selectedCategoryIdRef.current || null,
+      });
       if (isOnnMoviesTraceEnabled()) {
         traceOnnMoviesEvent('Catalog', 'catalog_sync_phase', {
           providerId: activeProviderId,
@@ -1527,6 +1612,13 @@ export function useMoviesScreenModel(
         providerId: activeProviderId,
         categoryId: selectedCategoryId,
       });
+      logMoviesDiagnostic('first-page-gated', {
+        providerId: activeProviderId,
+        reason: 'movies_page_gated_waiting_categories',
+        categoryCount: categories.length,
+        selectedCategoryId: selectedCategoryId || null,
+        requestGeneration: requestGenerationRef.current,
+      });
       return;
     }
 
@@ -1555,6 +1647,13 @@ export function useMoviesScreenModel(
       loadingRequestToken: requestKey,
       firstPageResolvedCategoryId: null,
     });
+    logMoviesDiagnostic('first-page-gate-armed', {
+      providerId: activeProviderId,
+      selectedCategoryId,
+      requestGeneration: generation,
+      requestToken: requestKey,
+      categoryCount: categories.length,
+    });
 
     const loadInitialPage = async () => {
       const pageStartedAt = Date.now();
@@ -1579,6 +1678,14 @@ export function useMoviesScreenModel(
         providerId: activeProviderId,
         categoryId: selectedCategoryId,
         search: isSearchMode,
+      });
+      logMoviesDiagnostic('first-page-start', {
+        providerId: activeProviderId,
+        selectedCategoryId,
+        requestGeneration: generation,
+        requestToken: requestKey,
+        categoryCount: categoriesRef.current.length,
+        loadStatus: loadStatusRef.current,
       });
       if (isOnnMoviesTraceEnabled()) {
         traceOnnMoviesEvent('Catalog', 'page_load_start', {
@@ -1800,6 +1907,14 @@ export function useMoviesScreenModel(
           elapsedMs: Date.now() - pageStartedAt,
           countQueue: categoryCountQueueRef.current?.getStats() ?? null,
         });
+        logMoviesDiagnostic('first-page-finish', {
+          providerId: activeProviderId,
+          selectedCategoryId,
+          requestGeneration: generation,
+          requestToken: requestKey,
+          returnedMovieCount: page.items.length,
+          loadStatus: page.items.length > 0 ? 'ready' : 'empty',
+        });
         if (isOnnMoviesTraceEnabled()) {
           traceOnnMoviesEvent('Catalog', 'page_load_end', {
             providerId: activeProviderId,
@@ -1920,6 +2035,13 @@ export function useMoviesScreenModel(
             providerId: activeProviderId,
             categoryId: selectedCategoryId,
           });
+          logMoviesDiagnostic('first-page-catalog-not-ready', {
+            providerId: activeProviderId,
+            selectedCategoryId,
+            requestGeneration: generation,
+            requestToken: requestKey,
+            catalogRepairing,
+          });
           setLoadStatus('loading');
           setLoadErrorMessage(null);
           // Keep the primary-loader gate armed; do not resolve first-page readiness.
@@ -1929,6 +2051,14 @@ export function useMoviesScreenModel(
         updateVisibleMovies([], 'category-first-page-error');
         setHasMore(false);
         setLoadStatus('error');
+        logMoviesDiagnostic('first-page-error', {
+          providerId: activeProviderId,
+          selectedCategoryId,
+          requestGeneration: generation,
+          requestToken: requestKey,
+          errorName: error instanceof Error ? error.name : 'unknown',
+          errorMessagePresent: Boolean(error),
+        });
         setLoadErrorMessage(error instanceof Error ? error.message : 'Unable to load movies for this category.');
         setFirstPageLoadGate((previous) => {
           if (previous.loadingRequestToken !== requestKey) {

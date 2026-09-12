@@ -25,6 +25,14 @@ import { isVideoDecoderInitFailure, UNSUPPORTED_VIDEO_FORMAT_CATEGORY } from './
 let nextPlayerGenerationId = 1;
 const playerGenerationIds = new WeakMap<object, number>();
 
+function logPlayerFocus(event: string, details: Record<string, unknown> = {}) {
+  console.log('[NOVACAST_PLAYER_FOCUS]', event, details);
+}
+
+function logPlayerPerf(event: string, details: Record<string, unknown> = {}) {
+  console.log('[NOVACAST_PLAYER_PERF]', event, details);
+}
+
 function getPlayerGenerationId(player: VideoPlayer) {
   const existing = playerGenerationIds.get(player);
   if (existing) return existing;
@@ -120,6 +128,11 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
   const bufferPolicyRef = useRef(bufferPolicy);
 
   useEffect(() => {
+    logPlayerFocus('player-hook-mount', { sourcePresent: Boolean(streamUrl) });
+    return () => logPlayerFocus('player-hook-unmount', { sourcePresent: Boolean(lastUrlRef.current) });
+  }, []);
+
+  useEffect(() => {
     onErrorRef.current = onError;
     onReadyRef.current = onReady;
     bufferPolicyRef.current = bufferPolicy;
@@ -134,6 +147,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
 
   const stableSource = useMemo(() => streamUrl, [streamUrl]);
   const player = useVideoPlayer(stableSource, (nextPlayer) => {
+    logPlayerPerf('player-init', { sourcePresent: Boolean(streamUrl), bufferPolicy });
     if (bufferPolicyRef.current === 'vod') {
       applyVodBufferProfile(nextPlayer);
     }
@@ -144,6 +158,32 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
   });
 
   const playerGenerationId = getPlayerGenerationId(player);
+
+  const previousStreamUrlRef = useRef<VideoSource>(streamUrl);
+  useEffect(() => {
+    if (previousStreamUrlRef.current !== streamUrl) {
+      logPlayerPerf('source-update-requested', {
+        sourcePresent: Boolean(streamUrl),
+        playerGenerationId,
+      });
+      previousStreamUrlRef.current = streamUrl;
+    }
+  }, [playerGenerationId, streamUrl]);
+
+  const previousPlayerRef = useRef<VideoPlayer | null>(null);
+  useEffect(() => {
+    const previousPlayer = previousPlayerRef.current;
+    logPlayerPerf(previousPlayer && previousPlayer !== player ? 'player-replaced' : 'player-active', {
+      playerGenerationId,
+      sourcePresent: Boolean(streamUrl),
+    });
+    previousPlayerRef.current = player;
+    return () => {
+      if (previousPlayerRef.current === player) {
+        logPlayerPerf('player-release-observed', { playerGenerationId });
+      }
+    };
+  }, [player, playerGenerationId, streamUrl]);
 
   useEffect(() => {
     if (bufferPolicy !== 'vod') {
@@ -194,6 +234,9 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
         playerGenerationId,
         errorCategory,
       });
+    }
+    if (status === 'readyToPlay') {
+      logPlayerPerf('playback-ready', { playerGenerationId });
     }
     if (bufferPolicy === 'vod' && status === 'error') {
       logVodPlayerMemory('playback-error', { playerGenerationId, errorCategory });
@@ -343,6 +386,11 @@ export function NovaStreamSurface({
   }, [onFirstFrameRender, onPlayingChange, onStatusChange, onTimeUpdate]);
 
   useEffect(() => {
+    logPlayerFocus('surface-mount', { surfaceType, focusable: false });
+    return () => logPlayerFocus('surface-unmount', { surfaceType, focusable: false });
+  }, [surfaceType]);
+
+  useEffect(() => {
     const statusSubscription = player.addListener('statusChange', (payload) => {
       onStatusChangeRef.current?.(payload);
     });
@@ -373,7 +421,10 @@ export function NovaStreamSurface({
         surfaceType={surfaceType}
         useExoShutter={false}
         nativeControls={false}
-        onFirstFrameRender={() => onFirstFrameRenderRef.current?.()}
+        onFirstFrameRender={() => {
+          logPlayerPerf('first-frame', { surfaceType });
+          onFirstFrameRenderRef.current?.();
+        }}
       />
     </View>
   );

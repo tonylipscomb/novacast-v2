@@ -489,6 +489,15 @@ export function MoviesScreen() {
     initialFocusedMovieId: moviesMemory.focusedMovieId,
     initialSelectedMovieId: moviesMemory.selectedMovieId,
   });
+  useEffect(() => {
+    console.info('[NOVACAST_MOVIES_DIAG]', 'screen-mount', {
+      providerId: activeProviderId,
+      dataSourcePresent: hasDataSource,
+    });
+    return () => console.info('[NOVACAST_MOVIES_DIAG]', 'screen-unmount', {
+      providerId: activeProviderId,
+    });
+  }, []);
   // Diagnostics-only mirror so audit logs report current selection/focus
   // without widening effect dependencies.
   moviesAuditRef.current.selectedMovieId = selectedMovie?.id ?? null;
@@ -5288,6 +5297,23 @@ useEffect(() => {
     firstPageLoadGate.firstPageResolvedCategoryId === firstPageLoadGate.loadingCategoryId;
   const primaryDiagRef = useRef<string | null>(null);
   const paginationDiagRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    console.info('[NOVACAST_MOVIES_DIAG]', 'loader-state', {
+      providerId: activeProviderId,
+      categoryCount: categories.length,
+      selectedCategoryId: selectedCategoryId || null,
+      catalogRepairing,
+      loadStatus,
+      categoriesPending: categoriesLoading,
+      categoriesReady: categories.length > 0,
+      firstPageLoadGate,
+      firstPageReady,
+      loaderVisible: primaryLoaderVisible,
+      loaderLabel: primaryLoaderVisible ? primaryLoaderLabel : null,
+      loaderReason: primaryLoaderVisible ? primaryLoaderMode : primaryHideReasonRef.current,
+    });
+  }, [activeProviderId, categories.length, categoriesLoading, catalogRepairing, firstPageLoadGate, firstPageReady, loadStatus, primaryLoaderLabel, primaryLoaderMode, primaryLoaderVisible, selectedCategoryId]);
 
   // Stage 3E.2: keep primary loader up through first-page readiness + min duration.
   useEffect(() => {

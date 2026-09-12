@@ -836,6 +836,30 @@ export function LiveTvScreen() {
     [logFocusAudit],
   );
 
+  useEffect(() => {
+    console.log('[NOVACAST_PLAYER_FOCUS]', 'live-screen-mount', {
+      selectedCategoryId: liveState?.selectedCategoryId ?? null,
+      selectedChannelId: liveState?.selectedChannelId ?? null,
+      fullscreenChannelId: liveState?.fullscreenChannelId ?? null,
+    });
+    return () => {
+      console.log('[NOVACAST_PLAYER_FOCUS]', 'live-screen-unmount', {
+        selectedCategoryId: liveStateRef.current?.selectedCategoryId ?? null,
+        selectedChannelId: liveStateRef.current?.selectedChannelId ?? null,
+        fullscreenChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    console.log('[NOVACAST_PLAYER_PERF]', 'fullscreen-state', {
+      elapsedMs: 0,
+      selectedChannelId: liveState?.selectedChannelId ?? null,
+      fullscreenChannelId: liveState?.fullscreenChannelId ?? null,
+      reason: 'fullscreen-state-change',
+    });
+  }, [liveState?.fullscreenChannelId, liveState?.selectedChannelId]);
+
   const previousAuditCategoryIdRef = useRef<string | null>(liveState?.selectedCategoryId ?? null);
   const previousAuditChannelIdRef = useRef<string | null>(liveState?.selectedChannelId ?? null);
   useEffect(() => {
@@ -1159,6 +1183,18 @@ export function LiveTvScreen() {
       return;
     }
 
+    console.log('[NOVACAST_PLAYER_FOCUS]', opening ? 'fullscreen-open' : 'fullscreen-close', {
+      reason: 'fullscreen-transition',
+      selectedChannelId: liveState?.selectedChannelId ?? null,
+      targetType: 'fullscreen',
+      targetId: currentFullscreenChannelId,
+    });
+    console.log('[NOVACAST_PLAYER_PERF]', opening ? 'fullscreen-open' : 'fullscreen-close', {
+      elapsedMs: 0,
+      focusedChannelId: currentFullscreenChannelId,
+      reason: 'fullscreen-transition',
+    });
+
     const targetChannelId = liveState?.selectedChannelId ?? null;
     logFocusAudit(opening ? 'fullscreen-opened' : 'fullscreen-closed', {
       reason: opening ? 'fullscreen-transition' : 'fullscreen-transition',
@@ -1190,6 +1226,11 @@ export function LiveTvScreen() {
       targetId: opening ? currentFullscreenChannelId : targetChannelId,
     });
     if (closing) {
+      console.log('[NOVACAST_PLAYER_FOCUS]', 'fullscreen-close-restore', {
+        reason: 'fullscreen-close-restore',
+        targetType: 'channel',
+        targetId: targetChannelId,
+      });
       logFocusAudit('fullscreen-close-restore-requested', {
         reason: 'fullscreen-close-restore',
         targetType: 'channel',
@@ -1233,6 +1274,11 @@ export function LiveTvScreen() {
   }, [liveState?.fullscreenChannelId, fullscreenFrameStatus]);
 
   const handleFullscreenFirstFrame = () => {
+    console.log('[NOVACAST_PLAYER_PERF]', 'first-frame-ready', {
+      elapsedMs: 0,
+      focusedChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+      reason: 'fullscreen-first-frame',
+    });
     liveLoadAudit('first-frame', {
       channelId: liveStateRef.current?.fullscreenChannelId ?? null,
       playerStatus: liveStreamPlayer.status,
@@ -2162,6 +2208,12 @@ export function LiveTvScreen() {
 
   const tuneChannel = useCallback(
     (channelId: string) => {
+      console.log('[NOVACAST_PLAYER_PERF]', 'tune-requested', {
+        elapsedMs: 0,
+        channelId,
+        fullscreen: Boolean(liveStateRef.current?.fullscreenChannelId),
+        reason: 'channel-ok',
+      });
       liveLoadAudit('preview-or-fullscreen-start', {
         channelId,
         source: 'channel-ok',
@@ -2248,6 +2300,11 @@ export function LiveTvScreen() {
       if (isChannelPressEnteringFullscreen(base, channelId) && channel) {
         const streamUrl = resolvePlaybackUrl(channel);
         if (streamUrl) {
+          console.log('[NOVACAST_PLAYER_PERF]', 'source-update-requested', {
+            elapsedMs: 0,
+            channelId,
+            reason: 'channel-ok-fullscreen',
+          });
           setPreviewStreamSource(resolvePlaybackSource(channel));
           setState((current) => openResolvedLiveChannelFullscreen(current ?? liveState ?? createLiveTvLandingState(undefined, channelId), channelId, streamUrl));
         }
@@ -2386,6 +2443,13 @@ export function LiveTvScreen() {
         name: nextChannel?.name ?? 'Channel',
         number: nextChannel?.number ? String(nextChannel.number) : undefined,
       });
+      console.log('[NOVACAST_PLAYER_PERF]', 'surf-key-accepted', {
+        elapsedMs: 0,
+        fromChannelId: adjacent.fromChannelId,
+        targetChannelId: nextId,
+        requestId,
+        reason: 'fullscreen-surf',
+      });
       if (surfOverlayTimerRef.current) {
         clearTimeout(surfOverlayTimerRef.current);
       }
@@ -2444,6 +2508,12 @@ export function LiveTvScreen() {
             return current;
           }
           if (shouldClearPreviewStreamUrl(base.previewChannelId, nextId)) {
+            console.log('[NOVACAST_PLAYER_PERF]', 'source-update-requested', {
+              elapsedMs: 0,
+              channelId: nextId,
+              requestId,
+              reason: 'fullscreen-surf',
+            });
             setPreviewStreamSource(null);
           }
           return surfLiveFullscreenChannel(base, nextId);
@@ -2796,8 +2866,20 @@ export function LiveTvScreen() {
                 hasTVPreferredFocus
                 accessibilityRole="button"
                 accessibilityLabel="Retry Live TV"
-                onFocus={() => setFocusedAction('retry')}
-                onBlur={() => setFocusedAction(null)}
+                onFocus={() => {
+                  console.log('[NOVACAST_PLAYER_FOCUS]', 'fullscreen-retry-focus', {
+                    targetType: 'fullscreen',
+                    targetId: fullscreenChannel?.id ?? null,
+                  });
+                  setFocusedAction('retry');
+                }}
+                onBlur={() => {
+                  console.log('[NOVACAST_PLAYER_FOCUS]', 'fullscreen-retry-blur', {
+                    targetType: 'fullscreen',
+                    targetId: fullscreenChannel?.id ?? null,
+                  });
+                  setFocusedAction(null);
+                }}
                 onPress={handleReload}
                 style={[styles.retryButton, novaTvFocus.base, focusedAction === 'retry' && styles.textFocusActive]}>
                 <MaterialCommunityIcons name="refresh" size={18} color={theme.colors.textPrimary} />
@@ -3190,6 +3272,18 @@ export function LiveTvScreen() {
                   {...(liveSurfHandles.anchor != null
                     ? { nextFocusLeft: liveSurfHandles.anchor, nextFocusRight: liveSurfHandles.anchor }
                     : {})}
+                  onFocus={() => {
+                    console.log('[NOVACAST_PLAYER_FOCUS]', 'fullscreen-close-focus', {
+                      targetType: 'fullscreen',
+                      targetId: fullscreenChannel.id,
+                    });
+                  }}
+                  onBlur={() => {
+                    console.log('[NOVACAST_PLAYER_FOCUS]', 'fullscreen-close-blur', {
+                      targetType: 'fullscreen',
+                      targetId: fullscreenChannel.id,
+                    });
+                  }}
                   onPress={() => {
                     setState((current) => closeLiveFullscreen(current ?? renderState));
                   }}

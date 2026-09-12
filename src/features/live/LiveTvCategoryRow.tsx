@@ -55,10 +55,20 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
       {...(Platform.OS === 'android' && nextFocusRight ? { nextFocusRight } : null)}
       accessibilityLabel={`Live TV category ${category.name}`}
       onFocus={() => {
+        console.log('[NOVACAST_PLAYER_FOCUS]', 'category-focus', {
+          targetType: 'category',
+          targetId: category.id,
+        });
         setIsFocused(true);
         onFocus();
       }}
-      onBlur={() => setIsFocused(false)}
+      onBlur={() => {
+        console.log('[NOVACAST_PLAYER_FOCUS]', 'category-blur', {
+          targetType: 'category',
+          targetId: category.id,
+        });
+        setIsFocused(false);
+      }}
       onPress={onPress}
       style={[styles.categoryRow, styles.categoryDefault, selected && styles.categoryActive, isFocused && (selected ? styles.categoryActiveFocused : styles.categoryRowFocused)]}>
       <Text

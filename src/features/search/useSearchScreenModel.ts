@@ -14,7 +14,7 @@ import {
 import { getSearchIndexReadiness, type SearchIndexReadiness } from './searchIndexReadiness';
 import { isSearchableQuery } from './searchQuery';
 import { SEARCH_DEBOUNCE_MS } from './searchConstants';
-import { getSearchScreenMemory, rememberSearchScreenMemory } from './searchScreenMemory';
+import { canRestoreSearchResultSnapshot, clearSearchResultSnapshot, getSearchScreenMemory, rememberSearchScreenMemory } from './searchScreenMemory';
 import { resolveSearchStatusAfterResults, resolveScopedSeedFromGrouped, shouldApplySearchResult } from './searchScreenLogic';
 import type { GroupedSearchResults, SearchHistoryEntry, SearchLoadStatus, SearchResult, SearchScope } from './searchTypes';
 
@@ -22,16 +22,17 @@ export function useSearchScreenModel() {
   const { bundle } = useActiveProviderBundle();
   const providerId = bundle?.providerId ?? '';
   const savedMemory = providerId ? getSearchScreenMemory(providerId) : null;
-  const [query, setQueryState] = useState(savedMemory?.query ?? '');
+  const savedSnapshot = savedMemory?.resultSnapshot;
+  const [query, setQueryState] = useState(savedSnapshot?.query ?? savedMemory?.query ?? '');
   const initialScope: SearchScope = savedMemory?.scope === 'all' ? 'movie' : (savedMemory?.scope ?? 'movie');
   // search-s2-normalize-scope
   const [scope, setScopeState] = useState<SearchScope>(initialScope);
-  const [results, setResults] = useState<SearchResult[]>([]);
-  const [groupedResults, setGroupedResults] = useState<GroupedSearchResults | null>(null);
-  const [status, setStatus] = useState<SearchLoadStatus>('idle');
+  const [results, setResults] = useState<SearchResult[]>(savedSnapshot?.scope === initialScope ? savedSnapshot.results : []);
+  const [groupedResults, setGroupedResults] = useState<GroupedSearchResults | null>(savedSnapshot?.scope === initialScope ? savedSnapshot.groupedResults : null);
+  const [status, setStatus] = useState<SearchLoadStatus>(savedSnapshot?.scope === initialScope && (savedSnapshot.results.length > 0 || savedSnapshot.groupedResults != null) ? 'ready' : 'idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [totalCount, setTotalCount] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(savedSnapshot?.scope === initialScope ? savedSnapshot.totalCount : 0);
+  const [hasMore, setHasMore] = useState(savedSnapshot?.scope === initialScope ? savedSnapshot.hasMore : false);
   const [history, setHistory] = useState<SearchHistoryEntry[]>([]);
   const [indexReadiness, setIndexReadiness] = useState<SearchIndexReadiness | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -44,8 +45,11 @@ export function useSearchScreenModel() {
   const groupedSnapshotRef = useRef<{ query: string; grouped: GroupedSearchResults } | null>(null);
   const offsetRef = useRef(0);
   const [reloadToken, setReloadToken] = useState(0);
+  const canRestoreSnapshot = Boolean(savedSnapshot && savedSnapshot.scope === initialScope);
+  const restoredSnapshotRef = useRef(canRestoreSnapshot);
 
   const reload = useCallback(() => {
+    restoredSnapshotRef.current = false;
     setReloadToken((current) => current + 1);
   }, []);
 
@@ -58,6 +62,10 @@ export function useSearchScreenModel() {
       setQueryState(nextQuery);
       if (providerId) {
         rememberSearchScreenMemory(providerId, { query: nextQuery });
+        if (nextQuery !== savedSnapshot?.query) {
+          restoredSnapshotRef.current = false;
+          clearSearchResultSnapshot(providerId);
+        }
       }
     },
     [providerId],
@@ -69,6 +77,10 @@ export function useSearchScreenModel() {
       setScopeState(resolvedScope);
       if (providerId) {
         rememberSearchScreenMemory(providerId, { scope: resolvedScope });
+        if (resolvedScope !== savedSnapshot?.scope) {
+          restoredSnapshotRef.current = false;
+          clearSearchResultSnapshot(providerId);
+        }
       }
     },
     [providerId],
@@ -113,6 +125,9 @@ export function useSearchScreenModel() {
     }
 
     const trimmed = query.trim();
+    if (restoredSnapshotRef.current && canRestoreSearchResultSnapshot(savedSnapshot, query, scope)) {
+      return;
+    }
     if (!isSearchableQuery(trimmed)) {
     abortRef.current?.abort();
     abortRef.current = null;

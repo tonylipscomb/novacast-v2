@@ -33,6 +33,8 @@ import { computeLiveSearchMatchTier } from '../src/features/search/liveSearchMat
 import { isSearchableQuery, normalizeSearchQuery } from '../src/features/search/searchQuery.ts';
 import { SEARCH_PAGE_SIZE } from '../src/features/search/searchConstants.ts';
 import { createSearchLiveFavoriteController } from '../src/features/search/searchLiveFavoriteControllerCore.ts';
+import { canRestoreSearchResultSnapshot, getSearchScreenMemory, rememberSearchResultSnapshot, resetSearchScreenMemory } from '../src/features/search/searchScreenMemory.ts';
+import { shouldAnimateLiveTvMarquee } from '../src/features/live/liveTvMarqueeState.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relativePath) => readFileSync(join(root, relativePath), 'utf8').replace(/\r\n/g, '\n');
@@ -429,6 +431,7 @@ test('one Search favorite controller triggers one 425ms hold and suppresses navi
   const second = { type: 'live', id: 'b', title: 'B' };
   controller.setFocused(first);
   controller.handleNativeEvent({ keyCode: 23, action: 0 });
+  controller.handleNativeEvent({ keyCode: 23, action: 0 });
   now += 425;
   timers[0]();
   assert.deepEqual(toggled, ['a']);
@@ -439,6 +442,38 @@ test('one Search favorite controller triggers one 425ms hold and suppresses navi
   now += 100;
   controller.handleNativeEvent({ keyCode: 66, action: 1 });
   assert.deepEqual(toggled, ['a']);
+  controller.setFocused(first);
+  controller.handleNativeEvent({ keyCode: 160, action: 0 });
+  controller.setFocused(null);
+  timers[1]?.();
+  assert.deepEqual(toggled, ['a']);
+});
+
+test('Search restores its bounded snapshot without issuing a matching search', () => {
+  resetSearchScreenMemory('snapshot-provider');
+  const snapshot = {
+    query: 'espn',
+    scope: 'live',
+    results: [{ type: 'live', id: 'espn', title: 'ESPN' }],
+    groupedResults: null,
+    totalCount: 1,
+    hasMore: false,
+  };
+  rememberSearchResultSnapshot('snapshot-provider', snapshot);
+  const memory = getSearchScreenMemory('snapshot-provider');
+  assert.equal(canRestoreSearchResultSnapshot(memory.resultSnapshot, 'espn', 'live'), true);
+  assert.equal(canRestoreSearchResultSnapshot(memory.resultSnapshot, 'espn', 'movie'), false);
+  assert.equal(memory.resultSnapshot?.results[0]?.id, 'espn');
+  assert.match(read('src/features/search/useSearchScreenModel.ts'), /canRestoreSearchResultSnapshot/);
+  assert.match(read('src/features/search/useSearchScreenModel.ts'), /restoredSnapshotRef\.current/);
+});
+
+test('Live marquee requires fresh measurement and focus before animating', () => {
+  assert.equal(shouldAnimateLiveTvMarquee({ focused: true, text: 'old title', measuredText: 'old title', distance: 80 }), true);
+  assert.equal(shouldAnimateLiveTvMarquee({ focused: true, text: 'new title', measuredText: 'old title', distance: 80 }), false);
+  assert.equal(shouldAnimateLiveTvMarquee({ focused: false, text: 'new title', measuredText: 'new title', distance: 80 }), false);
+  assert.match(read('src/features/live/LiveTvMarqueeText.tsx'), /setMeasuredText\(null\)/);
+  assert.match(read('src/features/live/LiveTvMarqueeText.tsx'), /offset\.setValue\(0\)/);
 });
 
 test('36. existing Live first-OK / second-OK contract remains', () => {

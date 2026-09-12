@@ -20,9 +20,13 @@ export function createSearchLiveFavoriteController(input: {
       focused = result;
       if (!result) detector.cancel('search-focus-cleared');
     },
-    handleNativeEvent(event: { keyCode?: number; action?: number; repeatCount?: number }) {
+    handleNativeEvent(event: { keyCode?: number; action?: number; eventKeyAction?: number; keyAction?: number; repeatCount?: number }) {
       if (event.keyCode !== 23 && event.keyCode !== 66 && event.keyCode !== 160) return;
-      detector.handleEvent({ keyCode: event.keyCode, eventKeyAction: event.action, repeatCount: event.repeatCount });
+      detector.handleEvent({
+        keyCode: event.keyCode,
+        eventKeyAction: event.action ?? event.eventKeyAction ?? event.keyAction,
+        repeatCount: event.repeatCount,
+      });
     },
     consumeSuppressedPress(id: string) {
       if (suppressedId !== id) return false;

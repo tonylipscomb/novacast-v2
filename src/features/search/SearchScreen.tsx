@@ -40,7 +40,7 @@ import { SearchMediaDetailLayer } from './SearchMediaDetailLayer';
 import { openSearchResult } from './searchNavigation';
 import { isSearchableQuery } from './searchQuery';
 import { searchResultKey } from './searchScopes';
-import { getSearchScreenMemory, rememberSearchScreenMemory } from './searchScreenMemory';
+import { getSearchScreenMemory, rememberSearchResultSnapshot, rememberSearchScreenMemory } from './searchScreenMemory';
 import { collectVisibleSearchResultKeys, isSearchFocusKeyVisible } from './searchFocusLogic';
 import {
   SEARCH_NOTIFICATION_DURATION_MS,
@@ -266,6 +266,19 @@ export function SearchScreen() {
         const livePlaybackChannels = liveResults
           .filter((item): item is import('./searchTypes').LiveSearchResult => item.type === 'live')
           .map(toLiveSearchPlaybackChannel);
+        rememberSearchResultSnapshot(activeProviderId, {
+          query,
+          scope,
+          results: scope === 'all' ? [] : results,
+          groupedResults: scope === 'all' ? groupedResults : null,
+          totalCount: scope === 'all'
+            ? (groupedResults?.live.totalCount ?? 0) + (groupedResults?.movie.totalCount ?? 0) +
+              (groupedResults?.series.totalCount ?? 0) + (groupedResults?.guide.totalCount ?? 0)
+            : totalCount,
+          hasMore: scope === 'all'
+            ? Boolean(groupedResults?.live.hasMore || groupedResults?.movie.hasMore || groupedResults?.series.hasMore || groupedResults?.guide.hasMore)
+            : hasMore,
+        });
         rememberLiveSearchNavigationHandoff({
           providerId: activeProviderId,
           resultIds: livePlaybackChannels.map((item) => item.id),
@@ -290,7 +303,7 @@ export function SearchScreen() {
 
       openSearchResult(router, activeProviderId, result, { query, scope, focusedResultKey: key });
     },
-    [activeProviderId, groupedResults, query, results, router, scope, searchMedia, setFocusedResultKey],
+    [activeProviderId, groupedResults, hasMore, query, results, router, scope, searchMedia, setFocusedResultKey, totalCount],
   );
 
   const toggleSearchLiveFavorite = useCallback(
@@ -615,6 +628,8 @@ export function SearchScreen() {
                   onToggleLiveFavorite={toggleSearchLiveFavorite}
                   onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}
                   consumeLiveFavoriteHoldSuppression={liveFavoriteController.consumeSuppressedPress}
+                  restoreResultKey={focusedResultKey}
+                  restoreRowRef={index === 0 ? firstFlatResultRef : undefined}
                   emphasized
                   focusUpHandle={index === 0 ? searchFocusUpHandle : undefined}
                   firstRowRef={index === 0 ? firstFlatResultRef : undefined}

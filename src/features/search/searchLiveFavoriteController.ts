@@ -46,12 +46,16 @@ export function useSearchLiveFavoriteController({ enabled, onToggle }: SearchLiv
     const subscription = DeviceEventEmitter.addListener('onNovaCastNativeTvKey', (event: {
       keyCode?: number;
       action?: number;
+      eventKeyAction?: number;
+      keyAction?: number;
       repeatCount?: number;
     }) => {
       if (event.keyCode !== 23 && event.keyCode !== 66 && event.keyCode !== 160) return;
       controllerRef.current?.handleNativeEvent({
         keyCode: event.keyCode,
         action: event.action,
+        eventKeyAction: event.eventKeyAction,
+        keyAction: event.keyAction,
         repeatCount: event.repeatCount,
       });
     });

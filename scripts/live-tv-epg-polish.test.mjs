@@ -61,7 +61,8 @@ test('Live presentation keeps category rows text-only and marquee behavior focus
   assert.match(channel, /<Text numberOfLines=\{1\} ellipsizeMode="tail"/);
   assert.match(channel, /isFocused && hasProgram/);
   assert.match(detail, /<LiveTvMarqueeText focused/);
-  assert.match(marquee, /if \(!focused \|\| distance <= 0\)/);
+  assert.match(marquee, /shouldAnimateLiveTvMarquee/);
+  assert.match(marquee, /measuredText/);
   assert.match(marquee, /useNativeDriver: true/);
 });
 

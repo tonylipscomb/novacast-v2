@@ -110,6 +110,7 @@ import {
 import {
   shouldLoadCategoryOnFocusAlone,
 } from './liveTvFocusPreview';
+import { logLiveEpgPerformance } from './liveTvChannelEpg';
 import {
   recordLiveTvFocusEvent,
 } from './liveTvFocusDiagnostics';
@@ -1491,6 +1492,18 @@ export function LiveTvScreen() {
 
   const focusChannelRow = useCallback(
     (channelId: string) => {
+      logLiveEpgPerformance('focus', {
+        elapsedMs: 0,
+        selectedCategoryId: liveStateRef.current?.selectedCategoryId ?? selectedCategoryId ?? null,
+        focusedChannelId: channelId,
+        batchIndex: null,
+        batchSize: null,
+        requestGeneration: null,
+        cacheHits: null,
+        cacheMisses: null,
+        responseCount: null,
+        reason: 'channel-focus-start',
+      });
       logFocusAudit('channel-received-focus', {
         reason: 'channel-row-onFocus',
         targetType: 'channel',

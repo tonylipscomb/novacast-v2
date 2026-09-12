@@ -34,6 +34,7 @@ import {
   enrichChannelsWithPrefetchedEpg,
   enrichSingleChannelEpg,
   hasCachedLiveTvEpg,
+  logLiveEpgPerformance,
   mapChannelsWithoutEpg,
   selectVisibleEpgWindow,
   shouldIssueFocusedEpgRequest,
@@ -93,6 +94,22 @@ function logCategoryEpgWarmup(
   fields: { categoryId: string; channelCount: number; batchSize?: number; loadedCount?: number; currentCount?: number; emptyCount?: number; durationMs?: number },
 ) {
   console.info('[NovaCast Category EPG Warmup]', { event, ...fields });
+}
+
+function logEpgPerf(event: string, fields: Record<string, unknown> = {}) {
+  logLiveEpgPerformance(event, {
+    elapsedMs: 0,
+    selectedCategoryId: null,
+    focusedChannelId: null,
+    batchIndex: null,
+    batchSize: null,
+    requestGeneration: null,
+    cacheHits: null,
+    cacheMisses: null,
+    responseCount: null,
+    reason: null,
+    ...fields,
+  });
 }
 
 export function useLiveTvScreenModel(
@@ -366,6 +383,13 @@ export function useLiveTvScreenModel(
 
       const generation = cancelLiveTvEpgWork('category-prefetch-supersede');
       const epgStartedAt = Date.now();
+      let batchIndex = 0;
+      logEpgPerf('category-change', {
+        selectedCategoryId: categoryId,
+        focusedChannelId: focusedChannelId ?? null,
+        requestGeneration: generation,
+        reason: 'category-prefetch-start',
+      });
       setChannelListPending(true);
       setEpgPendingChannelIds(new Set(nextChannels.filter((channel) => !hasCachedLiveTvEpg(channel.id)).map((channel) => channel.id)));
       epgRevealTimerRef.current = setTimeout(() => {
@@ -389,9 +413,21 @@ export function useLiveTvScreenModel(
 
       void enrichChannelsWithPrefetchedEpg(bundle, nextChannels, {
         focusedChannelId: focusedId,
+        selectedCategoryId: categoryId,
         generation,
         onBatchEnriched: (enriched) => {
+          const currentBatchIndex = batchIndex++;
           applyEpgBatch(enriched, requestId);
+          logEpgPerf('state-update', {
+            elapsedMs: Date.now() - epgStartedAt,
+            selectedCategoryId: categoryId,
+            focusedChannelId: focusedId,
+            batchIndex: currentBatchIndex,
+            batchSize: enriched.length,
+            requestGeneration: generation,
+            responseCount: enriched.length,
+            reason: 'epg-batch-merged',
+          });
           const currentCount = enriched.filter((channel) => Boolean(channel.current)).length;
           logCategoryEpgWarmup('batch-complete', {
             categoryId,
@@ -418,6 +454,16 @@ export function useLiveTvScreenModel(
         });
         setChannelListPending(false);
         commitChannels(fullyEnriched);
+        logEpgPerf('state-update', {
+          elapsedMs: Date.now() - epgStartedAt,
+          selectedCategoryId: categoryId,
+          focusedChannelId: focusedId,
+          batchIndex: null,
+          batchSize: fullyEnriched.length,
+          requestGeneration: generation,
+          responseCount: fullyEnriched.length,
+          reason: 'epg-complete-commit',
+        });
         logCategoryEpgWarmup('first-batch-complete', {
           categoryId,
           channelCount: nextChannels.length,
@@ -993,6 +1039,11 @@ export function useLiveTvScreenModel(
     lastStartupKeyRef.current = startupKey;
     mountStartedAtRef.current = Date.now();
     interactiveLoggedRef.current = false;
+    logEpgPerf('screen-mount', {
+      selectedCategoryId: initialCategoryId ?? null,
+      elapsedMs: 0,
+      reason: 'live-tv-mounted',
+    });
     logLiveStartup('screen-mounted', {
       elapsedMs: 0,
       providerIdPresent: Boolean(bundle?.providerId),
@@ -1031,6 +1082,10 @@ export function useLiveTvScreenModel(
         return [];
       }
 
+      logEpgPerf('category-change', {
+        selectedCategoryId: categoryId,
+        reason: 'category-selected',
+      });
       logLiveCategory('selection-requested', { categoryId });
       if (isSyntheticLivePersonalizationCategoryId(categoryId)) {
         // Synthetic categories resolve from personalization data — no provider fetch.
@@ -1053,6 +1108,11 @@ export function useLiveTvScreenModel(
         setChannels(next);
         setChannelListPending(false);
         setStatus(next.length ? 'ready' : 'empty');
+        logEpgPerf('visible-list-update', {
+          selectedCategoryId: categoryId,
+          responseCount: next.length,
+          reason: 'synthetic-category',
+        });
         logLiveCategory('selection-accepted', { categoryId, reason: 'synthetic-personalization' });
         return next;
       }
@@ -1091,6 +1151,12 @@ export function useLiveTvScreenModel(
         const immediate = mapChannelsWithoutEpg(nextChannels);
         clearLiveTvChannelRowDataPool();
         commitChannels(immediate);
+        logEpgPerf('visible-list-update', {
+          elapsedMs: Date.now() - startedAt,
+          selectedCategoryId: categoryId,
+          responseCount: immediate.length,
+          reason: 'category-channels-ready',
+        });
         setChannelListPending(false);
         setStatus(immediate.length ? 'ready' : 'empty');
         logLiveScreenSource({
@@ -1179,6 +1245,13 @@ export function useLiveTvScreenModel(
           suspended: shouldSuspendLiveListEpg(workload),
         });
         if (decision !== 'issue') {
+          logEpgPerf('focused-request-skipped', {
+            selectedCategoryId,
+            focusedChannelId: channelId,
+            cacheHits: decision === 'cache-hit' ? 1 : 0,
+            cacheMisses: decision === 'cache-hit' ? 0 : 1,
+            reason: decision,
+          });
           return;
         }
 
@@ -1186,6 +1259,17 @@ export function useLiveTvScreenModel(
         lastFocusedEpgRef.current = { channelId, atMs: Date.now() };
         epgFetchedIdsRef.current.add(channelId);
         epgInFlightIdsRef.current.add(channelId);
+        const focusedRequestStartedAt = Date.now();
+        logEpgPerf('focused-request-start', {
+          selectedCategoryId,
+          focusedChannelId: channelId,
+          batchIndex: 0,
+          batchSize: 1,
+          requestGeneration: null,
+          cacheHits: 0,
+          cacheMisses: 1,
+          reason: 'focused-channel-current-program',
+        });
         logLiveEpgTrigger({
           caller: 'useLiveTvScreenModel.enrichFocusedChannelEpg',
           reason: 'focused-channel-current-program',
@@ -1208,9 +1292,23 @@ export function useLiveTvScreenModel(
             }
 
             setChannels((current) => current.map((item) => (item.id === channelId ? enriched : item)));
+            logEpgPerf('program-replaced', {
+              elapsedMs: Date.now() - focusedRequestStartedAt,
+              selectedCategoryId,
+              focusedChannelId: channelId,
+              responseCount: 1,
+              reason: 'focused-row-program-changed',
+            });
           })
           .finally(() => {
             epgInFlightIdsRef.current.delete(channelId);
+            logEpgPerf('focused-request-finish', {
+              elapsedMs: Date.now() - focusedRequestStartedAt,
+              selectedCategoryId,
+              focusedChannelId: channelId,
+              responseCount: 1,
+              reason: 'focused-channel-current-program',
+            });
           });
       }, LIVE_EPG_FOCUS_DEBOUNCE_MS);
     },

@@ -28,6 +28,7 @@ export type EpgPrefetchOptions = {
   onChannelEnriched?: (channel: ProviderLiveChannel) => void;
   onBatchEnriched?: (channels: ProviderLiveChannel[]) => void;
   focusedChannelId?: string | null;
+  selectedCategoryId?: string | null;
   generation?: number;
 };
 
@@ -38,6 +39,10 @@ function logLiveEpg(event: string, payload: Record<string, unknown> = {}) {
     event,
     ...payload,
   });
+}
+
+export function logLiveEpgPerformance(event: string, payload: Record<string, unknown> = {}) {
+  console.info('[NOVACAST_EPG_PERF]', event, payload);
 }
 
 function epgProgressFromProgram(program: ProviderGuideProgram) {
@@ -176,6 +181,14 @@ export function clearLiveTvEpgCache() {
 export function cancelLiveTvEpgWork(reason = 'superseded') {
   const pending = inFlight.size;
   epgGeneration += 1;
+  logLiveEpgPerformance('generation-cancelled', {
+    elapsedMs: 0,
+    requestGeneration: epgGeneration,
+    cacheHits: 0,
+    cacheMisses: 0,
+    responseCount: 0,
+    reason,
+  });
   if (pending > 0) {
     noteLiveEpgRequestCancelled(pending);
     logLiveEpg('cancelled', {
@@ -250,6 +263,8 @@ export async function enrichChannelsWithPrefetchedEpg(
   }
 
   const generation = options?.generation ?? epgGeneration;
+  const selectedCategoryId = options?.selectedCategoryId ?? null;
+  const focusedChannelId = options?.focusedChannelId ?? null;
   const focusedIndex = options?.focusedChannelId ? channels.findIndex((channel) => channel.id === options.focusedChannelId) : -1;
   const prioritized = channels.slice().sort((left, right) => {
     const leftIndex = channels.indexOf(left);
@@ -261,15 +276,46 @@ export async function enrichChannelsWithPrefetchedEpg(
   const targets = prioritized.slice(0, 12);
   const epgMap = new Map<string, ProviderGuideProgram[]>();
 
-  const loadBatch = async (batch: ProviderLiveChannel[]) => {
+  const loadBatch = async (batch: ProviderLiveChannel[], batchIndex: number) => {
+    const startedAt = Date.now();
     const result = new Map<string, ProviderGuideProgram[]>();
+    let cacheHits = 0;
     const missing = batch.filter((channel) => {
       const cached = readCachedPrograms(channel.id);
       if (!cached) return true;
+      cacheHits += 1;
       result.set(channel.id, cached);
       return false;
     });
-    if (!missing.length) return result;
+    logLiveEpgPerformance('batch-start', {
+      elapsedMs: 0,
+      selectedCategoryId,
+      focusedChannelId,
+      batchIndex,
+      batchSize: batch.length,
+      channelsRequested: batch.length,
+      requestGeneration: generation,
+      cacheHits,
+      cacheMisses: missing.length,
+      responseCount: 0,
+      reason: 'prefetch',
+    });
+    if (!missing.length) {
+      logLiveEpgPerformance('batch-finish', {
+        elapsedMs: Date.now() - startedAt,
+        selectedCategoryId,
+        focusedChannelId,
+        batchIndex,
+        batchSize: batch.length,
+        channelsRequested: batch.length,
+        requestGeneration: generation,
+        cacheHits,
+        cacheMisses: 0,
+        responseCount: result.size,
+        reason: 'cache-only',
+      });
+      return result;
+    }
     if (bundle.connectionType === 'xtream') {
       const { fetchManagedEpgBatch } = await import('../guide/managedEpgClient.ts');
       const managedRequest = fetchManagedEpgBatch(missing.map((channel) => channel.id), 3);
@@ -283,11 +329,39 @@ export async function enrichChannelsWithPrefetchedEpg(
         if (inFlight.get(channelId) === request) inFlight.delete(channelId);
       });
       managed.forEach((programs, channelId) => result.set(channelId, programs));
-      if (managed.size) return result;
+      if (managed.size) {
+        logLiveEpgPerformance('batch-finish', {
+          elapsedMs: Date.now() - startedAt,
+          selectedCategoryId,
+          focusedChannelId,
+          batchIndex,
+          batchSize: batch.length,
+          channelsRequested: batch.length,
+          requestGeneration: generation,
+          cacheHits,
+          cacheMisses: missing.length,
+          responseCount: managed.size,
+          reason: 'managed-batch',
+        });
+        return result;
+      }
     }
     for (const channel of missing) {
       result.set(channel.id, await fetchProgramsForChannel(bundle, channel));
     }
+    logLiveEpgPerformance('batch-finish', {
+      elapsedMs: Date.now() - startedAt,
+      selectedCategoryId,
+      focusedChannelId,
+      batchIndex,
+      batchSize: batch.length,
+      channelsRequested: batch.length,
+      requestGeneration: generation,
+      cacheHits,
+      cacheMisses: missing.length,
+      responseCount: result.size,
+      reason: 'provider-batch',
+    });
     return result;
   };
 
@@ -306,10 +380,27 @@ export async function enrichChannelsWithPrefetchedEpg(
   };
 
   if (generation !== epgGeneration || shouldSuspendLiveListEpg(getLiveTvWorkload())) {
+    logLiveEpgPerformance('stale-generation-drop', {
+      elapsedMs: 0,
+      requestGeneration: generation,
+      currentGeneration: epgGeneration,
+      responseCount: 0,
+      reason: 'prefetch-before-start',
+    });
     return channels;
   }
-  const firstBatch = await loadBatch(targets);
-  if (generation === epgGeneration) applyBatch(targets, firstBatch);
+  const firstBatch = await loadBatch(targets, 0);
+  if (generation === epgGeneration) {
+    applyBatch(targets, firstBatch);
+  } else {
+    logLiveEpgPerformance('stale-generation-drop', {
+      elapsedMs: 0,
+      requestGeneration: generation,
+      currentGeneration: epgGeneration,
+      responseCount: firstBatch.size,
+      reason: 'first-batch-complete',
+    });
+  }
 
   const remaining = prioritized.slice(12);
   if (remaining.length) {
@@ -317,8 +408,19 @@ export async function enrichChannelsWithPrefetchedEpg(
       for (let offset = 0; offset < remaining.length && generation === epgGeneration; offset += 32) {
         if (shouldSuspendLiveListEpg(getLiveTvWorkload())) break;
         const batch = remaining.slice(offset, offset + 32);
-        const result = await loadBatch(batch);
-        if (generation !== epgGeneration) break;
+        const result = await loadBatch(batch, 1 + Math.floor(offset / 32));
+        if (generation !== epgGeneration) {
+          logLiveEpgPerformance('stale-generation-drop', {
+            elapsedMs: 0,
+            requestGeneration: generation,
+            currentGeneration: epgGeneration,
+            batchIndex: 1 + Math.floor(offset / 32),
+            batchSize: batch.length,
+            responseCount: result.size,
+            reason: 'background-batch-complete',
+          });
+          break;
+        }
         applyBatch(batch, result);
       }
     })();

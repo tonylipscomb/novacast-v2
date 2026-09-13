@@ -6,6 +6,7 @@ import {
   isRealProviderLiveCategoryId,
   isSyntheticLiveFavoritesCategoryId,
   isSyntheticLiveMyChannelsCategoryId,
+  LIVE_RECENTS_CATEGORY_ID,
   isSyntheticLivePersonalizationCategoryId,
   providerLiveCategoriesOnly,
   resolveInitialLiveBrowseCategoryId,
@@ -26,6 +27,7 @@ import {
   composeLiveCategoryRail,
   resolveMyChannelsLiveChannels,
   resolveRecentLiveChannels,
+  stabilizeRecentLiveChannels,
 } from './liveSyntheticCategories';
 
 import {
@@ -184,6 +186,35 @@ export function useLiveTvScreenModel(
       }),
     [recentRecords, providerIdForResolve],
   );
+  const recentsSessionOrderRef = useRef<string[] | null>(null);
+  const recentsSessionChannelsRef = useRef(new Map<string, ProviderLiveChannel>());
+  const previousSelectedCategoryRef = useRef(selectedCategoryId);
+  if (selectedCategoryId === LIVE_RECENTS_CATEGORY_ID) {
+    if (previousSelectedCategoryRef.current !== LIVE_RECENTS_CATEGORY_ID || !recentsSessionOrderRef.current) {
+      recentsSessionOrderRef.current = recentLiveChannels.map((channel) => channel.id);
+      recentsSessionChannelsRef.current = new Map(recentLiveChannels.map((channel) => [channel.id, channel]));
+    }
+  } else if (previousSelectedCategoryRef.current === LIVE_RECENTS_CATEGORY_ID) {
+    recentsSessionOrderRef.current = null;
+    recentsSessionChannelsRef.current.clear();
+  }
+  previousSelectedCategoryRef.current = selectedCategoryId;
+  const stableRecentLiveChannels = useMemo(() => {
+    if (selectedCategoryId !== LIVE_RECENTS_CATEGORY_ID || !recentsSessionOrderRef.current) {
+      return recentLiveChannels;
+    }
+    const stable = stabilizeRecentLiveChannels(
+      recentLiveChannels,
+      recentsSessionOrderRef.current,
+      recentsSessionChannelsRef.current,
+    );
+    for (const channel of stable) {
+      if (!recentsSessionChannelsRef.current.has(channel.id)) {
+        recentsSessionChannelsRef.current.set(channel.id, channel);
+      }
+    }
+    return stable;
+  }, [recentLiveChannels, selectedCategoryId]);
 
   // Synthetic categories build their channel list from personalization data only —
   // never a provider fetch. This effect also keeps the list live when a favorite is
@@ -194,12 +225,12 @@ export function useLiveTvScreenModel(
     }
     const next = isSyntheticLiveMyChannelsCategoryId(selectedCategoryId)
       ? myChannelsLiveChannels
-      : recentLiveChannels;
+      : stableRecentLiveChannels;
     channelsBaselineRef.current = next;
     setChannels(next);
     setChannelListPending(false);
     setStatus(next.length ? 'ready' : 'empty');
-  }, [selectedCategoryId, myChannelsLiveChannels, recentLiveChannels]);
+  }, [selectedCategoryId, myChannelsLiveChannels, stableRecentLiveChannels]);
 
   const loadChannelsForCategory = useCallback(
     async (categoryId: string, signal?: AbortSignal) => {
@@ -1102,7 +1133,7 @@ export function useLiveTvScreenModel(
         clearLiveTvChannelRowDataPool();
         const next = isSyntheticLiveMyChannelsCategoryId(categoryId)
           ? myChannelsLiveChannels
-          : recentLiveChannels;
+          : stableRecentLiveChannels;
         setSelectedCategoryId(categoryId);
         channelsBaselineRef.current = next;
         setChannels(next);
@@ -1213,7 +1244,7 @@ export function useLiveTvScreenModel(
       prefetchChannelEpg,
       updateCategoryCount,
       myChannelsLiveChannels,
-      recentLiveChannels,
+      stableRecentLiveChannels,
     ],
   );
 

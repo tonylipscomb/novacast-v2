@@ -9,6 +9,7 @@ import {
   composeLiveCategoryRail,
   resolveMyChannelsLiveChannels,
   resolveRecentLiveChannels,
+  stabilizeRecentLiveChannels,
   LIVE_MY_CHANNELS_CATEGORY_NAME,
   LIVE_RECENTS_CATEGORY_NAME,
   LIVE_MY_CHANNELS_EMPTY_MESSAGE,
@@ -178,6 +179,25 @@ test('resolveRecentLiveChannels preserves newest-first order without duplicates'
     ['ch-1', 'ch-2'],
   );
   assert.equal(new Set(channels.map((c) => c.id)).size, channels.length);
+});
+
+test('active Recents session keeps order and row identity while history updates', () => {
+  const first = loadedChannel('ch-a');
+  const second = loadedChannel('ch-b');
+  const third = loadedChannel('ch-c');
+  const reorderedHistory = [third, first, second];
+  const stable = stabilizeRecentLiveChannels(reorderedHistory, ['ch-a', 'ch-b', 'ch-c'], new Map([
+    ['ch-a', first],
+    ['ch-b', second],
+    ['ch-c', third],
+  ]));
+  assert.deepEqual(stable.map((channel) => channel.id), ['ch-a', 'ch-b', 'ch-c']);
+  assert.strictEqual(stable[2], third);
+  assert.strictEqual(stable[0], first);
+  const freshSession = stabilizeRecentLiveChannels(reorderedHistory, ['ch-c', 'ch-a', 'ch-b'], new Map());
+  assert.deepEqual(freshSession.map((channel) => channel.id), ['ch-c', 'ch-a', 'ch-b']);
+  assert.match(liveModel, /recentsSessionOrderRef/);
+  assert.match(liveModel, /stableRecentLiveChannels/);
 });
 
 // 10. Empty My Channels / Recents remain selectable and expose empty-state copy.

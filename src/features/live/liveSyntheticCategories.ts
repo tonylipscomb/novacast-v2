@@ -94,3 +94,23 @@ export function resolveRecentLiveChannels(
     favoriteRecords: recordShaped,
   }).channels;
 }
+
+/**
+ * Keep a mounted Recents rail stable for the duration of one Live TV session.
+ * Recent-history timestamps may change while browsing, but the focused row's
+ * order and object identity must not move underneath native TV focus.
+ */
+export function stabilizeRecentLiveChannels(
+  current: readonly ProviderLiveChannel[],
+  sessionOrder: readonly string[],
+  previousById?: ReadonlyMap<string, ProviderLiveChannel>,
+): ProviderLiveChannel[] {
+  const byId = new Map(current.map((channel) => [channel.id, channel]));
+  const orderedIds = [
+    ...sessionOrder,
+    ...current.map((channel) => channel.id).filter((id) => !sessionOrder.includes(id)),
+  ];
+  return orderedIds
+    .map((id) => previousById?.get(id) ?? byId.get(id))
+    .filter((channel): channel is ProviderLiveChannel => Boolean(channel && byId.has(channel.id)));
+}

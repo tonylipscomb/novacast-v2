@@ -127,6 +127,55 @@ test('4. Stream.category_id is preserved', () => {
   assert.equal(item.categoryId, '42');
 });
 
+test('4a. Native decoder preserves category_ids when category_id is absent', () => {
+  assert.match(kotlin, /JsonToken\.BEGIN_ARRAY/);
+  assert.match(kotlin, /name == "category_ids"/);
+  assert.match(kotlin, /private fun firstCategoryId/);
+  assert.match(kotlin, /stringField\(map, "category_id"\)\?\.let/);
+  assert.match(kotlin, /map\["category_ids"\]/);
+});
+
+test('4b. Category-shape diagnostics are bounded and identifier-safe', () => {
+  assert.match(kotlin, /categoryIdFieldPresentCount/);
+  assert.match(kotlin, /categoryIdsFieldPresentCount/);
+  assert.match(kotlin, /distinctCategoryIds/);
+  assert.match(kotlin, /topCategoryFrequencies/);
+  assert.match(kotlin, /category identifiers themselves are deliberately not emitted/);
+  assert.match(writer, /categoryId: resolveCatalogItemCategoryId/);
+});
+
+test('4c. A broad multi-category movie catalog keeps its distribution through the writer', () => {
+  const categoryCount = 442;
+  const mapped = Array.from({ length: 1480 }, (_, index) =>
+    mapNativeRecordToCatalogItem(
+      {
+        mediaType: 'movie',
+        contentId: `movie-${index}`,
+        categoryId: `category-${index % categoryCount}`,
+        title: `Movie ${index}`,
+      },
+      'provider-large',
+      'movie',
+      'all',
+      8,
+      { allowCategoryFallback: false },
+    ),
+  );
+  const distinct = new Set(mapped.map((item) => item.categoryId));
+  assert.equal(mapped.length, 1480);
+  assert.equal(distinct.size, categoryCount);
+  const result = validateMoviesCategoryDistribution({
+    generation: 8,
+    totalItems: mapped.length,
+    distinctCategoryIds: distinct.size,
+    metadataCategoryCount: categoryCount,
+    nonzeroCategoryCount: distinct.size,
+    largestCategoryId: 'category-0',
+    largestCategoryCount: 4,
+  });
+  assert.equal(result.validationPassed, true);
+});
+
 test('5. Requested category ID is never stamped onto every stream', () => {
   assert.match(kotlin, /Never stamp filterCategoryId|Preserve stream category_id only/);
   const missing = mapNativeRecordToCatalogItem(

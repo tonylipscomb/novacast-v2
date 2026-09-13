@@ -30,6 +30,11 @@ export type CatalogDecodeBatchStats = {
   rawSeen?: number;
   matched?: number;
   emptyCategoryIdCount?: number;
+  categoryIdFieldPresentCount?: number;
+  categoryIdsFieldPresentCount?: number;
+  distinctCategoryIds?: number;
+  /** Counts only; category identifiers are intentionally not included. */
+  topCategoryFrequencies?: number[];
   batchesEmitted?: number;
   maxBatchSize?: number;
   batchSize?: number;

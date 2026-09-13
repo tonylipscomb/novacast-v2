@@ -385,6 +385,10 @@ private class DecodeJob(
   private var rawSeen = 0
   private var matched = 0
   private var emptyCategoryIdCount = 0
+  private var categoryIdFieldPresentCount = 0
+  private var categoryIdsFieldPresentCount = 0
+  private var distinctCategoryIds = HashSet<String>()
+  private val categoryFrequency = HashMap<String, Int>()
   private var batchesEmitted = 0
   private var maxBatchSize = 0
   private var responseTopLevelType: String? = null
@@ -522,9 +526,18 @@ private class DecodeJob(
               rawSeen += 1
               val item = readObject(reader)
               item ?: continue
-              val itemCategory = stringField(item, "category_id")
+              val itemCategory = firstCategoryId(item)
+              if (item.containsKey("category_id")) {
+                categoryIdFieldPresentCount += 1
+              }
+              if (item.containsKey("category_ids")) {
+                categoryIdsFieldPresentCount += 1
+              }
               if (itemCategory.isNullOrEmpty()) {
                 emptyCategoryIdCount += 1
+              } else {
+                distinctCategoryIds.add(itemCategory)
+                categoryFrequency[itemCategory] = (categoryFrequency[itemCategory] ?: 0) + 1
               }
               if (!filterCategoryId.isNullOrEmpty() &&
                 filterCategoryId != "all" &&
@@ -607,6 +620,11 @@ private class DecodeJob(
     "rawSeen" to rawSeen,
     "matched" to matched,
     "emptyCategoryIdCount" to emptyCategoryIdCount,
+    "categoryIdFieldPresentCount" to categoryIdFieldPresentCount,
+    "categoryIdsFieldPresentCount" to categoryIdsFieldPresentCount,
+    "distinctCategoryIds" to distinctCategoryIds.size,
+    // Counts only; category identifiers themselves are deliberately not emitted.
+    "topCategoryFrequencies" to categoryFrequency.values.sortedDescending().take(10),
     "batchesEmitted" to batchesEmitted,
     "maxBatchSize" to maxBatchSize,
     "batchSize" to batchSize,
@@ -627,7 +645,7 @@ private class DecodeJob(
     val title = stringField(raw, "name")?.trim().orEmpty()
     // Preserve stream category_id only. Never stamp filterCategoryId — JS falls back.
     // Stamping poisons SQLite UPSERT last-write-wins when panels ignore category filters.
-    val streamCategoryId = stringField(raw, "category_id")
+    val streamCategoryId = firstCategoryId(raw)
     return if (mediaType == "series") {
       val seriesId = stringField(raw, "series_id") ?: stringField(raw, "stream_id") ?: "series-$index"
       mapOf(
@@ -686,11 +704,59 @@ private class DecodeJob(
           reader.nextNull()
           out[name] = null
         }
+        JsonToken.BEGIN_ARRAY -> {
+          if (name == "category_ids") {
+            out[name] = readStringArray(reader)
+          } else {
+            reader.skipValue()
+          }
+        }
         else -> reader.skipValue()
       }
     }
     reader.endObject()
     return out
+  }
+
+  /**
+   * Xtream variants use either category_id or category_ids. Keep the scalar
+   * field authoritative and use the first declared membership only when the
+   * scalar field is absent/empty; SQLite has one category_id per item.
+   */
+  private fun firstCategoryId(map: Map<String, Any?>): String? {
+    stringField(map, "category_id")?.let { return it }
+    val values = map["category_ids"]
+    return when (values) {
+      is List<*> -> values.asSequence()
+        .mapNotNull { value ->
+          when (value) {
+            is String -> value.trim().ifEmpty { null }
+            is Number -> value.toString()
+            else -> null
+          }
+        }
+        .firstOrNull()
+      is String -> values.split(',', '|')
+        .asSequence()
+        .map { it.trim() }
+        .firstOrNull { it.isNotEmpty() }
+      else -> null
+    }
+  }
+
+  private fun readStringArray(reader: JsonReader): List<String> {
+    val values = ArrayList<String>()
+    reader.beginArray()
+    while (reader.hasNext()) {
+      when (reader.peek()) {
+        JsonToken.STRING -> reader.nextString().trim().takeIf { it.isNotEmpty() }?.let(values::add)
+        JsonToken.NUMBER -> values.add(reader.nextString())
+        JsonToken.NULL -> reader.nextNull()
+        else -> reader.skipValue()
+      }
+    }
+    reader.endArray()
+    return values
   }
 
   private fun stringField(map: Map<String, Any?>, key: String): String? {

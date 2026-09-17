@@ -1001,9 +1001,10 @@ async function main() {
     requireUuid(request.managed_provider_id, 'claim_refresh_request', 'provider_id');
     const claimed = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(requestId)}&status=eq.pending`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }) }, 'claim_refresh_request');
     if (!claimed?.length) continue;
+    let ensuredJob = null;
     try {
       const source = { id: requireUuid(request.source_id, 'claim_refresh_request', 'source_id'), managed_provider_id: requireUuid(request.managed_provider_id, 'claim_refresh_request', 'provider_id') };
-      const ensuredJob = await ensureRefreshJob(source, requestId);
+      ensuredJob = await ensureRefreshJob(source, requestId);
       if (ensuredJob.skipped) {
         await patch('managed_provider_epg_refresh_requests', requestId, { status: 'pending', started_at: null }, '', 'defer_active_refresh_request');
         process.stdout.write('EPG refresh already active; request remains pending.\n');
@@ -1020,7 +1021,9 @@ async function main() {
       logDatabaseFailure(error);
       logWorkerFailure(error);
       const code = error instanceof Error && /^[a-z0-9_]+$/.test(error.message) ? error.message : 'worker_failure';
-      if (request.refresh_job_id && UUID_PATTERN.test(request.refresh_job_id)) await patch('managed_provider_epg_refresh_jobs', request.refresh_job_id, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }, '', 'fail_refresh_job').catch((patchError) => { logDatabaseFailure(patchError); });
+      // Use the job actually ensured this run; request.refresh_job_id is stale (null) until ensureRefreshJob links it in the DB.
+      const failJobId = (ensuredJob && !ensuredJob.skipped ? ensuredJob.jobId : null) ?? request.refresh_job_id;
+      if (failJobId && UUID_PATTERN.test(failJobId)) await patch('managed_provider_epg_refresh_jobs', failJobId, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }, '', 'fail_refresh_job').catch((patchError) => { logDatabaseFailure(patchError); });
       if (UUID_PATTERN.test(requestId)) await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() }, '', 'fail_request').catch((patchError) => { logDatabaseFailure(patchError); });
       process.stderr.write(`EPG refresh failed: ${code}\n`);
     }

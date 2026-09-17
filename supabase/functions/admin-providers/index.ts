@@ -23,6 +23,11 @@ const EPG_REFRESH_BUCKET = 'epg-refresh-artifacts';
 const EPG_REFRESH_PROGRAMME_CHUNK_SIZE = 5_000;
 const EPG_REFRESH_RETENTION_MS = 24 * 60 * 60 * 1000;
 const ACTIVE_REFRESH_STATUSES = ['queued', 'fetching', 'processing', 'finalizing'];
+// Bounded leases so a request can never stay pending/running forever.
+const EPG_REFRESH_REQUEST_START_LEASE_MS = 10 * 60 * 1000; // orphan pending with no linked job
+const EPG_REFRESH_JOB_HEARTBEAT_MS = 30 * 60 * 1000; // active job whose updated_at stopped advancing
+const EPG_REFRESH_SYNC_BUDGET_MS = 45 * 1000; // inline continuation wall-clock budget
+const EPG_REFRESH_SYNC_MAX_STEPS = 500; // inline continuation safety cap
 
 type ManagedProviderRow = {
   id: string;
@@ -546,6 +551,154 @@ async function updateRefreshJob(client: Awaited<ReturnType<typeof requireAdmin>>
   return data;
 }
 
+function refreshFailureCode(error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  return /^[a-z0-9_]+$/.test(message) ? message : 'refresh_failed';
+}
+
+async function failRefreshRequest(client: Awaited<ReturnType<typeof requireAdmin>>['client'], requestId: string, code: string) {
+  await client.from('managed_provider_epg_refresh_requests')
+    .update({ status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() })
+    .eq('id', requestId).in('status', ['pending', 'running']);
+}
+
+async function completeRefreshRequest(client: Awaited<ReturnType<typeof requireAdmin>>['client'], requestId: string, jobId: string) {
+  await client.from('managed_provider_epg_refresh_requests')
+    .update({ status: 'complete', completed_at: new Date().toISOString(), refresh_job_id: jobId })
+    .eq('id', requestId).in('status', ['pending', 'running']);
+}
+
+// Reconcile the request row with its job's terminal state; healthy active jobs are left running.
+async function reconcileRequestWithJob(client: Awaited<ReturnType<typeof requireAdmin>>['client'], requestId: string, job: EpgRefreshJobRow) {
+  if (job.status === 'complete') {
+    await completeRefreshRequest(client, requestId, job.id);
+  } else if (job.status === 'failed') {
+    await client.from('managed_provider_epg_refresh_requests')
+      .update({ status: 'failed', failure_code: job.failure_code ?? 'refresh_failed', failure_message: job.failure_message ?? job.failure_code ?? 'refresh_failed', completed_at: new Date().toISOString(), refresh_job_id: job.id })
+      .eq('id', requestId).in('status', ['pending', 'running']);
+  }
+}
+
+// Close the request linked to a job once the job reaches a terminal state (used by the continuation route).
+async function closeRequestForJob(client: Awaited<ReturnType<typeof requireAdmin>>['client'], jobId: string, publicJob: ReturnType<typeof publicRefreshJob>) {
+  if (publicJob.status !== 'complete' && publicJob.status !== 'failed') return;
+  const patch = publicJob.status === 'complete'
+    ? { status: 'complete', completed_at: new Date().toISOString() }
+    : { status: 'failed', failure_code: publicJob.failureCode ?? 'refresh_failed', failure_message: publicJob.failureMessage ?? publicJob.failureCode ?? 'refresh_failed', completed_at: new Date().toISOString() };
+  await client.from('managed_provider_epg_refresh_requests').update(patch).eq('refresh_job_id', jobId).in('status', ['pending', 'running']);
+}
+
+// Job-aware stale-lock recovery: never expire a healthy, progressing refresh.
+async function recoverStaleRefreshRequests(client: Awaited<ReturnType<typeof requireAdmin>>['client'], source: ManagedProviderEpgSourceRow) {
+  const { data: activeRequests } = await client.from('managed_provider_epg_refresh_requests')
+    .select('id,status,requested_at,started_at,refresh_job_id')
+    .eq('managed_provider_id', source.managed_provider_id)
+    .eq('source_id', source.id)
+    .in('status', ['pending', 'running']);
+  const now = Date.now();
+  for (const req of activeRequests ?? []) {
+    if (req.refresh_job_id) {
+      let job: EpgRefreshJobRow;
+      try {
+        job = await getRefreshJob(client, String(req.refresh_job_id));
+      } catch {
+        await failRefreshRequest(client, String(req.id), 'refresh_expired'); // linked job no longer exists
+        continue;
+      }
+      if (job.status === 'complete') { await completeRefreshRequest(client, String(req.id), job.id); continue; }
+      if (job.status === 'failed') { await failRefreshRequest(client, String(req.id), job.failure_code ?? 'refresh_failed'); continue; }
+      const beat = Date.parse(job.updated_at ?? job.started_at ?? job.created_at ?? '');
+      const stale = !Number.isFinite(beat) || now - beat > EPG_REFRESH_JOB_HEARTBEAT_MS;
+      if (stale) {
+        await markRefreshJobFailed(client, job, 'refresh_expired');
+        await failRefreshRequest(client, String(req.id), 'refresh_expired');
+      }
+      // healthy active job: leave running so the active pre-check still reports refresh_in_progress
+    } else {
+      const reference = Date.parse(req.started_at ?? req.requested_at ?? '');
+      const stale = !Number.isFinite(reference) || now - reference > EPG_REFRESH_REQUEST_START_LEASE_MS;
+      if (stale) await failRefreshRequest(client, String(req.id), 'refresh_expired'); // orphan never picked up
+    }
+  }
+}
+
+// Job-first reconciliation: an active job whose owning request is already terminal is orphaned and must not block.
+async function recoverOrphanedRefreshJobs(client: Awaited<ReturnType<typeof requireAdmin>>['client'], source: ManagedProviderEpgSourceRow) {
+  const { data: activeJobs } = await client.from('managed_provider_epg_refresh_jobs')
+    .select('id,managed_provider_id,source_id,generation,status,stage,processed_channels,processed_programmes,processed_mappings,total_channels,total_programmes,progress_percent,checkpoint,failure_code,failure_message,created_at,started_at,updated_at,completed_at')
+    .eq('source_id', source.id)
+    .in('status', ACTIVE_REFRESH_STATUSES);
+  const now = Date.now();
+  for (const row of activeJobs ?? []) {
+    const job = row as unknown as EpgRefreshJobRow;
+    const { data: owner } = await client.from('managed_provider_epg_refresh_requests')
+      .select('id,status,failure_code')
+      .eq('refresh_job_id', job.id)
+      .order('requested_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (owner?.status === 'failed') {
+      // Owning request already terminal-failed: the job is a zombie (e.g. worker died before failing it).
+      await markRefreshJobFailed(client, job, owner.failure_code ?? 'refresh_orphaned');
+      continue;
+    }
+    if (owner?.status === 'complete') {
+      await client.from('managed_provider_epg_refresh_jobs')
+        .update({ status: 'complete', stage: null, progress_percent: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', job.id).in('status', ACTIVE_REFRESH_STATUSES);
+      continue;
+    }
+    // Owner pending/running (possibly healthy) or no owner: only expire on heartbeat staleness; never on null progress alone.
+    const beat = Date.parse(job.updated_at ?? job.started_at ?? job.created_at ?? '');
+    const stale = !Number.isFinite(beat) || now - beat > EPG_REFRESH_JOB_HEARTBEAT_MS;
+    if (stale) {
+      await markRefreshJobFailed(client, job, 'refresh_expired');
+      if (owner?.id) await failRefreshRequest(client, String(owner.id), 'refresh_expired');
+    }
+  }
+}
+
+// Live refresh executor: enqueue the request, then drive the existing job engine to a terminal state.
+async function runManagedEpgRefresh(client: Awaited<ReturnType<typeof requireAdmin>>['client'], source: ManagedProviderEpgSourceRow) {
+  await recoverStaleRefreshRequests(client, source);
+  const enqueued = await enqueueEpgRefresh(client, source);
+  const requestId = String(enqueued.requestId);
+  const { data: claimed, error: claimError } = await client.from('managed_provider_epg_refresh_requests')
+    .update({ status: 'running', started_at: new Date().toISOString() })
+    .eq('id', requestId).eq('status', 'pending').select('id');
+  if (claimError) throw new Error('admin_refresh_job_failed');
+  if (!claimed?.length) {
+    return { requestId, sourceId: source.id, status: 'running', stage: null, progressPercent: null, startedAt: enqueued.requestedAt, job: null };
+  }
+  try {
+    const started = await startEpgRefresh(client, source);
+    await client.from('managed_provider_epg_refresh_requests').update({ refresh_job_id: started.jobId }).eq('id', requestId);
+    let job = await getRefreshJob(client, started.jobId);
+    const deadline = Date.now() + EPG_REFRESH_SYNC_BUDGET_MS;
+    let steps = 0;
+    while (ACTIVE_REFRESH_STATUSES.includes(job.status) && Date.now() < deadline && steps < EPG_REFRESH_SYNC_MAX_STEPS) {
+      await continueEpgRefresh(client, job.id);
+      job = await getRefreshJob(client, job.id);
+      steps += 1;
+    }
+    await reconcileRequestWithJob(client, requestId, job);
+    if (job.status === 'failed') throw new Error(job.failure_code ?? 'refresh_failed');
+    return { requestId, jobId: job.id, sourceId: source.id, status: job.status === 'complete' ? 'complete' : 'running', stage: job.stage ?? null, progressPercent: job.progress_percent ?? null, startedAt: started.startedAt, job: publicRefreshJob(job) };
+  } catch (error) {
+    await failRefreshRequest(client, requestId, refreshFailureCode(error)).catch(() => { /* terminal state already recorded */ });
+    throw error;
+  }
+}
+
+// Enqueue-only entry point. The GitHub Actions worker (scripts/epg-ingest) is the single authoritative EPG executor;
+// the edge function must never run the ingest pipeline itself. It only reconciles zombies and records the request.
+async function queueManagedEpgRefresh(client: Awaited<ReturnType<typeof requireAdmin>>['client'], source: ManagedProviderEpgSourceRow) {
+  await recoverStaleRefreshRequests(client, source);
+  await recoverOrphanedRefreshJobs(client, source);
+  const enqueued = await enqueueEpgRefresh(client, source);
+  return { requestId: enqueued.requestId, sourceId: enqueued.sourceId, status: enqueued.status, requestedAt: enqueued.requestedAt };
+}
+
 async function previewEpgResolution(client: Awaited<ReturnType<typeof requireAdmin>>['client'], providerId: string) {
   const { data, error } = await client.from('managed_provider_epg_combined_coverage')
     .select('id,managed_provider_id,snapshot_generation,created_at,provider_rows,resolved,unresolved,mapping_percent,enabled_source_count,by_source,by_match,candidate_conflicts,resolved_conflicts,unresolved_conflicts,duplicate_provider_variants,current_programme_coverage,future_programme_coverage,source_generations,samples,us_relevant_rows,us_combined_resolved,us_combined_unresolved,us_combined_mapping_ratio,us_combined_mapping_percent,us_by_source,us_by_match,resolved_with_current_programme,resolved_with_future_programme,resolved_with_current_and_future,resolved_without_programme_data,current_programme_percent,future_programme_percent,us_resolved_with_current_programme,us_resolved_with_future_programme,us_resolved_with_current_and_future,us_resolved_without_programme_data,us_current_programme_percent,us_future_programme_percent,epgenius_only,us2_only,same_target_overlap,different_target_conflict,mapping_ready,programme_coverage_ready,conflict_risk_acceptable,managed_guide_delivery_ready,readiness_reasons')
@@ -760,7 +913,7 @@ Deno.serve(async (request) => {
     if (action === 'start_epg_refresh' || action === 'refresh_epg_source') {
       const sourceId = typeof body?.sourceId === 'string' ? body.sourceId : '';
       const source = await loadEpgSource(client, sourceId);
-      return adminJsonResponse(request, { refresh: await enqueueEpgRefresh(client, source) });
+      return adminJsonResponse(request, { refresh: await queueManagedEpgRefresh(client, source) });
     }
 
     if (action === 'get_epg_refresh_status') {
@@ -772,7 +925,11 @@ Deno.serve(async (request) => {
     if (action === 'continue_epg_refresh') {
       const jobId = typeof body?.jobId === 'string' ? body.jobId : '';
       if (!jobId) throw new Error('invalid_request');
-      return adminJsonResponse(request, { refresh: publicRefreshJob(await getRefreshJob(client, jobId)) });
+      // Worker-authoritative: never advance a worker-owned job with the edge engine. Report status only,
+      // and settle the owning request if the worker has already finished the job.
+      const refresh = publicRefreshJob(await getRefreshJob(client, jobId));
+      await closeRequestForJob(client, jobId, refresh);
+      return adminJsonResponse(request, { refresh });
     }
 
     if (action === 'test_epg_source') {

@@ -8,7 +8,7 @@ process.env.EPG_INGEST_TEST_IMPORT = '1';
 process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
 process.env.PROVIDER_ENCRYPTION_KEY = '00'.repeat(32);
-const { assessGuideReadiness, buildMappingAudit, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
+const { assessGuideReadiness, buildMappingAudit, dedupeXmltvChannels, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
 
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
 const combinedMigration = fs.readFileSync(new URL('../supabase/migrations/20260906165500_managed_provider_epg_combined_coverage.sql', import.meta.url), 'utf8');
@@ -366,8 +366,8 @@ test('programme persistence is bounded to final mapped XMLTV targets without cha
 });
 
 test('EPG parsing and mapping still see the complete XMLTV channel universe before programme retention', () => {
-  assert.match(worker, /const xmltvIds = new Set\(channels\.map\(\(channel\) => channel\.id\)\)/);
-  assert.match(worker, /const audit = buildMappingAudit\(providerId, sourceId, live\.items, channels/);
+  assert.match(worker, /const xmltvIds = new Set\(dedupedChannels\.map\(\(channel\) => channel\.id\)\)/);
+  assert.match(worker, /const audit = buildMappingAudit\(providerId, sourceId, live\.items, dedupedChannels/);
   assert.match(worker, /retainMappedProgrammes\(programmes, mappingsResult\)/);
   assert.match(worker, /programmeRowsPersisted=/);
   assert.match(worker, /programmeRowsDroppedUnmapped=/);
@@ -568,4 +568,103 @@ test('no pending requests exits zero with a safe no-work message', async () => {
   assert.equal(result.code, 0);
   assert.match(result.stdout, /No pending EPG refresh requests\./);
   assert.equal(result.stderr, '');
+});
+
+test('dedupeXmltvChannels collapses duplicate exact XMLTV ids to one record', () => {
+  const deduped = dedupeXmltvChannels([
+    { id: 'Cinemax.hu', displayNames: ['Cinemax'] },
+    { id: 'Cinemax.hu', displayNames: ['Cinemax HD', 'Cinemax'] },
+  ]);
+  assert.equal(deduped.length, 1);
+  assert.equal(deduped[0].id, 'Cinemax.hu');
+});
+
+test('dedupeXmltvChannels preserves first-seen ordering', () => {
+  const deduped = dedupeXmltvChannels([
+    { id: 'B.hu', displayNames: ['Beta'] },
+    { id: 'A.hu', displayNames: ['Alpha'] },
+    { id: 'B.hu', displayNames: ['Beta HD'] },
+    { id: 'C.hu', displayNames: ['Gamma'] },
+  ]);
+  assert.deepEqual(deduped.map((channel) => channel.id), ['B.hu', 'A.hu', 'C.hu']);
+});
+
+test('dedupeXmltvChannels merges unique display names from later duplicates and keeps first primary', () => {
+  const deduped = dedupeXmltvChannels([
+    { id: 'Cinemax.hu', displayNames: ['Cinemax'] },
+    { id: 'Cinemax.hu', displayNames: ['Cinemax HD', 'Cinemax'] },
+  ]);
+  assert.deepEqual(deduped[0].displayNames, ['Cinemax', 'Cinemax HD']);
+});
+
+test('dedupeXmltvChannels never repeats a duplicate display name', () => {
+  const deduped = dedupeXmltvChannels([
+    { id: 'X.hu', displayNames: ['Same', 'Same'] },
+    { id: 'X.hu', displayNames: ['Same'] },
+  ]);
+  assert.deepEqual(deduped[0].displayNames, ['Same']);
+});
+
+test('dedupeXmltvChannels never merges different channel ids', () => {
+  const deduped = dedupeXmltvChannels([
+    { id: 'A.hu', displayNames: ['Alpha'] },
+    { id: 'a.hu', displayNames: ['Alpha Lower'] },
+  ]);
+  assert.equal(deduped.length, 2);
+  assert.deepEqual(deduped.map((channel) => channel.id).sort(), ['A.hu', 'a.hu']);
+});
+
+test('dedupeXmltvChannels drops blank ids and trims names without inventing synthetic ids', () => {
+  const deduped = dedupeXmltvChannels([
+    { id: '  ', displayNames: ['Ghost'] },
+    { id: 'Real.hu', displayNames: ['  Real  ', ''] },
+  ]);
+  assert.equal(deduped.length, 1);
+  assert.deepEqual(deduped[0], { id: 'Real.hu', displayNames: ['Real'] });
+});
+
+test('mapping audit consumes deduped channels (one XMLTV id -> one audit channel)', () => {
+  const deduped = dedupeXmltvChannels([
+    { id: 'Cinemax.hu', displayNames: ['Cinemax'] },
+    { id: 'Cinemax.hu', displayNames: ['Cinemax HD', 'Cinemax'] },
+  ]);
+  const audit = buildMappingAudit(
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    [{ streamId: 's1', name: 'Cinemax', epgChannelId: 'Cinemax.hu', categoryId: null, categoryName: null }],
+    deduped,
+    [],
+    { generation: 'snapshot-generation', expectedRows: 1, storedRows: 1, complete: true },
+    'epg-generation',
+  );
+  assert.equal(audit.xmltvChannels, 1);
+  assert.equal(audit.additionalDeterministicPotential, 1);
+});
+
+test('worker routes deduped channels through mapping, persistence, counts, and channel insert onConflict', () => {
+  assert.match(worker, /const dedupedChannels = dedupeXmltvChannels\(channels\);/);
+  // xmltvIds, both mapping audits, and channel_count all consume the deduped set.
+  assert.match(worker, /const xmltvIds = new Set\(dedupedChannels\.map\(\(channel\) => channel\.id\)\);/);
+  assert.match(worker, /buildMappingAudit\(providerId, sourceId, live\.items, dedupedChannels, validExistingMappings/);
+  assert.match(worker, /buildMappingAudit\(providerId, sourceId, live\.items, dedupedChannels, mappings, snapshot, generation\)/);
+  assert.match(worker, /channel_count: dedupedChannels\.length/);
+  assert.match(worker, /insertBatches\('managed_provider_epg_source_channels', dedupedChannels\.map/);
+  // Defense-in-depth: channel insert declares the primary-key conflict target.
+  assert.match(worker, /insertBatches\('managed_provider_epg_source_channels', dedupedChannels\.map[\s\S]*?'source_id,cache_generation,xmltv_channel_id', 'insert_channels'\)/);
+  // Raw channels array is no longer used for downstream persistence/counts.
+  assert.doesNotMatch(worker, /insertBatches\('managed_provider_epg_source_channels', channels\.map/);
+  assert.doesNotMatch(worker, /channel_count: channels\.length/);
+});
+
+test('programme insert conflict behavior remains unchanged (channel + time + title identity)', () => {
+  assert.match(worker, /insertBatches\('managed_provider_epg_source_programmes',[\s\S]*?'source_id,cache_generation,xmltv_channel_id,start_at,stop_at,title', 'insert_programmes'\)/);
+});
+
+test('failed-generation cleanup remains intact', () => {
+  assert.match(worker, /'cleanup_failed_generation'/);
+});
+
+test('duplicate channel diagnostics are emitted without leaking secrets', () => {
+  assert.match(worker, /xmltvChannelRowsParsed=\$\{channels\.length\} xmltvChannelsUnique=\$\{dedupedChannels\.length\} xmltvDuplicateChannelRows=/);
+  assert.doesNotMatch(worker, /duplicateChannelIdSample=\$\{JSON\.stringify\(url/);
 });

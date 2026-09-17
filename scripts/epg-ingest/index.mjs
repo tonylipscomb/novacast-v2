@@ -635,6 +635,20 @@ function toAuditXmltvChannel(row) {
   return { id, displayNames };
 }
 
+// Collapse repeated <channel id> rows so one XMLTV id maps to exactly one in-memory record.
+function dedupeXmltvChannels(channels) {
+  const byId = new Map();
+  for (const channel of Array.isArray(channels) ? channels : []) {
+    const id = String(channel?.id ?? '').trim();
+    if (!id) continue;
+    const displayNames = (Array.isArray(channel?.displayNames) ? channel.displayNames : []).map((value) => (typeof value === 'string' ? value.trim() : '')).filter(Boolean);
+    const existing = byId.get(id);
+    if (!existing) { byId.set(id, { id, displayNames: [...new Set(displayNames)] }); continue; }
+    for (const name of displayNames) if (!existing.displayNames.includes(name)) existing.displayNames.push(name);
+  }
+  return [...byId.values()];
+}
+
 function buildMappingAudit(providerId, sourceId, items, xmltvChannels, mappings, snapshot, epgGeneration) {
   const adaptedXmltvChannels = xmltvChannels.map(toAuditXmltvChannel);
   const channelsWithDisplayNames = adaptedXmltvChannels.filter((channel) => channel.displayNames.length > 0).length;
@@ -812,12 +826,16 @@ async function processRequest(request) {
     parser.finish();
     if (!channels.length || !programmes.length) throw new Error('empty_feed');
   });
+  const dedupedChannels = dedupeXmltvChannels(channels);
+  const duplicateChannelIdSamples = [];
+  { const seenChannelIds = new Set(); for (const channel of channels) { const id = String(channel?.id ?? '').trim(); if (!id) continue; if (seenChannelIds.has(id)) { if (!duplicateChannelIdSamples.includes(id) && duplicateChannelIdSamples.length < 10) duplicateChannelIdSamples.push(id); } else seenChannelIds.add(id); } }
+  process.stdout.write(`xmltvChannelRowsParsed=${channels.length} xmltvChannelsUnique=${dedupedChannels.length} xmltvDuplicateChannelRows=${channels.length - dedupedChannels.length}${duplicateChannelIdSamples.length ? ` duplicateChannelIdSample=${JSON.stringify(duplicateChannelIdSamples)}` : ''}\n`);
   const existingMappings = await runWorkerStage('load_current_mappings', async () => source.active_cache_generation ? db(`managed_provider_epg_source_mappings?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}&select=provider_stream_id,xmltv_channel_id,match_type,provider_canonical,xmltv_canonical`, {}, 'load_current_mappings') : []);
   const mappingsResult = await runWorkerStage('build_mappings', async () => {
   const liveStreamIds = new Set(live.items.map((item) => item.streamId));
-  const xmltvIds = new Set(channels.map((channel) => channel.id));
+  const xmltvIds = new Set(dedupedChannels.map((channel) => channel.id));
   const validExistingMappings = existingMappings.filter((mapping) => liveStreamIds.has(mapping.provider_stream_id) && xmltvIds.has(mapping.xmltv_channel_id));
-  const audit = buildMappingAudit(providerId, sourceId, live.items, channels, validExistingMappings, { generation: crypto.randomUUID(), expectedRows: live.items.length, storedRows: live.items.length, complete: true }, generation);
+  const audit = buildMappingAudit(providerId, sourceId, live.items, dedupedChannels, validExistingMappings, { generation: crypto.randomUUID(), expectedRows: live.items.length, storedRows: live.items.length, complete: true }, generation);
   const existingByStream = new Map(validExistingMappings.map((mapping) => [mapping.provider_stream_id, mapping]));
   for (const mapping of validExistingMappings) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: mapping.provider_stream_id, xmltv_channel_id: mapping.xmltv_channel_id, match_type: mapping.match_type, match_confidence_class: 'proven', provider_canonical: mapping.provider_canonical, xmltv_canonical: mapping.xmltv_canonical, mapped_at: refreshedAt });
   for (const mapping of audit.phase2cMappingRecords) if (!existingByStream.has(mapping.providerStreamId)) mappings.push({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, provider_stream_id: mapping.providerStreamId, xmltv_channel_id: mapping.xmltvChannelId, match_type: mapping.matchType, match_confidence_class: 'proven', provider_canonical: mapping.providerCanonical, xmltv_canonical: mapping.xmltvCanonical, mapped_at: refreshedAt });
@@ -826,18 +844,18 @@ async function processRequest(request) {
   const programmeRetention = retainMappedProgrammes(programmes, mappingsResult);
   process.stdout.write(`xmltvProgrammeRowsParsed=${xmltvProgrammeRowsParsed} programmeRetentionChannelCount=${programmeRetention.retentionIds.size} programmeRowsEligibleForPersistence=${programmeRetention.retained.length} programmeRowsDroppedUnmapped=${programmeRetention.dropped} programmeRowsPersisted=${programmeRetention.retained.length}\n`);
   await runWorkerStage('persist_cache', async () => {
-  await insertBatches('managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalize(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1), refreshed_at: refreshedAt })), '', 'insert_channels');
+  await insertBatches('managed_provider_epg_source_channels', dedupedChannels.map((channel) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalize(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1), refreshed_at: refreshedAt })), 'source_id,cache_generation,xmltv_channel_id', 'insert_channels');
   await insertBatches('managed_provider_epg_source_programmes', programmeRetention.retained.map((programme) => ({ source_id: source.id, managed_provider_id: source.managed_provider_id, cache_generation: generation, xmltv_channel_id: programme.channelId, start_at: programme.startAt, stop_at: programme.stopAt, title: programme.title, subtitle: programme.subtitle, description: programme.description, category: programme.category, refreshed_at: refreshedAt })), 'source_id,cache_generation,xmltv_channel_id,start_at,stop_at,title', 'insert_programmes');
   await insertBatches('managed_provider_epg_source_mappings', mappings, '', 'insert_mappings');
   });
-  await runWorkerStage('promote_generation', () => patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: channels.length, programme_count: programmeRetention.retained.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, invalidTimestamps: parser.invalidTimestamps, xmltvProgrammeRowsParsed, programmeRetentionChannelCount: programmeRetention.retentionIds.size, programmeRowsEligibleForPersistence: programmeRetention.retained.length, programmeRowsDroppedUnmapped: programmeRetention.dropped, programmeRowsPersisted: programmeRetention.retained.length }, updated_at: refreshedAt }, '', 'promote_generation'));
+  await runWorkerStage('promote_generation', () => patch('managed_provider_epg_sources', source.id, { active_cache_generation: generation, last_refresh_at: refreshedAt, last_refresh_status: 'success', channel_count: dedupedChannels.length, programme_count: programmeRetention.retained.length, diagnostic_summary: { sourceId: source.id, mappedChannels: mappings.length, xmltvChannelRowsParsed: channels.length, xmltvChannelsUnique: dedupedChannels.length, xmltvDuplicateChannelRows: channels.length - dedupedChannels.length, invalidTimestamps: parser.invalidTimestamps, xmltvProgrammeRowsParsed, programmeRetentionChannelCount: programmeRetention.retentionIds.size, programmeRowsEligibleForPersistence: programmeRetention.retained.length, programmeRowsDroppedUnmapped: programmeRetention.dropped, programmeRowsPersisted: programmeRetention.retained.length }, updated_at: refreshedAt }, '', 'promote_generation'));
   promoted = true;
   if (source.active_cache_generation) {
     for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(source.active_cache_generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_previous_generation').catch(() => {});
   }
   if (snapshot?.complete === true) {
     try {
-      const audit = buildMappingAudit(providerId, sourceId, live.items, channels, mappings, snapshot, generation);
+      const audit = buildMappingAudit(providerId, sourceId, live.items, dedupedChannels, mappings, snapshot, generation);
       if (audit.projectedMappedTotal < audit.currentMapped || audit.usPhase2cProjectedMapped < audit.usCurrentMapped) throw new Error('invalid_mapping_audit_totals');
       await persistMappingAudit(audit);
     } catch (error) {
@@ -853,7 +871,7 @@ async function processRequest(request) {
     logDatabaseFailure(error);
     process.stderr.write('Combined EPG coverage unavailable.\n');
   }
-  return { channels: channels.length, programmes: programmeRetention.retained.length, parsedProgrammes: xmltvProgrammeRowsParsed, programmeRetentionChannelCount: programmeRetention.retentionIds.size, programmeRowsDroppedUnmapped: programmeRetention.dropped, mapped: mappings.length };
+  return { channels: dedupedChannels.length, programmes: programmeRetention.retained.length, parsedProgrammes: xmltvProgrammeRowsParsed, programmeRetentionChannelCount: programmeRetention.retentionIds.size, programmeRowsDroppedUnmapped: programmeRetention.dropped, mapped: mappings.length };
   } catch (error) {
     if (!promoted) for (const table of ['managed_provider_epg_source_channels', 'managed_provider_epg_source_programmes', 'managed_provider_epg_source_mappings']) await db(`${table}?source_id=eq.${encodeURIComponent(source.id)}&cache_generation=eq.${encodeURIComponent(generation)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } }, 'cleanup_failed_generation').catch(() => {});
     throw error;
@@ -1032,7 +1050,7 @@ async function main() {
   if (failed) process.exitCode = 1;
 }
 
-export { assessGuideReadiness, buildMappingAudit, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel };
+export { assessGuideReadiness, buildMappingAudit, dedupeXmltvChannels, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel };
 
 if (process.env.EPG_INGEST_TEST_IMPORT !== '1') {
   main().catch((error) => {

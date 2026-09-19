@@ -4,8 +4,11 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import {
   FlatList,
+  findNodeHandle,
   Platform,
+  Pressable,
   StyleSheet,
+  Text,
   View,
   type ListRenderItemInfo,
   type View as ViewType,
@@ -16,6 +19,7 @@ import { NovaFocusRow } from '@/components/nova/NovaFocusRow';
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { novaTheme } from '@/theme';
 import { createFavoriteHoldDetector } from '@/features/live/liveFavoriteHold';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
 import {
   LIVE_SEARCH_FOCUS_SCROLL_VIEW_POSITION,
@@ -136,32 +140,37 @@ function ResultRow({
   const key = searchResultKey(result);
   const isLive = result.type === 'live';
   const [isFocused, setIsFocused] = useState(false);
-  const isFavorite = isLive && Boolean(favoriteContentIds?.has(result.id));
-  const nativeTvHold = isLive && Platform.OS === 'android' && Platform.isTV === true;
-  const holdSuppressedRef = useRef(false);
-  const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
-  if (isLive && !nativeTvHold && onToggleLiveFavorite && !favoriteHoldRef.current) {
-    favoriteHoldRef.current = createFavoriteHoldDetector({
-      onTriggered: () => {
-        holdSuppressedRef.current = true;
-        onToggleLiveFavorite(result);
-      },
-    });
-  }
   const nativeRef =
     restoreResultKey && key === restoreResultKey ? restoreRowRef : index === 0 ? firstRowRef : undefined;
+
+  if (isLive) {
+    return (
+      <LiveSearchResultRow
+        result={result}
+        isFavorite={Boolean(favoriteContentIds?.has(result.id))}
+        isRestoreTarget={Boolean(restoreResultKey && key === restoreResultKey)}
+        nativeRef={nativeRef}
+        focusUpHandle={index === 0 ? focusUpHandle : undefined}
+        focusLeftHandle={index === 0 ? focusLeftHandle : undefined}
+        onFocusResult={onFocusResult}
+        onSelectResult={onSelectResult}
+        onToggleFavorite={onToggleLiveFavorite}
+        onFocusLiveResult={onFocusLiveResult}
+        consumeLiveFavoriteHoldSuppression={consumeLiveFavoriteHoldSuppression}
+      />
+    );
+  }
 
   return (
     <NovaFocusRow
       title={displayStreamTitle(result.title)}
       subtitle={subtitleForResult(result)}
-      meta={isLive ? liveMeta(result) : kindLabel(result.type)}
+      meta={kindLabel(result.type)}
       leading={
-        isLive && result.logoUrl ? (
-          <Image source={{ uri: result.logoUrl }} style={styles.liveLogo} contentFit="contain" />
-        ) : undefined
+        undefined
       }
       nativeRef={nativeRef}
+      focusChrome="none"
       nextFocusUp={index === 0 ? focusUpHandle : undefined}
       nextFocusLeft={index === 0 ? focusLeftHandle : undefined}
       onFocus={() => {
@@ -171,35 +180,189 @@ function ResultRow({
       }}
       onBlur={() => {
         setIsFocused(false);
-        if (isLive) onFocusLiveResult?.(null);
+      }}
+      onPress={() => {
+        onSelectResult(result);
+      }}
+      accessibilityLabel={`Open ${kindLabel(result.type)} ${result.title}`}
+      style={[styles.resultRow, isFocused && styles.resultRowFocused]}
+      trailing={
+        <>
+          <MaterialCommunityIcons
+            name="chevron-right"
+            size={18}
+            color={isFocused ? novaTheme.colors.textPrimary : novaTheme.colors.textMuted}
+          />
+        </>
+      }
+    />
+  );
+}
+
+function LiveSearchResultRow({
+  result,
+  isFavorite,
+  isRestoreTarget,
+  nativeRef,
+  focusUpHandle,
+  focusLeftHandle,
+  onFocusResult,
+  onSelectResult,
+  onToggleFavorite,
+  onFocusLiveResult,
+  consumeLiveFavoriteHoldSuppression,
+}: {
+  result: LiveSearchResult;
+  isFavorite: boolean;
+  isRestoreTarget: boolean;
+  nativeRef?: RefObject<ViewType | null>;
+  focusUpHandle?: number;
+  focusLeftHandle?: number;
+  onFocusResult?: (key: string) => void;
+  onSelectResult: (result: SearchResult) => void;
+  onToggleFavorite?: (result: LiveSearchResult) => void;
+  onFocusLiveResult?: (result: LiveSearchResult | null) => void;
+  consumeLiveFavoriteHoldSuppression?: (id: string) => boolean;
+}) {
+  const key = searchResultKey(result);
+  const rowRef = useRef<ViewType | null>(null);
+  const favoriteRef = useRef<ViewType | null>(null);
+  const [rowHandle, setRowHandle] = useState<number | undefined>();
+  const [favoriteHandle, setFavoriteHandle] = useState<number | undefined>();
+  const [rowFocused, setRowFocused] = useState(false);
+  const [favoriteFocused, setFavoriteFocused] = useState(false);
+  const favoritePressRef = useRef(false);
+  const holdSuppressedRef = useRef(false);
+  const nativeTvHold = Platform.OS === 'android' && Platform.isTV === true;
+  const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
+
+  if (!nativeTvHold && onToggleFavorite && !favoriteHoldRef.current) {
+    favoriteHoldRef.current = createFavoriteHoldDetector({
+      onTriggered: () => {
+        holdSuppressedRef.current = true;
+        onToggleFavorite(result);
+      },
+    });
+  }
+
+  const assignRowRef = (instance: ViewType | null) => {
+    rowRef.current = instance;
+    if (nativeRef) {
+      nativeRef.current = instance;
+    }
+    const handle = instance ? findNodeHandle(instance) ?? undefined : undefined;
+    setRowHandle((current) => (current === handle ? current : handle));
+  };
+
+  const focused = rowFocused || favoriteFocused;
+  const activateFavorite = () => {
+    favoritePressRef.current = true;
+    onToggleFavorite?.(result);
+  };
+
+  return (
+    <Pressable
+      ref={assignRowRef}
+      focusable
+      accessible
+      accessibilityRole="button"
+      accessibilityLabel={`Open Live ${result.title}`}
+      hasTVPreferredFocus={isRestoreTarget}
+      {...(focusUpHandle ? { nextFocusUp: focusUpHandle } : null)}
+      {...(focusLeftHandle ? { nextFocusLeft: focusLeftHandle } : null)}
+      {...(favoriteHandle ? { nextFocusRight: favoriteHandle } : null)}
+      onFocus={() => {
+        setRowFocused(true);
+        onFocusResult?.(key);
+        onFocusLiveResult?.(result);
+      }}
+      onBlur={() => {
+        setRowFocused(false);
+        if (!favoriteFocused) {
+          onFocusLiveResult?.(null);
+        }
         favoriteHoldRef.current?.cancel('search-row-blur');
       }}
-      onPressIn={isLive && !nativeTvHold ? () => {
-        holdSuppressedRef.current = false;
-        favoriteHoldRef.current?.pressIn();
-      } : undefined}
-      onPressOut={isLive && !nativeTvHold ? () => favoriteHoldRef.current?.pressOut() : undefined}
+      onPressIn={() => {
+        favoritePressRef.current = false;
+        if (!nativeTvHold) {
+          holdSuppressedRef.current = false;
+          favoriteHoldRef.current?.pressIn();
+        }
+      }}
+      onPressOut={() => {
+        if (!nativeTvHold) favoriteHoldRef.current?.pressOut();
+      }}
       onPress={() => {
-        if (isLive && (holdSuppressedRef.current || consumeLiveFavoriteHoldSuppression?.(result.id))) {
+        if (favoritePressRef.current) {
+          favoritePressRef.current = false;
+          return;
+        }
+        if (holdSuppressedRef.current || consumeLiveFavoriteHoldSuppression?.(result.id)) {
           holdSuppressedRef.current = false;
           return;
         }
         onSelectResult(result);
       }}
-      accessibilityLabel={`Open ${kindLabel(result.type)} ${result.title}`}
-      trailing={
-        <>
-          {isLive ? (
-            <MaterialCommunityIcons
-              name={isFavorite ? 'star' : 'star-outline'}
-              size={16}
-              color={isFavorite ? novaTheme.colors.accentHover : novaTheme.colors.textMuted}
-            />
-          ) : null}
-          <MaterialCommunityIcons name="chevron-right" size={18} color={novaTheme.colors.textMuted} />
-        </>
-      }
-    />
+      style={[styles.resultRow, focused && styles.resultRowFocused]}>
+      {result.logoUrl ? (
+        <Image source={{ uri: result.logoUrl }} style={styles.liveLogo} contentFit="contain" />
+      ) : null}
+      <Text style={[styles.liveMeta, focused && styles.liveMetaFocused]} numberOfLines={1}>
+        {liveMeta(result)}
+      </Text>
+      <View style={styles.liveCopy}>
+        <Text style={[styles.liveTitle, focused && styles.liveTitleFocused]} numberOfLines={1}>
+          {displayStreamTitle(result.title)}
+        </Text>
+        <Text style={[styles.liveSubtitle, focused && styles.liveSubtitleFocused]} numberOfLines={1}>
+          {liveSubtitle(result)}
+        </Text>
+      </View>
+      <Pressable
+        ref={(instance) => {
+          favoriteRef.current = instance;
+          const handle = instance ? findNodeHandle(instance) ?? undefined : undefined;
+          setFavoriteHandle((current) => (current === handle ? current : handle));
+        }}
+        focusable
+        accessible
+        accessibilityRole="button"
+        accessibilityLabel={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+        {...(rowHandle ? { nextFocusLeft: rowHandle } : null)}
+        onFocus={() => {
+          setFavoriteFocused(true);
+          onFocusResult?.(key);
+          // The native long-press controller belongs to the row action. Disable
+          // it while the dedicated heart has focus so SELECT cannot toggle twice.
+          onFocusLiveResult?.(null);
+        }}
+        onBlur={() => {
+          setFavoriteFocused(false);
+          onFocusLiveResult?.(null);
+        }}
+        onPressIn={(event) => {
+          event.stopPropagation();
+          favoritePressRef.current = true;
+        }}
+        onPressOut={(event) => event.stopPropagation()}
+        onPress={(event) => {
+          event.stopPropagation();
+          activateFavorite();
+        }}
+        style={[styles.favoriteAction, favoriteFocused && styles.favoriteActionFocused]}>
+        <MaterialCommunityIcons
+          name={isFavorite ? 'heart' : 'heart-outline'}
+          size={16}
+          color={favoriteFocused || focused ? novaTheme.colors.textPrimary : isFavorite ? novaTheme.colors.accentHover : novaTheme.colors.textMuted}
+        />
+      </Pressable>
+      <MaterialCommunityIcons
+        name="chevron-right"
+        size={18}
+        color={focused ? novaTheme.colors.textPrimary : novaTheme.colors.textMuted}
+      />
+    </Pressable>
   );
 }
 
@@ -418,9 +581,10 @@ function FollowFocusSearchResults({
     <FlatList
       ref={listRef}
       style={styles.followList}
+      contentContainerStyle={styles.followListContent}
       data={results}
       keyExtractor={(item) => searchResultKey(item)}
-      extraData={`${focusedResultKey ?? ''}:${restoreResultKey ?? ''}`}
+      extraData={{ focusedResultKey, restoreResultKey, favoriteContentIds }}
       renderItem={renderItem}
       ListHeaderComponent={header ? <>{header}</> : null}
       getItemLayout={(_item, index) => liveSearchResultItemLayout(index)}
@@ -488,15 +652,91 @@ export function SearchResults(props: SearchResultsProps) {
 
 const styles = StyleSheet.create({
   list: {
+    paddingHorizontal: 6,
+    paddingTop: 4,
     paddingBottom: 8,
   },
   followList: {
     flex: 1,
     minHeight: 0,
   },
+  followListContent: {
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
   liveLogo: {
     width: 28,
     height: 28,
     marginRight: 8,
+  },
+  resultRow: {
+    minHeight: novaTheme.density.rowHeight,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: NOVA_GLASS.subtle.backgroundColor,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    borderWidth: 1,
+    borderRadius: NOVA_GLASS.radius.base,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+    marginBottom: 2,
+  },
+  resultRowFocused: {
+    backgroundColor: 'rgba(80,60,180,0.18)',
+    borderColor: NOVA_GLASS.active.borderColor,
+    borderWidth: 1,
+    borderRadius: NOVA_GLASS.radius.base,
+    shadowColor: '#7356E8',
+    shadowOpacity: 0.18,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 0 },
+    transform: [{ scale: 1.01 }],
+  },
+  liveMeta: {
+    minWidth: 54,
+    color: novaTheme.colors.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  liveMetaFocused: {
+    color: novaTheme.colors.textPrimary,
+  },
+  liveCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 1,
+  },
+  liveTitle: {
+    color: novaTheme.colors.textPrimary,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  liveTitleFocused: {
+    color: novaTheme.colors.textPrimary,
+    fontWeight: '800',
+  },
+  liveSubtitle: {
+    color: novaTheme.colors.textSecondary,
+    fontSize: 12,
+  },
+  liveSubtitleFocused: {
+    color: novaTheme.colors.textPrimary,
+    fontWeight: '700',
+  },
+  favoriteAction: {
+    width: 30,
+    height: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 10,
+  },
+  favoriteActionFocused: {
+    backgroundColor: 'rgba(80,60,180,0.18)',
+    borderColor: NOVA_GLASS.active.borderColor,
+    borderWidth: 1,
+    borderRadius: 10,
   },
 });

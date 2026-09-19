@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+
+const root = new URL('../', import.meta.url);
+const read = (file) => fs.readFileSync(new URL(file, root), 'utf8');
+const telemetry = read('src/features/diagnostics/livePerformanceTelemetry.ts');
+const screen = read('src/features/live/LiveTvScreen.tsx');
+const epg = read('src/features/live/liveTvChannelEpg.ts');
+const marquee = read('src/features/live/LiveTvMarqueeText.tsx');
+const types = read('src/features/diagnostics/diagnosticTypes.ts');
+
+assert.match(telemetry, /STALL_THRESHOLD_MS = 100/);
+assert.match(telemetry, /MAX_HISTORY = 64/);
+assert.match(telemetry, /js_thread_stall/);
+assert.match(telemetry, /isDiagnosticsEnabled\(\) !== false/);
+assert.match(telemetry, /shouldLogEveryEvent/);
+assert.match(telemetry, /cold_start_summary/);
+assert.match(telemetry, /live_performance_summary/);
+assert.match(telemetry, /live_epg_perf_summary/);
+assert.match(telemetry, /live_marquee_perf_summary/);
+assert.match(telemetry, /recordDiagnostic\(/);
+assert.match(types, /live_performance/);
+assert.match(epg, /epg_duplicate_request/);
+assert.match(epg, /epg_normalize/);
+assert.match(epg, /epg_commit/);
+assert.match(marquee, /marquee_start/);
+assert.match(marquee, /marquee_stop/);
+assert.match(marquee, /marquee_unmount/);
+assert.match(screen, /tune_requested/);
+assert.match(screen, /tune_first_frame/);
+assert.match(screen, /recordLiveRenderChurn\('LiveTvScreen'\)/);
+assert.match(read('src/features/live/useLiveTvScreenModel.ts'), /live_screen_ready_summary/);
+console.log('live-performance-telemetry: all assertions passed');

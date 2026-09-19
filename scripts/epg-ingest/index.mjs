@@ -18,6 +18,21 @@ const MIN_US_FUTURE_PROGRAMME_PERCENT = 60;
 const MAX_UNRESOLVED_CONFLICTS = 0;
 const FRESH_PROVIDER_CATALOG_SNAPSHOT_MS = 30 * 60 * 1000;
 const MAX_PROVIDER_CATALOG_FALLBACK_AGE_MS = 24 * 60 * 60 * 1000;
+const SOURCE_OPERATIONAL_FAILURE_CODES = new Set([
+  'unsafe_url',
+  'decrypt_failed',
+  'invalid_provider_credentials',
+  'provider_unreachable',
+  'feed_unavailable',
+  'http_404',
+  'http_5xx',
+  'gzip_failed',
+  'xmltv_parse_failed',
+  'empty_feed',
+  'mapping_failed',
+  'persist_failed',
+  'promote_failed',
+]);
 const headers = { apikey: SERVICE_ROLE_KEY, authorization: `Bearer ${SERVICE_ROLE_KEY}`, 'content-type': 'application/json' };
 
 class DatabaseFailure extends Error {
@@ -110,6 +125,15 @@ function logWorkerFailure(error) {
   }
 }
 
+function workerFailureCode(error) {
+  return error instanceof Error && /^[a-z0-9_]+$/.test(error.message) ? error.message : 'worker_failure';
+}
+
+function isSourceOperationalFailure(error) {
+  if (error instanceof DatabaseFailure || error instanceof WorkerValidationFailure) return false;
+  return SOURCE_OPERATIONAL_FAILURE_CODES.has(workerFailureCode(error));
+}
+
 function required(name) {
   const value = process.env[name];
   if (!value) throw new Error(`missing_${name.toLowerCase()}`);
@@ -139,6 +163,7 @@ function safeStageMessage(error, stage) {
   if (stage === 'fetch_epg_feed') return 'feed_unavailable';
   if (stage === 'gunzip_epg_feed') return 'gzip_failed';
   if (stage === 'parse_epg_feed') return 'xmltv_parse_failed';
+  if (stage === 'build_mappings') return 'mapping_failed';
   if (stage === 'persist_cache') return 'persist_failed';
   if (stage === 'promote_generation') return 'promote_failed';
   return 'worker_failure';
@@ -998,19 +1023,22 @@ async function main() {
   const providerId = providerInput ? requireUuid(providerInput, 'provider_filter', 'provider_id') : '';
   const sourceId = sourceInput ? requireUuid(sourceInput, 'source_filter', 'source_id') : '';
   const targetedRun = Boolean(providerId && sourceId);
-  let failed = false;
+  let globalFailure = false;
+  const summary = { completed: 0, failed: 0, deferred: 0, total: 0, failedSources: [] };
   if (targetedRun) {
     const targetRequest = await prepareTargetedRefresh(providerId, sourceId);
     if (!targetRequest) return;
   } else if (!providerId && !sourceId) {
-    const sources = await db('managed_provider_epg_sources?enabled=eq.true&select=id,managed_provider_id', {}, 'load_sources');
-    for (const source of sources ?? []) await enqueueScheduledRefresh(source).catch((error) => { logDatabaseFailure(error); logWorkerFailure(error); failed = true; });
+    const sources = await db('managed_provider_epg_sources?enabled=eq.true&managed_providers.status=eq.active&select=id,managed_provider_id,managed_providers!inner(status)', {}, 'load_sources');
+    for (const source of sources ?? []) await enqueueScheduledRefresh(source).catch((error) => { logDatabaseFailure(error); logWorkerFailure(error); globalFailure = true; });
   }
   const query = ['status=eq.pending', 'order=requested_at.asc', 'limit=20', providerId && `managed_provider_id=eq.${encodeURIComponent(providerId)}`, sourceId && `source_id=eq.${encodeURIComponent(sourceId)}`].filter(Boolean).join('&');
   const requests = await db(`managed_provider_epg_refresh_requests?select=id,managed_provider_id,source_id,refresh_job_id,status&${query}`, {}, 'load_pending_requests');
+  summary.total = requests?.length ?? 0;
   if (!requests?.length) {
     if (!providerId && !sourceId) process.stdout.write('No pending EPG refresh requests.\n');
-    if (failed) process.exitCode = 1;
+    if (!targetedRun) process.stdout.write(`EPG scheduled refresh summary:\ncompleted=${summary.completed}\nfailed=${summary.failed}\ndeferred=${summary.deferred}\ntotal=${summary.total}\n`);
+    if (globalFailure) process.exitCode = 1;
     return;
   }
   for (const request of requests ?? []) {
@@ -1018,13 +1046,14 @@ async function main() {
     requireUuid(request.source_id, 'claim_refresh_request', 'source_id');
     requireUuid(request.managed_provider_id, 'claim_refresh_request', 'provider_id');
     const claimed = await db(`managed_provider_epg_refresh_requests?id=eq.${encodeURIComponent(requestId)}&status=eq.pending`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify({ status: 'running', started_at: new Date().toISOString() }) }, 'claim_refresh_request');
-    if (!claimed?.length) continue;
+    if (!claimed?.length) { summary.deferred += 1; continue; }
     let ensuredJob = null;
     try {
       const source = { id: requireUuid(request.source_id, 'claim_refresh_request', 'source_id'), managed_provider_id: requireUuid(request.managed_provider_id, 'claim_refresh_request', 'provider_id') };
       ensuredJob = await ensureRefreshJob(source, requestId);
       if (ensuredJob.skipped) {
         await patch('managed_provider_epg_refresh_requests', requestId, { status: 'pending', started_at: null }, '', 'defer_active_refresh_request');
+        summary.deferred += 1;
         process.stdout.write('EPG refresh already active; request remains pending.\n');
         continue;
       }
@@ -1033,27 +1062,37 @@ async function main() {
       const result = await processRequest(request);
       await patch('managed_provider_epg_refresh_jobs', jobId, { status: 'complete', stage: null, progress_percent: 100, completed_at: new Date().toISOString(), updated_at: new Date().toISOString() }, '', 'complete_refresh_job');
       await patch('managed_provider_epg_refresh_requests', requestId, { status: 'complete', completed_at: new Date().toISOString() }, '', 'complete_request');
+      summary.completed += 1;
       process.stdout.write(`EPG refresh completed: channels=${result.channels} programmes=${result.programmes} mapped=${result.mapped}\n`);
     } catch (error) {
-      failed = true;
+      const code = workerFailureCode(error);
+      const sourceFailure = isSourceOperationalFailure(error);
+      summary.failed += 1;
+      summary.failedSources.push({ sourceId: request.source_id, code });
+      if (targetedRun || !sourceFailure) globalFailure = true;
       logDatabaseFailure(error);
       logWorkerFailure(error);
-      const code = error instanceof Error && /^[a-z0-9_]+$/.test(error.message) ? error.message : 'worker_failure';
       // Use the job actually ensured this run; request.refresh_job_id is stale (null) until ensureRefreshJob links it in the DB.
       const failJobId = (ensuredJob && !ensuredJob.skipped ? ensuredJob.jobId : null) ?? request.refresh_job_id;
-      if (failJobId && UUID_PATTERN.test(failJobId)) await patch('managed_provider_epg_refresh_jobs', failJobId, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }, '', 'fail_refresh_job').catch((patchError) => { logDatabaseFailure(patchError); });
-      if (UUID_PATTERN.test(requestId)) await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() }, '', 'fail_request').catch((patchError) => { logDatabaseFailure(patchError); });
+      if (failJobId && UUID_PATTERN.test(failJobId)) await patch('managed_provider_epg_refresh_jobs', failJobId, { status: 'failed', stage: null, failure_code: code, failure_message: code, updated_at: new Date().toISOString() }, '', 'fail_refresh_job').catch((patchError) => { logDatabaseFailure(patchError); globalFailure = true; });
+      if (UUID_PATTERN.test(requestId)) await patch('managed_provider_epg_refresh_requests', requestId, { status: 'failed', failure_code: code, failure_message: code, completed_at: new Date().toISOString() }, '', 'fail_request').catch((patchError) => { logDatabaseFailure(patchError); globalFailure = true; });
       process.stderr.write(`EPG refresh failed: ${code}\n`);
     }
   }
+  const failed = globalFailure || summary.failed > 0;
   if (targetedRun) {
     if (failed) process.exitCode = 1;
     return;
   }
-  if (failed) process.exitCode = 1;
+  process.stdout.write(`EPG scheduled refresh summary:\ncompleted=${summary.completed}\nfailed=${summary.failed}\ndeferred=${summary.deferred}\ntotal=${summary.total}\n`);
+  if (summary.failedSources.length) {
+    process.stdout.write('Failed sources:\n');
+    for (const failure of summary.failedSources) process.stdout.write(`${failure.sourceId} ${failure.code}\n`);
+  }
+  if (globalFailure) process.exitCode = 1;
 }
 
-export { assessGuideReadiness, buildMappingAudit, dedupeXmltvChannels, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel };
+export { assessGuideReadiness, buildMappingAudit, dedupeXmltvChannels, isSourceOperationalFailure, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel };
 
 if (process.env.EPG_INGEST_TEST_IMPORT !== '1') {
   main().catch((error) => {

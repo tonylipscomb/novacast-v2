@@ -153,6 +153,7 @@ export const SeriesPosterCard = memo(function SeriesPosterCard({
           isFocused && styles.posterShellFocused,
           { transform: [{ scale: focusScale }] },
         ]}>
+          {isFocused ? <View pointerEvents="none" style={styles.posterFocusHalo} /> : null}
           <View style={[
             styles.poster,
             showPosterArt ? styles.posterWithArt : { backgroundColor: posterColors.background },

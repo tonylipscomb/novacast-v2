@@ -27,6 +27,7 @@ export type LiveTvChannelRowProps = {
   preferFocus: boolean;
   trapFocusUp: boolean;
   trapFocusDown: boolean;
+  trapFocusRight: boolean;
   nextFocusLeft?: number;
   nextFocusRight?: number;
   onFocus: (channelId: string) => void;
@@ -52,6 +53,7 @@ function channelRowPropsAreEqual(previous: LiveTvChannelRowProps, next: LiveTvCh
     previous.preferFocus === next.preferFocus &&
     previous.trapFocusUp === next.trapFocusUp &&
     previous.trapFocusDown === next.trapFocusDown &&
+    previous.trapFocusRight === next.trapFocusRight &&
     previous.nextFocusLeft === next.nextFocusLeft &&
     previous.nextFocusRight === next.nextFocusRight &&
     previous.onFocus === next.onFocus &&
@@ -77,6 +79,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   preferFocus,
   trapFocusUp,
   trapFocusDown,
+  trapFocusRight,
   nextFocusLeft,
   nextFocusRight,
   onFocus,
@@ -131,13 +134,10 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
       hasTVPreferredFocus={preferFocus}
       {...(trapFocusUp && focusTrapHandle ? { nextFocusUp: focusTrapHandle } : null)}
       {...(trapFocusDown && focusTrapHandle ? { nextFocusDown: focusTrapHandle } : null)}
+      {...(trapFocusRight && focusTrapHandle ? { nextFocusRight: focusTrapHandle } : null)}
       {...(Platform.OS === 'android' && nextFocusLeft ? { nextFocusLeft } : null)}
-      {...(Platform.OS === 'android' && nextFocusRight ? { nextFocusRight } : null)}
+      {...(Platform.OS === 'android' && !trapFocusRight && nextFocusRight ? { nextFocusRight } : null)}
       onFocus={() => {
-        console.log('[NOVACAST_PLAYER_FOCUS]', 'channel-row-focus', {
-          targetType: 'channel',
-          targetId: data.id,
-        });
         isFocusedRef.current = true;
         setIsFocused(true);
         recordLiveTvChannelFocus();
@@ -145,10 +145,6 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
         onFocus(data.id);
       }}
       onBlur={() => {
-        console.log('[NOVACAST_PLAYER_FOCUS]', 'channel-row-blur', {
-          targetType: 'channel',
-          targetId: data.id,
-        });
         isFocusedRef.current = false;
         focusedActionRef.current = null;
         setFocusedAction(null);

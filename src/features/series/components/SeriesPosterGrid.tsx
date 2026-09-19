@@ -934,7 +934,7 @@ function createStyles(theme: NovaTheme) {
     loadingOverlay: {
       ...StyleSheet.absoluteFillObject,
       alignItems: 'center',
-      justifyContent: 'flex-start',
+      justifyContent: 'center',
       backgroundColor: 'transparent',
       borderWidth: 0,
       zIndex: 3,
@@ -944,10 +944,8 @@ function createStyles(theme: NovaTheme) {
       backgroundColor: 'rgba(0, 0, 0, 0.28)',
     },
     categoryLoaderContent: {
-      position: 'absolute',
-      top: '42%',
-      left: 12,
-      right: 12,
+      position: 'relative',
+      width: '100%',
       alignItems: 'center',
       justifyContent: 'center',
       gap: 24,

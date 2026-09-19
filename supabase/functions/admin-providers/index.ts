@@ -11,6 +11,7 @@ import {
 } from '../_shared/providerHealth.ts';
 import { runProviderHealthCheck } from '../_shared/providerHealthRunner.ts';
 import { fetchLiveChannelsForEpgMapping } from '../_shared/providerHealthRunner.ts';
+import { autoProvisionXtreamEpg } from '../_shared/autoProvisionProviderEpg.ts';
 import { canonicalizeEpgName, normalizeEpgMode, probeXmltvFeed, safeEpgUrl, testXmltvFeed, traceXmltvFeed, type EpgLiveChannel, type EpgMode, type XmltvStreamSink } from '../_shared/xmltvEpg.ts';
 
 const PROVIDER_SELECT =
@@ -23,6 +24,7 @@ const EPG_REFRESH_BUCKET = 'epg-refresh-artifacts';
 const EPG_REFRESH_PROGRAMME_CHUNK_SIZE = 5_000;
 const EPG_REFRESH_RETENTION_MS = 24 * 60 * 60 * 1000;
 const ACTIVE_REFRESH_STATUSES = ['queued', 'fetching', 'processing', 'finalizing'];
+const PROVIDER_VALIDATION_LEASE_MS = 3 * 60 * 1000;
 // Bounded leases so a request can never stay pending/running forever.
 const EPG_REFRESH_REQUEST_START_LEASE_MS = 10 * 60 * 1000; // orphan pending with no linked job
 const EPG_REFRESH_JOB_HEARTBEAT_MS = 30 * 60 * 1000; // active job whose updated_at stopped advancing
@@ -39,6 +41,7 @@ type ManagedProviderRow = {
   credentials_ciphertext?: string;
   credentials_iv?: string;
   last_successful_test_at?: string | null;
+  updated_at?: string | null;
   epg_mode?: EpgMode;
   custom_epg_url_ciphertext?: string | null;
   custom_epg_url_iv?: string | null;
@@ -838,6 +841,33 @@ function canActivateRow(row: ManagedProviderRow) {
   });
 }
 
+async function acquireProviderValidationLease(
+  client: Awaited<ReturnType<typeof requireAdmin>>['client'],
+  row: ManagedProviderRow,
+  id: string,
+  testingAt: string,
+) {
+  const now = Date.now();
+  const updatedAtMs = Date.parse(String(row.updated_at ?? ''));
+  if (row.health_status === 'testing' && Number.isFinite(updatedAtMs) && now - updatedAtMs < PROVIDER_VALIDATION_LEASE_MS) {
+    throw new Error('validation_in_progress');
+  }
+
+  let query = client
+    .from('managed_providers')
+    .update({ health_status: 'testing', updated_at: testingAt })
+    .eq('id', id);
+  if (row.health_status === 'testing') {
+    query = query.eq('health_status', 'testing').lt('updated_at', new Date(now - PROVIDER_VALIDATION_LEASE_MS).toISOString());
+  } else {
+    query = query.eq('health_status', row.health_status ?? 'unvalidated');
+    query = row.updated_at ? query.eq('updated_at', row.updated_at) : query.is('updated_at', null);
+  }
+  const { data, error } = await query.select('id').maybeSingle();
+  if (error) throw new Error('admin_update_failed');
+  if (!data) throw new Error('validation_in_progress');
+}
+
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return adminOptionsResponse(request);
 
@@ -969,21 +999,33 @@ Deno.serve(async (request) => {
       if (!id) throw new Error('invalid_request');
       const row = await loadProvider(client, id, true);
       const isGoldManaged = await hasGoldMetadata(client, id);
-      if (row.health_status === 'testing') throw new Error('validation_in_progress');
       const credentials = await decryptXtream(row);
       const testingAt = new Date().toISOString();
-      const { error: testingError } = await client
-        .from('managed_providers')
-        .update({ health_status: 'testing', updated_at: testingAt })
-        .eq('id', id);
-      if (testingError) throw new Error('admin_update_failed');
+      await acquireProviderValidationLease(client, row, id, testingAt);
 
       try {
         const summary = await runProviderHealthCheck(credentials, { isGoldManaged });
         const patch = healthColumns(summary, credentials.username, credentials.password, row.last_successful_test_at ?? null);
-        const { error } = await client.from('managed_providers').update(patch).eq('id', id);
+        const { data: completed, error } = await client
+          .from('managed_providers')
+          .update(patch)
+          .eq('id', id)
+          .eq('health_status', 'testing')
+          .eq('updated_at', testingAt)
+          .select('id')
+          .maybeSingle();
         if (error) throw new Error('admin_update_failed');
-        return adminJsonResponse(request, { ok: true, summary: patch.last_health_summary, providerId: id });
+        if (!completed) throw new Error('validation_in_progress');
+        const autoEpg = summary.overall === 'healthy' || summary.overall === 'degraded'
+          ? await autoProvisionXtreamEpg({
+            client,
+            providerId: id,
+            displayName: row.display_name,
+            credentials,
+            enqueueRefresh: (source) => enqueueEpgRefresh(client, source),
+          })
+          : null;
+        return adminJsonResponse(request, { ok: true, summary: patch.last_health_summary, providerId: id, autoEpg });
       } catch (error) {
         const failedAt = new Date().toISOString();
         await client
@@ -1004,7 +1046,9 @@ Deno.serve(async (request) => {
             },
             updated_at: failedAt,
           })
-          .eq('id', id);
+          .eq('id', id)
+          .eq('health_status', 'testing')
+          .eq('updated_at', testingAt);
         throw error;
       }
     }
@@ -1171,10 +1215,26 @@ Deno.serve(async (request) => {
               409,
             );
           }
-          return adminJsonResponse(request, { provider: toPublicProvider({ ...(data as Record<string, unknown>), ...patch, status: 'active' }), summary: patch.last_health_summary });
+          const autoEpg = await autoProvisionXtreamEpg({
+            client,
+            providerId: data.id,
+            displayName,
+            credentials,
+            enqueueRefresh: (source) => enqueueEpgRefresh(client, source),
+          });
+          return adminJsonResponse(request, { provider: toPublicProvider({ ...(data as Record<string, unknown>), ...patch, status: 'active' }), summary: patch.last_health_summary, autoEpg });
         }
         await client.from('managed_providers').update(patch).eq('id', data.id);
-        return adminJsonResponse(request, { provider: toPublicProvider({ ...(data as Record<string, unknown>), ...patch }), summary: patch.last_health_summary });
+        const autoEpg = summary.overall === 'healthy' || summary.overall === 'degraded'
+          ? await autoProvisionXtreamEpg({
+            client,
+            providerId: data.id,
+            displayName,
+            credentials,
+            enqueueRefresh: (source) => enqueueEpgRefresh(client, source),
+          })
+          : null;
+        return adminJsonResponse(request, { provider: toPublicProvider({ ...(data as Record<string, unknown>), ...patch }), summary: patch.last_health_summary, autoEpg });
       } catch (error) {
         const failedAt = new Date().toISOString();
         await client

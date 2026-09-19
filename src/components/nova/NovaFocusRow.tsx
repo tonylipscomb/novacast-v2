@@ -12,6 +12,7 @@ type NovaFocusRowProps = {
   subtitle?: string;
   meta?: string;
   focused?: boolean;
+  focusChrome?: 'default' | 'none';
   emphasized?: boolean;
   onPress?: () => void;
   onPressIn?: () => void;
@@ -33,6 +34,7 @@ export function NovaFocusRow({
   subtitle,
   meta,
   focused = false,
+  focusChrome = 'default',
   onPress,
   onPressIn,
   onPressOut,
@@ -70,7 +72,12 @@ export function NovaFocusRow({
       {...(nextFocusUp ? { nextFocusUp } : null)}
       {...(nextFocusDown ? { nextFocusDown } : null)}
       {...(nextFocusLeft ? { nextFocusLeft } : null)}
-      style={[styles.row, novaTvFocus.base, showFocused && novaTvFocus.active, style]}>
+      style={[
+        styles.row,
+        focusChrome === 'default' && novaTvFocus.base,
+        focusChrome === 'default' && showFocused && novaTvFocus.active,
+        style,
+      ]}>
       {leading}
       {meta ? (
         <Text style={[styles.meta, showFocused && styles.metaFocused]} numberOfLines={1}>

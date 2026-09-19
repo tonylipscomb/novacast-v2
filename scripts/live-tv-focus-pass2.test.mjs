@@ -29,6 +29,7 @@ import {
 } from '../src/features/live/liveTvPreviewScheduling.ts';
 import {
   shouldScrollToKeepFocusVisible,
+  resolveTrustedVisibleRange,
   visibleRangeFromViewableItems,
 } from '../src/features/live/liveTvFocusScroll.ts';
 import {
@@ -185,6 +186,61 @@ test('channel focus does not issue scrollToIndex when already visible', () => {
     }),
     false,
   );
+});
+
+test('native channel focus owns ordinary vertical scrolling regardless of viewability', () => {
+  assert.doesNotMatch(channelList, /scrollToFocusedIndex/);
+  assert.match(liveScreen, /recordLiveNavigationMetric\('channel-focus'\)/);
+});
+
+test('channel list keeps a bounded TV render buffer without clipping rows', () => {
+  assert.match(channelList, /removeClippedSubviews=\{false\}/);
+  assert.match(channelList, /windowSize=\{11\}/);
+  assert.match(channelList, /maxToRenderPerBatch=\{10\}/);
+  assert.match(channelList, /updateCellsBatchingPeriod=\{40\}/);
+  assert.match(channelList, /initialNumToRender=\{16\}/);
+});
+
+test('fullscreen restore focuses mounted rows directly and scrolls only for an unmounted target', () => {
+  const screen = read('src/features/live/LiveTvScreen.tsx');
+  assert.match(screen, /const targetNativeRef = targetChannelId \? channelRowRefs\.current\.get\(targetChannelId\) : null/);
+  assert.match(screen, /if \(!targetNativeRef && targetIndex >= 0\)/);
+  assert.match(screen, /focus-restore-direct-native-ref/);
+});
+
+test('transient empty viewability reuses a recent valid range', () => {
+  const trusted = resolveTrustedVisibleRange({
+    current: null,
+    currentAtMs: 1_400,
+    lastValid: { first: 4, last: 12 },
+    lastValidAtMs: 1_000,
+    nowMs: 1_400,
+  });
+  assert.deepEqual(trusted, { first: 4, last: 12 });
+  assert.equal(shouldScrollToKeepFocusVisible(6, trusted, 30), false);
+});
+
+test('uncertain viewability does not speculate a focus scroll', () => {
+  const trusted = resolveTrustedVisibleRange({
+    current: null,
+    currentAtMs: 2_000,
+    lastValid: null,
+    lastValidAtMs: 0,
+    nowMs: 2_000,
+  });
+  assert.equal(trusted, null);
+  assert.equal(shouldScrollToKeepFocusVisible(20, trusted, 30), false);
+});
+
+test('a later valid range permits genuine outside-window scrolling', () => {
+  const trusted = resolveTrustedVisibleRange({
+    current: { first: 0, last: 5 },
+    currentAtMs: 3_000,
+    lastValid: { first: 0, last: 5 },
+    lastValidAtMs: 3_000,
+    nowMs: 3_000,
+  });
+  assert.equal(shouldScrollToKeepFocusVisible(8, trusted, 30), true);
 });
 
 test('an out-of-range restoration may issue one bounded scroll', () => {

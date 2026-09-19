@@ -200,7 +200,9 @@ async function resolveSummariesFromCachedIds(
 export function createSmartMovieDataSource(base: MovieDataSource, providerId: string): MovieDataSource {
   const usesSqliteReads = base.sourceKind === 'sqlite';
   async function buildSmartCategories(providerCategories: MovieCategory[]) {
-    const sortedProviderCategories = sortProviderCategoriesUsFirst(providerCategories, 'movie');
+    const allMovies = providerCategories.filter((category) => category.id === 'all');
+    const realCategories = providerCategories.filter((category) => category.id !== 'all');
+    const sortedProviderCategories = [allMovies, sortProviderCategoriesUsFirst(realCategories, 'movie')].flat();
     return appendFallbackCategory(
       sortedProviderCategories.map((category) => ({
         ...category,
@@ -312,7 +314,11 @@ export function createSmartMovieDataSource(base: MovieDataSource, providerId: st
             }),
         );
         // SQLite path: provider-only list — no smart-wrapper substitute categories.
-        return providerCategories;
+        // It still applies deterministic category regional tiers;
+        // keep All Movies anchored first.
+        const allMovies = providerCategories.filter((category) => category.id === 'all');
+        const realCategories = providerCategories.filter((category) => category.id !== 'all');
+        return [...allMovies, ...sortProviderCategoriesUsFirst(realCategories, 'movie')];
       }
 
       const wrappedCategories = await buildSmartCategories(providerCategories);

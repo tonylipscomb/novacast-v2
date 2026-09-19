@@ -5,6 +5,7 @@
 
 import { StyleSheet } from 'react-native';
 
+import { NOVA_OVERLAY_SHELL } from '@/components/nova/NovaOverlayShell';
 import type { NovaTheme } from '@/theme/tokens';
 
 export function createMoviePosterFocusChrome(theme: NovaTheme) {
@@ -23,6 +24,22 @@ export function createMoviePosterFocusChrome(theme: NovaTheme) {
     posterShellFocused: {
       transform: [{ scale: 1.025 }],
     },
+    posterFocusHalo: {
+      position: 'absolute',
+      top: -3,
+      right: -3,
+      bottom: -3,
+      left: -3,
+      borderRadius: 5,
+      borderWidth: 1,
+      borderColor: 'rgba(130,145,220,0.20)',
+      backgroundColor: 'transparent',
+      shadowColor: NOVA_OVERLAY_SHELL.shadowColor,
+      shadowOpacity: 0.12,
+      shadowRadius: 4,
+      shadowOffset: { width: 0, height: 0 },
+      elevation: 2,
+    },
     poster: {
       aspectRatio: 2 / 3,
       borderRadius: 2,
@@ -32,9 +49,9 @@ export function createMoviePosterFocusChrome(theme: NovaTheme) {
       padding: 10,
     },
     posterFocused: {
-      borderColor: light ? theme.colors.focusRing : '#8FE9FF',
-      borderWidth: 4,
-      backgroundColor: 'rgba(7,15,24,0.96)',
+      borderColor: light ? theme.colors.focusRing : 'rgba(130,145,220,0.58)',
+      borderWidth: 1,
+      backgroundColor: 'transparent',
     },
     posterWithArt: {
       padding: 0,
@@ -50,9 +67,9 @@ export function createMoviePosterFocusChrome(theme: NovaTheme) {
       fontWeight: '700',
     },
     titleFocused: {
-      color: '#BFF4FF',
+      color: theme.colors.textPrimary,
       fontWeight: '900',
-      textShadowColor: 'rgba(143,233,255,0.65)',
+      textShadowColor: 'rgba(190,175,255,0.45)',
       textShadowOffset: { width: 0, height: 0 },
       textShadowRadius: 4,
     },

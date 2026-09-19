@@ -34,20 +34,25 @@ test('category EPG warmup uses bounded batches and one merge callback', () => {
   assert.match(epg, /offset \+= 32/);
   assert.match(epg, /onBatchEnriched/);
   assert.match(model, /applyEpgBatch/);
-  assert.match(model, /setChannels\(\(current\) =>/);
+  assert.match(model, /setEpgByChannelId\(\(current\) =>/);
+  assert.match(model, /epgRevision/);
   assert.doesNotMatch(model, /onChannelEnriched: \(enriched\) =>/);
   assert.match(epg, /inFlight\.set\(channelId, request\)/);
-  assert.match(model, /1_500/);
+  assert.match(model, /runAfterLiveTvFocusIdle/);
+  assert.doesNotMatch(model, /deferStart = true/);
   assert.match(epg, /generation !== epgGeneration/);
 });
 
-test('EPG warmup cannot gate playback and temporary release audits are absent', () => {
+test('EPG warmup cannot gate playback and title diagnostics stay bounded', () => {
   const model = read('src/features/live/useLiveTvScreenModel.ts');
   const client = read('src/features/guide/managedEpgClient.ts');
   const live = read('src/features/live/liveTvChannelEpg.ts');
   assert.doesNotMatch(model, /await[^\n]*resolvePlayback/);
   assert.doesNotMatch(client, /NovaCast Managed EPG Release Audit/);
-  assert.doesNotMatch(live, /NovaCast Live EPG Classification Audit/);
+  assert.match(live, /NovaCast Live EPG Classification Audit/);
+  assert.match(live, /programSamples/);
+  assert.doesNotMatch(live, /streamUrl/);
+  assert.doesNotMatch(live, /Authorization|password|token|username/i);
 });
 
 test('Live presentation keeps category rows text-only and marquee behavior focus-scoped', () => {
@@ -64,6 +69,16 @@ test('Live presentation keeps category rows text-only and marquee behavior focus
   assert.match(marquee, /shouldAnimateLiveTvMarquee/);
   assert.match(marquee, /measuredText/);
   assert.match(marquee, /useNativeDriver: true/);
+  assert.match(marquee, /let activeMarqueeStop/);
+  assert.match(marquee, /activeMarqueeStop\?\.\(\)/);
+  assert.match(marquee, /Animated\.delay\(700\)/);
+  assert.match(marquee, /duration: 350/);
+  assert.match(marquee, /ellipsizeMode=\{focused \? 'clip' : 'tail'\}/);
+  assert.match(marquee, /\{focused \? \(/);
+  assert.match(marquee, /style=\{\[style, styles\.measurement\]\}/);
+  assert.match(marquee, /fullTextWidth > 0 \? \{ width: fullTextWidth \}/);
+  assert.match(marquee, /measuredText === text/);
+  assert.doesNotMatch(marquee, /Animated\.Text[\s\S]{0,500}onTextLayout/);
 });
 
 test('unfocused channel rows do not mount marquee measurement work', () => {

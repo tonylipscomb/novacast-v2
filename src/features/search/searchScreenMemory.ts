@@ -13,10 +13,19 @@ export function canRestoreSearchResultSnapshot(snapshot: SearchResultSnapshot | 
   return Boolean(snapshot && snapshot.scope === scope && snapshot.query === query);
 }
 
+export function resolveSearchFocusRestoreKey(preferredKey: string | null | undefined, visibleKeys: readonly string[]) {
+  if (preferredKey && visibleKeys.includes(preferredKey)) {
+    return { key: preferredKey, usedFallback: false } as const;
+  }
+
+  return { key: visibleKeys[0] ?? null, usedFallback: Boolean(visibleKeys[0]) } as const;
+}
+
 export type SearchScreenMemory = {
   query: string;
   scope: SearchScope;
   focusedResultKey: string | null;
+  pendingFocusRestoreKey: string | null;
   resultSnapshot: SearchResultSnapshot | null;
 };
 
@@ -25,6 +34,7 @@ const DEFAULT_MEMORY: SearchScreenMemory = {
   // search-s2-default-scope
   scope: 'movie',
   focusedResultKey: null,
+  pendingFocusRestoreKey: null,
   resultSnapshot: null,
 };
 

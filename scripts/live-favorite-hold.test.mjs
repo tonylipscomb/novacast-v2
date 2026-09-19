@@ -88,4 +88,21 @@ for (const keyCode of [23, 66, 160]) {
   assert.equal(test.favorites, 0);
 }
 
+{
+  const test = harness();
+  // Native event timing must win over delayed JS delivery for a short tap.
+  test.detector.handleEvent({ keyCode: 23, eventKeyAction: 0, eventTime: 1000 });
+  test.advance(1000);
+  test.detector.handleEvent({ keyCode: 23, eventKeyAction: 1, eventTime: 1200 });
+  assert.equal(test.favorites, 0);
+}
+
+{
+  const test = harness();
+  test.detector.handleEvent({ keyCode: 23, eventKeyAction: 0, eventTime: 1000 });
+  test.advance(1000);
+  test.detector.handleEvent({ keyCode: 23, eventKeyAction: 1, eventTime: 1500 });
+  assert.equal(test.favorites, 1);
+}
+
 console.log('live favorite hold test passed');

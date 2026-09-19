@@ -96,6 +96,27 @@ export function MovieCategoryRail({
     applyMoviesBrowseListHostNativeFocus(listRef.current, hostProps.hostFocusable);
   }, [effectiveFocusable, hostProps.hostFocusable]);
 
+  useEffect(() => {
+    if (typeof __DEV__ === 'undefined' || !__DEV__) {
+      return;
+    }
+    const providerCategories = categories.filter(
+      (category) => category.kind === 'provider' && category.id !== 'all',
+    );
+    console.info('[NovaCast Movies Count Audit]', JSON.stringify({
+      phase: 'rail-render',
+      providerCategoryCount: providerCategories.length,
+      sample: providerCategories.slice(0, 5).map((category) => ({
+        categoryId: category.id,
+        categoryName: category.name,
+        hydratedCount: category.count,
+        countKnown: category.countKnown === true,
+        mapLookupHit: category.countKnown === true,
+        renderedCount: formatMovieCategoryCount(category.count, category.countKnown),
+      })),
+    }));
+  }, [categories]);
+
   return (
     <View style={styles.panel} collapsable={false}>
       {discoverStatusMessage ? (

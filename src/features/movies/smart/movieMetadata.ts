@@ -31,17 +31,13 @@ export function parseRatingNumber(rating?: string | number) {
   return 0;
 }
 
-export function parseYearFromTitle(title: string) {
+export function parseYearFromTitle(title: string, now = new Date()) {
   const match = title.match(/\((19|20)\d{2}\)/);
   if (match) {
-    return Number.parseInt(match[0].slice(1, 5), 10);
+    const year = Number.parseInt(match[0].slice(1, 5), 10);
+    const currentYear = now.getFullYear();
+    return year >= 1888 && year <= currentYear + 2 ? year : undefined;
   }
-
-  const trailing = title.match(/\b(19|20)\d{2}\b/);
-  if (trailing) {
-    return Number.parseInt(trailing[0], 10);
-  }
-
   return undefined;
 }
 
@@ -55,14 +51,14 @@ export function parseYearFromStreamFields(
     }
 
     if (typeof candidate === 'string' && candidate.trim()) {
-      const parsedDate = Date.parse(candidate);
-      if (Number.isFinite(parsedDate)) {
-        return new Date(parsedDate).getFullYear();
-      }
-
       const yearMatch = candidate.match(/\b(19|20)\d{2}\b/);
       if (yearMatch) {
         return Number.parseInt(yearMatch[0], 10);
+      }
+
+      const parsedDate = Date.parse(candidate);
+      if (Number.isFinite(parsedDate)) {
+        return new Date(parsedDate).getFullYear();
       }
     }
   }

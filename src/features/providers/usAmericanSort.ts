@@ -141,7 +141,7 @@ export function sortLiveChannelsUsFirst<T extends UsAmericanSortLabel>(items: T[
 export function sortMediaCategoriesUsFirst<T extends UsAmericanSortLabel>(items: T[]): T[] {
   return sortProviderCategoriesByRegion(withContentPolicy(items, 'movie'), {
     contentType: 'movie',
-    alphabetizeWithinGroup: true,
+    alphabetizeWithinGroup: false,
   });
 }
 
@@ -151,6 +151,6 @@ export function sortProviderCategoriesUsFirst<T extends UsAmericanSortLabel>(
 ): T[] {
   return sortProviderCategoriesByRegion(withContentPolicy(items, contentType), {
     contentType,
-    alphabetizeWithinGroup: true,
+    alphabetizeWithinGroup: contentType !== 'movie',
   });
 }

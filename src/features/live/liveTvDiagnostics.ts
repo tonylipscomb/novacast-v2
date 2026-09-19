@@ -1,5 +1,6 @@
 import { isNovaCastTraceLoggingEnabled, novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import { isSyntheticLiveFavoritesCategoryId } from '../providers/liveCategoryIdSafety.ts';
+import { recordLivePerformanceEvent } from '../diagnostics/livePerformanceTelemetry';
 
 export type LiveStartupEvent =
   | 'screen-mounted'
@@ -17,6 +18,77 @@ export type LiveCategoryEvent =
 
 export type LivePerformanceSource = 'cache' | 'sqlite' | 'memory' | 'network' | 'repository' | 'unknown';
 
+type LiveNavigationSummary = {
+  startedAt: number;
+  verticalKeyDownCount: number;
+  channelFocusCount: number;
+  directionChanges: number;
+  maxNativeKeyGapMs: number | null;
+  visibleZeroCount: number;
+  unexpectedRegionTransitionCount: number;
+  nativeRefMissCount: number;
+  restoreCount: number;
+  lastDirection: string | null;
+  lastSummaryAt: number;
+};
+
+const liveNavigationSummary: LiveNavigationSummary = {
+  startedAt: Date.now(),
+  verticalKeyDownCount: 0,
+  channelFocusCount: 0,
+  directionChanges: 0,
+  maxNativeKeyGapMs: null,
+  visibleZeroCount: 0,
+  unexpectedRegionTransitionCount: 0,
+  nativeRefMissCount: 0,
+  restoreCount: 0,
+  lastDirection: null,
+  lastSummaryAt: 0,
+};
+
+export function recordLiveNavigationMetric(
+  metric: 'vertical-key-down' | 'channel-focus' | 'visible-zero' | 'unexpected-region-transition' | 'native-ref-miss' | 'restore',
+  fields: { direction?: string | null; nativeDeltaMs?: number | null } = {},
+) {
+  if (metric === 'vertical-key-down') {
+    liveNavigationSummary.verticalKeyDownCount += 1;
+    if (fields.direction && liveNavigationSummary.lastDirection && fields.direction !== liveNavigationSummary.lastDirection) {
+      liveNavigationSummary.directionChanges += 1;
+    }
+    if (fields.direction) liveNavigationSummary.lastDirection = fields.direction;
+    if (fields.nativeDeltaMs != null && fields.nativeDeltaMs >= 0) {
+      liveNavigationSummary.maxNativeKeyGapMs = Math.max(liveNavigationSummary.maxNativeKeyGapMs ?? 0, fields.nativeDeltaMs);
+    }
+  } else if (metric === 'channel-focus') {
+    liveNavigationSummary.channelFocusCount += 1;
+  } else if (metric === 'visible-zero') {
+    liveNavigationSummary.visibleZeroCount += 1;
+  } else if (metric === 'unexpected-region-transition') {
+    liveNavigationSummary.unexpectedRegionTransitionCount += 1;
+  } else if (metric === 'native-ref-miss') {
+    liveNavigationSummary.nativeRefMissCount += 1;
+  } else if (metric === 'restore') {
+    liveNavigationSummary.restoreCount += 1;
+  }
+
+  const totalHotEvents = liveNavigationSummary.verticalKeyDownCount + liveNavigationSummary.channelFocusCount;
+  const now = Date.now();
+  if (totalHotEvents >= 50 && now - liveNavigationSummary.lastSummaryAt >= 2_000) {
+    liveNavigationSummary.lastSummaryAt = now;
+    console.info('[NOVACAST_PERF] live_navigation_summary', {
+      durationMs: now - liveNavigationSummary.startedAt,
+      verticalKeyDownCount: liveNavigationSummary.verticalKeyDownCount,
+      channelFocusCount: liveNavigationSummary.channelFocusCount,
+      directionChanges: liveNavigationSummary.directionChanges,
+      maxNativeKeyGapMs: liveNavigationSummary.maxNativeKeyGapMs,
+      visibleZeroCount: liveNavigationSummary.visibleZeroCount,
+      unexpectedRegionTransitionCount: liveNavigationSummary.unexpectedRegionTransitionCount,
+      nativeRefMissCount: liveNavigationSummary.nativeRefMissCount,
+      restoreCount: liveNavigationSummary.restoreCount,
+    });
+  }
+}
+
 function safeCategoryId(categoryId: string | null | undefined) {
   const value = String(categoryId ?? '').trim();
   return value || null;
@@ -33,6 +105,12 @@ export function logLiveStartup(
     source?: string;
   } = { elapsedMs: 0 },
 ) {
+  recordLivePerformanceEvent('live_entry_milestone', {
+    milestone: event,
+    elapsedMs: fields.elapsedMs,
+    categoryCount: fields.categoryCount ?? null,
+    channelCount: fields.channelCount ?? null,
+  });
   novacastTrace('[NovaCast Live Startup]', {
     event,
     elapsedMs: fields.elapsedMs,
@@ -130,6 +208,135 @@ export function logLivePerformance(fields: {
     epgPending: fields.epgPending ?? false,
     discoverPending: fields.discoverPending ?? false,
   });
+}
+
+export function logLiveNavPerf(
+  event: string,
+  fields: {
+    categoryId?: string | null;
+    channelCount?: number | null;
+    visibleRowCount?: number | null;
+    elapsedMs?: number | null;
+    renderVersion?: number | null;
+    focusedChannelId?: string | null;
+    focusedIndex?: number | null;
+    currentVisibleRange?: { first: number; last: number } | null;
+    trustedVisibleRange?: { first: number; last: number } | null;
+    lastValidVisibleRange?: { first: number; last: number } | null;
+    bandFirst?: number | null;
+    bandLast?: number | null;
+    totalChannelCount?: number | null;
+    channelId?: string | null;
+    index?: number | null;
+    distanceFromFocusedIndex?: number | null;
+    previousHandlePresent?: boolean;
+    nextHandlePresent?: boolean;
+    action?: string | null;
+    selectedChannelId?: string | null;
+    rowMounted?: boolean;
+    nativeRefPresent?: boolean;
+    listKey?: string | null;
+    lastNavigationIntent?: string | null;
+    timestamp?: number | null;
+    currentVisibleCount?: number | null;
+    ageOfLastValidRangeMs?: number | null;
+    shouldScroll?: boolean;
+    reason?: string | null;
+  } = {},
+) {
+  if (event === 'channel-focus') {
+    recordLiveNavigationMetric('channel-focus');
+    return;
+  }
+  if (event === 'native-focus-scroll-owned') return;
+  if (event === 'visible-channel-list-change') {
+    if (fields.visibleRowCount === 0) {
+      recordLiveNavigationMetric('visible-zero');
+    } else {
+      return;
+    }
+  }
+  if (event === 'channel-native-ref') {
+    const isFailure =
+      (fields.action === 'unmount' && fields.index === fields.focusedIndex) ||
+      fields.nativeRefPresent === false ||
+      fields.previousHandlePresent === false ||
+      fields.nextHandlePresent === false;
+    if (!isFailure) return;
+    if (fields.nativeRefPresent === false || fields.previousHandlePresent === false || fields.nextHandlePresent === false) {
+      recordLiveNavigationMetric('native-ref-miss');
+    }
+  }
+  console.info('[NovaCast Live Nav Perf]', event, {
+    categoryId: safeCategoryId(fields.categoryId),
+    channelCount: fields.channelCount ?? null,
+    visibleRowCount: fields.visibleRowCount ?? null,
+    elapsedMs: fields.elapsedMs ?? null,
+    renderVersion: fields.renderVersion ?? null,
+    focusedChannelId: fields.focusedChannelId ?? null,
+    focusedIndex: fields.focusedIndex ?? null,
+    currentVisibleRange: fields.currentVisibleRange ?? null,
+    trustedVisibleRange: fields.trustedVisibleRange ?? null,
+    lastValidVisibleRange: fields.lastValidVisibleRange ?? null,
+    bandFirst: fields.bandFirst ?? null,
+    bandLast: fields.bandLast ?? null,
+    totalChannelCount: fields.totalChannelCount ?? null,
+    channelId: fields.channelId ?? null,
+    index: fields.index ?? null,
+    distanceFromFocusedIndex: fields.distanceFromFocusedIndex ?? null,
+    previousHandlePresent: fields.previousHandlePresent ?? null,
+    nextHandlePresent: fields.nextHandlePresent ?? null,
+    action: fields.action ?? null,
+    selectedChannelId: fields.selectedChannelId ?? null,
+    rowMounted: fields.rowMounted ?? null,
+    nativeRefPresent: fields.nativeRefPresent ?? null,
+    listKey: fields.listKey ?? null,
+    lastNavigationIntent: fields.lastNavigationIntent ?? null,
+    timestamp: fields.timestamp ?? null,
+    currentVisibleCount: fields.currentVisibleCount ?? null,
+    ageOfLastValidRangeMs: fields.ageOfLastValidRangeMs ?? null,
+    shouldScroll: fields.shouldScroll ?? null,
+    reason: fields.reason ?? null,
+  });
+}
+
+export function logLiveFocusPerf(fields: {
+  channelId: string | null;
+  previousChannelId: string | null;
+  categoryId?: string | null;
+  deltaMs?: number | null;
+  sameLogicalTarget: boolean;
+  source: string;
+  navigationActive?: boolean;
+}) {
+  if (fields.source === 'channel-row-onFocus') {
+    return;
+  }
+  console.info('[NovaCast Live Focus Perf]', {
+    channelId: fields.channelId,
+    previousChannelId: fields.previousChannelId,
+    categoryId: safeCategoryId(fields.categoryId),
+    deltaMs: fields.deltaMs ?? null,
+    sameLogicalTarget: fields.sameLogicalTarget,
+    source: fields.source,
+    navigationActive: fields.navigationActive ?? null,
+  });
+}
+
+export function logLiveDerivePerf(fields: {
+  categoryId: string;
+  totalProviderChannels: number | null;
+  categoryChannelCount: number;
+  categoryLookupMs: number;
+  filterMs: number;
+  sortMs: number;
+  normalizeMs: number;
+  decorationMs: number;
+  modelBuildMs: number;
+  totalMs: number;
+  cacheHit: boolean;
+}) {
+  console.info('[NovaCast Live Derive Perf]', fields);
 }
 
 export type LiveCategoryOrderAuditEvent =

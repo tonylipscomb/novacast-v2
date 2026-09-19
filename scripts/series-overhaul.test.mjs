@@ -69,6 +69,22 @@ test('stripProviderStreamTitlePrefix removes provider channel prefixes', () => {
   assert.equal(stripProviderStreamTitlePrefix('Batman: The Dark Knight (2008)'), 'Batman: The Dark Knight (2008)');
 });
 
+test('stream-title cleanup preserves clock expressions after provider prefixes', () => {
+  const cases = [
+    'NFL  | 16 - MNF 8:15pm Broncos at Chiefs',
+    'NFL | 17 - SNF 8:20pm Cowboys at Eagles',
+    'NFL | 3 - 1:00pm Ravens at Steelers',
+    'SPORTS | 42 - 7:30 PM Lakers vs Celtics',
+  ];
+  for (const value of cases) {
+    const normalized = stripProviderStreamTitlePrefix(value);
+    assert.match(normalized, /\d{1,2}:\d{2}\s*(?:am|pm)?/i);
+    assert.doesNotMatch(normalized, /^(?:15pm|20pm|00pm|30\s+PM)\b/i);
+  }
+  assert.equal(stripProviderStreamTitlePrefix('NEWS | 12 - CNN'), 'CNN');
+  assert.equal(stripProviderStreamTitlePrefix('ESPN: SportsCenter'), 'ESPN: SportsCenter');
+});
+
 test('parseProviderTitlePrefix extracts country codes for provider categories', () => {
   assert.equal(parseProviderTitlePrefix('US | Entertainment').countryCode, 'US');
   assert.equal(parseProviderTitlePrefix('US | Entertainment').title, 'Entertainment');

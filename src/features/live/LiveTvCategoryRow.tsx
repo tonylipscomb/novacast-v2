@@ -13,6 +13,7 @@ type LiveTvCategoryRowProps = {
   category: ProviderLiveCategory;
   selected: boolean;
   preferFocus: boolean;
+  suppressFocusVisual?: boolean;
   nextFocusRight?: number;
   onFocus: () => void;
   onPress: () => void;
@@ -24,6 +25,7 @@ function areLiveTvCategoryRowPropsEqual(previous: LiveTvCategoryRowProps, next: 
     previous.category === next.category &&
     previous.selected === next.selected &&
     previous.preferFocus === next.preferFocus &&
+    previous.suppressFocusVisual === next.suppressFocusVisual &&
     previous.nextFocusRight === next.nextFocusRight
   );
 }
@@ -32,6 +34,7 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
   category,
   selected,
   preferFocus,
+  suppressFocusVisual = false,
   nextFocusRight,
   onFocus,
   onPress,
@@ -70,14 +73,14 @@ export const LiveTvCategoryRow = memo(function LiveTvCategoryRow({
         setIsFocused(false);
       }}
       onPress={onPress}
-      style={[styles.categoryRow, styles.categoryDefault, selected && styles.categoryActive, isFocused && (selected ? styles.categoryActiveFocused : styles.categoryRowFocused)]}>
+      style={[styles.categoryRow, styles.categoryDefault, selected && styles.categoryActive, isFocused && !suppressFocusVisual && (selected ? styles.categoryActiveFocused : styles.categoryRowFocused)]}>
       <Text
         numberOfLines={2}
         ellipsizeMode="tail"
-        style={[styles.categoryName, selected && styles.categoryNameSelected, isFocused && styles.categoryNameFocused]}>
+        style={[styles.categoryName, selected && styles.categoryNameSelected, isFocused && !suppressFocusVisual && styles.categoryNameFocused]}>
         {displayName}
       </Text>
-      <Text numberOfLines={1} style={[styles.categoryCount, isFocused && styles.categoryCountFocused]}>
+      <Text numberOfLines={1} style={[styles.categoryCount, isFocused && !suppressFocusVisual && styles.categoryCountFocused]}>
         {formatLiveTvCategoryCount(category.count)}
       </Text>
     </Pressable>

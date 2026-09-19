@@ -21,6 +21,7 @@ import { type ComponentProps, useCallback, useEffect, useMemo, useRef } from 're
 import { StyleSheet, View } from 'react-native';
 import { useEventListener } from 'expo';
 import { isVideoDecoderInitFailure, UNSUPPORTED_VIDEO_FORMAT_CATEGORY } from './unified/moviePlaybackCompatibility.ts';
+import { createSerialLatestAsyncLane } from './serialLatestAsyncLane.ts';
 
 let nextPlayerGenerationId = 1;
 const playerGenerationIds = new WeakMap<object, number>();
@@ -72,6 +73,8 @@ type NovaStreamPlayerOptions = {
   muted?: boolean;
   onError?: (message: string) => void;
   onReady?: () => void;
+  /** Optional guard for callers with an asynchronous intent generation. */
+  shouldAcceptAsyncCommit?: () => boolean;
   /**
    * Live keeps expo-video defaults. VOD applies a bounded Media3 LoadControl
    * so progressive MKV cannot grow DefaultAllocator to the Java heap ceiling.
@@ -119,12 +122,27 @@ function replacePlayerSource(player: VideoPlayer, source: VideoSource) {
   }
 }
 
+type PendingPlayerReplacement = {
+  source: VideoSource;
+  requestId: number;
+  onSuccess: () => void;
+  onFailure: () => void;
+};
+
 export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamPlayerOptions = {}) {
-  const { autoPlay = true, muted = false, onError, onReady, bufferPolicy = 'live' } = options;
+  const {
+    autoPlay = true,
+    muted = false,
+    onError,
+    onReady,
+    shouldAcceptAsyncCommit,
+    bufferPolicy = 'live',
+  } = options;
   const lastUrlRef = useRef(streamUrl);
   const lastPlayerRef = useRef<VideoPlayer | null>(null);
   const onErrorRef = useRef(onError);
   const onReadyRef = useRef(onReady);
+  const shouldAcceptAsyncCommitRef = useRef(shouldAcceptAsyncCommit);
   const bufferPolicyRef = useRef(bufferPolicy);
 
   useEffect(() => {
@@ -135,6 +153,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
   useEffect(() => {
     onErrorRef.current = onError;
     onReadyRef.current = onReady;
+    shouldAcceptAsyncCommitRef.current = shouldAcceptAsyncCommit;
     bufferPolicyRef.current = bufferPolicy;
   }, [bufferPolicy, onError, onReady]);
 
@@ -247,6 +266,15 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
   });
 
   const replaceRequestRef = useRef(0);
+  const replacementLane = useMemo(
+    () => createSerialLatestAsyncLane<PendingPlayerReplacement>((next) =>
+      replacePlayerSource(player, next.source).then(next.onSuccess).catch(next.onFailure)),
+    [player],
+  );
+  const enqueuePlayerReplacement = useCallback(
+    (replacement: PendingPlayerReplacement) => replacementLane.enqueue(replacement),
+    [replacementLane],
+  );
 
   useEffect(() => {
     if (!streamUrl) {
@@ -263,7 +291,12 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
       }
       try {
         player.pause();
-        void replacePlayerSource(player, null).catch(() => {});
+        enqueuePlayerReplacement({
+          source: null,
+          requestId: replaceRequestRef.current,
+          onSuccess: () => {},
+          onFailure: () => {},
+        });
       } catch {
         // The hook-managed player may already be releasing during unmount.
       }
@@ -294,9 +327,14 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
       logVodPlayerMemory('source-replaced', { playerGenerationId });
     }
 
-    void replacePlayerSource(player, streamUrl)
-      .then(() => {
-        if (requestId !== replaceRequestRef.current) {
+    enqueuePlayerReplacement({
+      source: streamUrl,
+      requestId,
+      onSuccess: () => {
+        if (
+          requestId !== replaceRequestRef.current ||
+          (shouldAcceptAsyncCommitRef.current && !shouldAcceptAsyncCommitRef.current())
+        ) {
           return;
         }
 
@@ -305,20 +343,29 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
           player.play();
         }
         onReadyRef.current?.();
-      })
-      .catch(() => {
-        if (requestId === replaceRequestRef.current) {
+      },
+      onFailure: () => {
+        if (
+          requestId === replaceRequestRef.current &&
+          (!shouldAcceptAsyncCommitRef.current || shouldAcceptAsyncCommitRef.current())
+        ) {
           onErrorRef.current?.('Unable to start playback for this stream.');
         }
-      });
-  }, [autoPlay, bufferPolicy, muted, player, playerGenerationId, streamUrl]);
+      },
+    });
+  }, [autoPlay, bufferPolicy, enqueuePlayerReplacement, muted, player, playerGenerationId, streamUrl]);
 
   useEffect(() => {
     return () => {
       replaceRequestRef.current += 1;
       try {
         player.pause();
-        void replacePlayerSource(player, null).catch(() => {});
+        enqueuePlayerReplacement({
+          source: null,
+          requestId: replaceRequestRef.current,
+          onSuccess: () => {},
+          onFailure: () => {},
+        });
       } catch {
         // Player may already be released during unmount.
       }
@@ -342,8 +389,10 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
       applyVodBufferProfile(player);
       logVodPlayerMemory('retry', { playerGenerationId, retryCount: requestId });
     }
-    void replacePlayerSource(player, streamUrl)
-      .then(() => {
+    enqueuePlayerReplacement({
+      source: streamUrl,
+      requestId,
+      onSuccess: () => {
         if (requestId !== replaceRequestRef.current) {
           return;
         }
@@ -352,13 +401,14 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
         if (autoPlay) {
           player.play();
         }
-      })
-      .catch(() => {
+      },
+      onFailure: () => {
         if (requestId === replaceRequestRef.current) {
           onErrorRef.current?.('Unable to restart playback for this stream.');
         }
-      });
-  }, [autoPlay, bufferPolicy, muted, player, playerGenerationId, streamUrl]);
+      },
+    });
+  }, [autoPlay, bufferPolicy, enqueuePlayerReplacement, muted, player, playerGenerationId, streamUrl]);
 
   return { player, retry, hasStream: Boolean(streamUrl) };
 }

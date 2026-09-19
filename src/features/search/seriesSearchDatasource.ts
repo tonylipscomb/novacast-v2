@@ -37,7 +37,10 @@ export async function resolveSeriesSearchDatasource(input: {
     readableGeneration = 0;
   }
 
-  const sqliteAvailable = SERIES_SQLITE_READS_ENABLED && readableGeneration > 0;
+  // A readable generation is the authoritative local Search source even
+  // while a newer generation is being built. The feature flag must not route
+  // a healthy local catalog into the slow provider fallback.
+  const sqliteAvailable = readableGeneration > 0;
   novacastTrace(
     '[NovaCast Series Search Runtime] ' +
       JSON.stringify({

@@ -34,6 +34,7 @@ import { TvRemoteImage } from '@/components/media/TvRemoteImage';
 import { MediaArtworkFallback } from '@/features/media-browser/MediaArtworkFallback';
 import type { MediaDetail, MediaDetailEpisode } from '@/features/media-browser/mediaTypes';
 import { novaTheme } from '@/theme';
+import { NovaOverlayShell } from '@/components/nova/NovaOverlayShell';
 import { NOVA_FOCUS, NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { isValidTvFocusableTarget, requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novacastTrace } from '@/features/diagnostics/novacastLogPolicy';
@@ -884,7 +885,7 @@ export function SeriesDetailPopupV2({
         {...(Platform.OS === 'android'
           ? { autoFocus: true, trapFocusLeft: true, trapFocusRight: true, trapFocusUp: true, trapFocusDown: true }
           : {})}>
-        <View style={[styles.shadowWrap, { width: layout.popupWidth, height: layout.popupHeight }]}>
+        <NovaOverlayShell style={{ width: layout.popupWidth, height: layout.popupHeight }}>
           {/* No backdrop image — same Android layout-stability reasoning as Movies V2. */}
           <View style={styles.card}>
             <View pointerEvents="none" style={styles.cardTopHighlight} />
@@ -1004,7 +1005,7 @@ export function SeriesDetailPopupV2({
               </View>
             </View>
           </View>
-        </View>
+        </NovaOverlayShell>
       </FocusBoundaryView>
     </View>
   );
@@ -1021,22 +1022,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  shadowWrap: {
-    borderRadius: 20,
-    backgroundColor: 'transparent',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.45,
-    shadowRadius: 24,
-    elevation: 16,
-  },
   card: {
     flex: 1,
-    borderRadius: 20,
+    borderRadius: 26,
     overflow: 'hidden',
-    backgroundColor: 'rgba(8, 13, 25, 0.72)',
-    borderWidth: 1,
-    borderColor: 'rgba(205,190,255,0.28)',
+    backgroundColor: 'transparent',
+    borderWidth: 0,
   },
   cardTopHighlight: {
     position: 'absolute',

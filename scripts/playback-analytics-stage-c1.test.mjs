@@ -26,7 +26,9 @@ function loadTracker() {
     exports: module.exports,
     require: (request) => request.endsWith('novaAnalytics')
       ? { enqueueAnalyticsEvent: () => Promise.resolve(true) }
-      : {},
+      : request.endsWith('diagnosticsClient')
+        ? { recordDiagnostic: () => undefined }
+        : {},
     console,
   }, { filename: 'playbackAnalytics.ts' });
   return module.exports.createPlaybackAnalyticsTracker;

@@ -36,6 +36,13 @@ export const DEPRIORITIZED_FOREIGN_LANGUAGE_MARKERS =
 export const DEPRIORITIZED_RELIGIOUS_MARKERS =
   /\b(islamic|islam|muslim|muslims|quran|koran|ramadan|ramadhan|eid|hijab|hijabi|halal|sunni|shia|shiah|shite|prophet|muhammad|mohammed|mohamed|nasheed|naat|sunnah|hadith|hajj|umrah|iftar|suhoor|suhur|taraweeh|tarawih|madrasa|madrassa|masjid|mosque|sufi|sufism|deen|dawah|dawa|zakat|salah|salat)\b/i;
 
+/** Bounded full-word markers for non-local regional presentation categories. */
+export const REGIONAL_PRESENTATION_CATEGORY_ALIASES = new Set([
+  'BELGIUM', 'BELGIAN', 'BULGARIA', 'BULGARIAN', 'CHINA', 'CHINESE',
+  'DANSK', 'DANSKE', 'DENMARK', 'DANISH',
+  'ALBANIA', 'ALBANIAN', 'SOMALIA', 'SOMALI', 'AFRICA', 'AFRICAN',
+]);
+
 export const EUROPE_COUNTRY_CODES = new Set([
   'AT',
   'BE',
@@ -113,6 +120,13 @@ export const FOREIGN_COUNTRY_CODES = new Set([
   'MA',
   'DZ',
   'TN',
+]);
+
+/** Recognized country/region tokens allowed at the start of a category label. */
+export const CATEGORY_REGION_PREFIX_CODES = new Set([
+  'US', 'USA', 'CA', 'AU', 'UK', 'GB',
+  ...EUROPE_COUNTRY_CODES,
+  ...FOREIGN_COUNTRY_CODES,
 ]);
 
 export const US_DEFAULT_DISPLAY_SUFFIX: Record<ProviderCategoryContentType, string> = {

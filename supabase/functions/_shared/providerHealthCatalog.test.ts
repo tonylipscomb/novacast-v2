@@ -2,6 +2,7 @@ import { assert, assertEquals } from 'jsr:@std/assert@1';
 import {
   CATALOG_READ_LIMIT_BYTES,
   catalogDiagnosticMessage,
+  createXtreamCatalogScanner,
   parseXtreamCatalogText,
 } from './providerHealthCatalog.ts';
 
@@ -15,6 +16,7 @@ Deno.test('parses a normal small Xtream array', () => {
   assertEquals(parsed.reason, 'ok');
   assertEquals(parsed.count, 3);
   assertEquals(parsed.complete, true);
+  assertEquals(parsed.stopReason, 'complete');
   assertEquals(parsed.items[0]?.stream_id, 1);
 });
 
@@ -31,6 +33,7 @@ Deno.test('valid catalog just under the configured byte limit parses completely'
   assertEquals(parsed.ok, true);
   assertEquals(parsed.count, 40);
   assertEquals(parsed.truncated, false);
+  assertEquals(parsed.stopReason, 'complete');
 });
 
 Deno.test('response exceeding the read limit is not passed through JSON.parse as one blob', () => {
@@ -49,6 +52,7 @@ Deno.test('response exceeding the read limit is not passed through JSON.parse as
   assertEquals(parsed.ok, true);
   assert(parsed.count >= 10);
   assertEquals(parsed.reason, 'ok');
+  assertEquals(parsed.stopReason, 'byte_limit');
 });
 
 Deno.test('truncated JSON with no complete record is payload too large, not invalid JSON', () => {
@@ -93,6 +97,41 @@ Deno.test('huge catalogs keep a bounded sample instead of retaining every row', 
   assert(parsed.items.some((item) => item.stream_id === 5000));
 });
 
+Deno.test('counts a complete 20000-item catalog while bounding diagnostic inspection', () => {
+  const rows = Array.from({ length: 20_000 }, (_, index) => channel(index + 1));
+  const parsed = parseXtreamCatalogText(JSON.stringify(rows), { keepAll: true });
+  assertEquals(parsed.ok, true);
+  assertEquals(parsed.totalCount, 20_000);
+  assertEquals(parsed.inspectedCount, 12_000);
+  assertEquals(parsed.count, 12_000);
+  assertEquals(parsed.exactCountAvailable, true);
+  assertEquals(parsed.diagnosticTruncated, true);
+  assertEquals(parsed.items.length, 12_000);
+});
+
+Deno.test('an interrupted full count is not reported as exact', () => {
+  const text = JSON.stringify(Array.from({ length: 20_000 }, (_, index) => channel(index + 1)));
+  const parsed = parseXtreamCatalogText(text.slice(0, Math.floor(text.length * 0.8)), {
+    truncatedInput: true,
+    maxBytes: text.length,
+  });
+  assertEquals(parsed.ok, true);
+  assertEquals(parsed.totalCount, null);
+  assertEquals(parsed.exactCountAvailable, false);
+  assertEquals(parsed.diagnosticTruncated, true);
+  assertEquals(parsed.stopReason, 'upstream_incomplete');
+});
+
+Deno.test('a timeout after partial records preserves the bounded count', () => {
+  const scanner = createXtreamCatalogScanner({ maxItems: 12_000 });
+  scanner.push(new TextEncoder().encode(JSON.stringify([channel(1), channel(2), channel(3)]).slice(0, -1)));
+  const parsed = scanner.finish(true, 'timeout');
+  assertEquals(parsed.inspectedCount, 3);
+  assertEquals(parsed.totalCount, null);
+  assertEquals(parsed.exactCountAvailable, false);
+  assertEquals(parsed.stopReason, 'timeout');
+});
+
 Deno.test('empty valid array is catalog_empty', () => {
   const parsed = parseXtreamCatalogText('[]');
   assertEquals(parsed.ok, false);
@@ -104,7 +143,7 @@ Deno.test('diagnostic messages stay distinct and sanitized', () => {
   assertEquals(catalogDiagnosticMessage('catalog_timeout'), 'Catalog request timed out.');
   assertEquals(
     catalogDiagnosticMessage('catalog_payload_too_large', { limitBytes: CATALOG_READ_LIMIT_BYTES }),
-    'Catalog response exceeded the 8 MB validation read limit before a complete record could be parsed.',
+    'Catalog response exceeded the 128 MB validation read limit before a complete record could be parsed.',
   );
   for (const reason of ['catalog_http', 'catalog_timeout', 'catalog_html', 'catalog_invalid_json', 'catalog_unexpected_shape', 'catalog_payload_too_large'] as const) {
     const detail = catalogDiagnosticMessage(reason, { httpStatus: 500 });

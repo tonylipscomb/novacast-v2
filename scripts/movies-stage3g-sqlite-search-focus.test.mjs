@@ -47,6 +47,7 @@ test('1. Healthy readable generation selects SQLite datasource', () => {
   assert.match(rootFiles.datasource, /\[NovaCast Movies Search Datasource\]/);
   assert.match(rootFiles.screen, /resolveMoviesSearchDatasource/);
   assert.match(rootFiles.screen, /createSqliteMovieDataSource\(activeProviderId\)/);
+  assert.doesNotMatch(rootFiles.datasource, /MOVIES_SQLITE_READS_ENABLED && readableGeneration/);
 });
 
 test('2. bundle.movies provider datasource is not used when SQLite is available', () => {

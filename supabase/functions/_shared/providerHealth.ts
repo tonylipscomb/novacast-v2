@@ -51,7 +51,7 @@ export type ProviderHealthSummary = {
   overall: ProviderHealthStatus;
   overallLabel: string;
   cloudPlaybackProbeRestricted?: boolean;
-  cloudPlaybackProbeReason?: 'gold_cloud_probe_restricted';
+  cloudPlaybackProbeReason?: 'cloud_playback_restricted' | 'gold_cloud_probe_restricted';
   testedAt: string;
   durationMs: number;
   checks: ProviderHealthCheck[];
@@ -71,6 +71,16 @@ export type ProviderHealthSummary = {
     seriesCategories: number;
     series: number;
     episodeLookupOk?: boolean;
+    countDetails?: {
+      liveChannels?: CatalogCountDetail;
+      movies?: CatalogCountDetail;
+      series?: CatalogCountDetail;
+    };
+    truncated?: {
+      liveChannels?: boolean;
+      movies?: boolean;
+      series?: boolean;
+    };
   };
   probes?: {
     live: { passed: number; total: number; averageMs: number | null };
@@ -79,6 +89,16 @@ export type ProviderHealthSummary = {
   };
   notes: string[];
   decoderCaveat: string;
+};
+
+export type CatalogCountDetail = {
+  totalCount: number | null;
+  inspectedCount: number;
+  exactCountAvailable: boolean;
+  diagnosticTruncated: boolean;
+  bytesRead: number;
+  complete: boolean;
+  stopReason: 'complete' | 'byte_limit' | 'timeout' | 'upstream_incomplete' | 'fallback_sample' | 'parse_failure';
 };
 
 export const STREAM_PROBE_CAVEAT =
@@ -324,7 +344,11 @@ export function classifyOverallHealth(checks: ProviderHealthCheck[], probeSummar
 }): { overall: ProviderHealthStatus; overallLabel: string; notes: string[] } {
   const notes: string[] = [];
   const criticalFails = checks.filter((check) => check.severity === 'critical' && check.verdict === 'fail');
-  const warnings = checks.filter((check) => check.verdict === 'warn' || (check.severity === 'noncritical' && check.verdict === 'fail'));
+  const warnings = checks.filter((check) => {
+    if (check.id === 'epg') return false;
+    if (check.id === 'playback' && check.verdict === 'warn' && check.detail.includes('single allowed connection appears to be in use')) return false;
+    return check.verdict === 'warn' || (check.severity === 'noncritical' && check.verdict === 'fail');
+  });
 
   if (probeSummary) {
     const groups = [probeSummary.live, probeSummary.movies, probeSummary.episodes].filter((group) => group.total > 0);
@@ -350,6 +374,15 @@ export function classifyOverallHealth(checks: ProviderHealthCheck[], probeSummar
   }
 
   if (criticalFails.length) {
+    const catalogFails = criticalFails.filter((check) => ['live-catalog', 'movie-catalog', 'series-catalog', 'compatibility'].includes(check.id));
+    const nonCatalogCriticalFails = criticalFails.filter((check) => !catalogFails.includes(check));
+    if (!nonCatalogCriticalFails.length && catalogFails.length) {
+      return {
+        overall: 'degraded',
+        overallLabel: catalogFails[0]?.detail || 'One or more provider catalogs need attention.',
+        notes: catalogFails.map((check) => check.detail),
+      };
+    }
     return {
       overall: 'failed',
       overallLabel: criticalFails[0]?.detail || 'A critical provider check failed.',
@@ -555,6 +588,15 @@ export function isGoldCloudProbeRestricted(input: {
   catalogs?: ProviderHealthSummary['catalogs'];
 }) {
   if (!input.isGoldManaged || !input.probes.length || input.probes.some((probe) => probe.ok)) return false;
+  return isCloudPlaybackProbeRestricted(input);
+}
+
+export function isCloudPlaybackProbeRestricted(input: {
+  checks: ProviderHealthCheck[];
+  probes: StreamProbeResult[];
+  catalogs?: ProviderHealthSummary['catalogs'];
+}) {
+  if (!input.probes.length || input.probes.some((probe) => probe.ok)) return false;
   if (input.probes.some((probe) => probe.httpStatus !== 404 && probe.httpStatus !== 511)) return false;
   const playback = input.checks.find((check) => check.id === 'playback');
   if (!playback || playback.verdict !== 'fail') return false;

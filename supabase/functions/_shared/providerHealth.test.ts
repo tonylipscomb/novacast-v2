@@ -9,6 +9,7 @@ import {
   displayHealthLabel,
   formatStreamProbeDiagnostic,
   isBlockedProviderHost,
+  isCloudPlaybackProbeRestricted,
   isGoldCloudProbeRestricted,
   maybeConnectionLimitCode,
   normalizePlaybackExtension,
@@ -96,31 +97,48 @@ Deno.test('classifies stream HTTP 401 403 404 and 429 distinctly', () => {
   assertEquals(classifyStreamProbePayload({ httpStatus: 416 }).code, 'stream_range_rejected');
 });
 
-Deno.test('health aggregation treats playback failure as failed and EPG as degraded', () => {
+Deno.test('health aggregation preserves genuine failures while excluding advisory warnings', () => {
   const failed = classifyOverallHealth([
     { id: 'authentication', label: 'Authentication', verdict: 'pass', severity: 'critical', detail: 'ok' },
     { id: 'playback', label: 'Stream Probe', verdict: 'fail', severity: 'critical', detail: 'Playback endpoints failed.' },
   ]);
   assertEquals(failed.overall, 'failed');
 
-  const degraded = classifyOverallHealth([
+  const epgAdvisory = classifyOverallHealth([
     { id: 'authentication', label: 'Authentication', verdict: 'pass', severity: 'critical', detail: 'ok' },
     { id: 'playback', label: 'Stream Probe', verdict: 'pass', severity: 'critical', detail: '3/3' },
     { id: 'epg', label: 'EPG', verdict: 'warn', severity: 'noncritical', detail: 'EPG unavailable.' },
   ]);
-  assertEquals(degraded.overall, 'degraded');
+  assertEquals(epgAdvisory.overall, 'healthy');
 
   const connectionLimit = classifyOverallHealth([
     { id: 'authentication', label: 'Authentication', verdict: 'pass', severity: 'critical', detail: 'ok' },
     { id: 'playback', label: 'Stream Probe', verdict: 'warn', severity: 'noncritical', detail: streamProbeMessage('stream_connection_limit') },
   ]);
-  assertEquals(connectionLimit.overall, 'degraded');
+  assertEquals(connectionLimit.overall, 'healthy');
+
+  const combinedAdvisory = classifyOverallHealth([
+    { id: 'server', label: 'Server', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'authentication', label: 'Authentication', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'live-catalog', label: 'Live TV Catalog', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'compatibility', label: 'NovaCast Compatibility', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'playback', label: 'Stream Probe', verdict: 'warn', severity: 'noncritical', detail: streamProbeMessage('stream_connection_limit') },
+    { id: 'epg', label: 'EPG', verdict: 'warn', severity: 'noncritical', detail: 'EPG unavailable.' },
+  ]);
+  assertEquals(combinedAdvisory.overall, 'healthy');
 
   const healthy = classifyOverallHealth([
     { id: 'server', label: 'Server', verdict: 'pass', severity: 'critical', detail: 'ok' },
     { id: 'playback', label: 'Stream Probe', verdict: 'pass', severity: 'critical', detail: 'ok' },
   ]);
   assertEquals(healthy.overall, 'healthy');
+
+  const catalogDegraded = classifyOverallHealth([
+    { id: 'server', label: 'Server', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'authentication', label: 'Authentication', verdict: 'pass', severity: 'critical', detail: 'ok' },
+    { id: 'live-catalog', label: 'Live TV Catalog', verdict: 'fail', severity: 'critical', detail: 'catalog unavailable' },
+  ]);
+  assertEquals(catalogDegraded.overall, 'degraded');
 });
 
 Deno.test('Gold-only 511/404 playback rejection is restricted but raw probes remain failures', () => {
@@ -140,6 +158,7 @@ Deno.test('Gold-only 511/404 playback rejection is restricted but raw probes rem
   assertEquals(isGoldCloudProbeRestricted({ isGoldManaged: false, checks: [...checks], probes, catalogs: { liveCategories: 1, liveChannels: 3, movieCategories: 1, movies: 2, seriesCategories: 1, series: 1 } }), false);
   assertEquals(isGoldCloudProbeRestricted({ isGoldManaged: true, checks: checks.map((check) => check.id === 'authentication' ? { ...check, verdict: 'fail' as const } : check), probes, catalogs: { liveCategories: 1, liveChannels: 3, movieCategories: 1, movies: 2, seriesCategories: 1, series: 1 } }), false);
   assertEquals(isGoldCloudProbeRestricted({ isGoldManaged: true, checks, probes: probes.map((probe) => ({ ...probe, httpStatus: 403 })), catalogs: { liveCategories: 1, liveChannels: 3, movieCategories: 1, movies: 2, seriesCategories: 1, series: 1 } }), false);
+  assertEquals(isCloudPlaybackProbeRestricted({ checks, probes, catalogs: { liveCategories: 1, liveChannels: 3, movieCategories: 1, movies: 2, seriesCategories: 1, series: 1 } }), true);
 });
 
 Deno.test('activation requires non-stale healthy or degraded health', () => {

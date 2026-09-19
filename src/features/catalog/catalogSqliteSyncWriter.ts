@@ -3,7 +3,7 @@ import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 import { parseRatingNumber } from '../movies/smart/movieMetadata.ts';
 import type { NativeCatalogRecord } from './nativeCatalogDecodeTypes.ts';
 import { checkpointCatalogWalIfIdle, initializeCatalogDatabase } from './catalogDatabase.ts';
-import { waitForForegroundCatalogReadsToDrain } from './catalogForegroundPriority.ts';
+import { waitForForegroundCatalogReadsToDrain, waitForLiveCatalogTuningToSettle } from './catalogForegroundPriority.ts';
 import {
   processStreamingBatches,
   type ChunkWorkKind,
@@ -33,6 +33,7 @@ import {
 } from './catalogWriteQuietPeriod.ts';
 import { validateMoviesCategoryDistribution } from './moviesCategoryDistributionValidation.ts';
 import { resolveCatalogItemCategoryId } from './vodCategoryFilterCapability.ts';
+import { computeVodRegionRank } from '../providers/vodRegionRank.ts';
 import { isCatalogGuidePriorityActive, waitUntilCatalogGuidePriorityIdle } from '../providers/catalogSyncGuidePriority.ts';
 import { waitForCatalogInteractiveUiReady } from './catalogInteractiveStartup.ts';
 import {
@@ -53,6 +54,7 @@ function logMovieCompletionTailSummary(input: Record<string, unknown>) {
 async function waitForForegroundCatalogWork(providerId: string, mediaType: CatalogMediaType) {
   await waitForCatalogInteractiveUiReady();
   await waitForForegroundCatalogReadsToDrain();
+  await waitForLiveCatalogTuningToSettle();
   await waitForGuideBeforeCatalogWrite(providerId, mediaType);
 }
 
@@ -338,6 +340,12 @@ export function mapMovieSummaryToCatalogItem(
     description: movie.description ?? null,
     streamExtension: movie.containerExtension ?? null,
     providerSortOrder: movie.providerSortOrder ?? null,
+    regionRank:
+      movie.regionRank ??
+      computeVodRegionRank(
+        { title: movie.title, rawTitle: movie.rawTitle, countryCode: movie.countryCode },
+        'movie',
+      ),
     syncGeneration: generation,
   };
 }
@@ -372,6 +380,10 @@ export function mapNativeRecordToCatalogItem(
     streamExtension: record.streamExtension ?? null,
     seriesId: mediaType === 'series' ? contentId : null,
     providerSortOrder: record.providerSortOrder ?? null,
+    regionRank:
+      mediaType === 'movie'
+        ? computeVodRegionRank({ title: record.title }, 'movie')
+        : null,
     syncGeneration: generation,
   };
 }

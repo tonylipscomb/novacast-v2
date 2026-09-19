@@ -17,6 +17,9 @@ type SearchSectionProps = {
   page: SearchPageResult<SearchResult>;
   loading?: boolean;
   focusedResultKey?: string | null;
+  favoriteContentIds?: ReadonlySet<string>;
+  restoreResultKey?: string | null;
+  restoreRowRef?: React.RefObject<View | null>;
   onFocusResult?: (key: string) => void;
   onSelectResult: (result: SearchResult) => void;
   onToggleLiveFavorite?: (result: LiveSearchResult) => void;
@@ -82,6 +85,9 @@ export function SearchSection({
   page,
   loading = false,
   focusedResultKey,
+  favoriteContentIds,
+  restoreResultKey,
+  restoreRowRef,
   onFocusResult,
   onSelectResult,
   onToggleLiveFavorite,
@@ -128,8 +134,11 @@ export function SearchSection({
         <SearchResults
           results={page.items}
           focusedResultKey={focusedResultKey}
+          restoreResultKey={restoreResultKey}
+          restoreRowRef={restoreRowRef}
           onFocusResult={onFocusResult}
           onSelectResult={onSelectResult}
+          favoriteContentIds={favoriteContentIds}
           onToggleLiveFavorite={onToggleLiveFavorite}
           onFocusLiveResult={onFocusLiveResult}
           consumeLiveFavoriteHoldSuppression={consumeLiveFavoriteHoldSuppression}

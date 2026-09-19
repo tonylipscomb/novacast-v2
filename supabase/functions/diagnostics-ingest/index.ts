@@ -14,6 +14,7 @@ const ALLOWED = new Set([
   'app_launch', 'app_resumed', 'app_backgrounded', 'route_changed',
   'catalog_sync_started', 'catalog_sync_completed', 'catalog_sync_failed',
   'provider_assignment_changed', 'connectivity_changed', 'retry_started', 'playback_recovered',
+  'live_timeshift_capability',
 ]);
 
 function sessionCause(eventType: string, metadata: Record<string, unknown>, errorCode?: string) {

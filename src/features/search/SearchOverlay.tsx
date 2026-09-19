@@ -18,6 +18,7 @@ import {
 import { patchLiveTvWorkload } from '@/features/live/liveTvWorkload';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
+import { NovaOverlayShell } from '@/components/nova/NovaOverlayShell';
 
 const focusText = createNovaTvFocusTextStyles(novaTheme);
 
@@ -953,7 +954,7 @@ function SearchOverlayContent({
                 trapFocusDown: true,
               }
             : {})}>
-          <View style={styles.panel}>
+          <NovaOverlayShell style={styles.panel}>
           <View style={styles.header} pointerEvents="box-none">
             <Pressable
               ref={closeButtonRef}
@@ -1041,7 +1042,7 @@ function SearchOverlayContent({
             resultsPane
           )}
           </View>
-          </View>
+          </NovaOverlayShell>
         </FocusBoundaryView>
         {detailLayer}
       </View>

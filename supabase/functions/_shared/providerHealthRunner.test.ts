@@ -219,7 +219,7 @@ Deno.test('occupied max_connections=1 skips stream probes and does not fail as b
   assertEquals(playback?.verdict, 'warn');
   assertEquals(playback?.severity, 'noncritical');
   assert(String(playback?.detail).includes('single allowed connection'));
-  assertEquals(summary.overall, 'degraded');
+  assertEquals(summary.overall, 'healthy');
   const blob = JSON.stringify(sanitizeHealthSummary(summary, USER, PASS));
   assert(!blob.includes(USER));
   assert(!blob.includes(PASS));

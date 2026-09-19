@@ -5,11 +5,15 @@ export function displayHealthLabel(input: {
   activationStatus: string;
   healthStatus: string;
   validationStale: boolean;
+  expired?: boolean;
+  offline?: boolean;
 }) {
   if (input.activationStatus === 'paused' || input.activationStatus === 'revoked') return 'DISABLED';
   if (input.activationStatus === 'draft' && (input.healthStatus === 'unvalidated' || input.validationStale)) return 'DRAFT';
   if (input.healthStatus === 'testing') return 'TESTING';
   if (input.validationStale) return 'VALIDATION REQUIRED';
+  if (input.expired) return 'EXPIRED';
+  if (input.offline) return 'OFFLINE';
   if (input.healthStatus === 'healthy') return 'HEALTHY';
   if (input.healthStatus === 'degraded') return 'DEGRADED';
   if (input.healthStatus === 'failed') return 'FAILED';
@@ -30,15 +34,23 @@ export function canActivateProvider(input: {
 export function healthTone(label: string) {
   if (label === 'HEALTHY') return 'healthy';
   if (label === 'DEGRADED' || label === 'VALIDATION REQUIRED' || label === 'TESTING') return 'warn';
-  if (label === 'FAILED') return 'fail';
+  if (label === 'FAILED' || label === 'OFFLINE' || label === 'EXPIRED') return 'fail';
   if (label === 'DISABLED') return 'disabled';
   return 'draft';
 }
 
-export function formatCount(value: unknown) {
+export function formatCount(value: unknown, atLeast = false) {
   const number = Number(value ?? 0);
   if (!Number.isFinite(number)) return '—';
-  return number.toLocaleString();
+  return `${number.toLocaleString()}${atLeast ? '+' : ''}`;
+}
+
+export function isCappedCatalogCount(value: unknown, truncated?: boolean, exactCountAvailable?: boolean) {
+  if (exactCountAvailable === true) return false;
+  if (exactCountAvailable === false) return true;
+  if (truncated === true) return true;
+  if (truncated === false) return false;
+  return Number(value) >= 12_000;
 }
 
 export function formatTimestamp(value: unknown) {

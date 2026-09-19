@@ -45,7 +45,12 @@ export function parseCatalogReleaseYear(value: unknown): number | null {
 }
 
 /** SQLite before 3.30 may not support NULLS LAST; use IS NULL / CASE. */
-export function orderByClauseCompatible(sort: CatalogItemSort | undefined) {
+export function orderByClauseCompatible(
+  sort: CatalogItemSort | undefined,
+  options?: { regionalFirst?: boolean },
+) {
+  const regionalPrefix = options?.regionalFirst ? 'COALESCE(region_rank, 1) ASC, ' : '';
+  const order = (() => {
   switch (sort) {
     case 'newest':
       return `CASE WHEN ${VALID_RELEASE_DATE_SQL} THEN 0 WHEN ${VALID_RELEASE_YEAR_SQL} THEN 1 WHEN ${VALID_ADDED_AT_SQL} THEN 2 ELSE 3 END ASC, release_date DESC, release_year DESC, added_at DESC, ${PROVIDER_THEN_ID}`;
@@ -65,6 +70,8 @@ export function orderByClauseCompatible(sort: CatalogItemSort | undefined) {
     default:
       return 'normalized_title ASC, content_id ASC';
   }
+  })();
+  return regionalPrefix + order;
 }
 
 export type CatalogSortMetadataCoverage = {

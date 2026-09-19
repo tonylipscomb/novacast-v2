@@ -5,6 +5,7 @@ import { Animated, findNodeHandle, Pressable, StyleSheet, Text, View } from 'rea
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
 import { NovaPosterFocusOverlay } from '@/components/nova/NovaPosterFocusOverlay';
+import { parseCatalogReleaseYear } from '@/features/catalog/catalogSortOrder';
 import { formatRatingOneDecimal } from '@/features/media-browser/ratingNormalization';
 import {
   isOnnMoviesTraceEnabled,
@@ -112,8 +113,15 @@ export const MoviePosterCard = memo(function MoviePosterCard({
   const posterFailed = failedPosterKey === posterKey;
   const showPosterArt = Boolean(movie.posterUrl) && !posterFailed;
   const displayRating = formatRatingOneDecimal(movie.rating);
+  // Provider/catalog data can contain numeric junk (for example, `219`).
+  // Keep that value available to the model, but never render it as a year.
+  const displayYear = parseCatalogReleaseYear(movie.year);
+  const displayGenre = movie.genres.find((genre) => {
+    const value = genre.trim();
+    return value.length > 0 && !/^\d+$/.test(value);
+  });
   const metaPrimary = formatMediaMetaLabel({
-    year: movie.year,
+    year: displayYear ?? undefined,
     rating: movie.rating,
     genre: movie.genres[0],
   });
@@ -159,6 +167,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
           showFocused && styles.posterShellFocused,
           { transform: [{ scale: focusScale }] },
         ]}>
+        {showFocused ? <View pointerEvents="none" style={styles.posterFocusHalo} /> : null}
         <View
           style={[
             styles.poster,
@@ -185,7 +194,7 @@ export const MoviePosterCard = memo(function MoviePosterCard({
               <View style={styles.posterCenter}>
                 <Text style={[styles.initials, { color: posterColors.accent }]}>{initials}</Text>
                 <Text numberOfLines={1} style={[styles.posterGenre, { color: posterColors.accentSoft }]}>
-                  {movie.genres[0] ?? 'Feature'}
+                  {displayGenre ?? ''}
                 </Text>
               </View>
               <View style={styles.posterFooter}>
@@ -210,8 +219,8 @@ export const MoviePosterCard = memo(function MoviePosterCard({
       </Text>
       <View style={styles.metaRow}>
         {metaPrimary ? <Text style={[styles.meta, showFocused && styles.metaFocused]}>{metaPrimary}</Text> : null}
-        {metaPrimary && movie.genres[0] ? <View style={styles.metaDot} /> : null}
-        <Text style={styles.meta}>{movie.genres[0] ?? 'Feature'}</Text>
+        {metaPrimary && displayGenre ? <View style={styles.metaDot} /> : null}
+        {displayGenre ? <Text style={styles.meta}>{displayGenre}</Text> : null}
       </View>
     </>
   );
@@ -268,6 +277,7 @@ function createStyles(theme: NovaTheme) {
     card: focusChrome.card,
     posterShell: focusChrome.posterShell,
     posterShellFocused: focusChrome.posterShellFocused,
+    posterFocusHalo: focusChrome.posterFocusHalo,
     poster: focusChrome.poster,
     posterFocused: focusChrome.posterFocused,
     posterWithArt: focusChrome.posterWithArt,

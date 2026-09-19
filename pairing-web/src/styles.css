@@ -555,16 +555,18 @@ a.downloadButton {
 
 .providersPage { display: grid; gap: 14px; }
 .providersPage .inviteFilters { grid-template-columns: minmax(250px, 1fr) auto auto; }
-.providerCardGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.providerCardGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; align-items: start; }
 .providerCard {
   display: grid;
   gap: 12px;
   padding: 18px;
   border: 1px solid rgba(74, 124, 205, .24);
   border-radius: 12px;
+  min-width: 0;
   background: linear-gradient(145deg, rgba(8, 22, 43, .92), rgba(5, 14, 30, .88));
 }
-.providerCard header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.providerCard header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; }
+.providerCard header > div { min-width: 0; }
 .providerCard header strong { display: block; color: #f5f8ff; font-size: 18px; }
 .providerCard header small { display: block; margin-top: 4px; color: #8499b9; font-size: 11px; }
 .providerCard dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
@@ -572,6 +574,20 @@ a.downloadButton {
 .providerCard dl span { display: block; color: #8ea1c1; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
 .providerCard dl strong { display: block; margin-top: 6px; color: #f5f8ff; font-size: 20px; }
 .providerCard > p, .providerNote { margin: 0; color: #93a7c6; font-size: 12px; }
+.providerHealthSignals { display: grid; gap: 6px; padding: 10px 0; border-top: 1px solid rgba(74,124,205,.14); border-bottom: 1px solid rgba(74,124,205,.14); }
+.providerHealthSignals > div { display: flex; justify-content: space-between; gap: 12px; color: #8499b9; font-size: 11px; }
+.providerHealthSignals strong { color: #dce8fb; font-size: 11px; font-weight: 600; text-align: right; }
+.providerEpgDetails { min-width: 0; }
+.providerEpgDetails > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid rgba(74,124,205,.22); border-radius: 8px; color: #dce8fb; background: rgba(6,20,48,.6); cursor: pointer; list-style: none; }
+.providerEpgDetails > summary::-webkit-details-marker { display: none; }
+.providerEpgDetails > summary > span { display: grid; gap: 3px; min-width: 0; }
+.providerEpgDetails > summary strong { color: #f5f8ff; font-size: 12px; }
+.providerEpgDetails > summary small { overflow: hidden; color: #8499b9; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.providerEpgDetails > summary b { flex: 0 0 auto; color: #18d7ff; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
+.providerEpgDetails[open] > summary { border-color: rgba(24,215,255,.35); border-radius: 8px 8px 0 0; }
+.providerEpgDetails[open] > .providerDiagnostics { border-top: 0; border-radius: 0 0 8px 8px; }
+.providerEpgSummary{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:48px;padding:9px 12px;border:1px solid rgba(74,124,205,.22);border-radius:8px;color:#dce8fb;background:rgba(6,20,48,.6);text-align:left;cursor:pointer}.providerEpgSummary span{display:grid;gap:3px;min-width:0}.providerEpgSummary strong{color:#f5f8ff;font-size:12px}.providerEpgSummary small{overflow:hidden;color:#8499b9;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.providerEpgSummary b{flex:0 0 auto;color:#18d7ff;font-size:10px;letter-spacing:.05em;text-transform:uppercase}.epgWizardModal{width:min(820px,calc(100vw - 32px));max-height:82vh;overflow:auto}.epgWizardSummary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:18px}.epgWizardSummary span,.epgWizardMetricGrid span{display:grid;gap:5px;padding:10px;border:1px solid rgba(74,124,205,.18);border-radius:7px;color:#8499b9;background:rgba(6,20,48,.52);font-size:10px;text-transform:uppercase}.epgWizardSummary strong,.epgWizardMetricGrid strong{color:#f5f8ff;font-size:14px;text-transform:none}.epgWizardActions{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.epgWizardActions button{min-height:36px;padding:0 11px;font-size:10px}.epgWizardSourceList{display:grid;gap:8px}.epgWizardSourceRow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid rgba(74,124,205,.2);border-radius:8px;background:rgba(6,20,48,.42)}.epgWizardSourceRow>div{display:grid;gap:4px;min-width:0}.epgWizardSourceRow strong{color:#f5f8ff;font-size:13px}.epgWizardSourceRow small{color:#8499b9;font-size:10px}.epgWizardSourceRow button{flex:0 0 auto;min-height:34px;padding:0 12px}.epgWizardMetricGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:18px}.epgWizardDanger{margin-top:18px;padding:10px;border:1px solid rgba(239,68,68,.25);border-radius:7px;color:#ffb8ae}.epgWizardDanger summary{cursor:pointer;font-size:11px}.epgWizardDanger button{margin-top:10px}.epgWizardBack{margin-top:14px}
+.epgWizardActions button,.epgSourceMore summary{box-sizing:border-box;min-height:32px;height:32px;padding:0 10px;border-radius:8px;font-size:12px;line-height:30px;white-space:nowrap}.epgWizardToolbar{gap:6px;margin:12px 0}.epgWizardToolbar button{font-size:12px}.epgPrimaryAction{color:#f5f8ff;background:#2563eb}.epgSecondaryAction{color:#b9c8e2;background:rgba(10,30,57,.86)}.epgSourceActions{align-items:center;gap:6px;margin:10px 0 0}.epgSourceActions>button{min-width:0}.epgSourceMore{position:relative}.epgSourceMore summary{display:block;border:1px solid rgba(74,124,205,.25);color:#c8d7ed;background:rgba(10,30,57,.86);cursor:pointer;list-style:none}.epgSourceMore summary::-webkit-details-marker{display:none}.epgSourceMore[open] summary{border-color:rgba(24,215,255,.4);color:#fff}.epgSourceMore>div{position:absolute;z-index:2;top:38px;right:0;display:grid;min-width:116px;gap:4px;padding:6px;border:1px solid rgba(74,124,205,.35);border-radius:8px;background:#07142a;box-shadow:0 12px 28px rgba(0,0,0,.45)}.epgSourceMore>div button{width:100%;min-height:30px;height:30px;padding:0 8px;text-align:left;font-size:12px;line-height:28px}.epgWizardDanger{font-size:11px}.epgWizardDanger button{min-height:30px;height:30px;padding:0 10px;font-size:12px;line-height:28px;white-space:nowrap}
 .providerCard footer { display: flex; flex-wrap: wrap; gap: 8px; }
 .providerCard footer button { min-height: 36px; padding: 0 12px; font-size: 11px; }
 .goldExpirationCenter,.goldActivity{display:grid;gap:12px;padding:16px;border:1px solid rgba(74,124,205,.24);border-radius:10px;background:rgba(5,16,33,.88)}
@@ -630,6 +646,7 @@ a.downloadButton {
  @media (max-width: 900px) { .diagnosticMetricGrid { grid-template-columns: repeat(2, 1fr); } .diagnosticRow { grid-template-columns: 1fr 1fr; } }
 @keyframes providerPulse { 50% { opacity: .35; } }
 @media (max-width: 760px) {
+  .providerCardGrid { grid-template-columns: 1fr; }
   .providerCard dl { grid-template-columns: 1fr; }
   .providersPage .inviteFilters { grid-template-columns: 1fr; }
 }

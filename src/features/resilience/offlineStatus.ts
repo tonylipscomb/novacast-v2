@@ -15,6 +15,11 @@ type OfflineSnapshot = {
 
 const OUTAGE_DEDUPE_MS = 60_000;
 const OFFLINE_FAILURE_THRESHOLD = 3;
+export const OFFLINE_TOAST_DURATION_MS = 3_500;
+
+export function isConfirmedOfflineTransition(previous: NetworkStatus, next: NetworkStatus) {
+  return previous === 'online' && next === 'offline';
+}
 
 let snapshot: OfflineSnapshot = {
   status: 'unknown',
@@ -47,7 +52,7 @@ export function reportNetworkOutcome(ok: boolean, failureKind: NetworkFailureKin
   if (ok) {
     const next: NetworkStatus = 'online';
     if (snapshot.status === next && snapshot.consecutiveFailures === 0) return;
-    snapshot = { ...snapshot, status: next, consecutiveFailures: 0, lastChangedAt: Date.now() };
+    snapshot = { ...snapshot, status: next, consecutiveFailures: 0, lastChangedAt: Date.now(), lastOutageNotifiedAt: null };
     emit();
     return;
   }

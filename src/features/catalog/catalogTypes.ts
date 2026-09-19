@@ -111,6 +111,8 @@ export type CatalogItemsPageQuery = {
    * hasMore is inferred from page length === limit; totalCount may be approximate.
    */
   skipTotalCount?: boolean;
+  /** Apply persisted Movie regional rank before the requested sort. */
+  regionalFirst?: boolean;
 };
 
 export type CatalogItemsPage = {
@@ -125,7 +127,7 @@ export type CatalogItemsPage = {
 export const CATALOG_DEFAULT_PAGE_SIZE = 48;
 
 /** Stage 3C: generation-safe Movies v2 tables. */
-export const CATALOG_SCHEMA_VERSION = 4;
+export const CATALOG_SCHEMA_VERSION = 5;
 
 export const CATALOG_DATABASE_NAME = 'novacast-catalog.db';
 

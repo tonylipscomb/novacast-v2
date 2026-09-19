@@ -1,4 +1,4 @@
-export const CATALOG_READ_LIMIT_BYTES = 8 * 1024 * 1024;
+export const CATALOG_READ_LIMIT_BYTES = 128 * 1024 * 1024;
 export const CATALOG_ITEM_SCAN_LIMIT = 12_000;
 export const CATALOG_SAMPLE_LIMIT = 40;
 export const CATALOG_UNPARSED_TAIL_LIMIT = 512 * 1024;
@@ -12,12 +12,25 @@ export type CatalogFailureReason =
   | 'catalog_payload_too_large'
   | 'catalog_empty';
 
+export type CatalogStopReason =
+  | 'complete'
+  | 'byte_limit'
+  | 'timeout'
+  | 'upstream_incomplete'
+  | 'fallback_sample'
+  | 'parse_failure';
+
 export type CatalogScanResult = {
   ok: boolean;
   reason: 'ok' | CatalogFailureReason;
   detail: string;
   items: Record<string, unknown>[];
   count: number;
+  totalCount: number | null;
+  inspectedCount: number;
+  exactCountAvailable: boolean;
+  diagnosticTruncated: boolean;
+  stopReason: CatalogStopReason;
   truncated: boolean;
   complete: boolean;
   bytesRead: number;
@@ -65,12 +78,14 @@ export function createXtreamCatalogScanner(options: {
   const decoder = new TextDecoder();
   let buffer = '';
   let bytesRead = 0;
-  let count = 0;
+  let totalCount = 0;
+  let inspectedCount = 0;
   let samples: Record<string, unknown>[] = [];
   let lastItems: Record<string, unknown>[] = [];
   let arrayStarted = false;
   let finished = false;
   let truncated = false;
+  let diagnosticTruncated = false;
   let complete = false;
   let reason: CatalogScanResult['reason'] = 'ok';
   let httpStatus: number | null = null;
@@ -81,14 +96,19 @@ export function createXtreamCatalogScanner(options: {
   };
 
   const consider = (item: Record<string, unknown>) => {
-    count += 1;
-    if (keepAll && samples.length < maxItems) {
+    totalCount += 1;
+    if (inspectedCount >= maxItems) {
+      diagnosticTruncated = true;
+      return;
+    }
+    inspectedCount += 1;
+    if (keepAll) {
       samples.push(item);
       return;
     }
     if (samples.length < Math.min(8, sampleSize)) {
       samples.push(item);
-    } else if (count % 47 === 0 && samples.length < sampleSize - 8) {
+    } else if (totalCount % 47 === 0 && samples.length < sampleSize - 8) {
       samples.push(item);
     }
     lastItems = [...lastItems, item].slice(-8);
@@ -166,11 +186,6 @@ export function createXtreamCatalogScanner(options: {
         break;
       }
       index = end + 1;
-      if (count >= maxItems) {
-        truncated = true;
-        finished = true;
-        break;
-      }
     }
     buffer = buffer.slice(index);
     if (buffer.length > CATALOG_UNPARSED_TAIL_LIMIT) {
@@ -189,10 +204,6 @@ export function createXtreamCatalogScanner(options: {
         finished = true;
         for (const row of rows) {
           if (row && typeof row === 'object' && !Array.isArray(row)) consider(row);
-          if (count >= maxItems) {
-            truncated = true;
-            break;
-          }
         }
         buffer = '';
         return;
@@ -208,10 +219,13 @@ export function createXtreamCatalogScanner(options: {
       return bytesRead;
     },
     get count() {
-      return count;
+      return inspectedCount;
     },
     get finished() {
       return finished;
+    },
+    get complete() {
+      return complete;
     },
     setHttpStatus(status: number) {
       httpStatus = status;
@@ -229,14 +243,14 @@ export function createXtreamCatalogScanner(options: {
       bytesRead += next.byteLength;
       buffer += decoder.decode(next, { stream: true });
       processBuffer(false);
-      if (bytesRead >= maxBytes) {
+      if (bytesRead >= maxBytes && !complete) {
         truncated = true;
         finished = true;
       }
     },
-    finish(inputTruncated = truncated): CatalogScanResult {
+    finish(inputTruncated = truncated, forcedStopReason?: CatalogStopReason): CatalogScanResult {
       buffer += decoder.decode();
-      truncated = truncated || inputTruncated;
+      const inputEndedIncomplete = inputTruncated;
       if (!finished) processBuffer(true);
       if (!keepAll && lastItems.length) {
         const seen = new Set(samples);
@@ -246,19 +260,31 @@ export function createXtreamCatalogScanner(options: {
           seen.add(item);
         }
       }
-      if (reason === 'ok' && count === 0) {
+      if (reason === 'ok' && totalCount === 0) {
         if (complete) reason = 'catalog_empty';
         else if (truncated) reason = 'catalog_payload_too_large';
         else if (!arrayStarted) reason = looksLikeHtml(buffer) ? 'catalog_html' : 'catalog_invalid_json';
         else reason = 'catalog_invalid_json';
       }
-      const ok = reason === 'ok' && count > 0;
+      const ok = reason === 'ok' && totalCount > 0;
+      const exactCountAvailable = ok && complete && !truncated && !inputEndedIncomplete;
+      const stopReason = forcedStopReason ?? (
+        exactCountAvailable ? 'complete' :
+          truncated ? 'byte_limit' :
+            inputEndedIncomplete ? 'upstream_incomplete' :
+              reason !== 'ok' ? 'parse_failure' : 'upstream_incomplete'
+      );
       return {
         ok,
         reason: ok ? 'ok' : reason,
-        detail: catalogDiagnosticMessage(ok ? 'ok' : reason, { httpStatus, limitBytes: maxBytes, count }),
+        detail: catalogDiagnosticMessage(ok ? 'ok' : reason, { httpStatus, limitBytes: maxBytes, count: exactCountAvailable ? totalCount : inspectedCount }),
         items: samples,
-        count,
+        count: inspectedCount,
+        totalCount: exactCountAvailable ? totalCount : null,
+        inspectedCount,
+        exactCountAvailable,
+        diagnosticTruncated: diagnosticTruncated || totalCount > inspectedCount,
+        stopReason,
         truncated,
         complete,
         bytesRead,

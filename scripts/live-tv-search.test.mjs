@@ -476,6 +476,16 @@ test('Live marquee requires fresh measurement and focus before animating', () =>
   assert.match(read('src/features/live/LiveTvMarqueeText.tsx'), /offset\.setValue\(0\)/);
 });
 
+test('Live marquee measures intrinsic text independently and waits for late measurement', () => {
+  const marquee = read('src/features/live/LiveTvMarqueeText.tsx');
+  assert.match(marquee, /<Text[\s\S]*pointerEvents="none"/);
+  assert.match(marquee, /style=\{\[style, styles\.measurement\]\}/);
+  assert.match(marquee, /width: 10000/);
+  assert.match(marquee, /setFullTextWidth\(event\.nativeEvent\.lines\[0\]\?\.width \?\? 0\)/);
+  assert.match(marquee, /measuredText === text && fullTextWidth > 0/);
+  assert.match(marquee, /\[distance, focused, measuredText, offset, text\]/);
+});
+
 test('36. existing Live first-OK / second-OK contract remains', () => {
   const landing = createLiveTvLandingState('sports', 'espn');
   const firstOk = chooseLiveChannel(landing, 'espn');

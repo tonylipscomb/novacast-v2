@@ -13,6 +13,8 @@ import {
 } from '../src/features/resilience/sanitizedDiagnostics.ts';
 import {
   getOfflineSnapshot,
+  isConfirmedOfflineTransition,
+  OFFLINE_TOAST_DURATION_MS,
   reportNetworkOutcome,
   resetOfflineStatusForTests,
   shouldAnnounceOfflineOutage,
@@ -75,6 +77,27 @@ test('offline status dedupes outage announcements', () => {
   assert.equal(getOfflineSnapshot().status, 'offline');
   assert.equal(shouldAnnounceOfflineOutage(), true);
   assert.equal(shouldAnnounceOfflineOutage(), false);
+});
+
+test('offline toast only recognizes a confirmed online-to-offline transition', () => {
+  assert.equal(isConfirmedOfflineTransition('unknown', 'offline'), false);
+  assert.equal(isConfirmedOfflineTransition('online', 'offline'), true);
+  assert.equal(isConfirmedOfflineTransition('offline', 'offline'), false);
+  assert.equal(isConfirmedOfflineTransition('offline', 'online'), false);
+  assert.equal(isConfirmedOfflineTransition('online', 'unknown'), false);
+});
+
+test('offline toast duration is transient and reconnect re-arms future outages', () => {
+  assert.ok(OFFLINE_TOAST_DURATION_MS >= 3000 && OFFLINE_TOAST_DURATION_MS <= 4000);
+  resetOfflineStatusForTests();
+  reportNetworkOutcome(true);
+  reportNetworkOutcome(false);
+  reportNetworkOutcome(false);
+  reportNetworkOutcome(false);
+  assert.equal(getOfflineSnapshot().status, 'offline');
+  reportNetworkOutcome(true);
+  assert.equal(getOfflineSnapshot().lastOutageNotifiedAt, null);
+  assert.equal(isConfirmedOfflineTransition('online', 'offline'), true);
 });
 
 test('provider failures do not mark the device offline', () => {

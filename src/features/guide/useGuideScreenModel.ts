@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { getLiveTvMemory } from '@/features/live/liveTvMemory';
-import { getLiveFavoriteEntries, usePersonalizationStore } from '@/features/personalization/personalizationStore';
+import { getLiveFavoriteEntries, getRecentItems, usePersonalizationStore } from '@/features/personalization/personalizationStore';
 import {
   XTREAM_GUIDE_CHANNEL_PAGE_SIZE,
   XTREAM_GUIDE_MAX_LOADED_CHANNELS,
@@ -14,13 +14,13 @@ import { useActiveProviderBundle } from '@/features/providers/useActiveProviderB
 import type { ProviderRepositoryBundle } from '@/features/providers/providerBundle';
 import { beginCatalogGuidePriority, endCatalogGuidePriority } from '@/features/providers/catalogSyncGuidePriority';
 
-import { applyGuideCategoryResult, GUIDE_FAVORITES_CATEGORY_ID, statusForRows, type GuideLoadStatus } from './guideLogic';
+import { applyGuideCategoryResult, buildGuideCategoryRail, GUIDE_FAVORITES_CATEGORY_ID, GUIDE_RECENT_CATEGORY_ID, statusForRows, type GuideLoadStatus } from './guideLogic';
 import { getGuideMemory, rememberGuideMemory } from './guideMemory';
 import { getGuideWindow, normalizeGuideRows, type NormalizedGuideRow } from './guideTimeline';
 
 /** Synthetic category prepended before provider categories, mirroring Live TV's category rail. */
 export const GUIDE_ALL_CATEGORY_ID = 'all';
-export { GUIDE_FAVORITES_CATEGORY_ID };
+export { GUIDE_FAVORITES_CATEGORY_ID, GUIDE_RECENT_CATEGORY_ID };
 export type { GuideLoadStatus };
 
 type GuideCacheEntry = {
@@ -73,6 +73,17 @@ async function loadFavoriteGuideRows(bundle: ProviderRepositoryBundle, signal?: 
   return capped.map((channel) => ({ channel, programs: [] }));
 }
 
+async function loadRecentGuideRows(bundle: ProviderRepositoryBundle, signal?: AbortSignal): Promise<ProviderGuideRow[]> {
+  const entries = (await getRecentItems(bundle.providerId)).filter((item) => item.mediaType === 'live');
+  if (!entries.length || signal?.aborted) return [];
+
+  const channels = (
+    await Promise.all(entries.map((entry) => bundle.live.getChannel(entry.contentId, signal).catch(() => null)))
+  ).filter((channel): channel is ProviderLiveChannel => Boolean(channel));
+
+  return channels.slice(0, XTREAM_GUIDE_MAX_LOADED_CHANNELS).map((channel) => ({ channel, programs: [] }));
+}
+
 export function useGuideScreenModel() {
   // NOVACAST_GUIDE_V2_1_POLISH_V1: prior progressive short-EPG experiment.
   // NOVACAST_GUIDE_V2_2_STABILITY_V1: Guide is channels-first and performs no per-channel EPG network calls.
@@ -98,29 +109,13 @@ export function useGuideScreenModel() {
   const selectedCategoryIdRef = useRef('');
   const loadAbortRef = useRef<AbortController | null>(null);
 
-  const categories = useMemo<ProviderLiveCategory[]>(() => {
-    const countsKnown = baseCategories.length > 0 && baseCategories.every((category) => category.count != null);
-    const allCategory: ProviderLiveCategory = {
-      id: GUIDE_ALL_CATEGORY_ID,
-      renderKey: GUIDE_ALL_CATEGORY_ID,
-      name: 'All Channels',
-      count: countsKnown ? baseCategories.reduce((total, category) => total + (category.count ?? 0), 0) : null,
-      icon: 'earth',
-    };
-    const favoritesCategory: ProviderLiveCategory[] = favoritesAvailable
-      ? [
-          {
-            id: GUIDE_FAVORITES_CATEGORY_ID,
-            renderKey: GUIDE_FAVORITES_CATEGORY_ID,
-            name: 'Favorites',
-            count: personalizationState.liveFavorites.length,
-            icon: 'star-outline' as const,
-          },
-        ]
-      : [];
-
-    return [allCategory, ...favoritesCategory, ...baseCategories];
-  }, [baseCategories, favoritesAvailable, personalizationState.liveFavorites.length]);
+  const categories = useMemo(
+    () => buildGuideCategoryRail(baseCategories, {
+      favorites: personalizationState.liveFavorites.filter((item) => item.mediaType === 'live').length,
+      recent: personalizationState.recentItems.filter((item) => item.mediaType === 'live').length,
+    }),
+    [baseCategories, personalizationState.liveFavorites, personalizationState.recentItems],
+  );
 
   const applyResult = useCallback(
     (
@@ -170,11 +165,13 @@ export function useGuideScreenModel() {
       // SQLite batch, allowing only an already-running tiny batch to finish.
       beginCatalogGuidePriority();
       try {
-        if (categoryId === GUIDE_FAVORITES_CATEGORY_ID) {
+        if (categoryId === GUIDE_FAVORITES_CATEGORY_ID || categoryId === GUIDE_RECENT_CATEGORY_ID) {
           if (offset > 0) {
             return;
           }
-          const favoriteRows = await loadFavoriteGuideRows(bundle, signal);
+          const favoriteRows = categoryId === GUIDE_FAVORITES_CATEGORY_ID
+            ? await loadFavoriteGuideRows(bundle, signal)
+            : await loadRecentGuideRows(bundle, signal);
           if (requestId !== requestRef.current || signal.aborted) {
             return;
           }
@@ -204,6 +201,7 @@ export function useGuideScreenModel() {
             categoryId: providerCategoryId,
             channelOffset: offset,
             channelLimit,
+            channelsOnly: true,
           }),
           countPromise,
         ]);
@@ -216,6 +214,23 @@ export function useGuideScreenModel() {
         const hasMoreLocal =
           pageRows.length >= channelLimit && loadedAfter < XTREAM_GUIDE_MAX_LOADED_CHANNELS;
         applyResult(categoryId, requestId, normalized, hasMoreLocal, totalCount, append);
+
+        if (!append) {
+          // Hydrate only after the channel page has been published. The same
+          // request id and AbortSignal ensure a category switch cannot let a
+          // slow EPG result overwrite the active Guide page.
+          void bundle.guide.getRows(signal, {
+            categoryId: providerCategoryId,
+            channelOffset: offset,
+            channelLimit,
+          }).then((hydratedRows) => {
+            if (requestId !== requestRef.current || signal.aborted) return;
+            applyResult(categoryId, requestId, normalizeGuideRows(hydratedRows), hasMoreLocal, totalCount, false);
+          }).catch(() => {
+            // Channel readiness is already established; EPG failure leaves
+            // the visible rows usable with their no-schedule state.
+          });
+        }
       } catch (error) {
         if (requestId !== requestRef.current || signal.aborted || isAbortError(error)) {
           return;
@@ -306,7 +321,8 @@ export function useGuideScreenModel() {
       const liveMemory = getLiveTvMemory(bundle.providerId);
       const availableIds = new Set([
         GUIDE_ALL_CATEGORY_ID,
-        ...(favoritesAvailable ? [GUIDE_FAVORITES_CATEGORY_ID] : []),
+        GUIDE_FAVORITES_CATEGORY_ID,
+        GUIDE_RECENT_CATEGORY_ID,
         ...nextCategories.map((category) => category.id),
       ]);
 
@@ -342,7 +358,7 @@ export function useGuideScreenModel() {
 
   const loadMore = useCallback(async () => {
     if (!bundle || !hasMore || loadingMoreRef.current || !rowsRef.current.length) return;
-    if (selectedCategoryIdRef.current === GUIDE_FAVORITES_CATEGORY_ID) return;
+    if (selectedCategoryIdRef.current === GUIDE_FAVORITES_CATEGORY_ID || selectedCategoryIdRef.current === GUIDE_RECENT_CATEGORY_ID) return;
 
     const signal = loadAbortRef.current?.signal;
     if (!signal || signal.aborted) return;

@@ -11,6 +11,7 @@ const catalogTableRouting = fs.readFileSync('src/features/catalog/catalogTableRo
 const catalogSqliteSyncWriter = fs.readFileSync('src/features/catalog/catalogSqliteSyncWriter.ts', 'utf8');
 const providerCatalogSync = fs.readFileSync('src/features/providers/providerCatalogSync.ts', 'utf8');
 const seriesDiagnostics = fs.readFileSync('src/features/series/seriesDiagnostics.ts', 'utf8');
+const seriesSearchDatasource = fs.readFileSync('src/features/search/seriesSearchDatasource.ts', 'utf8');
 
 function sliceBlock(source, startNeedle, endNeedle) {
   const start = source.indexOf(startNeedle);
@@ -105,6 +106,11 @@ test('10. Search reads from SQLite', () => {
   const block = sliceBlock(sqliteDs, 'async function searchSeriesImpl', 'return {\n    async getCategories');
   assert.match(block, /getCatalogItemsPage\(/);
   assert.match(block, /query: input\.query/);
+});
+
+test('10a. Search selects the readable Series generation regardless of the indexing flag', () => {
+  assert.match(seriesSearchDatasource, /const sqliteAvailable = readableGeneration > 0/);
+  assert.doesNotMatch(seriesSearchDatasource, /SERIES_SQLITE_READS_ENABLED && readableGeneration/);
 });
 
 test('11. Search does not call provider when local generation is readable', () => {

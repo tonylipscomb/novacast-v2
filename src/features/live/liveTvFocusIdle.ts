@@ -1,4 +1,4 @@
-import { patchLiveTvWorkload } from './liveTvWorkload';
+import { patchLiveTvWorkload } from './liveTvWorkload.ts';
 
 const FOCUS_IDLE_MS = 500;
 
@@ -34,6 +34,10 @@ export function runAfterLiveTvFocusIdle(callback: () => void) {
   if (!idleTimer) {
     idleTimer = setTimeout(flushFocusIdleQueue, FOCUS_IDLE_MS);
   }
+}
+
+export function waitForLiveTvFocusIdle(): Promise<void> {
+  return new Promise((resolve) => runAfterLiveTvFocusIdle(resolve));
 }
 
 export function resetLiveTvFocusIdle() {

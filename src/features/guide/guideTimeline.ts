@@ -1,10 +1,31 @@
 import type { ProviderGuideProgram, ProviderGuideRow } from '@/features/providers/providerRepositories';
+import { decodeDisplayTextEntities } from '../live/liveTvProgramText.ts';
 
 // NOVACAST_GUIDE_V2_FOUNDATION_V1: denser TV-first grid for 1080p / ONN-class devices.
-export const GUIDE_CHANNEL_COLUMN_WIDTH = 190;
+// Shared channel/EPG split: the channel rail is compact while the timeline
+// remains the dominant body region on TV-sized layouts.
+export const GUIDE_CHANNEL_COLUMN_WIDTH = 320;
+export const GUIDE_ROW_HEIGHT = 60;
+export const GUIDE_ROW_GAP = 3;
 export const GUIDE_PIXELS_PER_MINUTE = 1.15;
 export const GUIDE_MIN_PROGRAM_WIDTH = 108;
 export const GUIDE_TIME_SLOT_MINUTES = 60;
+export const GUIDE_INITIAL_PAST_MINUTES = 20;
+
+// Device-grounded column widths: fixed 264/320dp ate ~61% of the 960dp ONN window,
+// so the Categories/Channels columns are derived from the live RN window width instead.
+export const GUIDE_CATEGORY_MIN_WIDTH = 148;
+export const GUIDE_CATEGORY_MAX_WIDTH = 240;
+export const GUIDE_CHANNEL_MIN_WIDTH = 188;
+export const GUIDE_CHANNEL_MAX_WIDTH = 300;
+
+export function deriveGuideColumnWidths(windowWidth: number) {
+  const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+  return {
+    categoryWidth: clamp(Math.round(windowWidth * 0.16), GUIDE_CATEGORY_MIN_WIDTH, GUIDE_CATEGORY_MAX_WIDTH),
+    channelWidth: clamp(Math.round(windowWidth * 0.2), GUIDE_CHANNEL_MIN_WIDTH, GUIDE_CHANNEL_MAX_WIDTH),
+  };
+}
 
 export type NormalizedGuideProgram = ProviderGuideProgram & {
   startAt?: number;
@@ -56,7 +77,11 @@ export function parseGuideTimestamp(value: unknown, reference = Date.now()): num
 }
 
 function cleanText(value?: string) {
-  const text = value?.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
+  if (value === undefined) return undefined;
+  // Strip markup, then decode entities once via the shared normalizer so Guide
+  // and Live TV render the same text (e.g. "Sanford &amp; Son" -> "Sanford & Son").
+  const stripped = value.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/gi, ' ');
+  const text = decodeDisplayTextEntities(stripped).replace(/\s+/g, ' ').trim();
   return text || undefined;
 }
 
@@ -147,6 +172,18 @@ export function getProgramWidth(program: Pick<NormalizedGuideProgram, 'startAt' 
 
 export function timeToTimelinePixels(timestamp: number, timelineStartAt: number) {
   return Math.max(0, ((timestamp - timelineStartAt) / 60_000) * GUIDE_PIXELS_PER_MINUTE);
+}
+
+export function getGuideNowOffset(
+  now: number,
+  timelineStartAt: number,
+  pastMinutes = GUIDE_INITIAL_PAST_MINUTES,
+  maxScrollableOffset = Number.POSITIVE_INFINITY,
+) {
+  return Math.min(
+    Math.max(0, timeToTimelinePixels(now - pastMinutes * 60_000, timelineStartAt)),
+    Math.max(0, maxScrollableOffset),
+  );
 }
 
 export function getProgramOffset(program: Pick<NormalizedGuideProgram, 'startAt'>, timelineStartAt: number) {

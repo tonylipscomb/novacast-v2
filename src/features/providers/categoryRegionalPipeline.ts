@@ -4,8 +4,10 @@ import {
   BARE_US_LABEL_PATTERN,
   CANADA_REGION_MARKERS,
   CATEGORY_REGION_SORT_PRIORITY,
+  CATEGORY_REGION_PREFIX_CODES,
   DEPRIORITIZED_FOREIGN_LANGUAGE_MARKERS,
   DEPRIORITIZED_RELIGIOUS_MARKERS,
+  REGIONAL_PRESENTATION_CATEGORY_ALIASES,
   EUROPE_COUNTRY_CODES,
   EUROPE_REGION_MARKERS,
   FOREIGN_COUNTRY_CODES,
@@ -25,6 +27,8 @@ export type CategoryRegionalInput = {
   rawName?: string;
   countryCode?: string;
   contentType?: ProviderCategoryContentType;
+  /** Optional resolved user region; app defaults to US when omitted. */
+  preferredRegion?: string;
 };
 
 export type CategoryRegionalProfile = {
@@ -105,6 +109,30 @@ function collectCategoryLabels(input: CategoryRegionalInput) {
   return [...labels];
 }
 
+function explicitCategoryRegionCode(labels: string[], countryCode?: string): string | undefined {
+  const metadataCode = countryCode?.trim().toUpperCase();
+  if (metadataCode && CATEGORY_REGION_PREFIX_CODES.has(metadataCode)) {
+    return metadataCode === 'USA' ? 'US' : metadataCode === 'GB' ? 'UK' : metadataCode;
+  }
+
+  for (const label of labels) {
+    const match = label.match(/^([A-Z]{2,3})(?=\s|[:|/\\-])/i);
+    const token = match?.[1]?.toUpperCase();
+    if (token && CATEGORY_REGION_PREFIX_CODES.has(token)) {
+      return token === 'USA' ? 'US' : token === 'GB' ? 'UK' : token;
+    }
+  }
+  return undefined;
+}
+
+function groupForExplicitRegion(code: string): CategoryRegionGroup {
+  if (code === 'CA') return 'canada';
+  if (code === 'AU') return 'australia';
+  if (code === 'UK' || code === 'GB') return 'uk';
+  if (EUROPE_COUNTRY_CODES.has(code)) return 'europe';
+  return 'foreign';
+}
+
 export function analyzeCategoryScriptProfile(labels: string[]): CategoryScriptProfile {
   let latinLetters = 0;
   let nonLatinLetters = 0;
@@ -140,6 +168,11 @@ function matchesAnyLabel(labels: string[], pattern: RegExp) {
 
 function matchesCountryCode(countryCode: string | undefined, codes: Set<string>) {
   return Boolean(countryCode && codes.has(countryCode));
+}
+
+function startsWithRegionalPresentationAlias(label: string) {
+  const token = label.trim().match(/^([A-Z]+)(?=\s|$|[(:|/\\-])/i)?.[1]?.toUpperCase();
+  return Boolean(token && REGIONAL_PRESENTATION_CATEGORY_ALIASES.has(token));
 }
 
 function isUsRegion(labels: string[], countryCode?: string) {
@@ -223,7 +256,8 @@ function isDeprioritizedForeignLatin(labels: string[], countryCode?: string) {
 
   if (
     matchesAnyLabel(labels, DEPRIORITIZED_FOREIGN_LANGUAGE_MARKERS) ||
-    matchesAnyLabel(labels, DEPRIORITIZED_RELIGIOUS_MARKERS)
+    matchesAnyLabel(labels, DEPRIORITIZED_RELIGIOUS_MARKERS) ||
+    labels.some(startsWithRegionalPresentationAlias)
   ) {
     return true;
   }
@@ -268,7 +302,23 @@ function resolveCategoryRegionGroupFromParsed(
   scriptProfile: CategoryScriptProfile,
   countryCode: string | undefined,
   parsedLabels: ParsedCategoryLabel[],
+  preferredRegion = 'US',
+  contentType?: ProviderCategoryContentType,
 ): CategoryRegionGroup {
+  const explicitRegion = explicitCategoryRegionCode(labels, countryCode);
+  if (explicitRegion) {
+    const localRegion = preferredRegion.trim().toUpperCase();
+    if ((localRegion === 'USA' ? 'US' : localRegion) === explicitRegion) {
+      return 'us';
+    }
+    return contentType === 'movie' || contentType === 'series' ? 'foreign' : groupForExplicitRegion(explicitRegion);
+  }
+  // For VOD categories, an explicit language/presentation marker is also a
+  // regional variant. Keep it below neutral/global categories without
+  // changing the finer-grained Live category groups.
+  if ((contentType === 'movie' || contentType === 'series') && isDeprioritizedForeignLatin(labels, countryCode)) {
+    return 'foreign';
+  }
   if (scriptProfile === 'foreign') return 'foreign';
   if (scriptProfile === 'mixed') return 'mixed';
   const us = isUsRegionFast(labels, countryCode, parsedLabels);
@@ -287,7 +337,20 @@ export function resolveCategoryRegionGroup(
   labels: string[],
   scriptProfile: CategoryScriptProfile,
   countryCode?: string,
+  preferredRegion = 'US',
+  contentType?: ProviderCategoryContentType,
 ): CategoryRegionGroup {
+  const explicitRegion = explicitCategoryRegionCode(labels, countryCode);
+  if (explicitRegion) {
+    const localRegion = preferredRegion.trim().toUpperCase();
+    if ((localRegion === 'USA' ? 'US' : localRegion) === explicitRegion) {
+      return 'us';
+    }
+    return contentType === 'movie' || contentType === 'series' ? 'foreign' : groupForExplicitRegion(explicitRegion);
+  }
+  if ((contentType === 'movie' || contentType === 'series') && isDeprioritizedForeignLatin(labels, countryCode)) {
+    return 'foreign';
+  }
   if (scriptProfile === 'foreign') {
     return 'foreign';
   }
@@ -451,7 +514,14 @@ export function buildCategoryRegionalProfile(
   }
 
   const regionStartedAt = metrics ? nowMs() : 0;
-  const regionGroup = resolveCategoryRegionGroupFromParsed(labels, scriptProfile, input.countryCode, parsedLabels);
+  const regionGroup = resolveCategoryRegionGroupFromParsed(
+    labels,
+    scriptProfile,
+    input.countryCode,
+    parsedLabels,
+    input.preferredRegion,
+    input.contentType,
+  );
   if (metrics) {
     metrics.regionClassifyMs = (metrics.regionClassifyMs ?? 0) + (nowMs() - regionStartedAt);
     metrics.regionClassifyCount = (metrics.regionClassifyCount ?? 0) + 1;
@@ -478,7 +548,14 @@ export function buildCategoryRegionalProfile(
   }
 
   const sortKeyStartedAt = metrics ? nowMs() : 0;
-  const sortLabel = displayName.toLocaleLowerCase();
+  // Series presentation prefixes are display-only. Keep their provider label
+  // as the within-tier sort key so `BELGIUM ...` remains ahead of `GR ...`
+  // instead of sorting by the cleaned display name (`APPLE+ ...`). Live keeps
+  // its existing display-name ordering.
+  const sortLabel =
+    input.contentType === 'series' && regionGroup === 'foreign'
+      ? (primary?.label.trim() || input.name.trim()).toLocaleLowerCase()
+      : displayName.toLocaleLowerCase();
   if (metrics) {
     metrics.sortKeyMs = (metrics.sortKeyMs ?? 0) + (nowMs() - sortKeyStartedAt);
   }
@@ -501,7 +578,13 @@ export function buildCategoryRegionalProfile(
 function resolveCategoryRegionPriority(input: CategoryRegionalInput): number {
   const labels = collectCategoryLabels(input);
   const scriptProfile = analyzeCategoryScriptProfile(labels);
-  const regionGroup = resolveCategoryRegionGroup(labels, scriptProfile, input.countryCode);
+  const regionGroup = resolveCategoryRegionGroup(
+    labels,
+    scriptProfile,
+    input.countryCode,
+    input.preferredRegion,
+    input.contentType,
+  );
   return CATEGORY_REGION_SORT_PRIORITY[regionGroup];
 }
 
@@ -520,7 +603,12 @@ export function compareCategoryRegionalPriority(left: CategoryRegionalProfile, r
 /** Stable sort: region priority, optional alphabetical grouping, then original order. */
 export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
   items: T[],
-  options?: { contentType?: ProviderCategoryContentType; alphabetizeWithinGroup?: boolean; metrics?: CategoryRegionalSortMetrics },
+  options?: {
+    contentType?: ProviderCategoryContentType;
+    alphabetizeWithinGroup?: boolean;
+    preferredRegion?: string;
+    metrics?: CategoryRegionalSortMetrics;
+  },
 ): T[] {
   if (items.length <= 1) {
     return items;
@@ -537,6 +625,7 @@ export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
       rawName: item.rawName,
       countryCode: item.countryCode,
       contentType,
+      preferredRegion: options?.preferredRegion,
     }, options?.metrics),
   }));
   if (options?.metrics) {
@@ -587,10 +676,7 @@ export function sortProviderCategoriesByRegion<T extends CategorySortLabel>(
 }
 
 export function categoryRegionalSortRank(input: CategorySortLabel, contentType?: ProviderCategoryContentType) {
-  // The numeric priority is independent of content type. Keep the argument
-  // for the public API while avoiding full display-profile construction.
-  void contentType;
-  return resolveCategoryRegionPriority(input);
+  return resolveCategoryRegionPriority({ ...input, contentType });
 }
 
 export function isUsAmericanLiveLabel(

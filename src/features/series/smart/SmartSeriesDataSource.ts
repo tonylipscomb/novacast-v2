@@ -165,10 +165,12 @@ export async function refreshSmartSeriesCategoryCounts(providerId: string, categ
   return categories.map((category) => {
     if (!category.smartKey) {
       if (category.kind === 'provider') {
+        const indexedCount = getCategoryCountFromIndex(providerId, 'series', category.id);
+        const currentCountIsAuthoritative = category.countKnown === true;
         return {
           ...category,
-          count: getCategoryCountFromIndex(providerId, 'series', category.id) ?? category.count,
-          countKnown: getCategoryCountFromIndex(providerId, 'series', category.id) !== undefined || category.countKnown !== false,
+          count: currentCountIsAuthoritative ? category.count : indexedCount ?? category.count,
+          countKnown: currentCountIsAuthoritative || indexedCount !== undefined || category.countKnown === true,
         };
       }
       return category;
@@ -186,13 +188,17 @@ export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: 
   async function buildSmartCategories(providerCategories: MediaCategory[]) {
     const sortedProviderCategories = sortProviderCategoriesUsFirst(providerCategories, 'series');
     return appendFallbackCategory(
-      sortedProviderCategories.map((category) => ({
-        ...category,
-        kind: 'provider' as const,
-        section: 'provider' as const,
-        count: getCategoryCountFromIndex(providerId, 'series', category.id) ?? category.count,
-        countKnown: getCategoryCountFromIndex(providerId, 'series', category.id) !== undefined || category.countKnown !== false,
-      })),
+      sortedProviderCategories.map((category) => {
+        const indexedCount = getCategoryCountFromIndex(providerId, 'series', category.id);
+        const currentCountIsAuthoritative = category.countKnown === true;
+        return {
+          ...category,
+          kind: 'provider' as const,
+          section: 'provider' as const,
+          count: currentCountIsAuthoritative ? category.count : indexedCount ?? category.count,
+          countKnown: currentCountIsAuthoritative || indexedCount !== undefined || category.countKnown === true,
+        };
+      }),
       providerId,
     );
   }
@@ -278,7 +284,10 @@ export function createSmartSeriesDataSource(base: SeriesDataSource, providerId: 
         return definition?.maxItems ? Math.min(count, definition.maxItems) : count;
       }
 
-      return getCategoryCountFromIndex(providerId, 'series', categoryId) ?? base.getCategoryCount?.(categoryId) ?? 0;
+      // The wrapped datasource owns the current readable generation. A
+      // persisted count index is only a fallback for sources that cannot
+      // answer the query themselves; it must never override that generation.
+      return base.getCategoryCount?.(categoryId) ?? getCategoryCountFromIndex(providerId, 'series', categoryId) ?? 0;
     },
 
     async searchSeries(input) {

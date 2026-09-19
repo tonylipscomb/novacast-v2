@@ -8,7 +8,7 @@ process.env.EPG_INGEST_TEST_IMPORT = '1';
 process.env.SUPABASE_URL = 'https://example.supabase.co';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
 process.env.PROVIDER_ENCRYPTION_KEY = '00'.repeat(32);
-const { assessGuideReadiness, buildMappingAudit, dedupeXmltvChannels, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
+const { assessGuideReadiness, buildMappingAudit, dedupeXmltvChannels, isSourceOperationalFailure, normalizeXmltvChannelId, retainMappedProgrammes, snapshotWithinAge, toAuditXmltvChannel } = await import('./epg-ingest/index.mjs');
 
 const worker = fs.readFileSync(new URL('./epg-ingest/index.mjs', import.meta.url), 'utf8');
 const combinedMigration = fs.readFileSync(new URL('../supabase/migrations/20260906165500_managed_provider_epg_combined_coverage.sql', import.meta.url), 'utf8');
@@ -568,6 +568,30 @@ test('no pending requests exits zero with a safe no-work message', async () => {
   assert.equal(result.code, 0);
   assert.match(result.stdout, /No pending EPG refresh requests\./);
   assert.equal(result.stderr, '');
+});
+
+test('scheduled failure classification isolates source failures but not infrastructure failures', () => {
+  assert.equal(isSourceOperationalFailure(new Error('provider_unreachable')), true);
+  assert.equal(isSourceOperationalFailure(new Error('xmltv_parse_failed')), true);
+  assert.equal(isSourceOperationalFailure(new Error('database_failure')), false);
+  assert.equal(isSourceOperationalFailure(new Error('worker_failure')), false);
+});
+
+test('scheduled worker terminalizes isolated failures, continues, and only targets exit 1', () => {
+  assert.match(worker, /summary\.failedSources\.push\(\{ sourceId: request\.source_id, code \}\)/);
+  assert.match(worker, /if \(targetedRun \|\| !sourceFailure\) globalFailure = true/);
+  assert.match(worker, /fail_refresh_job/);
+  assert.match(worker, /fail_request/);
+  assert.match(worker, /EPG scheduled refresh summary:/);
+  assert.match(worker, /completed=\$\{summary\.completed\}/);
+  assert.match(worker, /failed=\$\{summary\.failed\}/);
+  assert.match(worker, /deferred=\$\{summary\.deferred\}/);
+  assert.match(worker, /total=\$\{summary\.total\}/);
+});
+
+test('scheduled source loading uses the existing active provider status and does not log credentials', () => {
+  assert.match(worker, /managed_provider_epg_sources\?enabled=eq\.true&managed_providers\.status=eq\.active&select=id,managed_provider_id,managed_providers!inner\(status\)/);
+  assert.doesNotMatch(worker, /process\.stdout\.write\([^\n]*(?:password|credentials|authorization|epg_url)/i);
 });
 
 test('dedupeXmltvChannels collapses duplicate exact XMLTV ids to one record', () => {

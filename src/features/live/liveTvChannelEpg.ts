@@ -9,6 +9,8 @@ import {
   noteLiveEpgRequestStarted,
   shouldSuspendLiveListEpg,
 } from './liveTvWorkload.ts';
+import { waitForLiveTvFocusIdle } from './liveTvFocusIdle.ts';
+import { recordLivePerformanceEvent } from '../diagnostics/livePerformanceTelemetry.ts';
 
 export const LIVE_EPG_WINDOW_RADIUS = 3;
 export const LIVE_EPG_FOCUS_DEBOUNCE_MS = 280;
@@ -32,9 +34,31 @@ export type EpgPrefetchOptions = {
   generation?: number;
 };
 
+function logLiveTitleAudit(
+  channel: ProviderLiveChannel,
+  programs: ProviderGuideProgram[],
+  reason: string,
+  result: ProviderLiveChannel,
+) {
+  const first = programs[0];
+  console.info('[NovaCast Live Title Audit]', {
+    reason,
+    streamId: channel.id,
+    rawName: channel.rawName ?? channel.name,
+    normalizedName: displayStreamTitle(channel.name),
+    epgChannelId: channel.epgChannelId ?? null,
+    epgTitle: first ? displayLiveProgramText(first.title, '') : null,
+    epgStart: first?.startAt ?? null,
+    epgEnd: first?.endAt ?? null,
+    rowDisplayTitle: displayStreamTitle(result.name),
+    playerDisplayTitle: displayLiveProgramText(result.current, displayStreamTitle(result.name)),
+  });
+}
+
 export type FocusedEpgIssueDecision = 'issue' | 'debounce' | 'deduped' | 'cache-hit' | 'suspended';
 
 function logLiveEpg(event: string, payload: Record<string, unknown> = {}) {
+  recordLivePerformanceEvent(`epg_${event.replace(/-/g, '_')}`, payload);
   console.info('[NovaCast Live EPG]', {
     event,
     ...payload,
@@ -42,6 +66,10 @@ function logLiveEpg(event: string, payload: Record<string, unknown> = {}) {
 }
 
 export function logLiveEpgPerformance(event: string, payload: Record<string, unknown> = {}) {
+  recordLivePerformanceEvent(`epg_${event.replace(/-/g, '_')}`, payload);
+  if (event === 'focus') {
+    return;
+  }
   console.info('[NOVACAST_EPG_PERF]', event, payload);
 }
 
@@ -67,14 +95,26 @@ export function orderTimedEpgPrograms(programs: ProviderGuideProgram[], now = Da
   return current ? [current, ...future] : future;
 }
 
-export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: ProviderGuideProgram[]): ProviderLiveChannel {
+export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: ProviderGuideProgram[], audit = false): ProviderLiveChannel {
   if (!programs.length) {
     const title = displayLiveProgramText(channel.current, '');
     const channelLabel = displayStreamTitle(channel.name);
-    return {
+    const enriched = {
       ...channel,
       current: title && title !== channelLabel && title !== channel.name.trim() ? title : '',
     };
+    if (audit) console.info('[NovaCast Live EPG Classification Audit]', {
+      channelId: channel.id,
+      programCount: 0,
+      programSamples: [],
+      now: Date.now(),
+      hasTimedPrograms: false,
+      orderedFirstTitle: null,
+      hasCurrent: false,
+      resultingCurrentTitle: enriched.current || null,
+      resultingNextTitle: enriched.next || null,
+    });
+    return enriched;
   }
 
   const orderedPrograms = orderTimedEpgPrograms(programs);
@@ -87,7 +127,7 @@ export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: Pro
   const channelLabel = displayStreamTitle(channel.name);
   const current = hasCurrent || !hasTimedPrograms;
 
-  return {
+  const enriched = {
     ...channel,
     current: current && programTitle && programTitle !== channelLabel && programTitle !== channel.name.trim() ? programTitle : '',
     next: next?.title ? displayLiveProgramText(next.title, channel.next) : channel.next,
@@ -98,6 +138,22 @@ export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: Pro
     progress: current ? epgProgressFromProgram(now) : 0,
     description: current ? displayLiveProgramText(now.description, 'No program information available.') : 'No program information available.',
   };
+  if (audit) console.info('[NovaCast Live EPG Classification Audit]', {
+    channelId: channel.id,
+    programCount: programs.length,
+    programSamples: programs.slice(0, 3).map((program) => ({
+      title: displayLiveProgramText(program.title, ''),
+      startAt: program.startAt ?? null,
+      endAt: program.endAt ?? null,
+    })),
+    now: Date.now(),
+    hasTimedPrograms,
+    orderedFirstTitle: displayLiveProgramText(orderedPrograms[0]?.title, ''),
+    hasCurrent,
+    resultingCurrentTitle: enriched.current || null,
+    resultingNextTitle: enriched.next || null,
+  });
+  return enriched;
 }
 
 export function mapChannelsWithoutEpg(channels: ProviderLiveChannel[]): ProviderLiveChannel[] {
@@ -216,6 +272,7 @@ async function fetchProgramsForChannel(
 
   const existing = inFlight.get(channel.id);
   if (existing) {
+    recordLivePerformanceEvent('epg_duplicate_request', { channelId: channel.id });
     logLiveEpg('deduped', { channelId: channel.id });
     return existing;
   }
@@ -366,16 +423,22 @@ export async function enrichChannelsWithPrefetchedEpg(
   };
 
   const applyBatch = (batch: ProviderLiveChannel[], programsById: Map<string, ProviderGuideProgram[]>) => {
+    recordLivePerformanceEvent('epg_normalize', { channelCount: batch.length, responseCount: programsById.size });
     const enrichedBatch: ProviderLiveChannel[] = [];
     for (const channel of batch) {
       const programs = programsById.get(channel.id);
       if (!programs) continue;
       epgMap.set(channel.id, programs);
-      const enriched = enrichChannelWithEpg(channel, programs);
+      const shouldAudit = channel.id === focusedChannelId;
+      const enriched = enrichChannelWithEpg(channel, programs, shouldAudit);
+      if (shouldAudit) {
+        logLiveTitleAudit(channel, programs, 'programs-returned', enriched);
+      }
       enrichedBatch.push(enriched);
       options?.onChannelEnriched?.(enriched);
     }
     if (enrichedBatch.length) options?.onBatchEnriched?.(enrichedBatch);
+    recordLivePerformanceEvent('epg_commit', { channelCount: enrichedBatch.length, responseCount: programsById.size });
     return enrichedBatch;
   };
 
@@ -406,7 +469,29 @@ export async function enrichChannelsWithPrefetchedEpg(
   if (remaining.length) {
     void (async () => {
       for (let offset = 0; offset < remaining.length && generation === epgGeneration; offset += 32) {
-        if (shouldSuspendLiveListEpg(getLiveTvWorkload())) break;
+        const workload = getLiveTvWorkload();
+        if (shouldSuspendLiveListEpg(workload)) break;
+        if (workload.rapidDpadActive) {
+          logLiveEpgPerformance('bulk-paused', {
+            elapsedMs: 0,
+            selectedCategoryId,
+            focusedChannelId,
+            batchIndex: 1 + Math.floor(offset / 32),
+            batchSize: 32,
+            requestGeneration: generation,
+            reason: 'normal-navigation-active',
+          });
+          await waitForLiveTvFocusIdle();
+          logLiveEpgPerformance('bulk-resumed', {
+            elapsedMs: 0,
+            selectedCategoryId,
+            focusedChannelId,
+            batchIndex: 1 + Math.floor(offset / 8),
+            batchSize: 32,
+            requestGeneration: generation,
+            reason: 'normal-navigation-idle',
+          });
+        }
         const batch = remaining.slice(offset, offset + 32);
         const result = await loadBatch(batch, 1 + Math.floor(offset / 32));
         if (generation !== epgGeneration) {
@@ -420,6 +505,9 @@ export async function enrichChannelsWithPrefetchedEpg(
             reason: 'background-batch-complete',
           });
           break;
+        }
+        if (getLiveTvWorkload().rapidDpadActive) {
+          await waitForLiveTvFocusIdle();
         }
         applyBatch(batch, result);
       }
@@ -444,9 +532,13 @@ export async function enrichSingleChannelEpg(
   const cached = readCachedPrograms(channel.id);
   if (cached) {
     logLiveEpg('cache-hit', { channelId: channel.id, reason: 'focused' });
-    return enrichChannelWithEpg(channel, cached);
+    const enriched = enrichChannelWithEpg(channel, cached, true);
+    logLiveTitleAudit(channel, cached, 'focused-cache-returned', enriched);
+    return enriched;
   }
 
   const programs = await fetchProgramsForChannel(bundle, channel);
-  return enrichChannelWithEpg(channel, programs);
+  const enriched = enrichChannelWithEpg(channel, programs, true);
+  logLiveTitleAudit(channel, programs, 'focused-programs-returned', enriched);
+  return enriched;
 }

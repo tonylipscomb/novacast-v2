@@ -16,7 +16,11 @@ import { createXtreamProviderRepositories } from '../src/features/providers/prov
 
 test('movie metadata helpers parse title year, ratings, and genre tags', () => {
   assert.equal(parseYearFromTitle('Inception (2010)'), 2010);
-  assert.equal(parseYearFromTitle('Blade Runner 2049'), 2049);
+  assert.equal(parseYearFromTitle('Blade Runner 2049'), undefined);
+  assert.equal(parseYearFromTitle('Death Race 2050'), undefined);
+  assert.equal(parseYearFromTitle('2001: A Space Odyssey'), undefined);
+  assert.equal(parseYearFromTitle('1917'), undefined);
+  assert.equal(parseYearFromTitle('Team! (2026)'), 2026);
   assert.equal(parseRatingNumber('8.4'), 8.4);
   assert.equal(parseAddedTimestamp('1700000000'), 1700000000000);
   assert.equal(inferGenreTags('Avengers Endgame', ['Action']).includes('superhero'), true);

@@ -3,6 +3,7 @@ import { requireAdmin } from '../_shared/admin.ts';
 import { decryptSecret, encryptSecret, normalizeProviderUrl } from '../_shared/security.ts';
 import { canActivateFromHealth, sanitizeHealthSummary } from '../_shared/providerHealth.ts';
 import { runProviderHealthCheck } from '../_shared/providerHealthRunner.ts';
+import { autoProvisionXtreamEpg, enqueueProviderEpgRefresh } from '../_shared/autoProvisionProviderEpg.ts';
 import { checkGoldRoute, createM3uAccount, getDeviceInfo, getPackages, getReseller, parseM3uUrl, renewAccount, safeGoldBaseUrl, setAccountStatus, GoldPanelError } from '../_shared/goldPanelClient.ts';
 import { sanitizeGoldError, sanitizeGoldText } from '../_shared/goldPanelSanitization.ts';
 import { GoldActivityTableMissingError, listGoldAdminActivity, recordGoldAdminEvent } from '../_shared/goldAdminEvents.ts';
@@ -136,14 +137,24 @@ Deno.serve(async (request) => {
       }).select(ACCOUNT_SELECT).single();
       if (error || !account) return adminJsonResponse(request, { goldCreated, goldImported, novaCastProviderCreated: true, managedProviderId: provider.id, errorCategory: 'gold_metadata_create_failed' }, 502);
       let summary = null;
+      let autoEpg = null;
       if (body?.runDiagnostics === true) {
-      const health = await runProviderHealthCheck({ baseUrl: credentials.baseUrl, username: credentials.username, password: credentials.password }, { isGoldManaged: true });
+        const health = await runProviderHealthCheck({ baseUrl: credentials.baseUrl, username: credentials.username, password: credentials.password }, { isGoldManaged: true });
         summary = sanitizeHealthSummary(health, credentials.username, credentials.password);
         await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, last_successful_test_at: canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? health.testedAt : null, validation_stale: false, last_health_summary: summary, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString(), ...(body?.activateIfHealthy === true && canActivateFromHealth({ healthStatus: health.overall, validationStale: false, activationStatus: 'draft' }) ? { status: 'active' } : {}) }).eq('id', provider.id);
+        if (health.overall === 'healthy' || health.overall === 'degraded') {
+          autoEpg = await autoProvisionXtreamEpg({
+            client,
+            providerId: provider.id,
+            displayName,
+            credentials,
+            enqueueRefresh: (source) => enqueueProviderEpgRefresh(client, source),
+          });
+        }
       }
       await recordGoldAdminEvent(client, { action: goldImported ? 'account_imported' : 'account_created', goldAccountId: account.id, managedProviderId: provider.id, goldUserId: account.gold_user_id, actorUserId: user.id, metadata: { source: goldImported ? 'm3u_import' : 'reseller_create' } });
       if (summary) await recordGoldAdminEvent(client, { action: 'diagnostics_run', goldAccountId: account.id, managedProviderId: provider.id, goldUserId: account.gold_user_id, actorUserId: user.id, metadata: { healthStatus: summary.overall } });
-      return adminJsonResponse(request, { success: true, goldCreated, goldImported, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider, summary });
+      return adminJsonResponse(request, { success: true, goldCreated, goldImported, novaCastProviderCreated: true, managedProviderId: provider.id, account, provider, summary, autoEpg });
     }
 
     if (!accountId) throw new GoldPanelError('invalid_request', 'Gold account is required.', 400);
@@ -155,8 +166,17 @@ Deno.serve(async (request) => {
       const health = await runProviderHealthCheck(credentials, { isGoldManaged: true });
       const safeHealth = sanitizeHealthSummary(health, credentials.username, credentials.password);
       await client.from('managed_providers').update({ health_status: health.overall, last_tested_at: health.testedAt, validation_stale: false, last_health_summary: safeHealth, live_channel_count: health.catalogs?.liveChannels ?? 0, movie_count: health.catalogs?.movies ?? 0, series_count: health.catalogs?.series ?? 0, updated_at: new Date().toISOString() }).eq('id', account.managed_provider_id);
+      const autoEpg = health.overall === 'healthy' || health.overall === 'degraded'
+        ? await autoProvisionXtreamEpg({
+          client,
+          providerId: account.managed_provider_id,
+          displayName: String((await client.from('managed_providers').select('display_name').eq('id', account.managed_provider_id).single()).data?.display_name ?? 'Provider'),
+          credentials,
+          enqueueRefresh: (source) => enqueueProviderEpgRefresh(client, source),
+        })
+        : null;
       await recordGoldAdminEvent(client, { action: 'diagnostics_run', goldAccountId: account.id, managedProviderId: account.managed_provider_id, goldUserId: account.gold_user_id, actorUserId: user.id, metadata: { healthStatus: safeHealth.overall } });
-      return adminJsonResponse(request, { summary: safeHealth, account });
+      return adminJsonResponse(request, { summary: safeHealth, account, autoEpg });
     }
     if (action === 'renew_account') { const credentials = await providerCredentials(client, account.managed_provider_id); const sub = String(body?.sub ?? '1'); await renewAccount({ username: credentials.username, password: credentials.password, sub }); const renewed = await syncAccount(client, account); await recordGoldAdminEvent(client, { action: 'account_renewed', goldAccountId: account.id, managedProviderId: account.managed_provider_id, goldUserId: renewed.gold_user_id, actorUserId: user.id, metadata: { subscriptionMonths: Number(sub) } }); return adminJsonResponse(request, { account: renewed }); }
     if (action === 'set_account_status') { const enabled = body?.enabled !== false; await setAccountStatus(account.gold_user_id, enabled); const updated = await syncAccount(client, account); await recordGoldAdminEvent(client, { action: enabled ? 'account_enabled' : 'account_disabled', goldAccountId: account.id, managedProviderId: account.managed_provider_id, goldUserId: updated.gold_user_id, actorUserId: user.id }); return adminJsonResponse(request, { account: updated }); }

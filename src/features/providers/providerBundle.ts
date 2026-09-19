@@ -242,7 +242,11 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
   // and that "base" now prefers a readable local generation, falling back
   // to the real provider network call only when none exists.
   const rawSeriesDataSource = createProviderSeriesDataSource(base.series, base.mediaBaseUrl, provider.id);
-  const seriesSqliteSelected = SERIES_SQLITE_READS_ENABLED;
+  // A published Series generation is the authoritative browse source. Keep
+  // the old env flag for diagnostics/backward compatibility, but do not let a
+  // missing build-time flag route the runtime rail back to placeholder
+  // provider counts.
+  const seriesSqliteSelected = true;
   logSeriesDataSourceAudit({
     event: 'data-source-selection',
     providerId: provider.id,
@@ -250,7 +254,7 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
     sourceClass: seriesSqliteSelected ? 'SqliteSeriesDataSource' : 'ProviderSeriesDataSource',
     sqliteEnabled: seriesSqliteSelected,
     generationStatus: 'bundle-factory',
-    fallbackReason: seriesSqliteSelected ? null : 'EXPO_PUBLIC_SERIES_SQLITE_READS!==true',
+    fallbackReason: null,
   });
   const seriesDataSource = createSmartSeriesDataSource(
     seriesSqliteSelected

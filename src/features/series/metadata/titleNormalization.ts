@@ -122,6 +122,9 @@ function rememberCountryCode(current: string | undefined, token: string) {
 function cleanDisplayTitle(title: string, fallback: string) {
   let cleaned = title.trim();
   for (let pass = 0; pass < 4; pass += 1) {
+    if (/^\d{1,2}:\d{2}\s*(?:am|pm)?\b/i.test(cleaned)) {
+      break;
+    }
     cleaned = cleaned.replace(LEADING_DELIMITER_PATTERN, '').trim();
     const numericMatch = cleaned.match(NUMERIC_PIPE_PREFIX_PATTERN);
     if (numericMatch?.groups) {
@@ -143,6 +146,11 @@ function cleanDisplayTitle(title: string, fallback: string) {
 function stripLeadingTitleNoise(title: string) {
   let next = title.trim();
   if (!next) {
+    return next;
+  }
+
+  // A clock at the beginning is title content, not a numeric prefix.
+  if (/^\d{1,2}:\d{2}\s*(?:am|pm)?\b/i.test(next)) {
     return next;
   }
 
@@ -171,9 +179,11 @@ function stripNestedProviderPrefixes(raw: string): ProviderTitlePrefix {
     const strippedLeading = stripLeadingTitleNoise(title);
     if (strippedLeading !== title) {
       title = strippedLeading;
+      if (/^\d{1,2}:\d{2}\s*(?:am|pm)?\b/i.test(title)) {
+        break;
+      }
       continue;
     }
-
     const bracketMatch = title.match(BRACKET_PREFIX_PATTERN);
     if (bracketMatch?.groups) {
       const token = bracketMatch.groups.token.trim();
@@ -191,6 +201,11 @@ function stripNestedProviderPrefixes(raw: string): ProviderTitlePrefix {
     const tokenMatch = title.match(PREFIX_TOKEN_PATTERN);
     if (tokenMatch?.groups) {
       const token = tokenMatch.groups.token.trim();
+      const looksLikeClock = /(?:^|\s)\d{1,2}$/.test(token) &&
+        /^\d{2}(?:\s*(?:am|pm)\b|\s|$)/i.test(tokenMatch.groups.rest);
+      if (looksLikeClock) {
+        break;
+      }
       if (shouldStripPrefixToken(token)) {
         if (isMultiRegionCategoryMarker(token)) {
           regionMarker = 'multi';
@@ -220,6 +235,15 @@ function stripNestedProviderPrefixes(raw: string): ProviderTitlePrefix {
     const colonMatch = title.match(PROVIDER_COLON_LABEL);
     if (colonMatch?.groups) {
       const label = colonMatch.groups.label.trim();
+      // A provider prefix colon is not the colon in a clock expression. The
+      // prefix cleanup above may leave `MNF 8:15pm` or `7:30 PM` at the head
+      // of the title, so preserve the hour/minute boundary before applying
+      // legacy numeric/event-label cleanup.
+      const looksLikeClock = /(?:^|\s)\d{1,2}$/.test(label) &&
+        /^\d{2}(?:\s*(?:am|pm)\b|\s|$)/i.test(colonMatch.groups.rest);
+      if (looksLikeClock) {
+        break;
+      }
       if (/\d/.test(label) || /^(UFC|PPV|LIVE|VOD|EVENT|REPLAY)/i.test(label)) {
         title = colonMatch.groups.rest.trim();
         continue;

@@ -143,8 +143,9 @@ test('7. Play receives initial preferred focus', () => {
 // 8. Visible focused action styling exists.
 test('8. Visible focused action styling exists', () => {
   assert.match(popup, /actionFocused: \{/);
-  assert.match(popup, /transform: \[\{ scale: 1\.06 \}\]/);
-  assert.match(popup, /borderColor: novaTheme\.colors\.focusRing/);
+  assert.match(popup, /backgroundColor: NOVA_GLASS\.activeFocused\.backgroundColor/);
+  assert.match(popup, /borderColor: NOVA_GLASS\.activeFocused\.borderColor/);
+  assert.match(popup, /borderRadius: NOVA_GLASS\.radius\.base/);
   assert.match(popup, /closeButtonFocused: \{/);
 });
 

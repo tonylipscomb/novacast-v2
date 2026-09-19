@@ -3,6 +3,28 @@ export type VisibleIndexRange = {
   last: number;
 };
 
+export const LIVE_TV_VIEWABILITY_TRUST_WINDOW_MS = 500;
+
+/** Prefer a recent valid range; never infer that an empty callback means offscreen. */
+export function resolveTrustedVisibleRange(input: {
+  current: VisibleIndexRange | null;
+  currentAtMs: number;
+  lastValid: VisibleIndexRange | null;
+  lastValidAtMs: number;
+  nowMs?: number;
+  maxAgeMs?: number;
+}): VisibleIndexRange | null {
+  const now = input.nowMs ?? Date.now();
+  const maxAge = input.maxAgeMs ?? LIVE_TV_VIEWABILITY_TRUST_WINDOW_MS;
+  if (input.current && now - input.currentAtMs <= maxAge) {
+    return input.current;
+  }
+  if (input.lastValid && now - input.lastValidAtMs <= maxAge) {
+    return input.lastValid;
+  }
+  return null;
+}
+
 export function visibleRangeFromViewableItems(
   viewableItems: readonly { index: number | null }[],
 ): VisibleIndexRange | null {

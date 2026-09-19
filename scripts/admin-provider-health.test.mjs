@@ -24,7 +24,7 @@ test('activation is gated on health and does not trust the browser', () => {
 
 test('retest does not disable the provider', () => {
   const testBlock = providersFn.split("action === 'test'")[1]?.split("action === 'activate'")[0] ?? '';
-  assert.match(testBlock, /health_status: 'testing'/);
+  assert.match(testBlock, /acquireProviderValidationLease/);
   assert.doesNotMatch(testBlock, /status:\s*'paused'/);
   assert.doesNotMatch(testBlock, /status:\s*'revoked'/);
 });
@@ -42,11 +42,55 @@ test('catalog failures use distinct sanitized reasons instead of catalog_payload
   assert.doesNotMatch(runner, /catalog_payload_invalid/);
   assert.match(runner, /createXtreamCatalogScanner/);
   assert.match(runner, /fetchXtreamCatalog/);
+  assert.match(runner, /const CATALOG_TIMEOUT_MS = 45_000/);
+  assert.match(catalog, /CATALOG_READ_LIMIT_BYTES = 128 \* 1024 \* 1024/);
   assert.match(runner, /Anonymous root access is not required/);
   assert.match(catalog, /catalog_payload_too_large/);
   assert.match(catalog, /catalog_invalid_json/);
   assert.match(catalog, /catalog_unexpected_shape/);
   assert.match(catalog, /catalog_html/);
+});
+
+test('provider validation uses a stale-recoverable race-safe lease', () => {
+  assert.match(providersFn, /PROVIDER_VALIDATION_LEASE_MS = 3 \* 60 \* 1000/);
+  assert.match(providersFn, /acquireProviderValidationLease/);
+  assert.match(providersFn, /updated_at', new Date\(now - PROVIDER_VALIDATION_LEASE_MS\)/);
+  assert.match(providersFn, /\.eq\('health_status', 'testing'\)/);
+  assert.match(providersFn, /\.eq\('updated_at', testingAt\)/);
+  assert.match(providersFn, /if \(!data\) throw new Error\('validation_in_progress'\)/);
+});
+
+test('bounded catalog counts carry truncation metadata and the Admin UI renders lower bounds', () => {
+  assert.match(runner, /catalogs\.countDetails = \{/);
+  assert.match(runner, /totalCount: liveStreamResult\.totalCount/);
+  assert.match(runner, /exactCountAvailable: vodStreamResult\.exactCountAvailable/);
+  assert.match(runner, /diagnosticTruncated: seriesListResult\.diagnosticTruncated/);
+  assert.match(runner, /'get_live_streams'/);
+  assert.match(runner, /'get_vod_streams'/);
+  assert.match(runner, /'get_series'/);
+  assert.match(adminUi, /isCappedCatalogCount/);
+  assert.match(adminUi, /formatCount\(provider\.live_channel_count, isCappedCatalogCount/);
+  assert.match(adminUi, /formatCount\(provider\.movie_count, isCappedCatalogCount/);
+  assert.match(adminUi, /formatCount\(provider\.series_count, isCappedCatalogCount/);
+});
+
+test('cloud-only 404/511 restrictions are separate from provider health', () => {
+  assert.match(health, /export function isCloudPlaybackProbeRestricted/);
+  assert.match(runner, /isCloudPlaybackProbeRestricted\(\{ checks, probes, catalogs \}\)/);
+  assert.match(runner, /checks\.filter\(\(check\) => check\.id !== 'playback'\)/);
+  assert.match(adminUi, /Restricted · Device verify/);
+});
+
+test('provider cards use a compact EPG summary and modal wizard', () => {
+  const styles = fs.readFileSync(new URL('../pairing-web/src/styles.css', import.meta.url), 'utf8');
+  assert.match(styles, /providerCardGrid \{[^}]*minmax\(420px, 1fr\)/s);
+  assert.match(adminUi, /providerEpgSummary/);
+  assert.match(adminUi, /function EpgWizard/);
+  assert.doesNotMatch(adminUi, /<details className="providerEpgDetails">/);
+  assert.match(adminUi, />Coverage<\/button>/);
+  assert.match(adminUi, />Audit<\/button>/);
+  assert.match(adminUi, /epgSourceMore/);
+  assert.match(adminUi, /Manage EPG/);
 });
 
 test('stream probes remain sequential, bounded, and connection-limit aware', () => {

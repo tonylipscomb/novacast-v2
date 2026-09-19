@@ -64,11 +64,14 @@ test('managed failures and missing client prerequisites fall back without affect
   assert.match(client, /setTimeout\(\(\) => controller\.abort\(\), 3_000\)/);
 });
 
-test('temporary release-visible managed EPG audit logging is removed', () => {
-  const client = fs.readFileSync(new URL('../src/features/guide/managedEpgClient.ts', import.meta.url), 'utf8');
+test('temporary Live EPG audit diagnostics are bounded to safe display fields', () => {
   const live = fs.readFileSync(new URL('../src/features/live/liveTvChannelEpg.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(client, /NovaCast Managed EPG Release Audit/);
-  assert.doesNotMatch(live, /NovaCast Live EPG Classification Audit/);
+  assert.match(live, /NovaCast Live EPG Classification Audit/);
+  assert.match(live, /programSamples/);
+  assert.match(live, /slice\(0, 3\)/);
+  assert.match(live, /rawName/);
+  assert.doesNotMatch(live, /streamUrl/);
+  assert.doesNotMatch(live, /Authorization|password|token|username/i);
 });
 
 test('Edge function authenticates by device assignment and never accepts client provider identity', () => {

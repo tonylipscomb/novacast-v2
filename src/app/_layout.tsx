@@ -52,6 +52,7 @@ import { initializeNovaAnalytics, setAnalyticsRoute, setAnalyticsState } from '@
 import { sendNovaAnalyticsHeartbeat } from '@/features/analytics/analyticsHeartbeat';
 import { recordSupportLog } from '@/features/diagnostics/diagnosticsClient';
 import { StartupVisualGateProvider } from '@/features/startup/startupVisualGate';
+import { beginLivePerformanceSession, completeLivePerformanceSummary, startLiveJsStallMonitor } from '@/features/diagnostics/livePerformanceTelemetry';
 
 const NOVACAST_BACKGROUND = require('../../assets/images/ncnewbackground.png');
 const NOVACAST_ICE_BACKGROUND = require('../../assets/images/novacasticeback.png');
@@ -64,6 +65,8 @@ SplashScreen.preventAutoHideAsync().catch(() => {
 });
 initializeCatalogAudit();
 initializeEarlyBootAudit();
+beginLivePerformanceSession('cold_start');
+startLiveJsStallMonitor('cold_start', 15_000);
 initializeFocusLatencyAudit();
 console.info(`[NovaCast Catalog] ${CATALOG_BUILD_MARKER}`);
 earlyBootMark('root_layout_init');
@@ -201,6 +204,7 @@ export default function RootLayout() {
   useEffect(() => {
     if (providerStoreReady) {
       markStartupReady();
+      completeLivePerformanceSummary('provider-store-ready');
     }
   }, [providerStoreReady]);
 

@@ -1,27 +1,25 @@
 import type { ElementRef, RefObject } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
-import { FlatList, StyleSheet, type LayoutChangeEvent, type ListRenderItemInfo, type ViewToken } from 'react-native';
+import { findNodeHandle, FlatList, StyleSheet, type LayoutChangeEvent, type ListRenderItemInfo, type ViewToken } from 'react-native';
 import { View } from 'react-native';
 
 import type { ProviderLiveChannel } from '@/features/providers/providerRepositories';
 
 import { LiveTvChannelRow } from './LiveTvChannelRow';
 import {
-  buildLiveTvChannelEpgMap,
   buildLiveTvChannelRowShellList,
+  type LiveTvChannelEpgData,
   type LiveTvChannelRowShellData,
 } from './liveTvChannelRowData';
 import {
-  LIVE_TV_FOCUS_SCROLL_VIEW_POSITION,
-  shouldScrollToKeepFocusVisible,
   visibleRangeFromViewableItems,
   type VisibleIndexRange,
 } from './liveTvFocusScroll';
 import { getLiveTvChannelItemLayout } from './liveTvChannelRowLayout';
-import { shouldProgrammaticScrollOnFocus, shouldScrollListToFocusIndex } from './liveTvPreviewScheduling';
 import { recordLiveTvManualScroll } from './liveTvScrollPerf';
 import { recordLiveTvProgrammaticScroll, recordLiveTvVisibleRowRender } from './liveTvFocusDiagnostics';
 import { resolveLiveTvRowAbMode } from './liveTvUiPerfMode';
+import { logLiveNavPerf } from './liveTvDiagnostics';
 
 const CHANNEL_KEY_EXTRACTOR = (item: LiveTvChannelRowShellData) => item.id;
 
@@ -32,6 +30,9 @@ const VIEWABILITY_CONFIG = {
 
 type LiveTvChannelListProps = {
   channels: ProviderLiveChannel[];
+  epgByChannelId: ReadonlyMap<string, LiveTvChannelEpgData>;
+  epgRevision: number;
+  categoryId?: string | null;
   epgPendingChannelIds: ReadonlySet<string>;
   selectedChannelId: string;
   previewChannelId: string | null;
@@ -47,8 +48,13 @@ type LiveTvChannelListProps = {
   consumeFavoriteHoldSuppression?: (channelId: string) => boolean;
   onActionFocusChange?: (channelId: string, focused: boolean) => void;
   onLayout?: (event: LayoutChangeEvent) => void;
-  /** When true, allow one programmatic scroll for restore / category jump. */
-  allowRestoreScroll?: boolean;
+  onFocusRenderState?: (state: {
+    focusedIndex: number;
+    bandFirst: number;
+    bandLast: number;
+    visibleRange: VisibleIndexRange | null;
+  }) => void;
+  getLastNavigationIntent?: () => string;
   onTuneChannel: (channelId: string) => void;
   onChannelFocus: (channelId: string) => void;
   registerRowRef: (channelId: string, instance: ElementRef<typeof View> | null) => void;
@@ -56,6 +62,9 @@ type LiveTvChannelListProps = {
 
 export const LiveTvChannelList = memo(function LiveTvChannelList({
   channels,
+  epgByChannelId,
+  epgRevision,
+  categoryId,
   epgPendingChannelIds,
   selectedChannelId,
   previewChannelId,
@@ -71,11 +80,14 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   consumeFavoriteHoldSuppression,
   onActionFocusChange,
   onLayout,
-  allowRestoreScroll = false,
+  onFocusRenderState,
+  getLastNavigationIntent,
   onTuneChannel,
   onChannelFocus,
   registerRowRef,
 }: LiveTvChannelListProps) {
+  const renderVersionRef = useRef(0);
+  renderVersionRef.current += 1;
   const tuneRef = useRef(onTuneChannel);
   const registerRef = useRef(registerRowRef);
   const focusRef = useRef(onChannelFocus);
@@ -85,12 +97,14 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
     focusRef.current = onChannelFocus;
   }, [onChannelFocus, onTuneChannel, registerRowRef]);
 
-  const focusedIndexRef = useRef<number | null>(null);
   const visibleRangeRef = useRef<VisibleIndexRange | null>(null);
-  const lastScrolledIndexRef = useRef<number | null>(null);
+  const lastValidVisibleRangeRef = useRef<VisibleIndexRange | null>(null);
+  const lastValidVisibleRangeAtRef = useRef(0);
+  const focusRenderBandRef = useRef<{ first: number; last: number } | null>(null);
+  const focusedIndexRef = useRef<number | null>(null);
+  const mountedRowRefsRef = useRef<Map<string, { index: number; handle: number; instance: ElementRef<typeof View> }>>(new Map());
+  const nativeRefLogRef = useRef<Map<string, number>>(new Map());
   const scrollRetryRef = useRef<{ index: number; attempts: number } | null>(null);
-  const allowRestoreScrollRef = useRef(allowRestoreScroll);
-  allowRestoreScrollRef.current = allowRestoreScroll;
 
   const onTune = useMemo(
     () => (channelId: string) => {
@@ -114,67 +128,195 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   );
 
   const rowShells = useMemo(() => buildLiveTvChannelRowShellList(channels), [channels]);
-  const epgByChannelId = useMemo(() => buildLiveTvChannelEpgMap(channels), [channels]);
   const channelIndexById = useMemo(() => new Map(rowShells.map((row, index) => [row.id, index])), [rowShells]);
+
+  const applyNativeFocusGraph = useCallback((entry: { index: number; handle: number; instance: ElementRef<typeof View> }) => {
+    const previous = Array.from(mountedRowRefsRef.current.values()).find((candidate) => candidate.index === entry.index - 1);
+    const next = Array.from(mountedRowRefsRef.current.values()).find((candidate) => candidate.index === entry.index + 1);
+    (entry.instance as unknown as { setNativeProps?: (props: object) => void }).setNativeProps?.({
+      nextFocusUp: previous?.handle ?? entry.handle,
+      nextFocusDown: next?.handle ?? entry.handle,
+      nextFocusRight: entry.handle,
+    });
+  }, []);
+
+  const refreshNativeFocusGraphAround = useCallback((index: number) => {
+    for (const entry of mountedRowRefsRef.current.values()) {
+      if (Math.abs(entry.index - index) <= 1) {
+        applyNativeFocusGraph(entry);
+      }
+    }
+  }, [applyNativeFocusGraph]);
+
+  const registerMountedRowRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
+    const index = channelIndexById.get(channelId);
+    if (index === undefined) {
+      onRegister(channelId, instance);
+      return;
+    }
+    if (instance) {
+      const handle = findNodeHandle(instance);
+      if (handle == null) {
+        onRegister(channelId, instance);
+        const focusedIndex = focusedIndexRef.current;
+        logLiveNavPerf('channel-native-ref', {
+          categoryId,
+          channelId,
+          index,
+          focusedChannelId: focusedIndex == null ? null : rowShells[focusedIndex]?.id ?? null,
+          focusedIndex,
+          distanceFromFocusedIndex: focusedIndex == null ? null : Math.abs(index - focusedIndex),
+          previousHandlePresent: Boolean(mountedRowRefsRef.current.get(rowShells[index - 1]?.id ?? '')),
+          nextHandlePresent: Boolean(mountedRowRefsRef.current.get(rowShells[index + 1]?.id ?? '')),
+          selectedChannelId,
+          rowMounted: true,
+          nativeRefPresent: false,
+          listKey: CHANNEL_KEY_EXTRACTOR(rowShells[index]),
+          lastNavigationIntent: getLastNavigationIntent?.() ?? 'none',
+          timestamp: Date.now(),
+          currentVisibleRange: visibleRangeRef.current,
+          bandFirst: focusRenderBandRef.current?.first ?? null,
+          bandLast: focusRenderBandRef.current?.last ?? null,
+          action: 'mount',
+        });
+        return;
+      }
+      mountedRowRefsRef.current.set(channelId, { index, handle, instance });
+      onRegister(channelId, instance);
+      applyNativeFocusGraph({ index, handle, instance });
+      refreshNativeFocusGraphAround(index);
+      const focusedIndex = focusedIndexRef.current;
+      if (focusedIndex != null && Math.abs(index - focusedIndex) <= 3) {
+        const now = Date.now();
+        const logKey = `${channelId}:mount`;
+        if (now - (nativeRefLogRef.current.get(logKey) ?? 0) > 500) {
+          nativeRefLogRef.current.set(logKey, now);
+          logLiveNavPerf('channel-native-ref', {
+            categoryId,
+            channelId,
+            index,
+            focusedChannelId: rowShells[focusedIndex]?.id ?? null,
+            focusedIndex,
+            distanceFromFocusedIndex: Math.abs(index - focusedIndex),
+            previousHandlePresent: Boolean(mountedRowRefsRef.current.get(rowShells[index - 1]?.id ?? '')),
+            nextHandlePresent: Boolean(mountedRowRefsRef.current.get(rowShells[index + 1]?.id ?? '')),
+            selectedChannelId,
+            rowMounted: true,
+            nativeRefPresent: true,
+            listKey: CHANNEL_KEY_EXTRACTOR(rowShells[index]),
+            lastNavigationIntent: getLastNavigationIntent?.() ?? 'none',
+            timestamp: now,
+            currentVisibleRange: visibleRangeRef.current,
+            bandFirst: focusRenderBandRef.current?.first ?? null,
+            bandLast: focusRenderBandRef.current?.last ?? null,
+            action: 'mount',
+          });
+        }
+      }
+      return;
+    }
+    mountedRowRefsRef.current.delete(channelId);
+    onRegister(channelId, null);
+    refreshNativeFocusGraphAround(index);
+    const focusedIndex = focusedIndexRef.current;
+    if (focusedIndex != null && Math.abs(index - focusedIndex) <= 3) {
+      const now = Date.now();
+      const logKey = `${channelId}:unmount`;
+      if (now - (nativeRefLogRef.current.get(logKey) ?? 0) > 500) {
+        nativeRefLogRef.current.set(logKey, now);
+        logLiveNavPerf('channel-native-ref', {
+          categoryId,
+          channelId,
+          index,
+          focusedChannelId: rowShells[focusedIndex]?.id ?? null,
+          focusedIndex,
+          distanceFromFocusedIndex: Math.abs(index - focusedIndex),
+          previousHandlePresent: Boolean(mountedRowRefsRef.current.get(rowShells[index - 1]?.id ?? '')),
+          nextHandlePresent: Boolean(mountedRowRefsRef.current.get(rowShells[index + 1]?.id ?? '')),
+          selectedChannelId,
+          rowMounted: false,
+          nativeRefPresent: false,
+          listKey: CHANNEL_KEY_EXTRACTOR(rowShells[index]),
+          lastNavigationIntent: getLastNavigationIntent?.() ?? 'none',
+          timestamp: now,
+          currentVisibleRange: visibleRangeRef.current,
+          bandFirst: focusRenderBandRef.current?.first ?? null,
+          bandLast: focusRenderBandRef.current?.last ?? null,
+          action: 'unmount',
+        });
+      }
+    }
+  }, [applyNativeFocusGraph, categoryId, channelIndexById, getLastNavigationIntent, onRegister, refreshNativeFocusGraphAround, rowShells, selectedChannelId]);
+
+  useEffect(() => {
+    logLiveNavPerf('channel-list-derived', {
+      categoryId,
+      channelCount: channels.length,
+      renderVersion: renderVersionRef.current,
+      reason: 'channel-array-changed',
+    });
+  }, [categoryId, channels.length, rowShells]);
 
   // Do not include a full-list EPG signature — per-row EPG props drive memoized updates.
   const listExtraData = useMemo(
     () =>
-      `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}:${favoriteChannelIds.size}`,
-    [categoryFocusLeftHandle, favoriteChannelIds.size, previewChannelId, selectedChannelId],
-  );
-
-  const scrollToFocusedIndex = useCallback(
-    (nextIndex: number, reason: 'focus' | 'restore' | 'category-jump' | 'focus-recovery') => {
-      if (!shouldScrollListToFocusIndex(lastScrolledIndexRef.current, nextIndex)) {
-        return;
-      }
-
-      const shouldScroll =
-        reason !== 'focus'
-          ? shouldProgrammaticScrollOnFocus({
-              focusedIndex: nextIndex,
-              visible: visibleRangeRef.current,
-              totalCount: rowShells.length,
-              reason,
-            })
-          : shouldScrollToKeepFocusVisible(nextIndex, visibleRangeRef.current, rowShells.length);
-
-      if (!shouldScroll) {
-        return;
-      }
-
-      recordLiveTvManualScroll();
-      recordLiveTvProgrammaticScroll(reason);
-      lastScrolledIndexRef.current = nextIndex;
-      scrollRetryRef.current = { index: nextIndex, attempts: 0 };
-      listRef.current?.scrollToIndex({
-        index: nextIndex,
-        animated: false,
-        viewPosition: LIVE_TV_FOCUS_SCROLL_VIEW_POSITION,
-      });
-    },
-    [listRef, rowShells.length],
+      `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}:${favoriteChannelIds.size}:${epgRevision}`,
+    [categoryFocusLeftHandle, epgRevision, favoriteChannelIds.size, previewChannelId, selectedChannelId],
   );
 
   const handleChannelFocus = useCallback(
     (channelId: string) => {
       onFocus(channelId);
-      const nextIndex = channelIndexById.get(channelId);
-      if (nextIndex === undefined) {
-        return;
+      const focusedIndex = channelIndexById.get(channelId);
+      focusedIndexRef.current = focusedIndex ?? null;
+      if (focusedIndex !== undefined) {
+        const currentBand = focusRenderBandRef.current;
+        const needsRecenter =
+          !currentBand || focusedIndex < currentBand.first + 8 || focusedIndex > currentBand.last - 8;
+        const nextBand = needsRecenter
+          ? {
+              first: Math.max(0, focusedIndex - 16),
+              last: Math.min(rowShells.length - 1, focusedIndex + 16),
+            }
+          : currentBand;
+        if (needsRecenter && nextBand) {
+          focusRenderBandRef.current = nextBand;
+          logLiveNavPerf('focus-render-band', {
+            categoryId,
+            focusedIndex,
+            bandFirst: nextBand.first,
+            bandLast: nextBand.last,
+            totalChannelCount: rowShells.length,
+            reason: currentBand ? 'edge-recenter' : 'initial',
+          });
+        }
+        onFocusRenderState?.({
+          focusedIndex,
+          bandFirst: nextBand?.first ?? focusedIndex,
+          bandLast: nextBand?.last ?? focusedIndex,
+          visibleRange: visibleRangeRef.current,
+        });
       }
-
-      focusedIndexRef.current = nextIndex;
-      const reason = allowRestoreScrollRef.current ? 'restore' : 'focus';
-      scrollToFocusedIndex(nextIndex, reason);
     },
-    [channelIndexById, onFocus, scrollToFocusedIndex],
+    [categoryId, channelIndexById, onFocus, onFocusRenderState, rowShells.length],
   );
 
   const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: ViewToken[] }) => {
-    visibleRangeRef.current = visibleRangeFromViewableItems(viewableItems);
-  }, []);
+    const nextVisibleRange = visibleRangeFromViewableItems(viewableItems);
+    const now = Date.now();
+    visibleRangeRef.current = nextVisibleRange;
+    if (nextVisibleRange) {
+      lastValidVisibleRangeRef.current = nextVisibleRange;
+      lastValidVisibleRangeAtRef.current = now;
+    }
+    logLiveNavPerf('visible-channel-list-change', {
+      categoryId,
+      channelCount: rowShells.length,
+      visibleRowCount: viewableItems.length,
+      renderVersion: renderVersionRef.current,
+      reason: 'viewability-change',
+    });
+  }, [categoryId, rowShells.length]);
 
   const renderItem = useCallback(
     ({ item, index }: ListRenderItemInfo<LiveTvChannelRowShellData>) => {
@@ -189,8 +331,9 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
           selected={item.id === selectedChannelId}
           previewing={item.id === previewChannelId}
           preferFocus={preferFocusChannelId === item.id}
-          trapFocusUp={false}
+          trapFocusUp={index === 0}
           trapFocusDown={index === rowShells.length - 1}
+          trapFocusRight
         nextFocusLeft={categoryFocusLeftHandle}
         nextFocusRight={undefined}
           isFavorite={favoriteChannelIds.has(item.id)}
@@ -203,7 +346,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
           onActionFocusChange={onActionFocusChange}
           onFocus={handleChannelFocus}
           onTune={onTune}
-          registerRef={onRegister}
+          registerRef={registerMountedRowRef}
         />
       );
     },
@@ -213,6 +356,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       epgByChannelId,
       epgPendingChannelIds,
       handleChannelFocus,
+      registerMountedRowRef,
       onRegister,
       onTune,
       onFavoriteChannel,
@@ -231,6 +375,11 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
 
   const onScrollToIndexFailed = useCallback(
     (info: { averageItemLength: number; index: number }) => {
+      console.warn('[NOVACAST_FOCUS]', 'scroll-to-index-failed', {
+        categoryId,
+        index: info.index,
+        averageItemLength: info.averageItemLength,
+      });
       const retry = scrollRetryRef.current;
       if (retry && retry.index === info.index && retry.attempts >= 1) {
         scrollRetryRef.current = null;
@@ -241,9 +390,8 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       recordLiveTvManualScroll();
       recordLiveTvProgrammaticScroll('focus-recovery');
       listRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
-      lastScrolledIndexRef.current = info.index;
     },
-    [listRef],
+    [categoryId, listRef],
   );
 
   return (
@@ -256,16 +404,25 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       showsVerticalScrollIndicator={false}
       contentContainerStyle={styles.channelList}
       removeClippedSubviews={false}
-      windowSize={5}
-      maxToRenderPerBatch={6}
-      updateCellsBatchingPeriod={80}
-      initialNumToRender={10}
+      windowSize={11}
+      maxToRenderPerBatch={10}
+      updateCellsBatchingPeriod={40}
+      initialNumToRender={16}
       getItemLayout={getLiveTvChannelItemLayout}
       onViewableItemsChanged={onViewableItemsChanged}
       viewabilityConfig={VIEWABILITY_CONFIG}
       onScrollToIndexFailed={onScrollToIndexFailed}
       renderItem={renderItem}
-      onLayout={onLayout}
+      onLayout={(event) => {
+        logLiveNavPerf('channel-list-render-ready', {
+          categoryId,
+          channelCount: rowShells.length,
+          visibleRowCount: visibleRangeRef.current ? visibleRangeRef.current.last - visibleRangeRef.current.first + 1 : null,
+          renderVersion: renderVersionRef.current,
+          reason: 'layout-ready',
+        });
+        onLayout?.(event);
+      }}
     />
   );
 });

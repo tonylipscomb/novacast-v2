@@ -143,6 +143,8 @@ export type ProviderLiveChannel = {
   categoryId: string;
   number: number;
   name: string;
+  /** Temporary release-audit provenance; never contains URLs or credentials. */
+  rawName?: string;
   shortName: string;
   current: string;
   next: string;
@@ -266,6 +268,8 @@ export type ProviderGuideQuery = {
   channelOffset?: number;
   channelLimit?: number;
   epgLimit?: number;
+  /** Return the authoritative channel page without waiting for schedule hydration. */
+  channelsOnly?: boolean;
 };
 
 export interface ProviderSearchRepository {
@@ -1012,6 +1016,7 @@ function mapLiveStream(stream: XtreamLiveStreamResponse, index: number, category
     categoryId,
     number,
     name,
+    rawName,
     shortName,
     current: '',
     next: 'Next program unavailable',
@@ -1192,7 +1197,7 @@ function mapVodInfo(movieId: string, response: XtreamVodInfoResponse | null, bas
   const backdropUrl = resolveMediaUrl(baseUrl, firstBackdropValue(fields.backdrop_path) ?? readText(fields, 'backdrop'));
   const rating = readNumber(fields, 'rating_5based', 'rating');
   const releaseDate = readText(fields, 'releaseDate', 'releasedate', 'release_date');
-  const yearMatch = releaseDate?.match(/\b(19|20)\d{2}\b/) ?? title.match(/\b(19|20)\d{2}\b/);
+  const parsedYear = parseYearFromStreamFields(title, { releasedate: releaseDate });
   const videoMetadata = parseXtreamVodVideoMetadata(fields);
 
   return {
@@ -1202,7 +1207,7 @@ function mapVodInfo(movieId: string, response: XtreamVodInfoResponse | null, bas
     posterUrl,
     backdropUrl,
     synopsis: readText(fields, 'plot', 'description', 'overview'),
-    year: yearMatch?.[0],
+    year: parsedYear == null ? undefined : String(parsedYear),
     releaseDate,
     runtime: formatVodRuntime(fields),
     genres: normalizeStringList(fields.genre),
@@ -1272,6 +1277,7 @@ export function createXtreamProviderRepositories(
   let loadingAllLiveStreamsUsFirst: Promise<XtreamLiveStreamResponse[]> | null = null;
   let authoritativeLiveDump: XtreamLiveStreamResponse[] | null = null;
   let loadingAuthoritativeLiveDump: Promise<XtreamLiveStreamResponse[]> | null = null;
+  let authoritativeLiveCategoryIndex: Map<string, XtreamLiveStreamResponse[]> | null = null;
   const liveStreamEpgIds = new Map<string, string>();
   let guideEpgProbeStarted = false;
   let guideProbeAllStreams: XtreamLiveStreamResponse[] = [];
@@ -1349,6 +1355,7 @@ export function createXtreamProviderRepositories(
     loadingAllLiveStreamsUsFirst = null;
     authoritativeLiveDump = null;
     loadingAuthoritativeLiveDump = null;
+    authoritativeLiveCategoryIndex = null;
     liveCategoryCountsLoaded = false;
     liveStreamCountMayBeTruncated = false;
     liveCategoryCountCache.clear();
@@ -1363,6 +1370,13 @@ export function createXtreamProviderRepositories(
       loadingAuthoritativeLiveDump = (async () => {
         const streams = dedupeXtreamLiveStreamsByStreamId(await client.getLiveStreams(undefined, signal));
         authoritativeLiveDump = streams;
+        authoritativeLiveCategoryIndex = new Map();
+        for (const stream of streams) {
+          const categoryId = normalizeProviderCategoryId(stream.category_id) || LIVE_UNKNOWN_CATEGORY_ID;
+          const categoryStreams = authoritativeLiveCategoryIndex.get(categoryId) ?? [];
+          categoryStreams.push(stream);
+          authoritativeLiveCategoryIndex.set(categoryId, categoryStreams);
+        }
         applyLiveStreamCounts(streams, streams.length >= XTREAM_MAX_ITEMS_PER_RESPONSE);
         return streams;
       })().finally(() => {
@@ -1379,10 +1393,7 @@ export function createXtreamProviderRepositories(
       return dump;
     }
 
-    const filtered =
-      categoryId === LIVE_UNKNOWN_CATEGORY_ID
-        ? dump.filter((stream) => !normalizeProviderCategoryId(stream.category_id))
-        : dump.filter((stream) => normalizeProviderCategoryId(stream.category_id) === categoryId);
+    const filtered = authoritativeLiveCategoryIndex?.get(categoryId) ?? [];
     if (categoryId !== LIVE_UNKNOWN_CATEGORY_ID) {
       startGuideEpgProbe(categoryId, dump);
     }
@@ -1895,14 +1906,16 @@ export function createXtreamProviderRepositories(
               countryCode: parsed.countryCode,
               regionMarker: parsed.regionMarker,
               count: providerCount ?? 0,
-              countKnown: providerCount !== null,
+              // Provider zeroes are placeholders until a current readable
+              // generation or direct category query confirms the count.
+              countKnown: providerCount !== null && providerCount > 0,
             };
           }),
         );
         if (options?.forCatalogSync) {
           return mapped;
         }
-        return sortMediaCategoriesUsFirst(mapped);
+        return sortProviderCategoriesUsFirst(mapped, 'series');
       },
       async getSeries(categoryId: string, signal) {
         const allStreams = await client.getSeries(
@@ -1981,8 +1994,20 @@ export function createXtreamProviderRepositories(
                 channelId: mappedChannels[0].id,
                 epgIdPresent: Boolean(mappedChannels[0].epgChannelId),
               }
-            : null,
+          : null,
         });
+
+        if (options?.channelsOnly) {
+          // Guide's first paint must be driven by provider channels, not by an
+          // EPG/cache read. A second, stale-guarded Guide request hydrates the
+          // same page after this result is visible.
+          const rows = mapGuideRowsFromChannels(mappedChannels, new Map());
+          guideDevLog('channels-only-ready', {
+            rowCount: rows.length,
+            durationMs: Date.now() - guideStartedAt,
+          });
+          return rows;
+        }
 
         // NOVACAST_GUIDE_V2_FOUNDATION_V1: channels-first Guide. Never block first paint on per-channel EPG requests.
         // NOVACAST_GUIDE_V2_3B_LOCAL_GUIDE_READ_V1:

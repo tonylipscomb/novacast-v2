@@ -38,6 +38,7 @@ import type { MediaCategory, SeriesDetail, SeriesSummary } from '../../media-bro
 import { getOfflineSnapshot } from '../../resilience/offlineStatus.ts';
 import { emitSeriesSqliteEvent } from '../seriesDiagnostics.ts';
 import { repairDegradedSeriesCatalogIfNeeded } from '../seriesSparseCatalogRepair.ts';
+import { mergeSeriesCategoryCounts, normalizeSeriesCategoryId } from '../seriesStartupFastPath.ts';
 import type { SeriesDataSource } from './SeriesDataSource.ts';
 
 const SQLITE_SERIES_DISCOVER_ID = 'all';
@@ -262,18 +263,14 @@ export function createSqliteSeriesDataSource(
       persistToGeneration: generation,
     });
     const countById = new Map(
-      itemCategories.map((row) => [assignSeriesStreamCategoryId(row.categoryId), row.itemCount]),
+      itemCategories.map((row) => [normalizeSeriesCategoryId(assignSeriesStreamCategoryId(row.categoryId)), row.itemCount]),
     );
-    const categories = buildSeriesCategoriesFromMetadata(
+    const categories = mergeSeriesCategoryCounts(buildSeriesCategoriesFromMetadata(
       enriched.categories.map((category) => ({
         categoryId: category.id,
         categoryName: category.name || derivedSeriesCategoryName(category.id),
       })),
-    ).map((category) => ({
-      ...category,
-      count: countById.get(category.id) ?? 0,
-      countKnown: countById.has(category.id),
-    }));
+    ), countById);
     logSeriesDataSourceAudit({
       event: 'source-getCategories-result',
       providerId,
@@ -519,8 +516,9 @@ export function createSqliteSeriesDataSource(
       if (!categoryId || categoryId === SQLITE_SERIES_DISCOVER_ID) {
         return getCatalogTotalCount(providerId, 'series', { generation });
       }
+      const normalizedCategoryId = normalizeSeriesCategoryId(categoryId);
       const categories = await getCatalogCategoryCounts(providerId, 'series', { generation });
-      return categories.find((category) => category.categoryId === categoryId)?.itemCount ?? 0;
+      return categories.find((category) => normalizeSeriesCategoryId(category.categoryId) === normalizedCategoryId)?.itemCount ?? 0;
     },
 
     async prefetchAllCategoryCounts(categoryIds, onCategoryCount) {
@@ -529,11 +527,11 @@ export function createSqliteSeriesDataSource(
         getCatalogCategoryCounts(providerId, 'series', { generation }),
         getCatalogTotalCount(providerId, 'series', { generation }),
       ]);
-      const byId = new Map(categories.map((category) => [category.categoryId, category.itemCount]));
+      const byId = new Map(categories.map((category) => [normalizeSeriesCategoryId(category.categoryId), category.itemCount]));
       for (const categoryId of categoryIds) {
         onCategoryCount(
           categoryId,
-          categoryId === SQLITE_SERIES_DISCOVER_ID ? totalCount : byId.get(categoryId) ?? 0,
+          categoryId === SQLITE_SERIES_DISCOVER_ID ? totalCount : byId.get(normalizeSeriesCategoryId(categoryId)) ?? 0,
         );
       }
     },

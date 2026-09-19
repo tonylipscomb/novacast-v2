@@ -129,7 +129,7 @@ function logMoviesAction(action: string, payload: Record<string, unknown> = {}) 
 }
 
 function logMoviesPerf(action: string, payload: Record<string, unknown> = {}) {
-  console.info('[NovaCast Movies]', { action, ...payload });
+  console.info('[NovaCast Movies Perf]', action, payload);
 }
 
 function applyIndexedProviderCounts(providerId: string, categories: MovieCategory[]): MovieCategory[] {

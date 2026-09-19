@@ -23,11 +23,13 @@ import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { usePlaybackActivity } from '@/features/playback/usePlaybackActivity';
 import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
+import { NovaViewProbe } from './NovaViewProbe';
 import type { LivePlaybackSource } from '@/features/providers/providerPlayback';
 import type { PlaybackItem } from '@/features/playback/unified/types';
 import { playbackAnalyticsTracker } from '@/features/analytics/playbackAnalytics';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { novacastTrace } from '@/features/diagnostics/novacastLogPolicy';
+import { beginLivePerformanceSession, completeLivePerformanceSummary, recordLivePerformanceEvent, recordLiveRenderChurn, startLiveJsStallMonitor } from '@/features/diagnostics/livePerformanceTelemetry';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
@@ -70,7 +72,6 @@ import {
 } from './liveTvFocusRestoration';
 import {
   FULLSCREEN_FIRST_FRAME_TIMEOUT_MS,
-  shouldKeepPreviewAlive,
   shouldShowFullscreenFallback,
   shouldShowFullscreenLoadingOverlay,
   type FullscreenFrameStatus,
@@ -115,12 +116,25 @@ import {
   recordLiveTvFocusEvent,
 } from './liveTvFocusDiagnostics';
 import { LiveTvFocusRouter, type LiveTvFocusRouterHandle } from './LiveTvFocusRouter';
+import {
+  clearFullscreenSurfOverlay,
+  FullscreenSurfOverlay,
+  publishFullscreenSurfOverlay,
+} from './FullscreenSurfOverlay';
+import {
+  setFullscreenSurfEnabled,
+  subscribeFullscreenSurfKeys,
+  type FullscreenSurfKeyEvent,
+} from './fullscreenSurfNative';
 import { logLiveSelection } from './liveTvSelectionDiagnostics';
+import { createLiveTimeshiftProbe, type LiveTimeshiftProbe } from './liveTimeshiftDiagnostics';
+import { markLiveCatalogInteraction } from '@/features/catalog/catalogForegroundPriority';
 import {
   LIVE_SURF_OVERLAY_HIDE_MS,
   createLiveSurfSessionId,
   logLiveSurf,
   resolveLiveSurfAdjacent,
+  resolveLiveSurfTarget,
   shouldApplyLiveSurfResolution,
 } from './liveTvSurf';
 import {
@@ -129,14 +143,15 @@ import {
 } from '@/features/playback/continuity/playbackContinuity';
 import { getLiveTvRowVisualFlags } from './liveTvUiPerfMode';
 import { hydrateFavoriteLiveChannels } from './liveFavoriteHydration';
-import { logLiveCategoryOrderAudit, logLiveStabilityLoader, logLivePerformance } from './liveTvDiagnostics';
+import { logLiveCategoryOrderAudit, logLiveStabilityLoader, logLivePerformance, logLiveNavPerf, recordLiveNavigationMetric } from './liveTvDiagnostics';
+import { resolveChannelFocusRetentionTarget, shouldRetainChannelFocus, type LiveFocusNavigationIntent } from './liveTvFocusRetention';
 import { LiveTvChannelListReveal, LiveTvPlanetLoader } from './LiveTvPlanetLoader';
 import {
   logLiveChannelPanelLoader,
   resolveLiveChannelPanelLoaderKind,
   shouldShowLiveChannelPanelLoader,
 } from './liveTvChannelPanelLoader';
-import { patchLiveTvWorkload } from './liveTvWorkload';
+import { getLiveTvWorkload, patchLiveTvWorkload } from './liveTvWorkload';
 import { cancelLiveTvEpgWork } from './liveTvChannelEpg';
 import {
   cancelLiveSearchCatalogBuild,
@@ -160,6 +175,7 @@ import {
   resolveLiveSearchSurfQueue,
   restoreLiveSearchBrowseState,
   shouldKeepLiveSearchMounted,
+  shouldPopToRetainedSearch,
   shouldLiveSearchBlockBackgroundFocus,
   shouldRestoreLiveBrowseFocusAfterFullscreen,
   shouldShowLiveSearchOverlay,
@@ -180,6 +196,8 @@ import { MovieToolbar } from '@/features/movies/components/MovieToolbar';
 import { createFavoriteHoldDetector } from './liveFavoriteHold';
 
 const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false } as const) : {};
+const FULLSCREEN_EXIT_FOCUS_SAFETY_TIMEOUT_MS = 5_000;
+const FULLSCREEN_EXIT_FOCUS_STABILIZATION_MS = 650;
 
 declare const __DEV__: boolean | undefined;
 
@@ -227,6 +245,72 @@ function formatPreviewWindow(channel: ProviderLiveChannel | null) {
   return `${channel.currentStart} - ${channel.currentEnd}`;
 }
 
+function FullscreenSurfInput({
+  enabled,
+  onEvent,
+  onNativeReady,
+}: {
+  enabled: boolean;
+  onEvent: (event: FullscreenSurfKeyEvent) => void;
+  onNativeReady: (ready: boolean) => void;
+}) {
+  const onEventRef = useRef(onEvent);
+  const nativeEventCountRef = useRef(0);
+  onEventRef.current = onEvent;
+
+  useEffect(() => {
+    if (!enabled || Platform.OS !== 'android' || !Platform.isTV) {
+      onNativeReady(false);
+      return;
+    }
+
+    console.info('[NovaCast Surf Bridge] enable-requested');
+    const nativeReady = setFullscreenSurfEnabled(true);
+    onNativeReady(nativeReady);
+    if (!nativeReady) {
+      return;
+    }
+
+    const subscription = subscribeFullscreenSurfKeys((event: FullscreenSurfKeyEvent) => {
+      const direction = event.keyCode === 21 ? -1 : event.keyCode === 22 ? 1 : null;
+      if (direction == null) {
+        return;
+      }
+      nativeEventCountRef.current += 1;
+      if (event.action === 1 || !event.repeatCount || event.repeatCount % 10 === 0) {
+        console.info('[NovaCast Fullscreen Raw Key] received', {
+          keyCode: event.keyCode ?? null,
+          action: event.action ?? null,
+          repeatCount: event.repeatCount ?? 0,
+          eventTime: event.eventTime ?? null,
+          downTime: event.downTime ?? null,
+          eventCount: nativeEventCountRef.current,
+        });
+      }
+      // The existing surf intent path coalesces repeated directional input and
+      // settles once the input stops. ACTION_UP therefore only ends the hold;
+      // it must not advance the virtual cursor a second time.
+      onEventRef.current(event);
+    });
+
+    if (!subscription) {
+      setFullscreenSurfEnabled(false);
+      onNativeReady(false);
+      return;
+    }
+
+    return () => {
+      subscription.remove();
+      console.info('[NovaCast Surf Bridge] disable-requested');
+      clearFullscreenSurfOverlay();
+      setFullscreenSurfEnabled(false);
+      onNativeReady(false);
+    };
+  }, [enabled, onNativeReady]);
+
+  return null;
+}
+
 function ChannelLogoBadge({
   channel,
   styles,
@@ -250,7 +334,10 @@ function ChannelLogoBadge({
 }
 
 export function LiveTvScreen() {
+  const liveScreenRenderCountRef = useRef(0);
+  liveScreenRenderCountRef.current += 1;
   recordLiveTvScreenRender();
+  recordLiveRenderChurn('LiveTvScreen');
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
@@ -283,17 +370,20 @@ export function LiveTvScreen() {
   const { state: personalizationState } = usePersonalizationStore(activeProviderId);
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.liveTv.key);
   const liveMemory = getLiveTvMemory(activeProviderId);
-  const routeCategoryId = typeof routeParams.categoryId === 'string' ? routeParams.categoryId : undefined;
-  const routeChannelId = typeof routeParams.channelId === 'string' ? routeParams.channelId : undefined;
+  const routeValue = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] : value);
+  const routeCategoryId = routeValue(routeParams.categoryId);
+  const routeChannelId = routeValue(routeParams.channelId);
+  const routeReturnRoute = routeValue(routeParams.returnRoute);
+  const routeDirectPlay = routeValue(routeParams.directPlay);
   const returnRoute =
-    routeParams.returnRoute === 'guide'
+    routeReturnRoute === 'guide'
       ? '/guide'
-      : routeParams.returnRoute === 'search'
+      : routeReturnRoute === 'search'
         ? '/search'
         : TV_HOME_ROUTE;
   const directPlayRequested =
-    routeParams.returnRoute === 'search' &&
-    routeParams.directPlay === '1' &&
+    routeReturnRoute === 'search' &&
+    routeDirectPlay === '1' &&
     Boolean(routeChannelId);
   const {
     bundle,
@@ -302,6 +392,8 @@ export function LiveTvScreen() {
     categories,
     categoryTotalCount,
     channels,
+    epgByChannelId,
+    epgRevision,
     epgPendingChannelIds,
     selectedCategoryId,
     channelListPending,
@@ -329,6 +421,13 @@ export function LiveTvScreen() {
   const lastRetryAtRef = useRef(0);
   const liveStateRef = useRef<LiveTvState | null>(null);
   const [interactionState, setState] = useState<LiveTvState | null>(null);
+  const [fullscreenSurfNativeActive, setFullscreenSurfNativeActive] = useState(false);
+  const fullscreenSurfIntentGenerationRef = useRef(0);
+  const activeSurfCommitGenerationRef = useRef<number | null>(null);
+  const surfCommitGenerationByRequestRef = useRef(new Map<number, number>());
+  const surfCommitGenerationByChannelRef = useRef(new Map<string, number>());
+  const surfCommitIdByRequestRef = useRef(new Map<number, number>());
+  const activeSurfCommitIdRef = useRef<number | null>(null);
   const [previewStreamSource, setPreviewStreamSource] = useState<LivePlaybackSource | null>(null);
   const previewStreamUrl = previewStreamSource?.uri ?? null;
   const [fullscreenFrameStatus, setFullscreenFrameStatus] = useState<FullscreenFrameStatus>('pending');
@@ -364,6 +463,10 @@ export function LiveTvScreen() {
     if (!handoff) {
       return;
     }
+    console.info('[NovaCast Search Direct Play]', 'session-found', {
+      resultCount: handoff.resultIds.length,
+      selectedChannelId: handoff.selected.id,
+    });
     liveSearchSurfQueueRef.current = handoff.resultIds;
     liveSearchQueueActiveRef.current = true;
     setSearchPlaybackSessionActive(true);
@@ -376,6 +479,20 @@ export function LiveTvScreen() {
       selectedId: handoff.selected.id,
     });
   }, [activeProviderId]);
+
+  useEffect(() => {
+    if (!directPlayRequested) {
+      return;
+    }
+    console.info('[NovaCast Search Direct Play]', 'first-render-playback-mode', {
+      channelId: routeChannelId,
+      directPlaySessionPresent: Boolean(liveSearchPlaybackSessionRef.current),
+      isSearchOrigin: returnRoute === '/search',
+      suppressBrowseShell: true,
+      firstRenderMode: 'playback-only',
+      playbackStartupState: 'awaiting-preview',
+    });
+  }, [directPlayRequested, returnRoute, routeChannelId]);
   const [fullscreenRetryNodeTag, setFullscreenRetryNodeTag] = useState<number | null>(null);
   const chromeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bootstrapState = useMemo(() => {
@@ -424,6 +541,8 @@ export function LiveTvScreen() {
     fullscreenActive: Boolean(liveState?.fullscreenChannelId),
   });
   useEffect(() => {
+    beginLivePerformanceSession('live_tv', { providerId: activeProviderId });
+    startLiveJsStallMonitor('live_tv');
     liveLoadAudit('screen-mounted', {
       component: 'src/features/live/LiveTvScreen.tsx:LiveTvScreen',
       windowWidth: width,
@@ -442,7 +561,10 @@ export function LiveTvScreen() {
       categoryCount: categories.length,
       channelCount: channels.length,
     });
-    return () => liveLoadAudit('screen-unmounted');
+    return () => {
+      completeLivePerformanceSummary('live-screen-unmount');
+      liveLoadAudit('screen-unmounted');
+    };
   }, []);
   useEffect(() => {
     liveLoadAudit('active-provider', { providerId: activeProviderId });
@@ -570,18 +692,74 @@ export function LiveTvScreen() {
   useEffect(() => {
     fullscreenChannelIdRef.current = liveState?.fullscreenChannelId ?? null;
   }, [liveState?.fullscreenChannelId]);
+  const shouldAcceptLiveSurfPlayerCommit = useCallback(
+    () => activeSurfCommitGenerationRef.current === null ||
+      activeSurfCommitGenerationRef.current === fullscreenSurfIntentGenerationRef.current,
+    [],
+  );
+  const singleHlsProbeEnabled = process.env.EXPO_PUBLIC_NOVASHIFT_SINGLE_HLS_PROBE === 'true';
+  const singleHlsProbeTargetIdRef = useRef<string | null>(null);
+  const singleHlsProbeActiveRef = useRef(false);
+  const currentFullscreenId = liveState?.fullscreenChannelId ?? null;
+  if (!singleHlsProbeEnabled || !currentFullscreenId) {
+    singleHlsProbeTargetIdRef.current = null;
+    singleHlsProbeActiveRef.current = false;
+  } else if (!singleHlsProbeTargetIdRef.current) {
+    // Capture only the first fullscreen tune in this diagnostic session. A
+    // later surf returns to the ordinary Live source and never starts another
+    // HLS probe automatically.
+    singleHlsProbeTargetIdRef.current = currentFullscreenId;
+    singleHlsProbeActiveRef.current = true;
+  } else if (singleHlsProbeTargetIdRef.current !== currentFullscreenId) {
+    singleHlsProbeActiveRef.current = false;
+  }
+  const singleHlsProbeChannel = useMemo(
+    () => currentFullscreenId
+      ? liveSearchPlaybackSessionRef.current?.channelsById.get(currentFullscreenId) ??
+        resolveLivePlaybackChannel(currentFullscreenId, channels, liveSearchPlaybackByIdRef.current)
+      : null,
+    [channels, currentFullscreenId, searchPlaybackSessionActive],
+  );
+  const singleHlsProbeUrl = useMemo(() => {
+    if (
+      !singleHlsProbeEnabled ||
+      !singleHlsProbeActiveRef.current ||
+      !currentFullscreenId ||
+      singleHlsProbeTargetIdRef.current !== currentFullscreenId ||
+      !bundle?.streamUrlBuilder ||
+      !singleHlsProbeChannel
+    ) {
+      return null;
+    }
+    return bundle.streamUrlBuilder.buildLiveStreamUrl(singleHlsProbeChannel.id, 'm3u8');
+  }, [bundle, currentFullscreenId, singleHlsProbeChannel, singleHlsProbeEnabled]);
+  const playerStreamSource = singleHlsProbeUrl
+    ? { uri: singleHlsProbeUrl, contentType: 'hls' as const, headers: { 'User-Agent': 'NovaCast NovaShift Probe' } }
+    : previewStreamUrl;
+  const playerStreamUrl = typeof playerStreamSource === 'string' ? playerStreamSource : playerStreamSource?.uri ?? null;
   const { player: liveStreamPlayer, retry: retryLiveStream, hasStream: hasLiveStream } = useNovaStreamPlayer(
-    previewStreamUrl,
+    playerStreamSource,
     {
+      shouldAcceptAsyncCommit: shouldAcceptLiveSurfPlayerCommit,
       onError: (message) => {
+        if (!shouldAcceptLiveSurfPlayerCommit()) {
+          console.info('[NovaCast Live Surf Playback]', {
+            event: 'stale-commit-dropped',
+            surfCommitId: activeSurfCommitIdRef.current,
+            commitGeneration: activeSurfCommitGenerationRef.current,
+            currentGeneration: fullscreenSurfIntentGenerationRef.current,
+            stage: 'player-error',
+          });
+          return;
+        }
         logProviderBoundary('[NovaCast Live Provider Request]', {
           event: 'source-error',
           channelId: fullscreenChannelIdRef.current,
           providerIdPresent: Boolean(activeProviderId),
           credentialsPresent: Boolean(bundle?.connectionType === 'xtream'),
           providerBasePresent: Boolean(bundle?.connectionType),
-          sourceScheme: previewStreamUrl ? previewStreamUrl.split(':', 1)[0] : null,
-          extension: previewStreamUrl?.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1] ?? null,
+          sourceScheme: playerStreamUrl ? playerStreamUrl.split(':', 1)[0] : null,
+          extension: playerStreamUrl?.match(/\.([a-z0-9]+)(?:\?|$)/i)?.[1] ?? null,
           userAgentPresent: false,
           ...classifyProviderBoundaryError(message),
           playerMounted: true,
@@ -595,6 +773,45 @@ export function LiveTvScreen() {
   );
 
   const streamSurfaceInFullscreen = Boolean(liveState?.fullscreenChannelId);
+  const liveTimeshiftProbeRef = useRef<LiveTimeshiftProbe | null>(null);
+  useEffect(() => {
+    liveTimeshiftProbeRef.current?.dispose();
+    liveTimeshiftProbeRef.current = null;
+    if (
+      !singleHlsProbeEnabled ||
+      !streamSurfaceInFullscreen ||
+      !currentFullscreenId ||
+      !singleHlsProbeUrl
+    ) {
+      return;
+    }
+    const probe = createLiveTimeshiftProbe({
+      player: liveStreamPlayer,
+      channelKey: currentFullscreenId,
+      providerId: activeProviderId,
+      sharedPlayerMode: true,
+    });
+    liveTimeshiftProbeRef.current = probe;
+    let cancelled = false;
+    let started = false;
+    const startWhenReady = () => {
+      if (cancelled || started || liveStreamPlayer.status === 'error') return;
+      if (liveStreamPlayer.status === 'readyToPlay') {
+        started = true;
+        probe.start();
+      }
+    };
+    const statusSubscription = liveStreamPlayer.addListener('statusChange', startWhenReady);
+    startWhenReady();
+    return () => {
+      cancelled = true;
+      statusSubscription.remove();
+      probe.dispose('channel-change');
+      if (liveTimeshiftProbeRef.current === probe) {
+        liveTimeshiftProbeRef.current = null;
+      }
+    };
+  }, [activeProviderId, currentFullscreenId, liveStreamPlayer, singleHlsProbeEnabled, singleHlsProbeUrl, streamSurfaceInFullscreen]);
   const livePreviewActive = Boolean(
     liveState?.previewChannelId &&
       !streamSurfaceInFullscreen &&
@@ -706,6 +923,13 @@ export function LiveTvScreen() {
       resolveLivePlaybackChannel(liveState?.fullscreenChannelId, channels, liveSearchPlaybackByIdRef.current),
     [channels, liveState?.fullscreenChannelId, searchPlaybackSessionActive],
   );
+  const novaViewProbeEnabled = process.env.EXPO_PUBLIC_NOVAVIEW_PROBE === 'true';
+  const novaViewProbeChannel = useMemo(() => {
+    if (!novaViewProbeEnabled || !fullscreenChannel) return null;
+    const index = channels.findIndex((channel) => channel.id === fullscreenChannel.id);
+    return channels.slice(index + 1).find((channel) => channel.id !== fullscreenChannel.id && Boolean(String(channel.id).trim())) ?? null;
+  }, [channels, fullscreenChannel, novaViewProbeEnabled]);
+  const novaViewProbeActive = Boolean(novaViewProbeEnabled && fullscreenChannel && novaViewProbeChannel && bundle);
   useEffect(() => {
     if (!liveState?.fullscreenChannelId) {
       return;
@@ -779,6 +1003,35 @@ export function LiveTvScreen() {
   const focusedChannelIdRef = useRef<string | null>(liveMemory.focusedChannelId ?? null);
   const focusedActionChannelIdRef = useRef<string | null>(null);
   const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
+  const focusOwnerRef = useRef<'categories' | 'channels' | null>(null);
+  const lastNavigationIntentRef = useRef<{ intent: LiveFocusNavigationIntent; at: number }>({ intent: 'none', at: 0 });
+  const lastDpadDirectionRef = useRef<'left' | 'right' | null>(null);
+  const verticalNavigationRef = useRef<{
+    previousNativeDownEventTime: number | null;
+    lastLogAt: number;
+    direction: 'up' | 'down' | null;
+    repeatCount: number;
+    eventTime: number | null;
+  }>({ previousNativeDownEventTime: null, lastLogAt: 0, direction: null, repeatCount: 0, eventTime: null });
+  const channelsForFocusRef = useRef(channels);
+  channelsForFocusRef.current = channels;
+  const lastShellFocusEscapeLogRef = useRef<number | null>(null);
+  const liveFocusRenderStateRef = useRef<{
+    focusedIndex: number | null;
+    bandFirst: number | null;
+    bandLast: number | null;
+    visibleRange: { first: number; last: number } | null;
+  }>({ focusedIndex: null, bandFirst: null, bandLast: null, visibleRange: null });
+  const focusRestoreInFlightRef = useRef<{
+    targetChannelId: string;
+    startedAt: number;
+    retryCount: number;
+    focusRequestIssued: boolean;
+    timeoutTimer: ReturnType<typeof setTimeout> | null;
+  } | null>(null);
+  const restoreInFlightCategoryLogRef = useRef<{ categoryId: string; at: number } | null>(null);
+  const lastEpgCommitAtRef = useRef(0);
+  const lastUnexpectedFocusLogRef = useRef<{ categoryId: string; at: number } | null>(null);
   const favoriteChannelRef = useRef<(channelId: string) => void>(() => undefined);
   const [categoryFocusEpoch, setCategoryFocusEpoch] = useState(0);
   const watchButtonRef = useRef<ElementRef<typeof View>>(null);
@@ -786,6 +1039,13 @@ export function LiveTvScreen() {
   const fullscreenCloseButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenLaunchSourceRef = useRef<FullscreenLaunchSource>(null);
   const previousFullscreenChannelIdRef = useRef<string | null>(null);
+  const lastReadyFullscreenChannelIdRef = useRef<string | null>(null);
+  const fullscreenExitFocusChannelIdRef = useRef<string | null>(null);
+  const fullscreenExitFocusPendingRef = useRef(false);
+  const fullscreenExitFocusPendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fullscreenExitFocusStabilizationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fullscreenExitFocusPhaseRef = useRef<'idle' | 'pending' | 'channel-focused-candidate' | 'stable'>('idle');
+  const fullscreenExitFocusReassertedRef = useRef(false);
   const isRestoringFullscreenFocusRef = useRef(false);
   const fullscreenRetryButtonRef = useRef<ElementRef<typeof View>>(null);
   const fullscreenRetryFocusKeyRef = useRef<string | null>(null);
@@ -793,8 +1053,10 @@ export function LiveTvScreen() {
   const lastChannelOkPressRef = useRef<LiveTvOkPressRecord | null>(null);
   const preferredCategoryFocusId = useRef(liveMemory.focusedCategoryId ?? firstProviderCategoryId ?? null);
   const preferredChannelFocusId = useRef(liveMemory.focusedChannelId ?? channels[0]?.id ?? null);
-  const preferCategoryFocusRef = useRef(true);
-  const preferChannelFocusRef = useRef(true);
+  // Fresh Live entry must not compete with the TV focus system. These are
+  // re-armed only by explicit navigation or fullscreen restoration.
+  const preferCategoryFocusRef = useRef(false);
+  const preferChannelFocusRef = useRef(false);
   // True only when the current category reflects a real user/route/persisted
   // choice. A provisional startup auto-default must never be written back to
   // Live memory as if it were a user preference.
@@ -806,6 +1068,70 @@ export function LiveTvScreen() {
   const stabilityLoaderShownAtRef = useRef<number | null>(null);
   const surfSessionIdRef = useRef<string | null>(null);
   const intendedSurfChannelIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const subscription = DeviceEventEmitter.addListener('onTVRemoteEvent', (event: {
+      eventType?: string;
+      action?: string;
+      repeatCount?: number;
+      eventTime?: number;
+      downTime?: number;
+    }) => {
+      const eventType = String(event?.eventType ?? '').trim().toLowerCase();
+      if (eventType === 'left' || eventType === 'arrowleft') {
+        const at = Date.now();
+        lastDpadDirectionRef.current = 'left';
+        lastNavigationIntentRef.current = { intent: 'left', at };
+        console.info('[NOVACAST_FOCUS]', 'navigation-intent', {
+          direction: 'left',
+          source: 'native-dpad',
+          previousOwner: focusOwnerRef.current,
+          timestamp: at,
+        });
+      } else if (eventType === 'right' || eventType === 'arrowright') {
+        lastDpadDirectionRef.current = 'right';
+      } else if (eventType === 'up' || eventType === 'down') {
+        const now = Date.now();
+        const direction = eventType as 'up' | 'down';
+        const isDown = event.action === 'down' || event.action === '0';
+        const previousDirection = verticalNavigationRef.current.direction;
+        const previousNativeDownEventTime = verticalNavigationRef.current.previousNativeDownEventTime;
+        const nativeDeltaMs = isDown && event.eventTime != null && previousNativeDownEventTime != null
+          ? event.eventTime - previousNativeDownEventTime
+          : null;
+        verticalNavigationRef.current = {
+          previousNativeDownEventTime: isDown && event.eventTime != null
+            ? event.eventTime
+            : previousNativeDownEventTime,
+          lastLogAt: verticalNavigationRef.current.lastLogAt,
+          direction,
+          repeatCount: event.repeatCount ?? 0,
+          eventTime: event.eventTime ?? null,
+        };
+        if (isDown) {
+          recordLiveNavigationMetric('vertical-key-down', { direction, nativeDeltaMs });
+        }
+        if (isDown && (now - verticalNavigationRef.current.lastLogAt > 1_000 || (event.repeatCount ?? 0) === 0 || direction !== previousDirection)) {
+          verticalNavigationRef.current.lastLogAt = now;
+          const focusedIndex = channelsForFocusRef.current.findIndex((channel) => channel.id === focusedChannelIdRef.current);
+          console.info('[NOVACAST_FOCUS]', 'vertical-navigation-intent', {
+            direction,
+            repeatCount: event.repeatCount ?? 0,
+            nativeEventTime: event.eventTime ?? null,
+            nativeDeltaMs,
+            previousOwner: focusOwnerRef.current,
+            focusedChannelId: focusedChannelIdRef.current,
+            focusedIndex: focusedIndex >= 0 ? focusedIndex : null,
+          });
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    lastEpgCommitAtRef.current = Date.now();
+  }, [epgRevision]);
 
   const logFocusAudit = useCallback((event: string, details: Record<string, unknown> = {}) => {
     const current = liveStateRef.current;
@@ -819,9 +1145,105 @@ export function LiveTvScreen() {
     });
   }, [selectedCategoryId]);
 
+  const updateLiveFocusRenderState = useCallback((state: {
+    focusedIndex: number;
+    bandFirst: number;
+    bandLast: number;
+    visibleRange: { first: number; last: number } | null;
+  }) => {
+    liveFocusRenderStateRef.current = state;
+  }, []);
+
+  const getLastNavigationIntent = useCallback(() => lastNavigationIntentRef.current.intent, []);
+
+  const clearFocusRestoreInFlight = useCallback((reason: string) => {
+    const active = focusRestoreInFlightRef.current;
+    if (!active) {
+      return;
+    }
+    if (active.timeoutTimer) {
+      clearTimeout(active.timeoutTimer);
+    }
+    focusRestoreInFlightRef.current = null;
+    console.info('[NOVACAST_FOCUS]', 'channel-focus-restore-cleared', {
+      targetChannelId: active.targetChannelId,
+      retryCount: active.retryCount,
+      elapsedMs: Date.now() - active.startedAt,
+      reason,
+    });
+  }, []);
+
+  const requestNativeRestoreFocus = useCallback((targetChannelId: string) => {
+    const active = focusRestoreInFlightRef.current;
+    if (!active || active.targetChannelId !== targetChannelId || active.focusRequestIssued) {
+      return;
+    }
+    active.focusRequestIssued = true;
+    requestTvFocus({
+      screen: 'live',
+      source: 'LiveTvScreen',
+      region: 'channel-list',
+      itemId: targetChannelId,
+      reason: active.retryCount > 0 ? 'unexpected-category-focus-retain-channel-retry' : 'unexpected-category-focus-retain-channel',
+      getTarget: () => channelRowRefs.current.get(targetChannelId),
+    });
+  }, []);
+
+  const requestFocusRestore = useCallback((targetChannelId: string, retryCount: number) => {
+    recordLiveNavigationMetric('restore');
+    const active = focusRestoreInFlightRef.current;
+    if (active?.targetChannelId === targetChannelId && active.retryCount >= retryCount) {
+      return;
+    }
+    if (active?.timeoutTimer) {
+      clearTimeout(active.timeoutTimer);
+    }
+    const nextState = {
+      targetChannelId,
+      startedAt: active?.targetChannelId === targetChannelId ? active.startedAt : Date.now(),
+      retryCount,
+      focusRequestIssued: false,
+      timeoutTimer: null as ReturnType<typeof setTimeout> | null,
+    };
+    focusRestoreInFlightRef.current = nextState;
+    if (channelRowRefs.current.has(targetChannelId)) {
+      requestNativeRestoreFocus(targetChannelId);
+    } else {
+      const targetIndex = channels.findIndex((channel) => channel.id === targetChannelId);
+      if (targetIndex >= 0) {
+        channelsRef.current?.scrollToIndex({ index: targetIndex, animated: false, viewPosition: 0.5 });
+      }
+    }
+    nextState.timeoutTimer = setTimeout(() => {
+      const current = focusRestoreInFlightRef.current;
+      if (!current || current.targetChannelId !== targetChannelId || current.retryCount !== retryCount) {
+        return;
+      }
+      if (retryCount === 0) {
+        console.info('[NOVACAST_FOCUS]', 'channel-focus-restore-timeout-retry', {
+          targetChannelId,
+          timeoutMs: 350,
+        });
+        requestFocusRestore(targetChannelId, 1);
+        return;
+      }
+      clearFocusRestoreInFlight('bounded-timeout');
+    }, 350);
+  }, [channels, clearFocusRestoreInFlight, requestNativeRestoreFocus]);
+
+  useEffect(() => () => clearFocusRestoreInFlight('screen-unmount'), [clearFocusRestoreInFlight]);
+
   const setPreferredChannelFocus = useCallback(
     (channelId: string, preferred: boolean, reason: string) => {
       const changed = preferredChannelFocusId.current !== channelId || preferChannelFocusRef.current !== preferred;
+      if (!changed) {
+        console.info('[NOVACAST_FOCUS]', 'redundant-focus-state-skipped', {
+          region: 'channel',
+          id: channelId,
+          reason,
+        });
+        return;
+      }
       preferredChannelFocusId.current = channelId;
       preferChannelFocusRef.current = preferred;
       if (changed) {
@@ -849,6 +1271,10 @@ export function LiveTvScreen() {
         fullscreenChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
       });
     };
+  }, []);
+
+  useEffect(() => {
+    logLiveNavPerf('screen-mount', { reason: 'live-screen-mounted' });
   }, []);
 
   useEffect(() => {
@@ -960,10 +1386,11 @@ export function LiveTvScreen() {
   const registerChannelRowRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
     if (instance) {
       channelRowRefs.current.set(channelId, instance);
+      requestNativeRestoreFocus(channelId);
     } else {
       channelRowRefs.current.delete(channelId);
     }
-  }, []);
+  }, [requestNativeRestoreFocus]);
 
   const registerCategoryRowRef = useCallback((categoryId: string, instance: ElementRef<typeof View> | null) => {
     if (instance) {
@@ -986,6 +1413,24 @@ export function LiveTvScreen() {
     const timer = setTimeout(() => {
       const latest = liveStateRef.current;
       const surfSessionActive = Boolean(surfSessionIdRef.current && latest?.fullscreenChannelId);
+      const commitGeneration = surfCommitGenerationByRequestRef.current.get(requestId) ??
+        surfCommitGenerationByChannelRef.current.get(channelId);
+      if (
+        surfSessionActive &&
+        commitGeneration !== undefined &&
+        commitGeneration !== fullscreenSurfIntentGenerationRef.current
+      ) {
+        console.info('[NovaCast Live Surf Playback]', {
+          event: 'stale-commit-dropped',
+          surfCommitId: requestId,
+          commitGeneration,
+          currentGeneration: fullscreenSurfIntentGenerationRef.current,
+          stage: 'preview-resolution',
+        });
+        surfCommitGenerationByRequestRef.current.delete(requestId);
+        surfCommitGenerationByChannelRef.current.delete(channelId);
+        return;
+      }
       if (
         !latest ||
         latest.previewRequestId !== requestId ||
@@ -1018,7 +1463,11 @@ export function LiveTvScreen() {
 
       const playbackSource = resolvePlaybackSource(channel);
       if (!playbackSource) {
-        setPreviewStreamSource(null);
+        if (!surfSessionActive) {
+          setPreviewStreamSource(null);
+        }
+        surfCommitGenerationByRequestRef.current.delete(requestId);
+        surfCommitGenerationByChannelRef.current.delete(channelId);
         setState((current) =>
           resolveLivePreview(current ?? latest, requestId, channelId, 'error', 'This channel is unavailable right now.'),
         );
@@ -1026,6 +1475,8 @@ export function LiveTvScreen() {
       }
 
       setPreviewStreamSource(playbackSource);
+      surfCommitGenerationByRequestRef.current.delete(requestId);
+      surfCommitGenerationByChannelRef.current.delete(channelId);
       if (surfSessionActive) {
         logLiveSurf({
           event: 'source-resolved',
@@ -1051,9 +1502,52 @@ export function LiveTvScreen() {
 
   useEffect(() => {
     if (liveState?.previewStatus === 'idle' || !liveState?.previewChannelId) {
+      if (liveState?.fullscreenChannelId) {
+        return;
+      }
       setPreviewStreamSource(null);
     }
   }, [liveState?.previewChannelId, liveState?.previewStatus]);
+
+  const captureFullscreenExitTarget = useCallback(() => {
+    const candidates = [
+      { id: lastReadyFullscreenChannelIdRef.current, reason: 'ready-channel' },
+      { id: fullscreenChannelIdRef.current, reason: 'committed-channel' },
+      { id: liveStateRef.current?.selectedChannelId ?? null, reason: 'fallback' },
+    ] as const;
+    const selected = candidates.find((candidate) => candidate.id && channels.some((channel) => channel.id === candidate.id));
+    const fallback = selected ?? (channels[0] ? { id: channels[0].id, reason: 'fallback' as const } : null);
+    const index = fallback ? channels.findIndex((channel) => channel.id === fallback.id) : -1;
+    fullscreenExitFocusChannelIdRef.current = fallback?.id ?? null;
+    fullscreenExitFocusPendingRef.current = Boolean(fallback?.id);
+    preferCategoryFocusRef.current = false;
+    preferChannelFocusRef.current = Boolean(fallback?.id);
+    focusOwnerRef.current = fallback?.id ? 'channels' : focusOwnerRef.current;
+    fullscreenExitFocusPhaseRef.current = fallback?.id ? 'pending' : 'idle';
+    fullscreenExitFocusReassertedRef.current = false;
+    if (fullscreenExitFocusPendingTimerRef.current) {
+      clearTimeout(fullscreenExitFocusPendingTimerRef.current);
+    }
+    if (fallback?.id) {
+      fullscreenExitFocusPendingTimerRef.current = setTimeout(() => {
+        fullscreenExitFocusPendingRef.current = false;
+        fullscreenExitFocusPhaseRef.current = 'stable';
+        fullscreenExitFocusChannelIdRef.current = null;
+        fullscreenExitFocusPendingTimerRef.current = null;
+      }, FULLSCREEN_EXIT_FOCUS_SAFETY_TIMEOUT_MS);
+    }
+    console.log('[NOVACAST_FOCUS]', 'fullscreen-exit-focus-pending', {
+      channelId: fallback?.id ?? null,
+      index,
+      reason: fallback?.reason ?? 'fallback',
+    });
+    console.log('[NOVACAST_FOCUS]', 'fullscreen-exit-target', {
+      channelId: fallback?.id ?? null,
+      index,
+      reason: fallback?.reason ?? 'fallback',
+    });
+    return fallback?.id ?? null;
+  }, [channels]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') {
@@ -1070,6 +1564,7 @@ export function LiveTvScreen() {
           }
 
           const nowMs = Date.now();
+          console.info('[NovaCast Live Back Perf]', 'back-key-received', { monotonicMs: nowMs, fullscreen: Boolean(fullscreenChannelIdRef.current) });
           const lastConsumedAtMs = getLastLiveSearchBackConsumedAtMs();
           const searchBack = decideLiveSearchScreenBack({
             searchSessionOpen: searchOpenRef.current,
@@ -1115,13 +1610,18 @@ export function LiveTvScreen() {
           );
 
           if (action === 'close-fullscreen') {
+            console.info('[NovaCast Live Back Perf]', 'fullscreen-close-requested', { monotonicMs: Date.now() });
             if (searchOpenRef.current) {
               suppressLiveSearchOverlayClose(nowMs);
               markLiveSearchBackConsumed(nowMs);
             }
             if (directPlayRequested) {
               playbackAnalyticsTracker.stop('user_back');
-              router.replace(returnRoute);
+              if (shouldPopToRetainedSearch(returnRoute, directPlayRequested)) {
+                router.back();
+              } else {
+                router.replace(returnRoute);
+              }
               return true;
             }
             if (fullscreenLaunchSourceRef.current === 'discover') {
@@ -1134,6 +1634,17 @@ export function LiveTvScreen() {
                 currentIndex: context?.currentIndex ?? 0,
               });
             }
+            captureFullscreenExitTarget();
+            console.info('[NovaCast Fullscreen Close Origin]', {
+              reason: 'hardware-back',
+              origin: 'LiveTvScreen.back-handler',
+              keyCode: null,
+              rawAction: null,
+              repeatCount: null,
+              fullscreenChannelId: fullscreenChannelIdRef.current,
+              nativeSurfActive: fullscreenSurfNativeActive,
+            });
+            clearFullscreenSurfOverlay();
             setState((current) => closeLiveFullscreen(current ?? liveState ?? bootstrapState ?? createInitialLiveTvState('', '')));
             return true;
           }
@@ -1163,7 +1674,7 @@ export function LiveTvScreen() {
     );
 
     return () => subscription.remove();
-  }, [bootstrapState, directPlayRequested, guide.visible, liveState, returnRoute, router]);
+  }, [bootstrapState, captureFullscreenExitTarget, directPlayRequested, fullscreenSurfNativeActive, guide.visible, liveState, returnRoute, router]);
 
   // Imperatively owns native TV focus across both fullscreen transitions,
   // because `hasTVPreferredFocus` is only a mount-time hint: it does not
@@ -1182,6 +1693,28 @@ export function LiveTvScreen() {
     if (!opening && !closing) {
       return;
     }
+    if (closing) {
+      pendingSurfDeltaRef.current = 0;
+      if (pendingSurfDrainTimerRef.current) {
+        clearTimeout(pendingSurfDrainTimerRef.current);
+        pendingSurfDrainTimerRef.current = null;
+      }
+      desiredSurfTargetIdRef.current = null;
+      if (surfSettleTimerRef.current) {
+        clearTimeout(surfSettleTimerRef.current);
+        surfSettleTimerRef.current = null;
+      }
+      console.info('[NovaCast Live Back Perf]', 'fullscreen-state-cleared', { monotonicMs: Date.now() });
+      console.info('[NovaCast Live Back Perf]', 'fullscreen-hidden', { monotonicMs: Date.now() });
+      console.info('[NovaCast Live Back Perf]', 'channel-list-visible', { monotonicMs: Date.now() });
+    }
+    if (opening) {
+      lastReadyFullscreenChannelIdRef.current = null;
+      fullscreenExitFocusChannelIdRef.current = null;
+      fullscreenExitFocusPendingRef.current = false;
+      fullscreenExitFocusPhaseRef.current = 'idle';
+      fullscreenExitFocusReassertedRef.current = false;
+    }
 
     console.log('[NOVACAST_PLAYER_FOCUS]', opening ? 'fullscreen-open' : 'fullscreen-close', {
       reason: 'fullscreen-transition',
@@ -1194,8 +1727,15 @@ export function LiveTvScreen() {
       focusedChannelId: currentFullscreenChannelId,
       reason: 'fullscreen-transition',
     });
+    console.info('[NovaCast Live Browse Retention]', opening ? 'fullscreen-open' : 'fullscreen-close', {
+      selectedCategoryId: liveState?.selectedCategoryId ?? null,
+      selectedChannelId: liveState?.selectedChannelId ?? null,
+    });
 
-    const targetChannelId = liveState?.selectedChannelId ?? null;
+    const preferredExitChannelId = fullscreenExitFocusChannelIdRef.current;
+    const targetChannelId = closing
+      ? preferredExitChannelId ?? liveState?.selectedChannelId ?? null
+      : liveState?.selectedChannelId ?? null;
     logFocusAudit(opening ? 'fullscreen-opened' : 'fullscreen-closed', {
       reason: opening ? 'fullscreen-transition' : 'fullscreen-transition',
       targetType: 'fullscreen',
@@ -1226,6 +1766,20 @@ export function LiveTvScreen() {
       targetId: opening ? currentFullscreenChannelId : targetChannelId,
     });
     if (closing) {
+      const targetIndex = channels.findIndex((channel) => channel.id === targetChannelId);
+      const targetNativeRef = targetChannelId ? channelRowRefs.current.get(targetChannelId) : null;
+      if (!targetNativeRef && targetIndex >= 0) {
+        try {
+          channelsRef.current?.scrollToIndex({ index: targetIndex, animated: false, viewPosition: 0.5 });
+        } catch {
+          // The bounded focus request below will retry after the row mounts.
+        }
+      }
+      if (targetNativeRef) {
+        console.info('[NovaCast Live Browse Retention]', 'focus-restore-direct-native-ref', { channelId: targetChannelId });
+      }
+      console.info('[NovaCast Live Browse Retention]', 'focus-restore-requested', { channelId: targetChannelId });
+      console.info('[NovaCast Live Back Perf]', 'channel-focus-requested', { monotonicMs: Date.now(), channelId: targetChannelId });
       console.log('[NOVACAST_PLAYER_FOCUS]', 'fullscreen-close-restore', {
         reason: 'fullscreen-close-restore',
         targetType: 'channel',
@@ -1250,44 +1804,139 @@ export function LiveTvScreen() {
         }
         return source === 'button' ? watchButtonRef.current : targetChannelId ? channelRowRefs.current.get(targetChannelId) : null;
       },
-      onSettled: () => {
+      onSettled: (status) => {
         isRestoringFullscreenFocusRef.current = false;
         if (closing) {
+          console.log('[NOVACAST_FOCUS]', status === 'executed' ? 'fullscreen-exit-focus-success' : 'fullscreen-exit-focus-fallback', {
+            channelId: targetChannelId,
+            index: channels.findIndex((channel) => channel.id === targetChannelId),
+            status,
+          });
+          console.info('[NovaCast Live Browse Retention]', 'focus-restore-confirmed', {
+            channelId: targetChannelId,
+            status,
+          });
+          console.info('[NovaCast Live Back Perf]', 'channel-focus-received', { monotonicMs: Date.now(), channelId: targetChannelId, status });
           fullscreenLaunchSourceRef.current = null;
+          if (status !== 'executed') {
+            fullscreenExitFocusPendingRef.current = false;
+            fullscreenExitFocusPhaseRef.current = 'idle';
+            fullscreenExitFocusChannelIdRef.current = null;
+            if (fullscreenExitFocusStabilizationTimerRef.current) {
+              clearTimeout(fullscreenExitFocusStabilizationTimerRef.current);
+              fullscreenExitFocusStabilizationTimerRef.current = null;
+            }
+            if (fullscreenExitFocusPendingTimerRef.current) {
+              clearTimeout(fullscreenExitFocusPendingTimerRef.current);
+              fullscreenExitFocusPendingTimerRef.current = null;
+            }
+          }
         }
       },
+      maxFrames: 3,
     });
 
     return cancel;
-  }, [liveState?.fullscreenChannelId, liveState?.selectedChannelId, logFocusAudit, searchOpen]);
+  }, [channels, liveState?.fullscreenChannelId, liveState?.selectedChannelId, logFocusAudit, searchOpen]);
+
+  useEffect(() => {
+    if (directPlayRequested) {
+      return;
+    }
+    console.info('[NovaCast Live Browse Retention]', 'browse-mounted');
+    return () => console.info('[NovaCast Live Browse Retention]', 'browse-unmounted');
+  }, [directPlayRequested]);
+
+  useEffect(() => {
+    if (directPlayRequested) {
+      return;
+    }
+    const fullscreenActive = Boolean(liveState?.fullscreenChannelId);
+    if (fullscreenActive) {
+      console.info('[NovaCast Live Browse Retention]', 'browse-suspended', {
+        selectedCategoryId: liveState?.selectedCategoryId ?? null,
+        selectedChannelId: liveState?.selectedChannelId ?? null,
+      });
+    } else {
+      console.info('[NovaCast Live Browse Retention]', 'browse-resumed', {
+        selectedCategoryId: liveState?.selectedCategoryId ?? null,
+        selectedChannelId: liveState?.selectedChannelId ?? null,
+      });
+    }
+  }, [directPlayRequested, liveState?.fullscreenChannelId, liveState?.selectedCategoryId, liveState?.selectedChannelId]);
 
   useEffect(() => {
     if (!liveState?.fullscreenChannelId || fullscreenFrameStatus !== 'pending') {
       return;
     }
+    const timeoutChannelId = liveState.fullscreenChannelId;
+    const timeoutGeneration = fullscreenSurfIntentGenerationRef.current;
 
     const timer = setTimeout(() => {
+      if (
+        liveStateRef.current?.fullscreenChannelId !== timeoutChannelId ||
+        fullscreenSurfIntentGenerationRef.current !== timeoutGeneration
+      ) {
+        console.info('[NovaCast Playback Overlay]', {
+          event: 'ignored-stale',
+          type: 'timeout',
+          channelId: timeoutChannelId,
+          generation: timeoutGeneration,
+          fullscreenActive: Boolean(liveStateRef.current?.fullscreenChannelId),
+          nativeSurfActive: fullscreenSurfNativeActive,
+        });
+        return;
+      }
       setFullscreenFrameStatus((current) => (current === 'ready' ? current : 'timeout'));
     }, FULLSCREEN_FIRST_FRAME_TIMEOUT_MS);
 
     return () => clearTimeout(timer);
-  }, [liveState?.fullscreenChannelId, fullscreenFrameStatus]);
+  }, [fullscreenFrameStatus, fullscreenSurfNativeActive, liveState?.fullscreenChannelId]);
 
   const handleFullscreenFirstFrame = () => {
+    if (!shouldAcceptLiveSurfPlayerCommit()) {
+      console.info('[NovaCast Live Surf Playback]', {
+        event: 'stale-commit-dropped',
+        surfCommitId: activeSurfCommitIdRef.current,
+        commitGeneration: activeSurfCommitGenerationRef.current,
+        currentGeneration: fullscreenSurfIntentGenerationRef.current,
+        stage: 'first-frame',
+      });
+      return;
+    }
     console.log('[NOVACAST_PLAYER_PERF]', 'first-frame-ready', {
       elapsedMs: 0,
       focusedChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+      surfCommitId: activeSurfCommitIdRef.current,
       reason: 'fullscreen-first-frame',
+    });
+    recordLivePerformanceEvent('tune_first_frame', {
+      channelId: liveStateRef.current?.fullscreenChannelId ?? null,
+      transactionId: activeSurfCommitIdRef.current,
     });
     liveLoadAudit('first-frame', {
       channelId: liveStateRef.current?.fullscreenChannelId ?? null,
       playerStatus: liveStreamPlayer.status,
       playing: liveStreamPlayer.playing,
     });
+    lastReadyFullscreenChannelIdRef.current = liveStateRef.current?.fullscreenChannelId ?? null;
     playbackAnalyticsTracker.firstFrame();
     setFullscreenFrameStatus('ready');
   };
   const handleLivePlayerPlayingChange = useCallback(({ isPlaying }: PlayingChangeEventPayload) => {
+    if (!shouldAcceptLiveSurfPlayerCommit()) {
+      console.info('[NovaCast Live Surf Playback]', {
+        event: 'stale-commit-dropped',
+        surfCommitId: activeSurfCommitIdRef.current,
+        commitGeneration: activeSurfCommitGenerationRef.current,
+        currentGeneration: fullscreenSurfIntentGenerationRef.current,
+        stage: 'player-playing',
+      });
+      return;
+    }
+    if (isPlaying) {
+      liveTimeshiftProbeRef.current?.markPlaying();
+    }
     liveLoadAudit('player-playing-change', {
       channelId: liveStateRef.current?.fullscreenChannelId ?? null,
       playerStatus: liveStreamPlayer.status,
@@ -1311,7 +1960,7 @@ export function LiveTvScreen() {
       });
       playbackAnalyticsTracker.firstFrame('playing_transition');
     }
-  }, [activeProviderId, bundle?.connectionType, liveLoadAudit, liveStreamPlayer, previewStreamUrl]);
+  }, [activeProviderId, bundle?.connectionType, liveLoadAudit, liveStreamPlayer, previewStreamUrl, shouldAcceptLiveSurfPlayerCommit]);
   const handleLivePlayerTimeUpdate = useCallback(({ currentTime }: TimeUpdateEventPayload) => {
     if (
       liveStateRef.current?.fullscreenChannelId &&
@@ -1404,26 +2053,40 @@ export function LiveTvScreen() {
       fullscreenRetryFocusKeyRef.current = null;
       return;
     }
-
-    if (surfRequestIdRef.current > 0) {
-      return;
-    }
-
     const focusKey = `${liveState.fullscreenChannelId}:${fullscreenFrameStatus}`;
     if (fullscreenRetryFocusKeyRef.current === focusKey) {
       return;
     }
-
     fullscreenRetryFocusKeyRef.current = focusKey;
-    return requestTvFocus({
-      screen: 'live',
-      source: 'LiveTvScreen',
-      region: 'fullscreen-retry',
-      itemId: liveState.fullscreenChannelId,
-      reason: 'fullscreen-fallback-retry',
-      getTarget: () => fullscreenRetryButtonRef.current,
+    console.info('[NovaCast Playback Overlay]', {
+      event: 'shown',
+      type: fullscreenFrameStatus === 'error' ? 'error' : 'timeout',
+      channelId: liveState.fullscreenChannelId,
+      surfCommitId: activeSurfCommitIdRef.current,
+      attemptId: liveState.previewRequestId,
+      generation: fullscreenSurfIntentGenerationRef.current,
+      fullscreenActive: true,
+      nativeSurfActive: fullscreenSurfNativeActive,
     });
-  }, [fullscreenFallbackVisible, fullscreenFrameStatus, liveState?.fullscreenChannelId]);
+  }, [fullscreenFallbackVisible, fullscreenFrameStatus, fullscreenSurfNativeActive, liveState?.fullscreenChannelId, liveState?.previewRequestId]);
+
+  useEffect(() => {
+    if (!liveState?.fullscreenChannelId || fullscreenFallbackVisible) {
+      return;
+    }
+    if (fullscreenFrameStatus === 'pending' || fullscreenFrameStatus === 'ready') {
+      console.info('[NovaCast Playback Overlay]', {
+        event: 'cleared',
+        type: fullscreenFrameStatus === 'pending' ? 'loading' : 'error',
+        channelId: liveState.fullscreenChannelId,
+        surfCommitId: activeSurfCommitIdRef.current,
+        attemptId: liveState.previewRequestId,
+        generation: fullscreenSurfIntentGenerationRef.current,
+        fullscreenActive: true,
+        nativeSurfActive: fullscreenSurfNativeActive,
+      });
+    }
+  }, [fullscreenFallbackVisible, fullscreenFrameStatus, fullscreenSurfNativeActive, liveState?.fullscreenChannelId, liveState?.previewRequestId]);
 
   useEffect(() => {
     // Provider change invalidates any prior user-selection ownership; re-seed
@@ -1524,6 +2187,146 @@ export function LiveTvScreen() {
 
   const focusCategoryRow = useCallback(
     (categoryId: string) => {
+      logLiveNavPerf('category-focus', {
+        categoryId,
+        channelCount: channels.length,
+        focusedChannelId: focusedChannelIdRef.current,
+        reason: 'category-row-focus',
+      });
+      if (liveStateRef.current?.fullscreenChannelId) {
+        console.info('[NovaCast Surf ASSERT]', {
+          event: 'background-focus-during-fullscreen',
+          region: 'category',
+          fullscreenChannelId: liveStateRef.current.fullscreenChannelId,
+          nativeSurfActive: fullscreenSurfNativeActive,
+        });
+        return;
+      }
+      if (fullscreenExitFocusPendingRef.current) {
+        console.log('[NOVACAST_FOCUS]', 'fullscreen-exit-category-focus-ignored', {
+          reason: 'fullscreen-exit-channel-restore-pending',
+          targetType: 'category',
+          targetId: categoryId,
+          preferredChannelId: fullscreenExitFocusChannelIdRef.current,
+        });
+        console.log('[NOVACAST_FOCUS]', 'event=post-exit-focus-owner', {
+          owner: 'category',
+          channelId: fullscreenExitFocusChannelIdRef.current,
+          categoryId,
+          restorePhase: fullscreenExitFocusPhaseRef.current,
+          timestamp: Date.now(),
+        });
+        if (
+          fullscreenExitFocusPhaseRef.current === 'channel-focused-candidate' &&
+          !fullscreenExitFocusReassertedRef.current
+        ) {
+          const targetChannelId = fullscreenExitFocusChannelIdRef.current;
+          const target = targetChannelId ? channelRowRefs.current.get(targetChannelId) : null;
+          fullscreenExitFocusReassertedRef.current = true;
+          requestTvFocus({
+            screen: 'live',
+            source: 'LiveTvScreen',
+            region: 'browse-restore',
+            itemId: targetChannelId,
+            reason: 'fullscreen-close-restore-reassert',
+            getTarget: () => target,
+            onSettled: (status) => {
+              if (status !== 'executed') {
+                fullscreenExitFocusPendingRef.current = false;
+                fullscreenExitFocusPhaseRef.current = 'idle';
+                fullscreenExitFocusChannelIdRef.current = null;
+                if (fullscreenExitFocusStabilizationTimerRef.current) {
+                  clearTimeout(fullscreenExitFocusStabilizationTimerRef.current);
+                  fullscreenExitFocusStabilizationTimerRef.current = null;
+                }
+              }
+            },
+            maxFrames: 3,
+          });
+        }
+        return;
+      }
+      const previousOwner = focusOwnerRef.current;
+      const navigationIntent = lastNavigationIntentRef.current;
+      const intentAgeMs = Date.now() - navigationIntent.at;
+      const isRecentLeftIntent = previousOwner === 'channels' && navigationIntent.intent === 'left' && intentAgeMs <= 500;
+      if (isRecentLeftIntent) {
+        clearFocusRestoreInFlight('legitimate-left');
+        lastNavigationIntentRef.current = { intent: 'none', at: 0 };
+        console.info('[NOVACAST_FOCUS]', 'region-transition-allowed', {
+          from: 'channels',
+          to: 'categories',
+          reason: 'native-dpad-left',
+          intentAgeMs,
+        });
+      }
+      const restoreInFlight = focusRestoreInFlightRef.current;
+      if (restoreInFlight && !isRecentLeftIntent) {
+        const now = Date.now();
+        const previousLog = restoreInFlightCategoryLogRef.current;
+        if (!previousLog || previousLog.categoryId !== categoryId || now - previousLog.at > 500) {
+          restoreInFlightCategoryLogRef.current = { categoryId, at: now };
+          console.info('[NOVACAST_FOCUS]', 'restore-in-flight-category-fallback', {
+            categoryId,
+            targetChannelId: restoreInFlight.targetChannelId,
+            restoreAgeMs: now - restoreInFlight.startedAt,
+            retryCount: restoreInFlight.retryCount,
+          });
+        }
+        return;
+      }
+      if (!searchOverlayVisible && shouldRetainChannelFocus({
+        previousOwner,
+        navigationIntent: navigationIntent.intent,
+        intentAgeMs,
+        focusedChannelId: focusedChannelIdRef.current,
+        preferredChannelId: preferredChannelFocusId.current,
+        selectedChannelId: liveStateRef.current?.selectedChannelId,
+      })) {
+        const targetChannelId = resolveChannelFocusRetentionTarget({
+          focusedChannelId: focusedChannelIdRef.current,
+          preferredChannelId: preferredChannelFocusId.current,
+          selectedChannelId: liveStateRef.current?.selectedChannelId,
+        });
+        const target = targetChannelId ? channelRowRefs.current.get(targetChannelId) : null;
+        const previousLog = lastUnexpectedFocusLogRef.current;
+        if (!previousLog || previousLog.categoryId !== categoryId || Date.now() - previousLog.at > 500) {
+          recordLiveNavigationMetric('unexpected-region-transition');
+          lastUnexpectedFocusLogRef.current = { categoryId, at: Date.now() };
+          console.warn('[NOVACAST_FOCUS] unexpected-region-transition', {
+            previousNativeTarget: 'channel',
+            nextNativeTarget: 'category',
+            previousChannelId: focusedChannelIdRef.current,
+            categoryId,
+            currentFocusRegion: liveStateRef.current?.fullscreenChannelId ? 'fullscreen' : 'live-browse',
+            preferredChannelId: preferredChannelFocusId.current,
+            selectedChannelId: liveStateRef.current?.selectedChannelId ?? null,
+            lastNavigationIntent: navigationIntent.intent,
+            millisecondsSinceLastEpgStateCommit: lastEpgCommitAtRef.current ? Date.now() - lastEpgCommitAtRef.current : null,
+            millisecondsSinceLastMarqueeUpdate: null,
+          });
+        }
+        if (targetChannelId && target) {
+          requestFocusRestore(targetChannelId, 0);
+        }
+        return;
+      }
+      if (previousOwner === 'categories' && preferredCategoryFocusId.current === categoryId) {
+        console.info('[NOVACAST_FOCUS]', 'redundant-focus-state-skipped', {
+          region: 'category',
+          id: categoryId,
+          reason: 'category-row-focus',
+        });
+        return;
+      }
+      focusOwnerRef.current = 'categories';
+      console.info('[NovaCast Live Focus Owner]', 'focus-owner-changed', {
+        from: previousOwner,
+        to: 'categories',
+        reason: 'category-row-focus',
+        channelId: null,
+        categoryId,
+      });
       logFocusAudit('category-received-focus', {
         reason: 'category-row-onFocus',
         targetType: 'category',
@@ -1533,11 +2336,83 @@ export function LiveTvScreen() {
       preferCategoryFocusRef.current = false;
       // Avoid FlatList epoch bumps on every category D-pad move.
     },
-    [logFocusAudit],
+    [channels.length, clearFocusRestoreInFlight, fullscreenSurfNativeActive, logFocusAudit, requestFocusRestore, searchOverlayVisible],
   );
 
   const focusChannelRow = useCallback(
     (channelId: string) => {
+      recordLiveNavigationMetric('channel-focus');
+      if (liveStateRef.current?.fullscreenChannelId) {
+        console.info('[NovaCast Surf ASSERT]', {
+          event: 'background-focus-during-fullscreen',
+          region: 'channel',
+          fullscreenChannelId: liveStateRef.current.fullscreenChannelId,
+          nativeSurfActive: fullscreenSurfNativeActive,
+        });
+        return;
+      }
+      if (fullscreenExitFocusPendingRef.current) {
+        if (fullscreenExitFocusChannelIdRef.current !== channelId) {
+          return;
+        }
+        if (fullscreenExitFocusPhaseRef.current === 'pending') {
+          fullscreenExitFocusPhaseRef.current = 'channel-focused-candidate';
+          if (fullscreenExitFocusStabilizationTimerRef.current) {
+            clearTimeout(fullscreenExitFocusStabilizationTimerRef.current);
+          }
+          fullscreenExitFocusStabilizationTimerRef.current = setTimeout(() => {
+            fullscreenExitFocusPendingRef.current = false;
+            fullscreenExitFocusPhaseRef.current = 'stable';
+            fullscreenExitFocusChannelIdRef.current = null;
+            fullscreenExitFocusStabilizationTimerRef.current = null;
+            if (fullscreenExitFocusPendingTimerRef.current) {
+              clearTimeout(fullscreenExitFocusPendingTimerRef.current);
+              fullscreenExitFocusPendingTimerRef.current = null;
+            }
+            console.log('[NOVACAST_FOCUS]', 'fullscreen-exit-focus-confirmed', {
+              reason: 'channel-row-stabilized',
+              targetType: 'channel',
+              targetId: channelId,
+            });
+          }, FULLSCREEN_EXIT_FOCUS_STABILIZATION_MS);
+          console.log('[NOVACAST_FOCUS]', 'event=post-exit-focus-owner', {
+            owner: 'channel',
+            channelId,
+            categoryId: liveStateRef.current?.selectedCategoryId ?? null,
+            restorePhase: 'channel-focused-candidate',
+            timestamp: Date.now(),
+          });
+        }
+        console.log('[NOVACAST_FOCUS]', 'fullscreen-exit-focus-candidate', {
+          reason: 'channel-row-onFocus',
+          targetType: 'channel',
+          targetId: channelId,
+        });
+      }
+      const previousOwner = focusOwnerRef.current;
+      const previousFocusedId = focusedChannelIdRef.current;
+      if (focusRestoreInFlightRef.current?.targetChannelId === channelId) {
+        clearFocusRestoreInFlight('target-channel-focused');
+      }
+      if (previousOwner === 'channels' && previousFocusedId === channelId) {
+        console.info('[NOVACAST_FOCUS]', 'redundant-focus-state-skipped', {
+          region: 'channel',
+          id: channelId,
+          reason: 'channel-row-focus',
+        });
+        return;
+      }
+      focusOwnerRef.current = 'channels';
+      preferCategoryFocusRef.current = false;
+      if (previousOwner !== 'channels') {
+        console.info('[NovaCast Live Focus Owner]', 'focus-owner-changed', {
+          from: previousOwner,
+          to: 'channels',
+          reason: 'channel-row-focus',
+          channelId,
+          categoryId: liveStateRef.current?.selectedCategoryId ?? null,
+        });
+      }
       logLiveEpgPerformance('focus', {
         elapsedMs: 0,
         selectedCategoryId: liveStateRef.current?.selectedCategoryId ?? selectedCategoryId ?? null,
@@ -1555,7 +2430,6 @@ export function LiveTvScreen() {
         targetType: 'channel',
         targetId: channelId,
       });
-      const previousFocusedId = focusedChannelIdRef.current;
       if (previousFocusedId !== channelId) {
         favoriteHoldRef.current?.cancel('focus_lost');
       }
@@ -1586,7 +2460,7 @@ export function LiveTvScreen() {
         return next === base ? current : next;
       });
     },
-    [enrichFocusedChannelEpg, liveLoadAudit, logFocusAudit, setPreferredChannelFocus],
+    [channels.length, clearFocusRestoreInFlight, enrichFocusedChannelEpg, fullscreenSurfNativeActive, liveLoadAudit, logFocusAudit, selectedCategoryId, setPreferredChannelFocus],
   );
 
   const closeLiveSearch = useCallback(() => {
@@ -2142,6 +3016,12 @@ export function LiveTvScreen() {
   }, []);
 
   const selectCategory = (categoryId: string) => {
+    logLiveNavPerf('category-select-start', {
+      categoryId,
+      channelCount: channels.length,
+      focusedChannelId: focusedChannelIdRef.current,
+      reason: 'category-selected',
+    });
     if (!liveSearchQueueActiveRef.current) {
       liveSearchSurfQueueRef.current = null;
     }
@@ -2208,6 +3088,7 @@ export function LiveTvScreen() {
 
   const tuneChannel = useCallback(
     (channelId: string) => {
+      recordLivePerformanceEvent('tune_requested', { channelId, transactionId: liveStateRef.current?.previewRequestId ?? null });
       console.log('[NOVACAST_PLAYER_PERF]', 'tune-requested', {
         elapsedMs: 0,
         channelId,
@@ -2227,6 +3108,9 @@ export function LiveTvScreen() {
       const base = interactionState ?? liveState;
       const nextState = chooseLiveChannel(base ?? createLiveTvLandingState(undefined, channelId), channelId);
       const channel = channels.find((item) => item.id === channelId);
+      if (isChannelPressEnteringFullscreen(base, channelId) && !directPlayRequested) {
+        console.info('[NovaCast Live Browse Retention]', 'launch-channel-key', { channelId });
+      }
       if (isChannelPressEnteringFullscreen(base, channelId)) {
         discoverLivePlaybackContextRef.current = null;
         fullscreenLaunchSourceRef.current = 'channel';
@@ -2257,6 +3141,7 @@ export function LiveTvScreen() {
       }
 
       recordLiveTvChannelTune();
+      markLiveCatalogInteraction('channel-tune');
       logFocusAudit('tune-channel', {
         reason: 'channel-ok',
         targetType: 'channel',
@@ -2313,7 +3198,7 @@ export function LiveTvScreen() {
       }
       syncLiveTvMemory();
     },
-    [activeProviderId, channels, enrichFocusedChannelEpg, interactionState, liveLoadAudit, liveState, logFocusAudit, resolvePlaybackUrl, showNotification, syncLiveTvMemory],
+    [activeProviderId, channels, directPlayRequested, enrichFocusedChannelEpg, interactionState, liveLoadAudit, liveState, logFocusAudit, resolvePlaybackUrl, showNotification, syncLiveTvMemory],
   );
 
   useEffect(() => {
@@ -2337,7 +3222,6 @@ export function LiveTvScreen() {
 
   const liveSurfRouterRef = useRef<LiveTvFocusRouterHandle | null>(null);
   const lastSettledSurfRequestIdRef = useRef(0);
-  const [surfOverlay, setSurfOverlay] = useState<{ channelId: string; name: string; number?: string } | null>(null);
   const [liveSurfHandles, setLiveSurfHandles] = useState<{
     anchor: number | null;
     left: number | null;
@@ -2349,11 +3233,36 @@ export function LiveTvScreen() {
   });
   const surfTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const surfOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const surfKeyDownRef = useRef(false);
+  const surfDirectionRef = useRef<1 | -1 | null>(null);
+  const surfCursorIndexRef = useRef<number | null>(null);
+  const surfCursorChannelIdRef = useRef<string | null>(null);
+  const nativeSurfSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nativeSurfEventCountRef = useRef(0);
+  const nativeSurfCursorMovesRef = useRef(0);
+  const nativeSurfRenderStartRef = useRef<number | null>(null);
+  const nativeSurfLastReleaseAtRef = useRef<number | null>(null);
+  const nativeSurfLastCommitAtRef = useRef<number | null>(null);
+  const nativeSurfTapBurstRef = useRef(false);
+  const surfWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const surfTransactionRef = useRef<{
+    attemptId: number;
+    surfCommitId: number;
+    generation: number;
+    desiredChannelId: string;
+    stage: string;
+  } | null>(null);
+  const surfCommitIdRef = useRef(0);
   const surfTokenRef = useRef(0);
   const surfRequestIdRef = useRef(0);
+  const pendingSurfDeltaRef = useRef(0);
+  const pendingSurfTargetIdRef = useRef<string | null>(null);
+  const desiredSurfTargetIdRef = useRef<string | null>(null);
+  const surfSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSurfDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const surfLiveChannel = useCallback(
-    (delta: 1 | -1): boolean => {
+    (delta: 1 | -1, targetOverride?: string, fromSettle = false, commitGeneration?: number, surfCommitId?: number): boolean => {
       if (
         !shouldHandleLiveChannelSurf({
           isLive: true,
@@ -2364,18 +3273,112 @@ export function LiveTvScreen() {
         return false;
       }
 
+      const workload = getLiveTvWorkload();
+      if (!workload.surfTransitionInFlight && !targetOverride && !fromSettle) {
+        const currentId = liveStateRef.current?.fullscreenChannelId ?? liveStateRef.current?.previewChannelId ?? null;
+        const discoverContext = liveStateRef.current?.fullscreenChannelId ? discoverLivePlaybackContextRef.current : null;
+        const searchSession = liveSearchPlaybackSessionRef.current;
+        const channelIds = discoverContext?.channels.map((channel) => channel.id) ?? searchSession?.resultIds ?? resolveLiveSearchSurfQueue(
+          liveSearchSurfQueueRef.current,
+          channels.map((channel) => channel.id),
+        );
+        const selectionBaseId = desiredSurfTargetIdRef.current ?? currentId;
+        const adjacent = resolveLiveSurfAdjacent({ channelIds, currentId: selectionBaseId, direction: delta });
+        if (adjacent.kind === 'noop') {
+          return false;
+        }
+        desiredSurfTargetIdRef.current = adjacent.toChannelId;
+        const selectedChannel = discoverContext?.channels.find((channel) => channel.id === adjacent.toChannelId) ??
+          (searchSession ? searchSession.channelsById.get(adjacent.toChannelId) : null) ??
+          channels.find((channel) => channel.id === adjacent.toChannelId);
+        publishFullscreenSurfOverlay({
+          channelId: adjacent.toChannelId,
+          channelName: displayStreamTitle(selectedChannel?.name ?? 'Channel'),
+          channelNumber: selectedChannel?.number ? String(selectedChannel.number) : undefined,
+        });
+        focusedChannelIdRef.current = adjacent.toChannelId;
+        setPreferredChannelFocus(adjacent.toChannelId, preferChannelFocusRef.current, 'fullscreen-surf-selection');
+        console.info('[NovaCast Live Surf Intent]', {
+          event: 'selection-updated',
+          actualIndex: adjacent.fromIndex,
+          desiredIndex: adjacent.toIndex,
+          direction: delta,
+          settleTimerArmed: true,
+        });
+        if (surfSettleTimerRef.current) clearTimeout(surfSettleTimerRef.current);
+        surfSettleTimerRef.current = setTimeout(() => {
+          surfSettleTimerRef.current = null;
+          const desiredTargetId = desiredSurfTargetIdRef.current;
+          desiredSurfTargetIdRef.current = null;
+          if (!desiredTargetId) return;
+          const ids = discoverLivePlaybackContextRef.current?.channels.map((channel) => channel.id) ??
+            liveSearchPlaybackSessionRef.current?.resultIds ??
+            resolveLiveSearchSurfQueue(liveSearchSurfQueueRef.current, channels.map((channel) => channel.id));
+          const fromIndex = ids.indexOf(liveStateRef.current?.fullscreenChannelId ?? '');
+          const toIndex = ids.indexOf(desiredTargetId);
+          console.info('[NovaCast Live Surf Intent]', {
+            event: 'tune-after-settle',
+            fromIndex,
+            toIndex,
+            settleMs: 250,
+          });
+          surfLiveChannel(toIndex >= fromIndex ? 1 : -1, desiredTargetId, true);
+        }, 250);
+        return true;
+      }
+
+      if (workload.surfTransitionInFlight) {
+        const currentId = liveStateRef.current?.fullscreenChannelId ?? liveStateRef.current?.previewChannelId ?? null;
+        const discoverContext = liveStateRef.current?.fullscreenChannelId ? discoverLivePlaybackContextRef.current : null;
+        const surfQueue = discoverContext?.channels ?? null;
+        const searchSession = liveSearchPlaybackSessionRef.current;
+        const channelIds = surfQueue?.map((channel) => channel.id) ?? searchSession?.resultIds ?? resolveLiveSearchSurfQueue(
+          liveSearchSurfQueueRef.current,
+          channels.map((channel) => channel.id),
+        );
+        const activeTargetId = intendedSurfChannelIdRef.current ?? currentId;
+        const desiredBaseId = desiredSurfTargetIdRef.current ?? pendingSurfTargetIdRef.current ?? activeTargetId;
+        const nextIntentDelta = Math.max(-5, Math.min(5, pendingSurfDeltaRef.current + delta));
+        const desiredTarget = desiredBaseId
+          ? resolveLiveSurfAdjacent({ channelIds, currentId: desiredBaseId, direction: delta })
+          : null;
+        if (nextIntentDelta !== pendingSurfDeltaRef.current && desiredTarget?.kind === 'adjacent') {
+          pendingSurfDeltaRef.current = nextIntentDelta;
+          pendingSurfTargetIdRef.current = desiredTarget.toChannelId;
+          desiredSurfTargetIdRef.current = desiredTarget.toChannelId;
+        }
+        console.info('[NovaCast Live Surf Intent]', {
+          event: 'selection-updated-during-tune',
+          direction: delta,
+          pendingDelta: pendingSurfDeltaRef.current,
+          currentChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+          activeTransitionTargetId: activeTargetId,
+          desiredTargetId: pendingSurfTargetIdRef.current ?? activeTargetId,
+        });
+        return true;
+      }
+
       const currentId = liveStateRef.current?.fullscreenChannelId ?? liveStateRef.current?.previewChannelId ?? null;
       const discoverContext = liveStateRef.current?.fullscreenChannelId ? discoverLivePlaybackContextRef.current : null;
       const surfQueue = discoverContext?.channels ?? null;
       const searchSession = liveSearchPlaybackSessionRef.current;
-      const adjacent = resolveLiveSurfAdjacent({
-        channelIds: surfQueue?.map((channel) => channel.id) ?? searchSession?.resultIds ?? resolveLiveSearchSurfQueue(
-          liveSearchSurfQueueRef.current,
-          channels.map((channel) => channel.id),
-        ),
-        currentId,
-        direction: delta,
-      });
+      const adjacent = targetOverride
+        ? resolveLiveSurfTarget({
+          channelIds: surfQueue?.map((channel) => channel.id) ?? searchSession?.resultIds ?? resolveLiveSearchSurfQueue(
+            liveSearchSurfQueueRef.current,
+            channels.map((channel) => channel.id),
+          ),
+          currentId,
+          targetId: targetOverride,
+        })
+        : resolveLiveSurfAdjacent({
+          channelIds: surfQueue?.map((channel) => channel.id) ?? searchSession?.resultIds ?? resolveLiveSearchSurfQueue(
+            liveSearchSurfQueueRef.current,
+            channels.map((channel) => channel.id),
+          ),
+          currentId,
+          direction: delta,
+        });
       const requestId = surfRequestIdRef.current + 1;
       surfRequestIdRef.current = requestId;
 
@@ -2408,6 +3411,17 @@ export function LiveTvScreen() {
       });
 
       const nextId = adjacent.toChannelId;
+      const nativeCommitPrepare = fromSettle && commitGeneration !== undefined;
+      if (commitGeneration !== undefined) {
+        surfCommitGenerationByRequestRef.current.set(requestId, commitGeneration);
+        surfCommitGenerationByChannelRef.current.set(nextId, commitGeneration);
+      }
+      if (surfCommitId !== undefined) {
+        surfCommitIdByRequestRef.current.set(requestId, surfCommitId);
+      }
+      desiredSurfTargetIdRef.current = null;
+      pendingSurfTargetIdRef.current = null;
+      pendingSurfDeltaRef.current = 0;
       if (discoverContext) {
         discoverLiveAudit('surf-request', {
           source: discoverContext.source,
@@ -2438,11 +3452,13 @@ export function LiveTvScreen() {
           });
         }
       }
-      setSurfOverlay({
-        channelId: nextId,
-        name: nextChannel?.name ?? 'Channel',
-        number: nextChannel?.number ? String(nextChannel.number) : undefined,
-      });
+      if (!nativeCommitPrepare) {
+        publishFullscreenSurfOverlay({
+          channelId: nextId,
+          channelName: displayStreamTitle(nextChannel?.name ?? 'Channel'),
+          channelNumber: nextChannel?.number ? String(nextChannel.number) : undefined,
+        });
+      }
       console.log('[NOVACAST_PLAYER_PERF]', 'surf-key-accepted', {
         elapsedMs: 0,
         fromChannelId: adjacent.fromChannelId,
@@ -2450,14 +3466,14 @@ export function LiveTvScreen() {
         requestId,
         reason: 'fullscreen-surf',
       });
-      if (surfOverlayTimerRef.current) {
-        clearTimeout(surfOverlayTimerRef.current);
+      if (!nativeCommitPrepare) {
+        if (surfOverlayTimerRef.current) {
+          clearTimeout(surfOverlayTimerRef.current);
+        }
+        surfOverlayTimerRef.current = setTimeout(() => clearFullscreenSurfOverlay(nextId), LIVE_SURF_OVERLAY_HIDE_MS);
+        setPreferredChannelFocus(nextId, preferChannelFocusRef.current, 'fullscreen-surf');
+        focusedChannelIdRef.current = nextId;
       }
-      surfOverlayTimerRef.current = setTimeout(() => {
-        setSurfOverlay((current) => (current?.channelId === nextId ? null : current));
-      }, LIVE_SURF_OVERLAY_HIDE_MS);
-      setPreferredChannelFocus(nextId, preferChannelFocusRef.current, 'fullscreen-surf');
-      focusedChannelIdRef.current = nextId;
 
       if (surfTimerRef.current) {
         clearTimeout(surfTimerRef.current);
@@ -2474,6 +3490,83 @@ export function LiveTvScreen() {
             requestId,
           });
           return;
+        }
+        if (
+          commitGeneration !== undefined &&
+          commitGeneration !== fullscreenSurfIntentGenerationRef.current
+        ) {
+          console.info('[NovaCast Live Surf Playback]', {
+            event: 'stale-commit-dropped',
+            surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+            commitGeneration,
+            currentGeneration: fullscreenSurfIntentGenerationRef.current,
+            stage: 'transition-settled-source-commit',
+          });
+          surfCommitGenerationByRequestRef.current.delete(requestId);
+          return;
+        }
+        const prepareStartedAt = liveLoadAuditNow();
+        console.info('[NovaCast Surf Commit]', {
+          surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+          generation: commitGeneration ?? null,
+          stage: 'prepare-start',
+          elapsedMsFromPrepareStart: 0,
+        });
+        let preparedSource: LivePlaybackSource | null = null;
+        if (nativeCommitPrepare) {
+          console.info('[NovaCast Surf Commit]', {
+            surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+            generation: commitGeneration,
+            stage: 'source-resolve-start',
+            elapsedMsFromPrepareStart: Math.round(liveLoadAuditNow() - prepareStartedAt),
+          });
+          try {
+            preparedSource = nextChannel ? resolvePlaybackSource(nextChannel) : null;
+          } catch {
+            preparedSource = null;
+          }
+          if (!preparedSource) {
+            console.info('[NovaCast Surf Commit]', {
+              surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+              generation: commitGeneration,
+              stage: 'prepare-failed',
+              elapsedMsFromPrepareStart: Math.round(liveLoadAuditNow() - prepareStartedAt),
+            });
+            patchLiveTvWorkload({ surfTransitionInFlight: false }, { log: true, reason: 'surf-prepare-failed' });
+            return;
+          }
+          if (commitGeneration !== fullscreenSurfIntentGenerationRef.current) {
+            console.info('[NovaCast Surf Commit]', {
+              surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+              generation: commitGeneration,
+              stage: 'stale-dropped',
+              elapsedMsFromPrepareStart: Math.round(liveLoadAuditNow() - prepareStartedAt),
+            });
+            surfCommitGenerationByRequestRef.current.delete(requestId);
+            surfCommitGenerationByChannelRef.current.delete(nextId);
+            surfCommitIdByRequestRef.current.delete(requestId);
+            return;
+          }
+          console.info('[NovaCast Surf Commit]', {
+            surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+            generation: commitGeneration,
+            stage: 'source-resolve-ready',
+            elapsedMsFromPrepareStart: Math.round(liveLoadAuditNow() - prepareStartedAt),
+          });
+          console.info('[NovaCast Surf Commit]', {
+            surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+            generation: commitGeneration,
+            stage: 'commit-start',
+            elapsedMsFromPrepareStart: Math.round(liveLoadAuditNow() - prepareStartedAt),
+          });
+          clearFullscreenSurfOverlay(nextId);
+          setPreviewStreamSource(preparedSource);
+          console.info('[NovaCast Surf Commit]', {
+            surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+            generation: commitGeneration,
+            stage: 'player-source-applied',
+            elapsedMsFromPrepareStart: Math.round(liveLoadAuditNow() - prepareStartedAt),
+          });
         }
         logLiveSurf({
           event: 'source-requested',
@@ -2507,14 +3600,30 @@ export function LiveTvScreen() {
           if (!base) {
             return current;
           }
+          if (
+            commitGeneration !== undefined &&
+            commitGeneration !== fullscreenSurfIntentGenerationRef.current
+          ) {
+            console.info('[NovaCast Live Surf Playback]', {
+              event: 'stale-commit-dropped',
+              surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? requestId,
+              commitGeneration,
+              currentGeneration: fullscreenSurfIntentGenerationRef.current,
+              stage: 'state-update',
+            });
+            surfCommitGenerationByRequestRef.current.delete(requestId);
+            surfCommitGenerationByChannelRef.current.delete(nextId);
+            surfCommitIdByRequestRef.current.delete(requestId);
+            return current;
+          }
           if (shouldClearPreviewStreamUrl(base.previewChannelId, nextId)) {
             console.log('[NOVACAST_PLAYER_PERF]', 'source-update-requested', {
               elapsedMs: 0,
               channelId: nextId,
               requestId,
-              reason: 'fullscreen-surf',
+              surfCommitId: surfCommitIdByRequestRef.current.get(requestId) ?? null,
+              reason: 'fullscreen-surf-preserve-current-until-next-source',
             });
-            setPreviewStreamSource(null);
           }
           return surfLiveFullscreenChannel(base, nextId);
         });
@@ -2524,13 +3633,321 @@ export function LiveTvScreen() {
           actionSource: 'live-surf',
           requestToken: (liveStateRef.current?.previewRequestId ?? 0) + 1,
         });
-      }, LIVE_CHANNEL_SURF_DEBOUNCE_MS);
+        markLiveCatalogInteraction('fullscreen-surf');
+      }, fromSettle ? 0 : LIVE_CHANNEL_SURF_DEBOUNCE_MS);
       return true;
     },
-    [channels, directPlayRequested, guide.visible, searchOverlayVisible, setPreferredChannelFocus],
+    [channels, directPlayRequested, guide.visible, resolvePlaybackSource, searchOverlayVisible, setPreferredChannelFocus],
   );
 
-  const visibleSurfOverlay = surfOverlay;
+  const handleNativeFullscreenSurfEvent = useCallback(
+    (event: FullscreenSurfKeyEvent) => {
+      const isDown = event.action === 0;
+      const isUp = event.action === 1;
+      const direction = event.keyCode === 21 ? -1 : event.keyCode === 22 ? 1 : null;
+      if (!direction || (!isDown && !isUp)) {
+        return;
+      }
+
+      if (isDown) {
+        const now = Date.now();
+        if (
+          !surfKeyDownRef.current &&
+          ((nativeSurfLastReleaseAtRef.current !== null && now - nativeSurfLastReleaseAtRef.current < 600) ||
+            (nativeSurfLastCommitAtRef.current !== null && now - nativeSurfLastCommitAtRef.current < 600))
+        ) {
+          nativeSurfTapBurstRef.current = true;
+        }
+        if (!surfKeyDownRef.current && nativeSurfEventCountRef.current > 0) {
+          console.info('[NovaCast Surf Perf Summary]', {
+            event: 'session-cancelled',
+            reason: 'new-input-before-settle',
+            eventCount: nativeSurfEventCountRef.current,
+            cursorMoves: nativeSurfCursorMovesRef.current,
+            parentRenderCount: nativeSurfRenderStartRef.current === null
+              ? 0
+              : liveScreenRenderCountRef.current - nativeSurfRenderStartRef.current,
+            overlayRenderCount: 'external-store',
+          });
+          nativeSurfEventCountRef.current = 0;
+          nativeSurfCursorMovesRef.current = 0;
+          nativeSurfRenderStartRef.current = null;
+        }
+        surfKeyDownRef.current = true;
+        surfDirectionRef.current = direction;
+        const workload = getLiveTvWorkload();
+        if (workload.surfTransitionInFlight) {
+          patchLiveTvWorkload({ surfTransitionInFlight: false }, { log: true, reason: 'surf-new-input-breaks-stale-transaction' });
+          console.info('[NovaCast Surf Tx]', {
+            attemptId: surfTransactionRef.current?.attemptId ?? null,
+            surfCommitId: surfTransactionRef.current?.surfCommitId ?? null,
+            generation: fullscreenSurfIntentGenerationRef.current,
+            desiredChannelId: surfCursorChannelIdRef.current,
+            readyChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+            stage: 'cancelled',
+            ageMs: null,
+            activeAttemptId: surfTransactionRef.current?.attemptId ?? null,
+            replaceInFlight: true,
+            pendingLatestChannelId: surfCursorChannelIdRef.current,
+          });
+        }
+        if (surfWatchdogTimerRef.current) {
+          clearTimeout(surfWatchdogTimerRef.current);
+          surfWatchdogTimerRef.current = null;
+        }
+        surfTransactionRef.current = null;
+        pendingSurfTargetIdRef.current = null;
+        pendingSurfDeltaRef.current = 0;
+        if (nativeSurfSettleTimerRef.current) {
+          clearTimeout(nativeSurfSettleTimerRef.current);
+          nativeSurfSettleTimerRef.current = null;
+        }
+
+        const discoverContext = discoverLivePlaybackContextRef.current;
+        const searchSession = liveSearchPlaybackSessionRef.current;
+        const channelIds = discoverContext?.channels.map((channel) => channel.id) ??
+          searchSession?.resultIds ??
+          resolveLiveSearchSurfQueue(liveSearchSurfQueueRef.current, channels.map((channel) => channel.id));
+        if (channelIds.length === 0) {
+          return;
+        }
+
+        const actualId = liveStateRef.current?.fullscreenChannelId ?? null;
+        const currentIndex = surfCursorIndexRef.current != null &&
+          surfCursorChannelIdRef.current && channelIds[surfCursorIndexRef.current] === surfCursorChannelIdRef.current
+          ? surfCursorIndexRef.current
+          : Math.max(0, channelIds.indexOf(actualId ?? ''));
+        const nextIndex = (currentIndex + direction + channelIds.length) % channelIds.length;
+        const nextId = channelIds[nextIndex];
+        if (!nextId) {
+          return;
+        }
+        surfCursorIndexRef.current = nextIndex;
+        surfCursorChannelIdRef.current = nextId;
+        fullscreenSurfIntentGenerationRef.current += 1;
+        if (fullscreenFrameStatus !== 'ready') {
+          console.info('[NovaCast Surf Recovery]', {
+            event: 'directional-input-during-player-warning',
+            keyCode: event.keyCode,
+            overlayType: fullscreenFrameStatus === 'error' ? 'error' : 'loading',
+            oldAttemptId: liveStateRef.current?.previewRequestId ?? null,
+            newGeneration: fullscreenSurfIntentGenerationRef.current,
+          });
+          setFullscreenFrameStatus('pending');
+        }
+        const nextChannel = discoverContext?.channels.find((channel) => channel.id === nextId) ??
+          (searchSession ? searchSession.channelsById.get(nextId) : null) ??
+          channels.find((channel) => channel.id === nextId);
+        publishFullscreenSurfOverlay({
+          channelId: nextId,
+          channelName: displayStreamTitle(nextChannel?.name ?? 'Channel'),
+          channelNumber: nextChannel?.number ? String(nextChannel.number) : undefined,
+        });
+        nativeSurfCursorMovesRef.current += 1;
+        nativeSurfEventCountRef.current += 1;
+        const shouldSample = !event.repeatCount || event.repeatCount % 10 === 0;
+        if (nativeSurfRenderStartRef.current === null) {
+          nativeSurfRenderStartRef.current = liveScreenRenderCountRef.current;
+        }
+        if (shouldSample) {
+          console.info('[NovaCast Live Surf Session]', {
+            event: event.repeatCount ? 'repeat' : 'down',
+            repeatCount: event.repeatCount ?? 0,
+            keyHeld: true,
+            cursorIndex: nextIndex,
+            cursorChannelId: nextId,
+            nativeEventTime: event.eventTime ?? null,
+            jsReceiptTime: liveLoadAuditNow(),
+            cursorCommitTime: liveLoadAuditNow(),
+          });
+          console.info('[NovaCast Live Surf Cursor]', {
+            event: 'cursor-moved',
+            fromIndex: currentIndex,
+            toIndex: nextIndex,
+            channelId: nextId,
+            repeatCount: event.repeatCount ?? 0,
+          });
+        }
+        if (surfOverlayTimerRef.current) {
+          clearTimeout(surfOverlayTimerRef.current);
+        }
+        surfOverlayTimerRef.current = setTimeout(() => {
+          clearFullscreenSurfOverlay(nextId);
+        }, LIVE_SURF_OVERLAY_HIDE_MS);
+        return;
+      }
+
+      surfKeyDownRef.current = false;
+      surfDirectionRef.current = direction;
+      nativeSurfLastReleaseAtRef.current = Date.now();
+      const releasedGeneration = fullscreenSurfIntentGenerationRef.current;
+      const releasedTargetId = surfCursorChannelIdRef.current;
+      console.info('[NovaCast Live Surf Session]', {
+        event: 'up',
+        repeatCount: event.repeatCount ?? 0,
+        keyHeld: false,
+        cursorIndex: surfCursorIndexRef.current,
+        cursorChannelId: releasedTargetId,
+      });
+      nativeSurfEventCountRef.current += 1;
+      if (!releasedTargetId) {
+        return;
+      }
+      if (nativeSurfSettleTimerRef.current) {
+        clearTimeout(nativeSurfSettleTimerRef.current);
+      }
+      const settleDelayMs = nativeSurfTapBurstRef.current ? 480 : 200;
+      nativeSurfSettleTimerRef.current = setTimeout(() => {
+        nativeSurfSettleTimerRef.current = null;
+        if (surfKeyDownRef.current || fullscreenSurfIntentGenerationRef.current !== releasedGeneration ||
+          surfCursorChannelIdRef.current !== releasedTargetId) {
+          console.info('[NovaCast Live Surf ASSERT]', 'blocked-tune-while-key-held');
+          return;
+        }
+        const currentId = liveStateRef.current?.fullscreenChannelId ?? null;
+        if (!currentId || currentId === releasedTargetId) {
+          return;
+        }
+        const ids = discoverLivePlaybackContextRef.current?.channels.map((channel) => channel.id) ??
+          liveSearchPlaybackSessionRef.current?.resultIds ??
+          resolveLiveSearchSurfQueue(liveSearchSurfQueueRef.current, channels.map((channel) => channel.id));
+        const fromIndex = ids.indexOf(currentId);
+        const toIndex = ids.indexOf(releasedTargetId);
+        if (fromIndex < 0 || toIndex < 0) {
+          return;
+        }
+        const surfCommitId = ++surfCommitIdRef.current;
+        nativeSurfLastCommitAtRef.current = Date.now();
+        activeSurfCommitGenerationRef.current = releasedGeneration;
+        activeSurfCommitIdRef.current = surfCommitId;
+        const expectedRequestId = surfRequestIdRef.current + 1;
+        surfTransactionRef.current = {
+          attemptId: surfCommitId,
+          surfCommitId,
+          generation: releasedGeneration,
+          desiredChannelId: releasedTargetId,
+          stage: 'commit-requested',
+        };
+        console.info('[NovaCast Surf Tx]', {
+          attemptId: surfCommitId,
+          surfCommitId,
+          generation: releasedGeneration,
+          desiredChannelId: releasedTargetId,
+          readyChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+          stage: 'attempt-created',
+          ageMs: 0,
+          activeAttemptId: surfCommitId,
+          replaceInFlight: false,
+          pendingLatestChannelId: null,
+        });
+        console.info('[NovaCast Live Surf Playback]', {
+          event: 'tune-after-release',
+          channelId: releasedTargetId,
+          generation: releasedGeneration,
+          surfCommitId,
+          });
+        console.info('[NovaCast Surf Perf Summary]', {
+          event: 'session-complete',
+          eventCount: nativeSurfEventCountRef.current,
+          maxInputAgeMs: null,
+          avgInputAgeMs: null,
+          cursorMoves: nativeSurfCursorMovesRef.current,
+          parentRenderCount: nativeSurfRenderStartRef.current === null
+            ? 0
+            : liveScreenRenderCountRef.current - nativeSurfRenderStartRef.current,
+          overlayRenderCount: 'external-store',
+        });
+        nativeSurfRenderStartRef.current = null;
+        nativeSurfEventCountRef.current = 0;
+        nativeSurfCursorMovesRef.current = 0;
+        surfLiveChannel(toIndex >= fromIndex ? 1 : -1, releasedTargetId, true, releasedGeneration, surfCommitId);
+        if (surfWatchdogTimerRef.current) clearTimeout(surfWatchdogTimerRef.current);
+        surfWatchdogTimerRef.current = setTimeout(() => {
+          const transaction = surfTransactionRef.current;
+          if (
+            !transaction ||
+            transaction.attemptId !== surfCommitId ||
+            transaction.generation !== fullscreenSurfIntentGenerationRef.current ||
+            surfRequestIdRef.current < expectedRequestId
+          ) {
+            surfWatchdogTimerRef.current = null;
+            if (transaction?.attemptId === surfCommitId) {
+              surfTransactionRef.current = null;
+            }
+            return;
+          }
+          patchLiveTvWorkload({ surfTransitionInFlight: false }, { log: true, reason: 'surf-watchdog-stalled' });
+          console.info('[NovaCast Surf Tx]', {
+            attemptId: surfCommitId,
+            surfCommitId,
+            generation: releasedGeneration,
+            desiredChannelId: releasedTargetId,
+            readyChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+            stage: 'watchdog-stalled',
+            ageMs: FULLSCREEN_FIRST_FRAME_TIMEOUT_MS + 5000,
+            activeAttemptId: surfCommitId,
+            replaceInFlight: true,
+            pendingLatestChannelId: null,
+          });
+          surfTransactionRef.current = null;
+          surfWatchdogTimerRef.current = null;
+        }, FULLSCREEN_FIRST_FRAME_TIMEOUT_MS + 5000);
+      }, settleDelayMs);
+    },
+    [channels, fullscreenFrameStatus, surfLiveChannel],
+  );
+
+  useEffect(() => {
+    if (liveState?.fullscreenChannelId) {
+      const ids = discoverLivePlaybackContextRef.current?.channels.map((channel) => channel.id) ??
+        liveSearchPlaybackSessionRef.current?.resultIds ??
+        resolveLiveSearchSurfQueue(liveSearchSurfQueueRef.current, channels.map((channel) => channel.id));
+      const index = ids.indexOf(liveState.fullscreenChannelId);
+      surfCursorIndexRef.current = index >= 0 ? index : null;
+      surfCursorChannelIdRef.current = liveState.fullscreenChannelId;
+    } else {
+      activeSurfCommitGenerationRef.current = null;
+      if (surfWatchdogTimerRef.current) {
+        clearTimeout(surfWatchdogTimerRef.current);
+        surfWatchdogTimerRef.current = null;
+      }
+      surfTransactionRef.current = null;
+      surfKeyDownRef.current = false;
+      surfDirectionRef.current = null;
+      surfCursorIndexRef.current = null;
+      surfCursorChannelIdRef.current = null;
+      clearFullscreenSurfOverlay();
+      if (surfOverlayTimerRef.current) {
+        clearTimeout(surfOverlayTimerRef.current);
+        surfOverlayTimerRef.current = null;
+      }
+      fullscreenSurfIntentGenerationRef.current += 1;
+      if (nativeSurfSettleTimerRef.current) {
+        clearTimeout(nativeSurfSettleTimerRef.current);
+        nativeSurfSettleTimerRef.current = null;
+      }
+    }
+  }, [channels, liveState?.fullscreenChannelId]);
+
+  useEffect(() => () => {
+    if (surfWatchdogTimerRef.current) {
+      clearTimeout(surfWatchdogTimerRef.current);
+      surfWatchdogTimerRef.current = null;
+    }
+    surfTransactionRef.current = null;
+    fullscreenExitFocusPendingRef.current = false;
+    fullscreenExitFocusPhaseRef.current = 'idle';
+    fullscreenExitFocusReassertedRef.current = false;
+    if (fullscreenExitFocusPendingTimerRef.current) {
+      clearTimeout(fullscreenExitFocusPendingTimerRef.current);
+      fullscreenExitFocusPendingTimerRef.current = null;
+    }
+    if (fullscreenExitFocusStabilizationTimerRef.current) {
+      clearTimeout(fullscreenExitFocusStabilizationTimerRef.current);
+      fullscreenExitFocusStabilizationTimerRef.current = null;
+    }
+    clearFullscreenSurfOverlay();
+  }, []);
 
   useEffect(() => {
     if (
@@ -2541,7 +3958,75 @@ export function LiveTvScreen() {
       lastSettledSurfRequestIdRef.current !== surfRequestIdRef.current
     ) {
       lastSettledSurfRequestIdRef.current = surfRequestIdRef.current;
+      if (surfWatchdogTimerRef.current) {
+        clearTimeout(surfWatchdogTimerRef.current);
+        surfWatchdogTimerRef.current = null;
+      }
+      if (surfTransactionRef.current) {
+        const transaction = surfTransactionRef.current;
+        transaction.stage = 'ready';
+        console.info('[NovaCast Surf Tx]', {
+          ...transaction,
+          readyChannelId: liveState.fullscreenChannelId,
+          ageMs: null,
+          activeAttemptId: transaction.attemptId,
+          replaceInFlight: false,
+          pendingLatestChannelId: null,
+        });
+        console.info('[NovaCast Surf Tx]', {
+          attemptId: transaction.attemptId,
+          surfCommitId: transaction.surfCommitId,
+          generation: transaction.generation,
+          desiredChannelId: transaction.desiredChannelId,
+          readyChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+          stage: 'reset-ready',
+          ageMs: null,
+          activeAttemptId: null,
+          replaceInFlight: false,
+          pendingLatestChannelId: null,
+        });
+        surfTransactionRef.current = null;
+      }
       patchLiveTvWorkload({ surfTransitionInFlight: false }, { log: true, reason: 'surf-complete' });
+      const pendingTargetId = desiredSurfTargetIdRef.current ?? pendingSurfTargetIdRef.current;
+      if (pendingTargetId && pendingTargetId !== liveState.fullscreenChannelId) {
+        const followUpTargetId = pendingTargetId;
+        const fromChannelId = liveState.fullscreenChannelId;
+        pendingSurfTargetIdRef.current = null;
+        pendingSurfDeltaRef.current = 0;
+        console.info('[NovaCast Live Surf Intent]', {
+          event: 'coalesced-follow-up',
+          fromChannelId: liveState.fullscreenChannelId,
+          desiredTargetId: pendingTargetId,
+          currentChannelId: liveState.fullscreenChannelId,
+        });
+        console.info('[NovaCast Surf Tx]', {
+          attemptId: null,
+          surfCommitId: null,
+          generation: fullscreenSurfIntentGenerationRef.current,
+          desiredChannelId: followUpTargetId,
+          readyChannelId: fromChannelId,
+          stage: 'pending-latest-promoted',
+          ageMs: null,
+          activeAttemptId: null,
+          replaceInFlight: false,
+          pendingLatestChannelId: followUpTargetId,
+        });
+        if (pendingSurfDrainTimerRef.current) clearTimeout(pendingSurfDrainTimerRef.current);
+        pendingSurfDrainTimerRef.current = setTimeout(() => {
+          pendingSurfDrainTimerRef.current = null;
+          const ids = discoverLivePlaybackContextRef.current?.channels.map((channel) => channel.id) ??
+            liveSearchPlaybackSessionRef.current?.resultIds ??
+            resolveLiveSearchSurfQueue(liveSearchSurfQueueRef.current, channels.map((channel) => channel.id));
+          const fromIndex = ids.indexOf(fromChannelId);
+          const targetIndex = ids.indexOf(followUpTargetId);
+          surfLiveChannel(targetIndex >= fromIndex ? 1 : -1, followUpTargetId);
+        }, 0);
+      } else {
+        pendingSurfTargetIdRef.current = null;
+        pendingSurfDeltaRef.current = 0;
+        console.info('[NovaCast Live Surf Intent]', { event: 'settled' });
+      }
       logLiveSurf({
         event: 'transition-complete',
         toChannelId: liveState.fullscreenChannelId,
@@ -2550,7 +4035,7 @@ export function LiveTvScreen() {
       });
       liveSurfRouterRef.current?.notifyTransitionSettled();
     }
-  }, [liveState?.fullscreenChannelId, liveState?.previewStatus]);
+  }, [liveState?.fullscreenChannelId, liveState?.previewStatus, surfLiveChannel]);
 
   useEffect(() => {
     if (
@@ -2561,7 +4046,26 @@ export function LiveTvScreen() {
       lastSettledSurfRequestIdRef.current !== surfRequestIdRef.current
     ) {
       lastSettledSurfRequestIdRef.current = surfRequestIdRef.current;
+      if (surfWatchdogTimerRef.current) {
+        clearTimeout(surfWatchdogTimerRef.current);
+        surfWatchdogTimerRef.current = null;
+      }
+      if (surfTransactionRef.current) {
+        surfTransactionRef.current.stage = 'error';
+        console.info('[NovaCast Surf Tx]', {
+          ...surfTransactionRef.current,
+          readyChannelId: liveStateRef.current?.fullscreenChannelId ?? null,
+          ageMs: null,
+          activeAttemptId: surfTransactionRef.current.attemptId,
+          replaceInFlight: false,
+          pendingLatestChannelId: null,
+        });
+        surfTransactionRef.current = null;
+      }
       patchLiveTvWorkload({ surfTransitionInFlight: false }, { log: true, reason: 'surf-failed' });
+      pendingSurfDeltaRef.current = 0;
+      pendingSurfTargetIdRef.current = null;
+      console.info('[NovaCast Live Surf Intent]', { event: 'settled', reason: 'transition-failed' });
       logLiveSurf({
         event: 'transition-failed',
         toChannelId: liveState.fullscreenChannelId,
@@ -2617,16 +4121,35 @@ export function LiveTvScreen() {
   favoriteChannelRef.current = favoriteChannel;
   if (!favoriteHoldRef.current) {
     favoriteHoldRef.current = createFavoriteHoldDetector({
-      onTriggered: () => {
+      onTriggered: (result) => {
+        console.info('[NovaCast Favorite Gesture]', 'hold-triggered', {
+          measuredHoldMs: Math.round(result.measuredHoldMs),
+          thresholdMs: result.thresholdMs,
+          focusedChannelId: focusedChannelIdRef.current,
+          suppressionArmed: result.suppressionArmed,
+          triggerLatencyMs: Math.round(result.triggerLatencyMs ?? 0),
+        });
         const channelId = focusedChannelIdRef.current;
         if (channelId) {
           favoriteChannelRef.current(channelId);
         }
       },
+      onStarted: (result) => console.info('[NovaCast Favorite Gesture]', 'down', {
+        thresholdMs: result.thresholdMs,
+        focusedChannelId: focusedChannelIdRef.current,
+        jsReceiptAtMs: Date.now(),
+      }),
+      onCancelled: (result) => console.info('[NovaCast Favorite Gesture]', 'up', {
+        measuredHoldMs: Math.round(result.measuredHoldMs),
+        thresholdMs: result.thresholdMs,
+        focusedChannelId: focusedChannelIdRef.current,
+        jsReceiptAtMs: Date.now(),
+        suppressionArmed: result.suppressionArmed,
+      }),
     });
   }
   const handleNativeFavoriteTvKey = useCallback(
-    (event: { keyCode?: number; action?: number; repeatCount?: number }) => {
+    (event: { keyCode?: number; action?: number; repeatCount?: number; eventTime?: number; downTime?: number }) => {
       if (Platform.OS !== 'android' || !Platform.isTV) {
         return;
       }
@@ -2640,10 +4163,19 @@ export function LiveTvScreen() {
       if (searchOverlayVisibleRef.current) {
         return;
       }
+      console.info('[NovaCast Favorite Gesture]', event.action === 1 ? 'up-received' : 'down-received', {
+        keyCode,
+        focusedChannelId: focusedChannelIdRef.current,
+        jsReceiptAtMs: Date.now(),
+        nativeEventTimeMs: Number.isFinite(event.eventTime) ? event.eventTime : null,
+        nativeDownTimeMs: Number.isFinite(event.downTime) ? event.downTime : null,
+      });
       favoriteHoldRef.current?.handleEvent({
         keyCode,
         eventKeyAction: event.action,
         repeatCount: event.repeatCount,
+        eventTime: event.eventTime,
+        downTime: event.downTime,
       });
     },
     [],
@@ -2825,15 +4357,6 @@ export function LiveTvScreen() {
   const showFatalPanel = !bundle || (categories.length === 0 && loadStatus !== 'loading');
 
   if (loadStatus === 'loading' && categories.length === 0) {
-    if (directPlayRequested) {
-      return (
-        <View style={styles.root}>
-          <View pointerEvents="none" style={styles.directPlayCurtain}>
-            <NovaSpaceLoader label="Starting playback…" />
-          </View>
-        </View>
-      );
-    }
     return (
       <NovaTvShell activeId="live" title="Live TV" subtitle="Browse channels without losing the picture." preferActiveNavigationFocus={false} compactNavigationRail expirationLabel={selectedProviderExpiration}>
         <View style={styles.statePanel}>
@@ -2844,15 +4367,6 @@ export function LiveTvScreen() {
   }
 
   if (showFatalPanel) {
-    if (directPlayRequested) {
-      return (
-        <View style={styles.root}>
-          <View pointerEvents="none" style={styles.directPlayCurtain}>
-            <NovaSpaceLoader label="Starting playback…" />
-          </View>
-        </View>
-      );
-    }
     return (
       <NovaTvShell activeId="live" title="Live TV" subtitle="Browse channels without losing the picture." preferActiveNavigationFocus={false} compactNavigationRail expirationLabel={selectedProviderExpiration}>
         <View style={styles.statePanel}>
@@ -2910,10 +4424,11 @@ export function LiveTvScreen() {
 
   if (!renderState) {
     if (directPlayRequested) {
+      console.info('[NovaCast Search Direct Play]', 'browse-shell-suppressed', { reason: 'awaiting-channel-data' });
       return (
         <View style={styles.root}>
-          <View pointerEvents="none" style={styles.directPlayCurtain}>
-            <NovaSpaceLoader label="Starting playback…" />
+          <View style={styles.statePanel}>
+            <LiveTvPlanetLoader label="Starting playback…" />
           </View>
         </View>
       );
@@ -2927,16 +4442,17 @@ export function LiveTvScreen() {
     );
   }
 
-  if (!renderState.fullscreenChannelId && !liveCategoryStartupReady) {
+  if (!renderState.fullscreenChannelId && (directPlayRequested || !liveCategoryStartupReady)) {
     // Startup stability loader: keep the shell/navbar usable, show a centered
     // spinner, and render NO category/channel content until the final US-first
     // order + selection + focus target are ready. Prevents any raw/pre-sort or
     // "Live {id}" placeholder flash and any post-paint reorder or focus loss.
     if (directPlayRequested) {
+      console.info('[NovaCast Search Direct Play]', 'browse-shell-suppressed', { reason: 'awaiting-direct-play' });
       return (
         <View style={styles.root}>
-          <View pointerEvents="none" style={styles.directPlayCurtain}>
-            <NovaSpaceLoader label="Starting playback…" />
+          <View style={styles.statePanel}>
+            <LiveTvPlanetLoader label="Starting playback…" />
           </View>
         </View>
       );
@@ -2947,7 +4463,7 @@ export function LiveTvScreen() {
           activeId="live"
           providerLabel={selectedProviderLabel}
           preferActiveNavigationFocus={false}
-          navigationFocusable={!searchOwnsBackgroundFocus}
+          navigationFocusable={!searchOwnsBackgroundFocus && !renderState.fullscreenChannelId}
           compactNavigationRail>
           <View style={styles.statePanel}>
             <LiveTvPlanetLoader label="Preparing live channels…" />
@@ -2959,19 +4475,46 @@ export function LiveTvScreen() {
 
   return (
     <View style={styles.root}>
-      {!renderState.fullscreenChannelId && !directPlayRequested ? (
+      <View
+        style={styles.browseLayer}
+        pointerEvents={renderState.fullscreenChannelId ? 'none' : 'auto'}
+        importantForAccessibility={renderState.fullscreenChannelId ? 'no-hide-descendants' : 'auto'}
+        accessibilityElementsHidden={Boolean(renderState.fullscreenChannelId)}>
       <NovaTvShell
         activeId="live"
         providerLabel={selectedProviderLabel}
         preferActiveNavigationFocus={false}
-        navigationFocusable={!searchOwnsBackgroundFocus}
+        navigationFocusable={!searchOwnsBackgroundFocus && !renderState.fullscreenChannelId}
         compactNavigationRail
+        onNavigationItemFocus={(navigationId) => {
+          if (navigationId && focusOwnerRef.current === 'channels') {
+            const now = Date.now();
+            if (!lastShellFocusEscapeLogRef.current || now - lastShellFocusEscapeLogRef.current > 500) {
+              lastShellFocusEscapeLogRef.current = now;
+              recordLiveNavigationMetric('unexpected-region-transition');
+              console.warn('[NOVACAST_FOCUS]', 'shell-focus-escape', {
+                lastChannelId: focusedChannelIdRef.current,
+                lastKeyDirection: lastDpadDirectionRef.current,
+                focusedIndex: channels.findIndex((channel) => channel.id === focusedChannelIdRef.current),
+                renderBand:
+                  liveFocusRenderStateRef.current.bandFirst != null && liveFocusRenderStateRef.current.bandLast != null
+                    ? {
+                        first: liveFocusRenderStateRef.current.bandFirst,
+                        last: liveFocusRenderStateRef.current.bandLast,
+                      }
+                    : null,
+                visibleRange: liveFocusRenderStateRef.current.visibleRange,
+                navigationId,
+              });
+            }
+          }
+        }}
         >
         <View
           style={styles.screen}
-          pointerEvents={searchOwnsBackgroundFocus ? 'none' : 'auto'}
-          importantForAccessibility={searchOwnsBackgroundFocus ? 'no-hide-descendants' : 'auto'}
-          accessibilityElementsHidden={searchOwnsBackgroundFocus}>
+          pointerEvents={searchOwnsBackgroundFocus || Boolean(renderState.fullscreenChannelId) ? 'none' : 'auto'}
+          importantForAccessibility={searchOwnsBackgroundFocus || renderState.fullscreenChannelId ? 'no-hide-descendants' : 'auto'}
+          accessibilityElementsHidden={searchOwnsBackgroundFocus || Boolean(renderState.fullscreenChannelId)}>
         <View
           style={[
             styles.mainGrid,
@@ -3008,10 +4551,11 @@ export function LiveTvScreen() {
                 categoriesRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: false });
               }}
               renderItem={({ item }) => (
-                <LiveTvCategoryRow
-                  category={item}
-                  selected={item.id === renderState.selectedCategoryId}
-                  preferFocus={preferCategoryFocusRef.current && item.id === (preferredCategoryFocusId.current ?? renderState.selectedCategoryId ?? firstProviderCategoryId ?? null)}
+                  <LiveTvCategoryRow
+                    category={item}
+                    selected={item.id === renderState.selectedCategoryId}
+                    preferFocus={preferCategoryFocusRef.current && item.id === (preferredCategoryFocusId.current ?? renderState.selectedCategoryId ?? firstProviderCategoryId ?? null)}
+                    suppressFocusVisual={fullscreenExitFocusPendingRef.current}
                   nextFocusRight={
                     item.id === renderState.selectedCategoryId ? categoryNextFocusRightHandle : undefined
                   }
@@ -3079,6 +4623,9 @@ export function LiveTvScreen() {
               <LiveTvChannelListReveal revealKey={renderState.selectedCategoryId || selectedCategoryId}>
                 <LiveTvChannelList
                   channels={channels}
+                  epgByChannelId={epgByChannelId}
+                  epgRevision={epgRevision}
+                  categoryId={renderState.selectedCategoryId}
                   epgPendingChannelIds={epgPendingChannelIds}
                   selectedChannelId={renderState.selectedChannelId}
                   previewChannelId={renderState.previewChannelId}
@@ -3093,6 +4640,8 @@ export function LiveTvScreen() {
                   consumeFavoriteHoldSuppression={consumeFavoriteHoldSuppression}
                   onActionFocusChange={handleActionFocusChange}
                   onLayout={handleLiveListLayout}
+                  onFocusRenderState={updateLiveFocusRenderState}
+                  getLastNavigationIntent={getLastNavigationIntent}
                   listRef={channelsRef}
                   onTuneChannel={tuneChannel}
                   onChannelFocus={focusChannelRow}
@@ -3102,7 +4651,7 @@ export function LiveTvScreen() {
             )}
           </View>
 
-          {shouldKeepPreviewAlive(renderState.fullscreenChannelId ?? null, fullscreenFrameStatus) ? (
+          {!directPlayRequested ? (
             <View
               style={[
                 styles.previewPanel,
@@ -3161,22 +4710,19 @@ export function LiveTvScreen() {
         </View>
         </View>
       </NovaTvShell>
-      ) : null}
-
-      {directPlayRequested && !renderState.fullscreenChannelId ? (
-        <View pointerEvents="none" style={styles.directPlayCurtain}>
-          <NovaSpaceLoader label="Starting playbackâ€¦" />
-          <Text style={styles.directPlayCurtainTitle}>
-            {detailPanelChannel?.name ? displayStreamTitle(detailPanelChannel.name) : 'Live channel'}
-          </Text>
-        </View>
-      ) : null}
+      </View>
 
       {fullscreenChannel ? (
         <View style={[styles.fullscreenOverlay, { width, height }]}>
+          <FullscreenSurfInput
+            enabled={!novaViewProbeActive}
+            onEvent={handleNativeFullscreenSurfEvent}
+            onNativeReady={setFullscreenSurfNativeActive}
+          />
           <LiveTvFocusRouter
             ref={liveSurfRouterRef}
-            enabled
+            enabled={!novaViewProbeActive}
+            directDirectionalInput={fullscreenSurfNativeActive}
             chromeVisible={showFullscreenChrome || fullscreenFallbackVisible}
             fromChannelId={fullscreenChannel.id}
             surfSessionId={surfSessionIdRef.current}
@@ -3196,29 +4742,31 @@ export function LiveTvScreen() {
             }}
           />
           {hasLiveStream ? (
-          <NovaStreamSurface
-            player={liveStreamPlayer}
-            contentFit="cover"
-            style={[styles.fullscreenPlayer, fullscreenFrameStatus !== 'ready' && styles.hiddenStreamSurface]}
-            onFirstFrameRender={handleFullscreenFirstFrame}
-            onPlayingChange={handleLivePlayerPlayingChange}
-            onTimeUpdate={handleLivePlayerTimeUpdate}
-          />
+          novaViewProbeActive && bundle && novaViewProbeChannel ? (
+            <NovaViewProbe
+              bundle={bundle}
+              playerA={liveStreamPlayer}
+              channelA={fullscreenChannel}
+              channelB={novaViewProbeChannel}
+              onFirstFrameRender={handleFullscreenFirstFrame}
+              onPlayingChange={handleLivePlayerPlayingChange}
+              onTimeUpdate={handleLivePlayerTimeUpdate}
+            />
+          ) : (
+            <NovaStreamSurface
+              player={liveStreamPlayer}
+              contentFit="cover"
+              style={[styles.fullscreenPlayer, fullscreenFrameStatus !== 'ready' && styles.hiddenStreamSurface]}
+              onFirstFrameRender={handleFullscreenFirstFrame}
+              onPlayingChange={handleLivePlayerPlayingChange}
+              onTimeUpdate={handleLivePlayerTimeUpdate}
+            />
+          )
           ) : null}
-          {visibleSurfOverlay ? (
+          {!novaViewProbeActive ? <FullscreenSurfOverlay /> : null}
+          {shouldShowFullscreenLoadingOverlay(fullscreenFrameStatus) ? (
             <View pointerEvents="none" style={styles.fullscreenStatusOverlay}>
-              <Text style={styles.fullscreenEyebrow}>
-                {visibleSurfOverlay.number ? `Channel ${visibleSurfOverlay.number}` : 'Live'}
-              </Text>
-              <Text style={styles.fullscreenTitle}>{displayStreamTitle(visibleSurfOverlay.name)}</Text>
-              {liveState?.previewStatus === 'loading' && liveState.previewChannelId === visibleSurfOverlay.channelId ? (
-                <Text style={styles.previewLoadingCopy}>Loading...</Text>
-              ) : null}
-            </View>
-          ) : null}
-          {shouldShowFullscreenLoadingOverlay(fullscreenFrameStatus) && !visibleSurfOverlay ? (
-            <View style={styles.fullscreenStatusOverlay}>
-              <NovaSpaceLoader label="Starting playback…" />
+              <NovaSpaceLoader label="Starting playback..." />
               <Text style={styles.previewLoadingCopy}>{displayStreamTitle(fullscreenChannel.name)}</Text>
             </View>
           ) : null}
@@ -3285,6 +4833,17 @@ export function LiveTvScreen() {
                     });
                   }}
                   onPress={() => {
+                    console.info('[NovaCast Fullscreen Close Origin]', {
+                      reason: 'fullscreen-close-control',
+                      origin: 'LiveTvScreen.fullscreen-controls',
+                      keyCode: null,
+                      rawAction: null,
+                      repeatCount: null,
+                      fullscreenChannelId: fullscreenChannelIdRef.current,
+                      nativeSurfActive: fullscreenSurfNativeActive,
+                    });
+                    captureFullscreenExitTarget();
+                    clearFullscreenSurfOverlay();
                     setState((current) => closeLiveFullscreen(current ?? renderState));
                   }}
                   style={styles.closeButton}>
@@ -3376,6 +4935,10 @@ function createStyles(theme: NovaTheme) {
     flex: 1,
     backgroundColor: 'transparent',
   },
+  browseLayer: {
+    flex: 1,
+    minHeight: 0,
+  },
   screen: {
     flex: 1,
     minHeight: 0,
@@ -3398,19 +4961,6 @@ function createStyles(theme: NovaTheme) {
     fontSize: 14,
     textAlign: 'center',
     lineHeight: 20,
-  },
-  directPlayCurtain: {
-    ...StyleSheet.absoluteFillObject,
-    zIndex: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-    backgroundColor: '#000000',
-  },
-  directPlayCurtainTitle: {
-    color: theme.colors.textPrimary,
-    fontSize: 18,
-    fontWeight: '700',
   },
   inlineStateNotice: {
     flex: 1,

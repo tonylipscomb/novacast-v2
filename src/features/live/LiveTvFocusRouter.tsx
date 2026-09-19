@@ -29,6 +29,7 @@ export type LiveTvFocusRouterHandle = {
 
 type LiveTvFocusRouterProps = {
   enabled: boolean;
+  directDirectionalInput?: boolean;
   chromeVisible: boolean;
   fromChannelId?: string | null;
   surfSessionId?: string | null;
@@ -46,6 +47,7 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
   function LiveTvFocusRouter(
     {
       enabled,
+      directDirectionalInput = false,
       chromeVisible,
       fromChannelId = null,
       surfSessionId = null,
@@ -317,6 +319,17 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
         });
         machineRef.current = decision.next;
         if (!decision.accept) {
+          if (decision.reason === 'transition-in-flight') {
+            // Preserve the remote intent while the current source transition
+            // finishes. LiveTvScreen coalesces this into one bounded follow-up.
+            logLiveSurfFocus({
+              event: 'surf-focus-queued',
+              direction,
+              ...snapshot(),
+            });
+            onSentinelFocusRef.current(direction);
+            return;
+          }
           logLiveSurfFocus({
             event: 'surf-focus-rejected',
             direction,
@@ -365,18 +378,18 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
           hasTVPreferredFocus={!chromeVisible && anchorPreferred}
           onFocus={handleAnchorFocus}
           onPress={() => onAnchorPress?.()}
-          {...(handles.left != null ? { nextFocusLeft: handles.left } : {})}
-          {...(handles.right != null ? { nextFocusRight: handles.right } : {})}
+          {...(!directDirectionalInput && handles.left != null ? { nextFocusLeft: handles.left } : {})}
+          {...(!directDirectionalInput && handles.right != null ? { nextFocusRight: handles.right } : {})}
           style={styles.sentinel}
         />
         <View
           ref={assignLeftRef}
           collapsable={false}
-          focusable
+          focusable={!directDirectionalInput}
           accessible={false}
           importantForAccessibility="no"
           onFocus={() => handleSentinelNativeFocus(-1)}
-          {...(bounce != null
+          {...(!directDirectionalInput && bounce != null
             ? {
                 nextFocusLeft: bounce,
                 nextFocusRight: bounce,
@@ -389,11 +402,11 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
         <View
           ref={assignRightRef}
           collapsable={false}
-          focusable
+          focusable={!directDirectionalInput}
           accessible={false}
           importantForAccessibility="no"
           onFocus={() => handleSentinelNativeFocus(1)}
-          {...(bounce != null
+          {...(!directDirectionalInput && bounce != null
             ? {
                 nextFocusLeft: bounce,
                 nextFocusRight: bounce,

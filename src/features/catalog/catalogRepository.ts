@@ -181,6 +181,7 @@ function mapItem(row: Record<string, unknown>): CatalogItemRecord {
     rating: asNullableNumber(row.rating),
     addedAt: asNullableNumber(row.added_at),
     popularity: asNullableNumber(row.popularity),
+    regionRank: asNullableNumber(row.region_rank),
     description: asNullableString(row.description),
     streamExtension: asNullableString(row.stream_extension),
     providerSortOrder: asNullableNumber(row.provider_sort_order),
@@ -641,7 +642,7 @@ export async function writeCatalogItemsBatch(
     return 0;
   }
 
-  const ITEM_PARAMS_PER_ROW = 21;
+  const ITEM_PARAMS_PER_ROW = 22;
   const CONSERVATIVE_SQLITE_VARIABLE_LIMIT = 999;
   const maxItemsPerStatement = Math.floor(CONSERVATIVE_SQLITE_VARIABLE_LIMIT / ITEM_PARAMS_PER_ROW);
   if (items.length > maxItemsPerStatement) {
@@ -668,6 +669,7 @@ export async function writeCatalogItemsBatch(
       rating = excluded.rating,
       added_at = excluded.added_at,
       popularity = excluded.popularity,
+      region_rank = excluded.region_rank,
       description = excluded.description,
       stream_extension = excluded.stream_extension,
       provider_sort_order = excluded.provider_sort_order,
@@ -685,6 +687,7 @@ export async function writeCatalogItemsBatch(
       rating = excluded.rating,
       added_at = excluded.added_at,
       popularity = excluded.popularity,
+      region_rank = excluded.region_rank,
       description = excluded.description,
       stream_extension = excluded.stream_extension,
       provider_sort_order = excluded.provider_sort_order,
@@ -699,7 +702,7 @@ export async function writeCatalogItemsBatch(
   const sql = `INSERT INTO ${itemsTable} (
       provider_id, media_type, content_id, category_id, title, normalized_title,
       artwork_url, backdrop_url, release_date, release_year, rating, added_at, popularity, description,
-      stream_extension, provider_sort_order, series_id, season_number, episode_number,
+      stream_extension, provider_sort_order, region_rank, series_id, season_number, episode_number,
       sync_generation, updated_at
     ) VALUES ${valuePlaceholders}
     ON CONFLICT(${itemConflict}) DO UPDATE SET
@@ -727,6 +730,7 @@ export async function writeCatalogItemsBatch(
       item.description ?? null,
       item.streamExtension ?? null,
       item.providerSortOrder ?? null,
+      item.regionRank ?? null,
       item.seriesId ?? null,
       item.seasonNumber ?? null,
       item.episodeNumber ?? null,
@@ -3874,7 +3878,7 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
 
   const pageSql = `SELECT * FROM ${itemsTable}
      WHERE ${where}
-     ORDER BY ${orderByClauseCompatible(query.sort)}
+     ORDER BY ${orderByClauseCompatible(query.sort, { regionalFirst: query.regionalFirst })}
      LIMIT ? OFFSET ?`;
 
   // Diagnostics-only: EXPLAIN QUERY PLAN for Movies search (no SQL behavior change).
@@ -3892,7 +3896,7 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
             likePattern: `%${normalizeCatalogTitle(query.query)}%`,
             limit,
             offset,
-            orderBy: orderByClauseCompatible(query.sort),
+            orderBy: orderByClauseCompatible(query.sort, { regionalFirst: query.regionalFirst }),
             plan: planRows.map((row) => ({
               id: row.id ?? null,
               parent: row.parent ?? null,

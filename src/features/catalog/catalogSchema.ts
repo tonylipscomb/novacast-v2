@@ -210,6 +210,14 @@ CREATE INDEX IF NOT EXISTS idx_catalog_items_v2_provider_media_gen_popularity
   ON catalog_items_v2 (provider_id, media_type, sync_generation, popularity);
 `;
 
+/** Additive regional rank index. The column itself is added for old databases by catalogDatabase. */
+export const CATALOG_MIGRATION_SQL_V5 = `
+CREATE INDEX IF NOT EXISTS idx_catalog_items_v2_provider_media_gen_region
+  ON catalog_items_v2 (provider_id, media_type, sync_generation, region_rank, content_id);
+CREATE INDEX IF NOT EXISTS idx_catalog_items_provider_media_region
+  ON catalog_items (provider_id, media_type, region_rank, content_id);
+`;
+
 export const CATALOG_REQUIRED_TABLES = [
   'catalog_providers',
   'catalog_categories',
@@ -237,6 +245,8 @@ export const CATALOG_REQUIRED_INDEXES = [
   'idx_catalog_items_v2_provider_media_gen_sort',
   'idx_catalog_items_v2_provider_media_gen_added',
   'idx_catalog_items_v2_provider_media_gen_popularity',
+  'idx_catalog_items_v2_provider_media_gen_region',
+  'idx_catalog_items_provider_media_region',
   'idx_catalog_categories_v2_provider_media_gen',
   'idx_catalog_categories_v2_provider_media_gen_sort',
   'idx_catalog_seasons_v2_provider_media_gen',

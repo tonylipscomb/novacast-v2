@@ -14,6 +14,7 @@ type GuideLocalFocusPressableProps = {
   nextFocusDown?: number;
   onFocus?: () => void;
   onPress?: () => void;
+  onLongPress?: () => void;
   style?: StyleProp<ViewStyle>;
   focusedStyle?: StyleProp<ViewStyle>;
   children: ReactNode | ((focused: boolean) => ReactNode);
@@ -34,6 +35,7 @@ export const GuideLocalFocusPressable = memo(function GuideLocalFocusPressable({
   nextFocusDown,
   onFocus,
   onPress,
+  onLongPress,
   style,
   focusedStyle,
   children,
@@ -59,6 +61,7 @@ export const GuideLocalFocusPressable = memo(function GuideLocalFocusPressable({
       }}
       onBlur={() => setFocused(false)}
       onPress={onPress}
+      onLongPress={onLongPress}
       style={[style, focused ? focusedStyle : null]}>
       {typeof children === 'function' ? children(focused) : children}
     </Pressable>

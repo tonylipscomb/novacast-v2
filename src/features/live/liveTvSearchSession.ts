@@ -122,6 +122,12 @@ export function shouldKeepLiveSearchMounted(searchSessionOpen: boolean) {
   return searchSessionOpen;
 }
 
+/** Search pushes Live above the original Search screen; pop that route so the
+ * original query/results/list instance is revealed instead of recreating it. */
+export function shouldPopToRetainedSearch(returnRoute: string, directPlayRequested: boolean) {
+  return returnRoute === '/search' && directPlayRequested;
+}
+
 export function isLiveSearchUiBlockingSurf(searchOverlayVisible: boolean) {
   return searchOverlayVisible;
 }

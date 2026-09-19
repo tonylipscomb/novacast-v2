@@ -250,6 +250,13 @@ test('category selection is not required to populate counts', () => {
   assert.match(smartSource, /preferSqliteCounts/);
 });
 
+test('startup fast paths hydrate counts from the same readable generation', () => {
+  assert.match(sqliteSource, /hydrateStartupCategoryCounts/);
+  assert.match(sqliteSource, /includeZeroCountCategories: true/);
+  assert.match(sqliteSource, /getCatalogTotalCount\(providerId, 'movie', \{ generation \}\)/);
+  assert.match(sqliteSource, /metadataCategories[\s\S]{0,220}hydrateStartupCategoryCounts/);
+});
+
 test('Series and Live TV remain unchanged by Movies count preload', () => {
   assert.doesNotMatch(seriesSmart, /grouped-items-v2-merge/);
   assert.doesNotMatch(seriesSmart, /NovaCast Movies Category Counts/);

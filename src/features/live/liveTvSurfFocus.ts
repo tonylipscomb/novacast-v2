@@ -17,6 +17,7 @@ export type LiveSurfFocusLogEvent =
   | 'right-sentinel-focus'
   | 'surf-focus-accepted'
   | 'surf-focus-rejected'
+  | 'surf-focus-queued'
   | 'router-disarmed'
   | 'transition-focus-reset'
   | 'anchor-focus-request'

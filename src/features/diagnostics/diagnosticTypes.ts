@@ -9,7 +9,7 @@ export type DiagnosticEventType =
   | 'app_launch' | 'app_resumed' | 'app_backgrounded' | 'route_changed'
   | 'catalog_sync_started' | 'catalog_sync_completed' | 'catalog_sync_failed'
   | 'provider_assignment_changed' | 'connectivity_changed' | 'retry_started'
-  | 'playback_recovered';
+  | 'playback_recovered' | 'live_timeshift_capability' | 'live_performance';
 
 export type DiagnosticEvent = {
   eventType: DiagnosticEventType;

@@ -2,8 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const { withDangerousMod } = require('@expo/config-plugins');
 
+const FAVORITE_MARKER = '// NovaCast native favorite key bridge';
 const METHOD = `
-  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    ${FAVORITE_MARKER}
     if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
         event.keyCode == KeyEvent.KEYCODE_ENTER ||
         event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
@@ -26,23 +27,53 @@ const METHOD = `
         }
       }
     }
-    return super.dispatchKeyEvent(event)
-  }
 `;
+
+function findMainActivity(rootDir) {
+  const pending = [rootDir];
+  while (pending.length) {
+    const current = pending.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== 'build' && entry.name !== '.gradle') pending.push(entryPath);
+      } else if (entry.name === 'MainActivity.kt') {
+        return entryPath;
+      }
+    }
+  }
+  return null;
+}
 
 function withNovacastNativeTvKeyEvents(config) {
   return withDangerousMod(config, ['android', async (config) => {
-    const activityPath = path.join(config.modRequest.platformProjectRoot, 'app', 'src', 'main', 'java', 'com', 'novacast', 'novacastv2', 'MainActivity.kt');
-    if (!fs.existsSync(activityPath)) throw new Error(`Expected MainActivity.kt not found: ${activityPath}`);
+    const activityPath = findMainActivity(path.join(config.modRequest.platformProjectRoot, 'app', 'src', 'main', 'java'));
+    if (!activityPath) throw new Error('Expected generated MainActivity.kt not found');
     let source = fs.readFileSync(activityPath, 'utf8');
-    if (source.includes('onNovaCastNativeTvKey')) return config;
-    const imports = 'import android.view.KeyEvent\nimport com.facebook.react.bridge.Arguments\nimport com.facebook.react.modules.core.DeviceEventManagerModule\n';
+    const alreadyPresent = source.includes('onNovaCastNativeTvKey');
+    if (!source.includes('import android.view.KeyEvent')) {
+      source = source.replace(/import android\.os\.Bundle\r?\n/, (match) => `${match}import android.view.KeyEvent\n`);
+    }
+    if (!alreadyPresent && !source.includes('import com.facebook.react.bridge.Arguments')) {
+      source = source.replace(/import android\.os\.Bundle\r?\n|import com\.facebook\.react\.ReactActivity\r?\n/, (match) => `${match}import com.facebook.react.bridge.Arguments\n`);
+    }
+    if (!alreadyPresent && !source.includes('import com.facebook.react.modules.core.DeviceEventManagerModule')) {
+      source = source.replace(/import android\.os\.Bundle\r?\n|import com\.facebook\.react\.ReactActivity\r?\n/, (match) => `${match}import com.facebook.react.modules.core.DeviceEventManagerModule\n`);
+    }
     const classMarker = 'class MainActivity : ReactActivity() {';
     if (!source.includes(classMarker)) throw new Error('Expected NovaCast MainActivity class not found');
-    source = source.replace('import android.os.Bundle\n', `import android.os.Bundle\n${imports}`);
-    const insertionPoint = '\n  override fun onCreate';
-    if (!source.includes(insertionPoint)) throw new Error('Expected MainActivity onCreate anchor not found');
-    source = source.replace(insertionPoint, `\n${METHOD}${insertionPoint}`);
+    if (!alreadyPresent) {
+      const dispatch = /(override fun dispatchKeyEvent\(event: KeyEvent\): Boolean \{\r?\n)/;
+      if (dispatch.test(source)) {
+        source = source.replace(dispatch, `$1${METHOD}`);
+      } else {
+        const insertionPoint = '\n  override fun onCreate';
+        if (!source.includes(insertionPoint)) throw new Error('Expected MainActivity onCreate anchor not found');
+        source = source.replace(insertionPoint, `\n  override fun dispatchKeyEvent(event: KeyEvent): Boolean {\n${METHOD}    return super.dispatchKeyEvent(event)\n  }${insertionPoint}`);
+      }
+    }
+    console.log('[NovaCast Config Plugin] MainActivity located:', activityPath);
+    console.log('[NovaCast Config Plugin] favorite bridge injected:', !alreadyPresent);
     fs.writeFileSync(activityPath, source);
     return config;
   }]);

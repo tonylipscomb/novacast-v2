@@ -124,6 +124,7 @@ function mapCatalogItemToMovie(item: CatalogItemRecord): MovieSummary {
     posterUrl: item.artworkUrl ?? undefined,
     containerExtension: item.streamExtension ?? undefined,
     providerSortOrder: item.providerSortOrder ?? undefined,
+    regionRank: item.regionRank ?? undefined,
   };
 }
 
@@ -194,7 +195,7 @@ function buildStartupCategoriesFromMetadata(
 ): MovieCategory[] {
   const seenIds = new Map<string, number>();
   const providerCategories: MovieCategory[] = metadata.map((category) => {
-    const id = category.categoryId;
+    const id = String(category.categoryId);
     const occurrence = (seenIds.get(id) ?? 0) + 1;
     seenIds.set(id, occurrence);
     const renderKey = occurrence === 1 ? id : `${id}::${occurrence}`;
@@ -222,6 +223,75 @@ function buildStartupCategoriesFromMetadata(
     },
     ...providerCategories,
   ]);
+}
+
+/** Hydrate startup metadata from the same readable generation before publish. */
+async function hydrateStartupCategoryCounts(
+  providerId: string,
+  generation: number,
+  categories: MovieCategory[],
+): Promise<MovieCategory[]> {
+  if (generation <= 0 || categories.length === 0) {
+    return categories;
+  }
+
+  try {
+    const [countRows, totalCount] = await Promise.all([
+      getCatalogCategoryCounts(providerId, 'movie', {
+        generation,
+        includeZeroCountCategories: true,
+      }),
+      getCatalogTotalCount(providerId, 'movie', { generation }),
+    ]);
+    // SQLite stores category ids as TEXT, but older/provider-backed snapshots
+    // can still surface numeric-looking ids as numbers.  Canonicalize both
+    // sides before lookup so a valid grouped count cannot become an unknown
+    // placeholder solely because of a runtime key type difference.
+    const countsById = new Map(countRows.map((row) => [String(row.categoryId), row.itemCount]));
+    const providerCategories = categories.filter(
+      (category) => category.kind === 'provider' && category.id !== SQLITE_MOVIES_DISCOVER_ID,
+    );
+    const knownBefore = providerCategories.filter((category) => category.countKnown === true).length;
+    const hydrationAudit = providerCategories.slice(0, 5).map((category) => ({
+      categoryId: category.id,
+      categoryName: category.name,
+      hydratedCount: countsById.get(String(category.id)) ?? null,
+      countKnown: category.countKnown === true,
+      mapLookupHit: countsById.has(String(category.id)),
+    }));
+
+    const hydrated = categories.map((category) => {
+      if (category.id === SQLITE_MOVIES_DISCOVER_ID) {
+        return { ...category, count: totalCount, countKnown: true };
+      }
+      if (category.kind !== 'provider') {
+        return category;
+      }
+      const count = countsById.get(String(category.id));
+      return count == null ? category : { ...category, count, countKnown: true };
+    });
+    if (typeof __DEV__ !== 'undefined' && __DEV__) {
+      const hydratedProviderCategories = hydrated.filter(
+        (category) => category.kind === 'provider' && category.id !== SQLITE_MOVIES_DISCOVER_ID,
+      );
+      console.info('[NovaCast Movies Count Audit]', JSON.stringify({
+        generation,
+        providerCategoryCount: providerCategories.length,
+        knownCountEntries: hydratedProviderCategories.filter((category) => category.countKnown === true).length,
+        unknownCountEntries: hydratedProviderCategories.filter((category) => category.countKnown !== true).length,
+        knownBefore,
+        sample: hydrationAudit.map((entry) => ({
+          ...entry,
+          renderedCount: entry.mapLookupHit ? entry.hydratedCount : null,
+        })),
+      }));
+    }
+    return hydrated;
+  } catch {
+    // Keep the prior metadata fast path usable if the local count query is
+    // temporarily unavailable; the existing deferred repair will retry it.
+    return categories;
+  }
 }
 
 function pinStartupCategories(
@@ -443,11 +513,23 @@ export function createSqliteMovieDataSource(
               elapsedMs: Date.now() - queryStartedAt,
             });
             if (needsCounts) {
-              scheduleDeferredFullCategoryRefresh(
+              const hydrated = await hydrateStartupCategoryCounts(providerId, memory.generation, preserved);
+              pinStartupCategories(
                 providerId,
-                () => getCategoriesImpl({ forceFull: true }),
-                'memory-unknown-counts',
+                memory.generation,
+                hydrated,
+                hydrated.find((category) => category.id === SQLITE_MOVIES_DISCOVER_ID)?.count ?? memory.totalCount,
+                hydrated.length,
+                hydrated.filter((category) => category.id !== SQLITE_MOVIES_DISCOVER_ID).length,
               );
+              if (hydrated.some((category) => category.id !== SQLITE_MOVIES_DISCOVER_ID && !category.countKnown)) {
+                scheduleDeferredFullCategoryRefresh(
+                  providerId,
+                  () => getCategoriesImpl({ forceFull: true }),
+                  'memory-unknown-counts',
+                );
+              }
+              return filterInteractiveMovieCategories(hydrated);
             }
             return preserved;
           }
@@ -510,11 +592,23 @@ export function createSqliteMovieDataSource(
                 category.id !== SQLITE_MOVIES_DISCOVER_ID && category.countKnown === false,
             );
             if (needsCounts) {
-              scheduleDeferredFullCategoryRefresh(
+              const hydrated = await hydrateStartupCategoryCounts(providerId, durable.generation, preserved);
+              pinStartupCategories(
                 providerId,
-                () => getCategoriesImpl({ forceFull: true }),
-                'durable-unknown-counts',
+                durable.generation,
+                hydrated,
+                hydrated.find((category) => category.id === SQLITE_MOVIES_DISCOVER_ID)?.count ?? durable.totalMovieCount,
+                hydrated.length,
+                hydrated.filter((category) => category.id !== SQLITE_MOVIES_DISCOVER_ID).length,
               );
+              if (hydrated.some((category) => category.id !== SQLITE_MOVIES_DISCOVER_ID && !category.countKnown)) {
+                scheduleDeferredFullCategoryRefresh(
+                  providerId,
+                  () => getCategoriesImpl({ forceFull: true }),
+                  'durable-unknown-counts',
+                );
+              }
+              return filterInteractiveMovieCategories(hydrated);
             }
             return preserved;
           }
@@ -585,9 +679,14 @@ export function createSqliteMovieDataSource(
               'movie',
               peekGeneration,
             );
-            const nextCategories = buildStartupCategoriesFromMetadata(
+            const metadataCategories = buildStartupCategoriesFromMetadata(
               metadata,
               totalEstimate,
+            );
+            const nextCategories = await hydrateStartupCategoryCounts(
+              providerId,
+              peekGeneration,
+              metadataCategories,
             );
             if (nextCategories.some((category) => category.id !== SQLITE_MOVIES_DISCOVER_ID)) {
               pinStartupCategories(
@@ -619,11 +718,13 @@ export function createSqliteMovieDataSource(
                 fallbackReason: null,
                 elapsedMs: Date.now() - queryStartedAt,
               });
-              scheduleDeferredFullCategoryRefresh(
-                providerId,
-                () => getCategoriesImpl({ forceFull: true }),
-                'startup-metadata-full-counts',
-              );
+              if (nextCategories.some((category) => category.id !== SQLITE_MOVIES_DISCOVER_ID && !category.countKnown)) {
+                scheduleDeferredFullCategoryRefresh(
+                  providerId,
+                  () => getCategoriesImpl({ forceFull: true }),
+                  'startup-metadata-full-counts',
+                );
+              }
               return nextCategories;
             }
           }
@@ -918,7 +1019,7 @@ export function createSqliteMovieDataSource(
 
       const seenIds = new Map<string, number>();
       const providerCategories: MovieCategory[] = normalizedCategories.map((category) => {
-        const id = category.categoryId;
+        const id = String(category.categoryId);
         const occurrence = (seenIds.get(id) ?? 0) + 1;
         seenIds.set(id, occurrence);
         const renderKey = occurrence === 1 ? id : `${id}::${occurrence}`;
@@ -1141,6 +1242,7 @@ export function createSqliteMovieDataSource(
           sort: mapSort(input.sort),
           generation: pinnedGeneration,
           skipTotalCount: true,
+          regionalFirst: true,
         });
         emitMoviesStartupTrace('movies_startup_viewport_query_finished', {
           providerId,
@@ -1195,6 +1297,7 @@ export function createSqliteMovieDataSource(
         sort: mapSort(input.sort),
         generation: itemsGeneration,
         skipTotalCount: input.offset === 0,
+        regionalFirst: true,
       });
 
       if (input.offset === 0) {

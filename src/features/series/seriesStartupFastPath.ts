@@ -10,6 +10,23 @@
 import type { MediaCategory } from '../media-browser/mediaTypes.ts';
 import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 
+export function normalizeSeriesCategoryId(value: unknown): string {
+  return String(value ?? '').trim();
+}
+
+export function mergeSeriesCategoryCounts(
+  categories: MediaCategory[],
+  counts: Map<string, number>,
+): MediaCategory[] {
+  return categories.map((category) => {
+    const categoryId = normalizeSeriesCategoryId(category.id);
+    const count = counts.get(categoryId);
+    return count === undefined
+      ? { ...category, count: 0, countKnown: false }
+      : { ...category, count, countKnown: true };
+  });
+}
+
 export const SERIES_FOCUS_STAGE4O_MARKER = 'stage4o-series-startup-fast-path-v1';
 export const SERIES_STARTUP_SNAPSHOT_SCHEMA_VERSION = 1;
 export const SERIES_STARTUP_SNAPSHOT_KEY_PREFIX = '@novacast/series-startup-snapshot/v1/';
@@ -247,9 +264,9 @@ export function mergeSeriesCategoriesPreservingCounts(
     return previous;
   }
 
-  const previousById = new Map(previous.map((category) => [category.id, category]));
+  const previousById = new Map(previous.map((category) => [normalizeSeriesCategoryId(category.id), category]));
   return next.map((category) => {
-    const prior = previousById.get(category.id);
+    const prior = previousById.get(normalizeSeriesCategoryId(category.id));
     if (!prior) {
       return category;
     }

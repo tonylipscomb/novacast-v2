@@ -28,6 +28,34 @@ test('1. SearchPosterCard uses the shared Movies poster focus style', () => {
   assert.match(movieCard, /createMoviePosterFocusChrome/);
 });
 
+test('1a. Movies and Series poster focus use a thin framed glow without a filled tile', () => {
+  const seriesCard = fs.readFileSync('src/features/series/components/SeriesPosterCard.tsx', 'utf8');
+  assert.match(chrome, /posterShellFocused/);
+  assert.match(chrome, /borderWidth: 2/);
+  assert.match(chrome, /backgroundColor: 'transparent'/);
+  assert.match(chrome, /rgba\(130,145,220,0\.58\)/);
+  assert.match(chrome, /posterFocusHalo/);
+  assert.doesNotMatch(chrome, /posterFocusHaloOuter/);
+  assert.match(chrome, /top: -3/);
+  assert.match(movieCard, /posterFocusHalo/);
+  assert.match(card, /posterFocusHalo/);
+  assert.match(seriesCard, /createMoviePosterFocusChrome/);
+  assert.match(seriesCard, /posterFocusHalo/);
+  assert.match(movieCard, /NovaPosterFocusOverlay/);
+  assert.match(seriesCard, /NovaPosterFocusOverlay/);
+});
+
+test('1b. Movies hide invalid year metadata and strip region prefixes for display only', () => {
+  const movieCard = fs.readFileSync('src/features/movies/components/MoviePosterCard.tsx', 'utf8');
+  const categoryDisplay = fs.readFileSync('src/features/providers/categoryDisplay.ts', 'utf8');
+  assert.match(movieCard, /parseCatalogReleaseYear\(movie\.year\)/);
+  assert.match(movieCard, /year: displayYear/);
+  assert.match(movieCard, /const displayGenre = movie\.genres\.find/);
+  assert.match(categoryDisplay, /contentType === 'movie'/);
+  assert.match(categoryDisplay, /CATEGORY_REGION_PREFIX_CODES/);
+  assert.doesNotMatch(categoryDisplay, /input\.name\s*=|input\.rawName\s*=/);
+});
+
 test('2. Old Search-only pop-out styling is removed', () => {
   assert.doesNotMatch(card, /scale: 1\.04/);
   assert.doesNotMatch(card, /createNovaTvGlassOverlayStyle/);

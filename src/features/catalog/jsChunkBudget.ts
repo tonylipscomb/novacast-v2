@@ -4,7 +4,7 @@
  * Tuning state is process-local only (not persisted across launches).
  */
 
-import { getCatalogBackgroundWriteYield } from './catalogForegroundPriority.ts';
+import { getCatalogBackgroundWriteYield, waitForCatalogLiveGate } from './catalogForegroundPriority.ts';
 import { recordCatalogWritePhase } from './catalogWritePhaseAudit.ts';
 
 export const CATALOG_CHUNK_PREFERRED_MS = 45;
@@ -234,6 +234,8 @@ export async function processTimeBudgeted<T>(
     if (options?.isCancelled?.()) {
       break;
     }
+
+    await waitForCatalogLiveGate();
 
     const itemStart = nowMs();
     await processItem(items[index], index);

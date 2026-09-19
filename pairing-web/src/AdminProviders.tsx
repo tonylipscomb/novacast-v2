@@ -8,9 +8,24 @@ import {
   formatCount,
   formatTimestamp,
   healthTone,
+  isCappedCatalogCount,
 } from './providerHealthDisplay';
 
 type Row = Record<string, unknown>;
+type CatalogSummary = {
+  liveCategories?: number;
+  liveChannels?: number;
+  movieCategories?: number;
+  movies?: number;
+  seriesCategories?: number;
+  series?: number;
+  countDetails?: {
+    liveChannels?: { exactCountAvailable?: boolean };
+    movies?: { exactCountAvailable?: boolean };
+    series?: { exactCountAvailable?: boolean };
+  };
+  truncated?: { liveChannels?: boolean; movies?: boolean; series?: boolean };
+};
 type Summary = {
   overall?: string;
   overallLabel?: string;
@@ -19,7 +34,7 @@ type Summary = {
   testedAt?: string;
   durationMs?: number;
   checks?: Array<Record<string, unknown>>;
-  catalogs?: Record<string, number>;
+  catalogs?: CatalogSummary;
   probes?: Record<string, { passed?: number; total?: number; averageMs?: number | null }>;
   notes?: string[];
   decoderCaveat?: string;
@@ -62,7 +77,9 @@ type EpgSourceForm = {
   enabled: boolean;
   url: string;
 };
+type EpgWizardStep = 'overview' | 'source' | 'coverage' | 'audit';
 const emptySourceForm: EpgSourceForm = { sourceKind: 'national', safeLabel: '', priority: '100', enabled: true, url: '' };
+const PROVIDER_VALIDATION_LEASE_MS = 3 * 60 * 1000;
 
 export function AdminProviders({
   token,
@@ -94,6 +111,9 @@ export function AdminProviders({
   const [sourceEditing, setSourceEditing] = useState<EpgSource | null>(null);
   const [sourceForm, setSourceForm] = useState<EpgSourceForm>(emptySourceForm);
   const [resolutionPreview, setResolutionPreview] = useState<EpgResult | null>(null);
+  const [epgWizardStep, setEpgWizardStep] = useState<EpgWizardStep | null>(null);
+  const [epgWizardSource, setEpgWizardSource] = useState<EpgSource | null>(null);
+  const [, setLeaseTick] = useState(0);
 
   useEffect(() => {
     if (openCreate) {
@@ -116,6 +136,12 @@ export function AdminProviders({
     const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 500);
     return () => window.clearInterval(timer);
   }, [testingId]);
+
+  useEffect(() => {
+    if (!providers.some((provider) => String(provider.health_status ?? '') === 'testing')) return;
+    const timer = window.setInterval(() => setLeaseTick((valueToIncrement) => valueToIncrement + 1), 10_000);
+    return () => window.clearInterval(timer);
+  }, [providers]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -146,7 +172,7 @@ export function AdminProviders({
       await onRefresh();
     } catch (error) {
       const category = error instanceof Error ? error.message : 'admin_request_failed';
-      onMessage(category === 'validation_in_progress' ? 'A health check is already running for this provider.' : `Health check failed (${category}).`);
+      onMessage(category === 'validation_in_progress' ? 'Provider validation is already running.' : `Health check failed (${category}).`);
       await onRefresh();
     } finally {
       setBusy(false);
@@ -276,6 +302,15 @@ export function AdminProviders({
     setSourceForm(source ? { sourceKind: source.sourceKind, safeLabel: source.safeLabel, priority: String(source.priority), enabled: source.enabled, url: '' } : emptySourceForm);
     setSourceModal(true);
   };
+  const wizardProvider = selected ? providers.find((provider) => String(provider.id) === String(selected.id)) ?? selected : null;
+
+  const openEpgWizard = (provider: Row) => {
+    setSelected(provider);
+    setEpgWizardSource(null);
+    setEpgWizardStep('overview');
+    setResolutionPreview(null);
+    setMappingAudit(null);
+  };
 
   const saveSource = async (event: FormEvent) => {
     event.preventDefault();
@@ -366,6 +401,7 @@ export function AdminProviders({
     try {
       const result = await request({ action: 'preview_epg_resolution', managedProviderId: String(provider.id) });
       setResolutionPreview((result.preview as EpgResult) ?? null);
+      setEpgWizardStep('coverage');
       onMessage('Combined EPG coverage preview completed.');
     } catch (error) {
       onMessage(`Combined EPG preview failed (${error instanceof Error ? error.message : 'admin_request_failed'}).`);
@@ -380,6 +416,8 @@ export function AdminProviders({
     try {
       const result = await request({ action: 'preview_epg_mapping_audit', managedProviderId: String(provider.id), sourceId: source.id });
       setMappingAudit((result.audit as EpgResult) ?? null);
+      setEpgWizardSource(source);
+      setEpgWizardStep('audit');
       onMessage('EPG mapping audit completed.');
     } catch (error) {
       onMessage(`EPG mapping audit failed (${error instanceof Error ? error.message : 'admin_request_failed'}).`);
@@ -463,34 +501,48 @@ export function AdminProviders({
             const activation = String(provider.status ?? 'draft');
             const health = String(provider.health_status ?? 'unvalidated');
             const stale = Boolean(provider.validation_stale);
-            const label = displayHealthLabel({ activationStatus: activation, healthStatus: health, validationStale: stale });
             const eligible = canActivateProvider({ healthStatus: health, validationStale: stale, activationStatus: activation });
             const summary = (provider.last_health_summary ?? null) as Summary | null;
-            const testing = testingId === id;
+            const catalogTruncated = summary?.catalogs?.truncated ?? {};
+            const catalogDetails = summary?.catalogs?.countDetails ?? {};
+            const authenticationCheck = summary?.checks?.find((check) => String(check.id) === 'authentication');
+            const serverCheck = summary?.checks?.find((check) => String(check.id) === 'server');
+            const expired = Boolean(summary?.account?.expiresAt && Date.parse(String(summary.account.expiresAt)) <= Date.now());
+            const offline = health === 'failed' && (authenticationCheck?.verdict === 'fail' || serverCheck?.verdict === 'fail') && !expired;
+            const testingLeaseFresh = health === 'testing' && isFreshProviderValidationLease(provider);
+            const testing = testingId === id || testingLeaseFresh;
+            const label = displayHealthLabel({ activationStatus: activation, healthStatus: health, validationStale: stale, expired, offline });
+            const healthToneLabel = healthTone(label);
             return (
-              <article key={id} className={`providerCard tone-${healthTone(label)}`}>
+              <article key={id} className={`providerCard tone-${healthToneLabel}`}>
                 <header>
                   <div>
                     <strong>{String(provider.display_name ?? provider.slug ?? 'Managed provider')}</strong>
                     <small>Xtream · {provider.goldAccount ? 'Gold Managed' : activation === 'active' ? 'Enabled' : activation === 'paused' || activation === 'revoked' ? 'Disabled' : 'Not served to devices'}</small>
                   </div>
-                  <b className={`providerBadge badge-${healthTone(label)}`}>{label}</b>
+                  <b className={`providerBadge badge-${healthToneLabel}`}>{label}</b>
                 </header>
                 <dl>
-                  <div><span>Live TV</span><strong>{formatCount(provider.live_channel_count)}</strong></div>
-                  <div><span>Movies</span><strong>{formatCount(provider.movie_count)}</strong></div>
-                  <div><span>Series</span><strong>{formatCount(provider.series_count)}</strong></div>
+                  <div><span>Live TV</span><strong>{formatCount(provider.live_channel_count, isCappedCatalogCount(provider.live_channel_count, catalogTruncated.liveChannels, catalogDetails.liveChannels?.exactCountAvailable))}</strong></div>
+                  <div><span>Movies</span><strong>{formatCount(provider.movie_count, isCappedCatalogCount(provider.movie_count, catalogTruncated.movies, catalogDetails.movies?.exactCountAvailable))}</strong></div>
+                  <div><span>Series</span><strong>{formatCount(provider.series_count, isCappedCatalogCount(provider.series_count, catalogTruncated.series, catalogDetails.series?.exactCountAvailable))}</strong></div>
                 </dl>
                 <p>Last tested: {formatTimestamp(provider.last_tested_at)}</p>
                 <p>Last successful: {formatTimestamp(provider.last_successful_test_at)}</p>
+                <div className="providerHealthSignals">
+                  <SignalRow label="API" value={checkLabel(authenticationCheck)} />
+                  <SignalRow label="Catalog" value={catalogLabel(summary)} />
+                  <SignalRow label="Cloud playback" value={summary?.cloudPlaybackProbeRestricted ? 'Restricted · Device verify' : probeLabel(summary)} />
+                  <SignalRow label="Device playback" value="Not verified" />
+                </div>
                 <p>Custom EPG: {provider.custom_url_configured ? 'Configured' : 'Not Configured'}</p>
-                <EpgSourcesPanel provider={provider} result={selected?.id === id ? epgResult : null} preview={selected?.id === id ? resolutionPreview : null} mappingAudit={selected?.id === id ? mappingAudit : null} busy={busy} onAdd={() => openSourceEditor(provider)} onEdit={(source) => openSourceEditor(provider, source)} onToggle={(source) => void toggleSource(source)} onTest={(source) => void runSourceTest(source)} onRefresh={(source) => void refreshSource(source)} onDelete={(source) => void deleteSource(source)} onPreview={() => void previewResolution(provider)} onMappingAudit={(source) => void runMappingAudit(provider, source)} />
-                {provider.goldAccount ? <p className="providerNote">Gold: {String((provider.goldAccount as Row).gold_country ?? '—') === 'ALL' ? 'ALL — VPN / All Countries' : String((provider.goldAccount as Row).gold_country ?? '—')} · expires {String((provider.goldAccount as Row).gold_expiration ?? 'unknown')}</p> : null}
+                <EpgSummaryButton provider={provider} onClick={() => openEpgWizard(provider)} />
+                {provider.goldAccount ? <p className="providerNote">Gold panel: {String((provider.goldAccount as Row).gold_country ?? '—') === 'ALL' ? 'ALL — VPN / All Countries' : String((provider.goldAccount as Row).gold_country ?? '—')} · expiry {String((provider.goldAccount as Row).gold_expiration ?? 'unknown')} · synced {formatTimestamp((provider.goldAccount as Row).last_synced_at)}</p> : null}
+                {summary?.account?.expiresAt ? <p className="providerNote">Latest API expiry: {formatTimestamp(summary.account.expiresAt)} · from test {formatTimestamp(summary.testedAt)}</p> : null}
                 {summary?.overallLabel ? <p className="providerNote">{String(summary.overallLabel)}</p> : null}
-                {summary?.cloudPlaybackProbeRestricted ? <p className="providerNote">Cloud playback probe restricted. Device playback test recommended.</p> : null}
                 {testing ? <ProgressPanel elapsed={elapsed} /> : null}
                 <footer>
-                  <button disabled={busy} onClick={() => void runTest(id)}>{testing ? 'Testing…' : 'Retest'}</button>
+                  <button disabled={busy || testingLeaseFresh} onClick={() => void runTest(id)}>{testing ? 'Testing…' : 'Retest'}</button>
                   <button
                     disabled={busy}
                     onClick={() => {
@@ -534,6 +586,28 @@ export function AdminProviders({
           <button onClick={() => setModal('add')}>Add Provider</button>
         </section>
       )}
+
+      {epgWizardStep && wizardProvider ? (
+        <EpgWizard
+          provider={wizardProvider}
+          step={epgWizardStep}
+          source={epgWizardSource}
+          preview={resolutionPreview}
+          audit={mappingAudit}
+          busy={busy}
+          onClose={() => setEpgWizardStep(null)}
+          onStep={setEpgWizardStep}
+          onAdd={() => openSourceEditor(wizardProvider)}
+          onManage={(source) => { setEpgWizardSource(source); setEpgWizardStep('source'); }}
+          onEdit={(source) => openSourceEditor(wizardProvider, source)}
+          onToggle={(source) => void toggleSource(source)}
+          onTest={(source) => void runSourceTest(source)}
+          onRefresh={(source) => void refreshSource(source)}
+          onDelete={(source) => void deleteSource(source)}
+          onPreview={() => void previewResolution(wizardProvider)}
+          onMappingAudit={(source) => void runMappingAudit(wizardProvider, source)}
+        />
+      ) : null}
 
       {modal === 'add' || modal === 'edit' ? (
         <div className="modalBackdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setModal(null); }}>
@@ -656,9 +730,59 @@ export function AdminProviders({
   );
 }
 
-function LegacyEpgSourcesPanel({ provider, result, preview, mappingAudit, busy, onAdd, onEdit, onToggle, onTest, onRefresh, onDelete, onPreview, onMappingAudit }: { provider: Row; result: EpgResult | null; preview: EpgResult | null; mappingAudit: EpgResult | null; busy: boolean; onAdd: () => void; onEdit: (source: EpgSource) => void; onToggle: (source: EpgSource) => void; onTest: (source: EpgSource) => void; onRefresh: (source: EpgSource) => void; onDelete: (source: EpgSource) => void; onPreview: () => void; onMappingAudit: (source: EpgSource) => void }) {
+function EpgSummaryButton({ provider, onClick }: { provider: Row; onClick: () => void }) {
   const sources = Array.isArray(provider.epgSources) ? provider.epgSources as EpgSource[] : [];
-  return <div className="providerDiagnostics compact"><div className="modalActions"><strong>EPG Sources</strong><button type="button" disabled={busy} onClick={onAdd}>Add source</button><button type="button" disabled={busy || !sources.length} onClick={onPreview}>Preview Combined Coverage</button></div>{sources.length ? sources.map((source) => <div key={source.id} className="providerNote"><strong>{source.safeLabel}</strong> · {source.sourceKind} · priority {source.priority} · {source.enabled ? 'Enabled' : 'Disabled'}<br /><small>Channels: {nullableEpgMetric(source.channelCount)} · Programs: {nullableEpgMetric(source.programmeCount)} · Mapped: {nullableEpgMetric(source.mappedChannels)} · Mapping: {source.mappingPercentage == null ? 'Not recorded' : `${(source.mappingPercentage * 100).toFixed(1)}%`} · Current: {source.currentProgramCoverage == null ? 'Not recorded' : `${(source.currentProgramCoverage * 100).toFixed(1)}%`} · Future: {source.futureProgramCoverage == null ? 'Not recorded' : `${(source.futureProgramCoverage * 100).toFixed(1)}%`}<br />Last refresh: {formatTimestamp(source.lastRefreshAt)} · Status: {source.lastRefreshStatus ?? 'Never'}</small><div className="modalActions"><button type="button" disabled={busy} onClick={() => onEdit(source)}>Edit</button><button type="button" disabled={busy} onClick={() => onToggle(source)}>{source.enabled ? 'Disable' : 'Enable'}</button><button type="button" disabled={busy} onClick={() => onTest(source)}>Test</button><button type="button" disabled={busy} onClick={() => onRefresh(source)}>Refresh</button><button type="button" disabled={busy} onClick={() => onMappingAudit(source)}>Mapping Audit</button><button type="button" disabled={busy} onClick={() => onDelete(source)}>Delete</button></div></div>) : <small>No additional EPG sources configured.</small>}{result ? <EpgResultPanel result={result} /> : null}{mappingAudit ? <EpgMappingAuditPanel result={mappingAudit} /> : null}</div>;
+  const enabled = sources.filter((source) => source.enabled).length;
+  const mapped = sources.reduce((total, source) => total + (source.mappedChannels ?? 0), 0);
+  const latestRefresh = sources.map((source) => source.lastRefreshAt).filter(Boolean).sort().at(-1) ?? null;
+  return <button type="button" className="providerEpgSummary" onClick={onClick}><span><strong>EPG</strong><small>{sources.length} source{sources.length === 1 ? '' : 's'} · {enabled} enabled · {mapped ? `${mapped.toLocaleString()} mapped` : 'Mapping not recorded'}{latestRefresh ? ` · ${formatTimestamp(latestRefresh)}` : ''}</small></span><b>Manage EPG</b></button>;
+}
+
+function EpgWizard({ provider, step, source, preview, audit, busy, onClose, onStep, onAdd, onManage, onEdit, onToggle, onTest, onRefresh, onDelete, onPreview, onMappingAudit }: {
+  provider: Row;
+  step: EpgWizardStep;
+  source: EpgSource | null;
+  preview: EpgResult | null;
+  audit: EpgResult | null;
+  busy: boolean;
+  onClose: () => void;
+  onStep: (step: EpgWizardStep) => void;
+  onAdd: () => void;
+  onManage: (source: EpgSource) => void;
+  onEdit: (source: EpgSource) => void;
+  onToggle: (source: EpgSource) => void;
+  onTest: (source: EpgSource) => void;
+  onRefresh: (source: EpgSource) => void;
+  onDelete: (source: EpgSource) => void;
+  onPreview: () => void;
+  onMappingAudit: (source: EpgSource) => void;
+}) {
+  const sources = Array.isArray(provider.epgSources) ? provider.epgSources as EpgSource[] : [];
+  const enabled = sources.filter((item) => item.enabled).length;
+  const mapped = sources.reduce((total, item) => total + (item.mappedChannels ?? 0), 0);
+  const latestRefresh = sources.map((item) => item.lastRefreshAt).filter(Boolean).sort().at(-1) ?? null;
+  const title = step === 'overview' ? 'Manage EPG' : step === 'source' ? source?.safeLabel ?? 'EPG source' : step === 'coverage' ? 'Combined coverage' : 'Mapping audit';
+  return <div className="modalBackdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+    <section className="inviteModal epgWizardModal" role="dialog" aria-modal="true">
+      <button className="modalClose" aria-label="Close EPG manager" disabled={busy} onClick={onClose} />
+      <span className="eyebrow">EPG MANAGEMENT · {String(provider.display_name ?? 'Provider')}</span>
+      <h2>{title}</h2>
+      {step === 'overview' ? <>
+        <div className="epgWizardSummary"><span>Sources <strong>{sources.length}</strong></span><span>Enabled <strong>{enabled}</strong></span><span>Mapped <strong>{mapped.toLocaleString()}</strong></span><span>Last refresh <strong>{latestRefresh ? formatTimestamp(latestRefresh) : 'Never'}</strong></span></div>
+        <div className="epgWizardActions epgWizardToolbar"><button type="button" className="epgPrimaryAction" disabled={busy} onClick={onAdd}>Add source</button><button type="button" className="epgSecondaryAction" disabled={busy || !sources.length} onClick={onPreview}>Coverage</button></div>
+        <div className="epgWizardSourceList">{sources.length ? sources.map((item) => <div className="epgWizardSourceRow" key={item.id}><div><strong>{item.safeLabel}</strong><small>{item.sourceKind} · Priority {item.priority} · {item.enabled ? 'Enabled' : 'Disabled'}</small><small>{nullableEpgMetric(item.channelCount)} channels · {nullableEpgMetric(item.programmeCount)} programmes · {nullableEpgMetric(item.mappedChannels)} mapped</small><small>Last refresh: {formatTimestamp(item.lastRefreshAt)} · {item.lastRefreshStatus ?? 'Never'}</small></div><button type="button" disabled={busy} onClick={() => onManage(item)}>Manage</button></div>) : <small>No EPG sources configured.</small>}</div>
+      </> : null}
+      {step === 'source' && source ? <>
+        <div className="epgWizardMetricGrid"><span>Kind<strong>{source.sourceKind}</strong></span><span>Status<strong>{source.enabled ? 'Enabled' : 'Disabled'}</strong></span><span>Priority<strong>{source.priority}</strong></span><span>Channels<strong>{nullableEpgMetric(source.channelCount)}</strong></span><span>Programmes<strong>{nullableEpgMetric(source.programmeCount)}</strong></span><span>Mapped<strong>{nullableEpgMetric(source.mappedChannels)}</strong></span><span>Mapping<strong>{source.mappingPercentage == null ? 'Not recorded' : `${(source.mappingPercentage * 100).toFixed(1)}%`}</strong></span><span>Current<strong>{source.currentProgramCoverage == null ? 'Not recorded' : `${(source.currentProgramCoverage * 100).toFixed(1)}%`}</strong></span><span>Future<strong>{source.futureProgramCoverage == null ? 'Not recorded' : `${(source.futureProgramCoverage * 100).toFixed(1)}%`}</strong></span></div>
+        <p className="providerNote">Last refresh: {formatTimestamp(source.lastRefreshAt)} · {source.lastRefreshStatus ?? 'Never'}</p>
+        <div className="epgWizardActions epgSourceActions"><button type="button" disabled={busy} onClick={() => onEdit(source)}>Edit</button><button type="button" disabled={busy} onClick={() => onRefresh(source)}>Refresh</button><details className="epgSourceMore"><summary>More</summary><div><button type="button" disabled={busy} onClick={() => onTest(source)}>Test</button><button type="button" disabled={busy} onClick={() => onMappingAudit(source)}>Audit</button><button type="button" disabled={busy} onClick={() => onToggle(source)}>{source.enabled ? 'Disable' : 'Enable'}</button></div></details></div>
+        <details className="epgWizardDanger"><summary>Danger zone</summary><button type="button" className="dangerButton" disabled={busy} onClick={() => onDelete(source)}>Delete source</button></details>
+        <button type="button" className="ghost epgWizardBack" onClick={() => onStep('overview')}>Back to Sources</button>
+      </> : null}
+      {step === 'coverage' ? <><CombinedCoveragePanel preview={preview ?? {}} /><button type="button" className="ghost epgWizardBack" onClick={() => onStep('overview')}>Back</button></> : null}
+      {step === 'audit' ? <><EpgMappingAuditPanel result={audit ?? {}} /><button type="button" className="ghost epgWizardBack" onClick={() => onStep('source')}>Back</button></> : null}
+    </section>
+  </div>;
 }
 
 function nullableEpgMetric(valueToFormat: unknown, suffix = '') {
@@ -669,11 +793,35 @@ function CombinedCoveragePanel({ preview }: { preview: EpgResult }) {
   const readiness = (preview.readiness ?? {}) as Record<string, unknown>;
   const status = (valueToFormat: unknown) => valueToFormat === true ? 'READY' : valueToFormat === false ? 'NEEDS WORK' : 'NOT RECORDED';
   const reasonText = Array.isArray(readiness.reasons) ? readiness.reasons.map((reason) => String(reason).replace(/_/g, ' ')).join(', ') : 'Not recorded';
-  return <div className="providerDiagnostics compact"><strong>Combined coverage preview</strong><p>Overall: {value(preview, 'resolvedChannels')} resolved · {value(preview, 'unresolvedChannels')} unresolved · {value(preview, 'totalProviderChannelsConsidered')} considered · Mapping {preview.mappingPercent == null ? 'Not recorded' : `${(Number(preview.mappingPercent) * 100).toFixed(1)}%`}</p><p>By source: {JSON.stringify(preview.resolvedBySource ?? {})}</p><p>By match: {JSON.stringify(preview.resolvedByMatchType ?? {})}</p><p>US coverage: {nullableEpgMetric(preview.usCombinedResolved)} / {nullableEpgMetric(preview.usRelevantRows)} mapped ({preview.usCombinedMappingPercent == null ? 'Not recorded' : `${Number(preview.usCombinedMappingPercent).toFixed(1)}%`})</p><p>US programmes: current {preview.usCurrentProgrammePercent == null ? 'Not recorded' : `${Number(preview.usCurrentProgrammePercent).toFixed(1)}%`} · future {preview.usFutureProgrammePercent == null ? 'Not recorded' : `${Number(preview.usFutureProgrammePercent).toFixed(1)}%`}</p><p>Sources: EPGenius {nullableEpgMetric(preview.epgeniusOnly)} · US2 {nullableEpgMetric(preview.us2Only)} · Conflicts {nullableEpgMetric(preview.differentTargetConflict)}</p><p>Readiness: Mapping {status(readiness.mappingReady)} · Programme coverage {status(readiness.programmeCoverageReady)} · Conflict safety {status(readiness.conflictRiskAcceptable)} · Managed Guide Delivery {readiness.managedGuideDeliveryReady === true ? 'READY' : readiness.managedGuideDeliveryReady === false ? 'NOT READY' : 'NOT RECORDED'}</p><small>Reasons: {reasonText}</small></div>;
+  const mapSummary = (valueToFormat: unknown) => valueToFormat && typeof valueToFormat === 'object' ? Object.entries(valueToFormat as Record<string, unknown>).slice(0, 6).map(([key, valueToShow]) => `${key}: ${valueToShow}`).join(' · ') || 'Not recorded' : 'Not recorded';
+  return <div className="providerDiagnostics compact"><strong>Combined coverage preview</strong><div className="epgWizardMetricGrid"><span>Resolved<strong>{value(preview, 'resolvedChannels')}</strong></span><span>Unresolved<strong>{value(preview, 'unresolvedChannels')}</strong></span><span>Considered<strong>{value(preview, 'totalProviderChannelsConsidered')}</strong></span><span>Mapping<strong>{preview.mappingPercent == null ? 'Not recorded' : `${(Number(preview.mappingPercent) * 100).toFixed(1)}%`}</strong></span><span>US mapped<strong>{nullableEpgMetric(preview.usCombinedResolved)} / {nullableEpgMetric(preview.usRelevantRows)}</strong></span><span>Conflicts<strong>{nullableEpgMetric(preview.differentTargetConflict)}</strong></span></div><p>Resolved by source: {mapSummary(preview.resolvedBySource)}</p><p>Resolved by match: {mapSummary(preview.resolvedByMatchType)}</p><p>US programmes: current {preview.usCurrentProgrammePercent == null ? 'Not recorded' : `${Number(preview.usCurrentProgrammePercent).toFixed(1)}%`} · future {preview.usFutureProgrammePercent == null ? 'Not recorded' : `${Number(preview.usFutureProgrammePercent).toFixed(1)}%`}</p><p>Readiness: Mapping {status(readiness.mappingReady)} · Programme coverage {status(readiness.programmeCoverageReady)} · Conflict safety {status(readiness.conflictRiskAcceptable)} · Managed Guide Delivery {readiness.managedGuideDeliveryReady === true ? 'READY' : readiness.managedGuideDeliveryReady === false ? 'NOT READY' : 'NOT RECORDED'}</p><small>Reasons: {reasonText}</small></div>;
 }
 
-function EpgSourcesPanel(props: Parameters<typeof LegacyEpgSourcesPanel>[0]) {
-  return <><LegacyEpgSourcesPanel {...props} preview={null} /><>{props.preview ? <CombinedCoveragePanel preview={props.preview} /> : null}</></>;
+function SignalRow({ label, value: signal }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{signal}</strong></div>;
+}
+
+function checkLabel(check: Record<string, unknown> | undefined) {
+  if (!check) return 'Not tested';
+  const verdict = String(check.verdict ?? 'skip');
+  return verdict === 'pass' ? 'Healthy' : verdict === 'warn' ? 'Warning' : verdict === 'fail' ? 'Failed' : 'Not tested';
+}
+
+function catalogLabel(summary: Summary | null) {
+  const checks = summary?.checks ?? [];
+  const catalogChecks = checks.filter((check) => ['live-catalog', 'movie-catalog', 'series-catalog'].includes(String(check.id)));
+  if (!catalogChecks.length) return 'Not tested';
+  if (catalogChecks.some((check) => check.verdict === 'fail')) return 'Needs attention';
+  if (catalogChecks.some((check) => check.verdict === 'warn')) return 'Warning';
+  return 'Healthy';
+}
+
+function probeLabel(summary: Summary | null) {
+  const probes = summary?.probes;
+  if (!probes) return 'Not tested';
+  const total = (probes.live?.total ?? 0) + (probes.movies?.total ?? 0) + (probes.episodes?.total ?? 0);
+  const passed = (probes.live?.passed ?? 0) + (probes.movies?.passed ?? 0) + (probes.episodes?.passed ?? 0);
+  return total === 0 ? 'Not tested' : passed === total ? 'Healthy' : passed ? 'Partial' : 'Failed';
 }
 
 function EpgMappingAuditPanel({ result }: { result: EpgResult }) {
@@ -689,6 +837,11 @@ function GoldDiagnostic({ account }: { account: Row }) {
 
 function canActivateFromSummary(summary: Summary | null) {
   return summary?.overall === 'healthy' || summary?.overall === 'degraded';
+}
+
+function isFreshProviderValidationLease(provider: Row) {
+  const updatedAt = Date.parse(String(provider.updated_at ?? ''));
+  return Number.isFinite(updatedAt) && Date.now() - updatedAt < PROVIDER_VALIDATION_LEASE_MS;
 }
 
 function friendlyEpgFailure(value: string) {

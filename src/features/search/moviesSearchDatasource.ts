@@ -7,8 +7,6 @@ import { resolveReadableCatalogGeneration } from '../catalog/catalogRepository.t
 import type { MovieDataSource } from '../movies/data/MovieDataSource.ts';
 import { createSqliteMovieDataSource } from '../movies/data/SqliteMovieDataSource.ts';
 
-const MOVIES_SQLITE_READS_ENABLED = process.env.EXPO_PUBLIC_MOVIES_SQLITE_READS === 'true';
-
 export type MoviesSearchDatasourceSelection = {
   providerId: string;
   dataSource: MovieDataSource | null;
@@ -33,7 +31,10 @@ export async function resolveMoviesSearchDatasource(input: {
     readableGeneration = 0;
   }
 
-  const sqliteAvailable = MOVIES_SQLITE_READS_ENABLED && readableGeneration > 0;
+  // Search must use the current readable snapshot whenever one exists. The
+  // background writer may be building a newer generation, but that must not
+  // make a healthy readable generation unavailable to Movie Search.
+  const sqliteAvailable = readableGeneration > 0;
   if (sqliteAvailable) {
     // search-s7-pinned-readable-generation
     const sqlite = createSqliteMovieDataSource(providerId, {
@@ -79,13 +80,11 @@ export async function resolveMoviesSearchDatasource(input: {
         : 'none';
 
   const providerFallbackAllowed = selectedDatasource !== 'sqlite-v2';
-  const fallbackReason = !MOVIES_SQLITE_READS_ENABLED
-    ? 'sqlite-reads-disabled'
-    : readableGeneration <= 0
-      ? 'no-readable-generation'
-      : selectedDatasource === 'browse-bundle'
-        ? 'using-bundle-or-browse-fallback'
-        : 'no-datasource';
+  const fallbackReason = readableGeneration <= 0
+    ? 'no-readable-generation'
+    : selectedDatasource === 'browse-bundle'
+      ? 'using-bundle-or-browse-fallback'
+      : 'no-datasource';
 
   novacastTrace('[NovaCast Movies Search Datasource] ' + JSON.stringify({
     providerId,

@@ -17,6 +17,7 @@ import {
   resetLiveSearchBackDiagnostics,
   resolveLiveSearchSurfQueue,
   shouldKeepLiveSearchMounted,
+  shouldPopToRetainedSearch,
   shouldLiveSearchBlockBackgroundFocus,
   shouldLiveSearchContentAcceptFocus,
   shouldLiveSearchNavbarAcceptFocus,
@@ -33,6 +34,12 @@ import {
   shouldLiveSearchResultFocusAffectQuery,
   shouldLiveSearchResultFocusOpenKeyboard,
 } from '../src/features/search/liveSearchResultsScroll.ts';
+import {
+  getSearchScreenMemory,
+  rememberSearchScreenMemory,
+  resetSearchScreenMemory,
+  resolveSearchFocusRestoreKey,
+} from '../src/features/search/searchScreenMemory.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relativePath) => readFileSync(join(root, relativePath), 'utf8').replace(/\r\n/g, '\n');
@@ -43,9 +50,11 @@ const liveRouter = read('src/features/live/LiveTvFocusRouter.tsx');
 const overlay = read('src/features/search/SearchOverlay.tsx');
 const searchResults = read('src/features/search/SearchResults.tsx');
 const focusRow = read('src/components/nova/NovaFocusRow.tsx');
+const novaFocusRow = focusRow;
 const moviesScreen = read('src/features/movies/MoviesScreen.tsx');
 const seriesScreen = read('src/features/series/SeriesScreen.tsx');
 const searchScreen = read('src/features/search/SearchScreen.tsx');
+const searchNavigation = read('src/features/search/searchNavigation.ts');
 const vodSeek = read('src/features/playback/unified/vodSeek.ts');
 const episodeNav = read('src/features/playback/continuity/episodeNavigation.ts');
 const movieToolbar = read('src/features/movies/components/MovieToolbar.tsx');
@@ -286,6 +295,78 @@ test('23. fullscreen BACK does not also close restored Search', () => {
   assert.match(liveScreen, /suppressLiveSearchOverlayClose\(nowMs\)/);
 });
 
+test('Search-origin playback pops to the retained Search route', () => {
+  assert.equal(shouldPopToRetainedSearch('/search', true), true);
+  assert.equal(shouldPopToRetainedSearch('/live', true), false);
+  assert.equal(shouldPopToRetainedSearch('/search', false), false);
+  assert.match(liveScreen, /shouldPopToRetainedSearch\(returnRoute, directPlayRequested\)/);
+  assert.match(liveScreen, /router\.back\(\)/);
+  assert.doesNotMatch(liveScreen, /if \(directPlayRequested\) \{[\s\S]{0,180}router\.replace\(returnRoute\)/);
+});
+
+test('Search-origin return restores one stable result key with a safe fallback', () => {
+  assert.deepEqual(resolveSearchFocusRestoreKey('live:b', ['live:a', 'live:b', 'live:c']), {
+    key: 'live:b',
+    usedFallback: false,
+  });
+  assert.deepEqual(resolveSearchFocusRestoreKey('live:missing', ['live:a', 'live:b']), {
+    key: 'live:a',
+    usedFallback: true,
+  });
+  assert.deepEqual(resolveSearchFocusRestoreKey('live:missing', []), {
+    key: null,
+    usedFallback: false,
+  });
+  assert.match(searchScreen, /saved-before-playback/);
+  assert.match(searchScreen, /row-focus-confirmed/);
+  assert.match(searchScreen, /requestTvFocus/);
+  assert.match(searchScreen, /searchRestoreRowRef/);
+});
+
+test('Search direct play suppresses the Live browse shell before fullscreen', () => {
+  assert.match(liveScreen, /directPlayRequested/);
+  assert.match(liveScreen, /first-render-playback-mode/);
+  assert.match(liveScreen, /browse-shell-suppressed/);
+  assert.match(liveScreen, /!renderState\.fullscreenChannelId && \(directPlayRequested \|\| !liveCategoryStartupReady\)/);
+  assert.match(liveScreen, /Starting playback/);
+  assert.match(liveScreen, /firstRenderMode: 'playback-only'/);
+  assert.match(searchNavigation, /returnRoute: 'search'/);
+  assert.match(searchNavigation, /directPlay: result\.id \? '1' : undefined/);
+});
+
+test('Search rows use custom capsule chrome without the legacy NovaFocusRow layer', () => {
+  assert.match(searchResults, /focusChrome="none"/);
+  assert.match(novaFocusRow, /focusChrome\?: 'default' \| 'none'/);
+  assert.match(novaFocusRow, /focusChrome === 'default' && showFocused && novaTvFocus\.active/);
+});
+
+test('Search focus visuals use one consistent inset capsule for every row', () => {
+  assert.match(searchResults, /paddingHorizontal: 6/);
+  assert.match(searchResults, /followListContent/);
+  assert.match(searchResults, /borderWidth: 1,[\s\S]*borderRadius: NOVA_GLASS\.radius\.base/);
+  assert.match(searchResults, /shadowOpacity: 0\.18/);
+  assert.match(searchResults, /transform: \[\{ scale: 1\.01 \}\]/);
+  assert.doesNotMatch(searchResults, /resultRowFocused[\s\S]{0,300}elevation/);
+  assert.doesNotMatch(searchResults, /resultRowFocused[\s\S]{0,300}borderTop/);
+  assert.doesNotMatch(searchResults, /resultRowFocused[\s\S]{0,300}borderBottom/);
+});
+
+test('Search focus restore key survives route remount and is cleared after confirmation', () => {
+  const providerId = 'search-focus-test-provider';
+  resetSearchScreenMemory(providerId);
+  rememberSearchScreenMemory(providerId, { pendingFocusRestoreKey: 'live:channel-b' });
+  assert.equal(getSearchScreenMemory(providerId).pendingFocusRestoreKey, 'live:channel-b');
+  rememberSearchScreenMemory(providerId, { pendingFocusRestoreKey: null });
+  assert.equal(getSearchScreenMemory(providerId).pendingFocusRestoreKey, null);
+});
+
+test('Search Live result rows use canonical favorite state and NovaGlass styling', () => {
+  assert.match(searchResults, /favoriteContentIds/);
+  assert.match(searchResults, /name=\{isFavorite \? 'heart' : 'heart-outline'\}/);
+  assert.match(searchResults, /NOVA_GLASS\.subtle/);
+  assert.doesNotMatch(searchResults, /searchFavorites/);
+});
+
 test('24. one BACK cannot trigger two layer transitions', () => {
   resetLiveSearchBackDiagnostics();
   markLiveSearchBackConsumed(2000);
@@ -311,13 +392,13 @@ test('24. one BACK cannot trigger two layer transitions', () => {
 
 test('25. navbar cannot receive focus while Search overlay open', () => {
   assert.equal(shouldLiveSearchNavbarAcceptFocus(true, false), false);
-  assert.match(liveScreen, /navigationFocusable=\{!searchOwnsBackgroundFocus\}/);
+  assert.match(liveScreen, /navigationFocusable=\{!searchOwnsBackgroundFocus && !renderState\.fullscreenChannelId\}/);
 });
 
 test('26. Live content cannot receive focus while Search overlay open', () => {
   assert.equal(shouldLiveSearchContentAcceptFocus(true, false), false);
   assert.equal(shouldLiveSearchBlockBackgroundFocus(true, false), true);
-  assert.match(liveScreen, /pointerEvents=\{searchOwnsBackgroundFocus \? 'none' : 'auto'\}/);
+  assert.match(liveScreen, /pointerEvents=\{searchOwnsBackgroundFocus \|\| Boolean\(renderState\.fullscreenChannelId\) \? 'none' : 'auto'\}/);
 });
 
 test('27. closing Search does not leave Home incorrectly highlighted', () => {
@@ -386,10 +467,21 @@ test('Live overlay BACK still dismisses IME before close', () => {
   assert.equal(afterIme.action, 'close-overlay');
 });
 
-test('Search Live direct play masks the browser during the existing ready-to-fullscreen handoff', () => {
-  assert.match(liveScreen, /directPlayRequested && !renderState\.fullscreenChannelId/);
-  assert.match(liveScreen, /styles\.directPlayCurtain/);
+test('Search Live direct play does not add a duplicate transitional loader', () => {
+  assert.doesNotMatch(liveScreen, /directPlayCurtain/);
+  assert.match(liveScreen, /directPlayRequested[\s\S]{0,500}Starting playback/);
+  assert.match(liveScreen, /!renderState\.fullscreenChannelId && \(directPlayRequested \|\| !liveCategoryStartupReady\)/);
   assert.match(liveScreen, /tuneChannel\(routeChannelId\)/);
+});
+
+test('normal Live browse remains mounted and suspended beneath fullscreen', () => {
+  assert.match(liveScreen, /styles\.browseLayer/);
+  assert.match(liveScreen, /importantForAccessibility=\{renderState\.fullscreenChannelId \? 'no-hide-descendants' : 'auto'\}/);
+  assert.match(liveScreen, /styles\.fullscreenOverlay/);
+  assert.match(liveScreen, /browse-mounted/);
+  assert.match(liveScreen, /fullscreen-open/);
+  assert.match(liveScreen, /fullscreen-close/);
+  assert.match(liveScreen, /browse-unmounted/);
 });
 
 test('Search Live category hydration preserves the authoritative search surf queue', () => {
@@ -406,6 +498,41 @@ test('Search owns one native TV hold controller and rows retain short-press play
   assert.match(searchResults, /nativeTvHold/);
   assert.match(searchResults, /onPress=\{\(\) =>/);
   assert.match(focusRow, /onBlur\?\.\(\)/);
+});
+
+test('Search Live favorites render from the canonical reactive store', () => {
+  assert.match(searchScreen, /usePersonalizationStore\(activeProviderId\)/);
+  assert.match(searchScreen, /favoriteContentIds=\{favoriteContentIds\}/);
+  assert.match(searchScreen, /toggleLiveFavorite\(activeProviderId, toLiveSearchPlaybackChannel\(result\)\)/);
+  assert.match(searchResults, /name=\{isFavorite \? 'heart' : 'heart-outline'\}/);
+  assert.match(searchResults, /style=\{\[styles\.resultRow, isFocused && styles\.resultRowFocused\]\}/);
+});
+
+test('Live Search heart is a dedicated TV focus target with row return navigation', () => {
+  assert.match(searchResults, /function LiveSearchResultRow/);
+  assert.match(searchResults, /<Pressable[\s\S]{0,900}focusable[\s\S]{0,900}accessibilityLabel=\{isFavorite \? 'Remove from favorites' : 'Add to favorites'\}/);
+  assert.match(searchResults, /nextFocusRight: favoriteHandle/);
+  assert.match(searchResults, /nextFocusLeft: rowHandle/);
+  assert.match(searchResults, /onFocusLiveResult\?\.\(result\)/);
+});
+
+test('Live Search heart activation stops row tuning and uses canonical favorite toggle', () => {
+  const heart = searchResults.slice(searchResults.indexOf('function LiveSearchResultRow'));
+  assert.match(heart, /onPressIn=\{\(event\) => \{[\s\S]{0,180}event\.stopPropagation\(\)/);
+  assert.match(heart, /onPress=\{\(event\) => \{[\s\S]{0,180}event\.stopPropagation\(\)[\s\S]{0,180}activateFavorite\(\)/);
+  assert.match(heart, /onToggleFavorite\?\.\(result\)/);
+  assert.match(heart, /onSelectResult\(result\)/);
+  assert.match(heart, /setFavoriteFocused\(true\)[\s\S]{0,320}onFocusLiveResult\?\.\(null\)/);
+});
+
+test('Live Search heart follows canonical favorite updates while the list remains open', () => {
+  assert.match(searchResults, /extraData=\{\{ focusedResultKey, restoreResultKey, favoriteContentIds \}\}/);
+  assert.match(searchResults, /isFavorite=\{Boolean\(favoriteContentIds\?\.has\(result\.id\)\)\}/);
+});
+
+test('My Channels keeps the canonical synthetic category name', () => {
+  const synthetic = read('src/features/live/liveSyntheticCategories.ts');
+  assert.match(synthetic, /LIVE_MY_CHANNELS_CATEGORY_NAME = 'My Channels'/);
 });
 
 test('Search-origin hydrated category collisions keep Search playback ownership', () => {

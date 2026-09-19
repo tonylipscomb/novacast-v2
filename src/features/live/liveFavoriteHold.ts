@@ -6,6 +6,8 @@ export type FavoriteHoldEvent = {
   key?: string;
   keyCode?: number;
   repeatCount?: number;
+  eventTime?: number;
+  downTime?: number;
 };
 
 export type FavoriteHoldResult = {
@@ -15,6 +17,7 @@ export type FavoriteHoldResult = {
   measuredHoldMs: number;
   keyCode?: number;
   suppressionArmed: boolean;
+  triggerLatencyMs?: number;
 };
 
 type FavoriteHoldDetectorOptions = {
@@ -41,6 +44,8 @@ export function createFavoriteHoldDetector(options: FavoriteHoldDetectorOptions 
   let triggered = false;
   let suppressNextPress = false;
   let activeKeyCode: number | undefined;
+  let nativeStartedAt: number | null = null;
+  let nativeTimingAvailable = false;
 
   const clearTimer = () => {
     if (timer !== null) {
@@ -49,33 +54,45 @@ export function createFavoriteHoldDetector(options: FavoriteHoldDetectorOptions 
     }
   };
 
-  const trigger = (reason: string, measuredAt = now()) => {
+  const trigger = (reason: string, measuredAt = now(), measuredHoldMs?: number) => {
     if (startedAt === null || triggered) return false;
-    const durationMs = Math.max(0, measuredAt - startedAt);
+    const durationMs = Math.max(0, measuredHoldMs ?? measuredAt - startedAt);
     clearTimer();
     triggered = true;
     suppressNextPress = true;
-    options.onTriggered?.({ reason, durationMs, thresholdMs, measuredHoldMs: durationMs, keyCode: activeKeyCode, suppressionArmed: true });
+    options.onTriggered?.({ reason, durationMs, thresholdMs, measuredHoldMs: durationMs, keyCode: activeKeyCode, suppressionArmed: true, triggerLatencyMs: Math.max(0, now() - startedAt) });
     return true;
   };
 
-  const start = (reason: string, keyCode?: number) => {
+  const start = (reason: string, keyCode?: number, eventTime?: number) => {
     if (startedAt !== null) return false;
     startedAt = now();
     activeKeyCode = keyCode;
+    nativeStartedAt = Number.isFinite(eventTime) ? eventTime ?? null : null;
+    nativeTimingAvailable = nativeStartedAt !== null;
     triggered = false;
     suppressNextPress = false;
     options.onStarted?.({ reason, durationMs: 0, thresholdMs, measuredHoldMs: 0, keyCode: activeKeyCode, suppressionArmed: false });
-    timer = schedule(() => trigger('threshold'), thresholdMs);
+    timer = schedule(() => {
+      // Android can deliver JS callbacks late while the UI thread is busy.
+      // With native event timing available, wait for key-up to confirm the
+      // physical hold instead of converting callback delay into a favorite.
+      if (!nativeTimingAvailable) {
+        trigger('threshold');
+      }
+    }, thresholdMs);
     return true;
   };
 
-  const release = (reason: string) => {
+  const release = (reason: string, eventTime?: number) => {
     if (startedAt === null) return false;
-    const durationMs = Math.max(0, now() - startedAt);
+    const nativeDurationMs = nativeTimingAvailable && Number.isFinite(eventTime) && nativeStartedAt !== null
+      ? Math.max(0, (eventTime ?? nativeStartedAt) - nativeStartedAt)
+      : undefined;
+    const durationMs = nativeDurationMs ?? Math.max(0, now() - startedAt);
     clearTimer();
     if (!triggered && durationMs >= thresholdMs) {
-      trigger(reason, now());
+      trigger(reason, now(), durationMs);
     }
     if (!triggered) {
       options.onCancelled?.({ reason, durationMs, thresholdMs, measuredHoldMs: durationMs, keyCode: activeKeyCode, suppressionArmed: false });
@@ -83,6 +100,8 @@ export function createFavoriteHoldDetector(options: FavoriteHoldDetectorOptions 
     startedAt = null;
     triggered = false;
     activeKeyCode = undefined;
+    nativeStartedAt = null;
+    nativeTimingAvailable = false;
     return true;
   };
 
@@ -90,14 +109,14 @@ export function createFavoriteHoldDetector(options: FavoriteHoldDetectorOptions 
     handleEvent(event: FavoriteHoldEvent) {
       if (!isSelectEvent(event)) return false;
       const localReceiptMs = now();
-      if (event.eventKeyAction === 1) return release('key_up');
+      if (event.eventKeyAction === 1) return release('key_up', event.eventTime);
       if (event.eventKeyAction === 2) {
         if (startedAt !== null) {
           return true;
         }
-        return start('key_repeat', event.keyCode);
+        return start('key_repeat', event.keyCode, event.eventTime);
       }
-      return start('key_down', event.keyCode);
+      return start('key_down', event.keyCode, event.eventTime);
     },
     pressIn: () => start('press_in'),
     pressOut: () => release('press_out'),

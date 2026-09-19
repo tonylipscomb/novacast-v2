@@ -36,6 +36,89 @@ test('resolveCategoryDisplayName relabels English and US categories without chan
   assert.equal(resolveCategoryDisplayName({ name: 'UK', contentType: 'series' }), 'United Kingdom');
 });
 
+test('movie category display removes bounded regional presentation prefixes only', () => {
+  assert.equal(
+    displayProviderCategoryName({ name: 'GR TURKISH MOVIES', contentType: 'movie', kind: 'provider' }),
+    'TURKISH MOVIES',
+  );
+  assert.equal(
+    displayProviderCategoryName({ name: 'GR HBO MAX', contentType: 'movie', kind: 'provider' }),
+    'HBO MAX',
+  );
+  assert.equal(
+    displayProviderCategoryName({ name: 'IL HEBREW DOCU-MOVIES', contentType: 'movie', kind: 'provider' }),
+    'HEBREW DOCU-MOVIES',
+  );
+  assert.equal(
+    displayProviderCategoryName({ name: 'USA Network', contentType: 'movie', kind: 'provider' }),
+    'USA Network',
+  );
+});
+
+test('live categories keep regional prefixes unless stripRegionPrefix is opted in', () => {
+  // Default live behaviour is unchanged (Live TV rail keeps the presentation prefix).
+  assert.equal(
+    displayProviderCategoryName({ name: 'US DAZN PPV', contentType: 'live', kind: 'provider' }),
+    'US Dazn Ppv',
+  );
+  // Guide rail opts in and reuses the shared movie/series prefix stripper.
+  assert.equal(
+    displayProviderCategoryName({ name: 'US DAZN PPV', contentType: 'live', kind: 'provider', stripRegionPrefix: true }),
+    'Dazn Ppv',
+  );
+  // Non-region 2-letter leads are preserved (only bounded region codes are stripped).
+  assert.equal(
+    displayProviderCategoryName({ name: 'HD Sports', contentType: 'live', kind: 'provider', stripRegionPrefix: true }),
+    displayProviderCategoryName({ name: 'HD Sports', contentType: 'live', kind: 'provider' }),
+  );
+});
+
+test('series categories preserve regional tiers and clean presentation prefixes', () => {
+  const categories = [
+    { id: 'crunchyroll', name: 'CRUNCHYROLL SERIES (MULTI-SUBS)' },
+    { id: 'discovery', name: 'DISCOVERY+ SERIES' },
+    { id: 'apple', name: 'APPLE+ SERIES' },
+    { id: 'netflix', name: 'NETFLIX SERIES' },
+    { id: 'belgium-fr', name: 'BELGIUM SERIES (FR)' },
+    { id: 'belgium-nl', name: 'BELGIUM SERIES (NL)' },
+    { id: 'bulgaria', name: 'BULGARIA SERIAL' },
+    { id: 'china', name: 'CHINA ANIMATION' },
+    { id: 'dansk', name: 'DANSK SERIE' },
+    { id: 'danske', name: 'DANSKE BØRN' },
+    { id: 'africa', name: 'AFRICA SERIES' },
+    { id: 'somalia', name: 'SOMALIA ENGLISH SERIES' },
+    { id: 'albania', name: 'ALBANIA SERIALE' },
+    { id: 'gr', name: 'GR APPLE+ SERIES' },
+    { id: 'us', name: 'US SERIES' },
+    { id: 'nl', name: 'NL NETFLIX SERIES' },
+    { id: 'il', name: 'IL HEBREW SERIES' },
+  ];
+  const sorted = sortProviderCategoriesByRegion(categories, {
+    contentType: 'series',
+    alphabetizeWithinGroup: true,
+  });
+  assert.deepEqual(sorted.map((category) => category.id), [
+    'us', 'apple', 'crunchyroll', 'discovery', 'netflix',
+    'africa', 'albania', 'belgium-fr', 'belgium-nl', 'bulgaria', 'china', 'dansk', 'danske', 'gr', 'il', 'nl', 'somalia',
+  ]);
+  for (const name of [
+    'BELGIUM SERIES (FR)', 'BELGIUM SERIES (NL)', 'BULGARIA SERIAL',
+    'CHINA ANIMATION', 'DANSK SERIE', 'DANSKE BØRN', 'GR APPLE+ SERIES', 'NL NETFLIX SERIES',
+  ]) {
+    assert.equal(buildCategoryRegionalProfile({ name, contentType: 'series' }).regionGroup, 'foreign', name);
+  }
+  assert.equal(buildCategoryRegionalProfile({ name: 'CRUNCHYROLL SERIES (MULTI-SUBS)', contentType: 'series' }).regionGroup, 'international');
+  assert.equal(buildCategoryRegionalProfile({ name: 'DISCOVERY+ SERIES', contentType: 'series' }).regionGroup, 'international');
+  assert.equal(
+    displayProviderCategoryName({ name: 'GR APPLE+ SERIES', contentType: 'series', kind: 'provider' }),
+    'APPLE+ SERIES',
+  );
+  assert.equal(
+    displayProviderCategoryName({ name: 'USA Network', contentType: 'series', kind: 'provider' }),
+    'USA Network',
+  );
+});
+
 test('sortProviderCategoriesByRegion matches the documented validation order', () => {
   const sorted = sortProviderCategoriesByRegion(
     [

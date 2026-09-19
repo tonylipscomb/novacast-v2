@@ -16,7 +16,7 @@ import {
   summarizeProbeGroup,
   aggregateStreamProbeCheck,
   connectionSlotOccupied,
-  isGoldCloudProbeRestricted,
+  isCloudPlaybackProbeRestricted,
   maybeConnectionLimitCode,
   normalizePlaybackExtension,
   parseOptionalInt,
@@ -32,14 +32,16 @@ import {
 import { parseProviderBaseUrl } from './providerHealth.ts';
 import {
   CATALOG_READ_LIMIT_BYTES,
+  CATALOG_ITEM_SCAN_LIMIT,
   catalogDiagnosticMessage,
   createXtreamCatalogScanner,
   type CatalogScanResult,
+  type CatalogStopReason,
 } from './providerHealthCatalog.ts';
 
 const REACHABILITY_TIMEOUT_MS = 8_000;
 const AUTH_TIMEOUT_MS = 10_000;
-const CATALOG_TIMEOUT_MS = 20_000;
+const CATALOG_TIMEOUT_MS = 45_000;
 const PROBE_TIMEOUT_MS = 8_000;
 const PROBE_MAX_BYTES = 2_048;
 const CATALOG_MAX_BYTES = CATALOG_READ_LIMIT_BYTES;
@@ -129,12 +131,17 @@ async function fetchXtreamCatalog(
     keepAll: options.keepAll,
     maxBytes: options.maxBytes ?? CATALOG_MAX_BYTES,
   });
-  const fail = (reason: CatalogScanResult['reason'], httpStatus?: number | null): CatalogScanResult => ({
+  const fail = (reason: CatalogScanResult['reason'], httpStatus?: number | null, stopReason: CatalogStopReason = 'parse_failure'): CatalogScanResult => ({
     ok: false,
     reason,
     detail: catalogDiagnosticMessage(reason, { httpStatus, limitBytes: options.maxBytes ?? CATALOG_MAX_BYTES }),
     items: [],
     count: 0,
+    totalCount: null,
+    inspectedCount: 0,
+    exactCountAvailable: false,
+    diagnosticTruncated: false,
+    stopReason,
     truncated: false,
     complete: false,
     bytesRead: scanner.bytesRead,
@@ -159,19 +166,49 @@ async function fetchXtreamCatalog(
     }
     const reader = response.body?.getReader();
     if (!reader) {
-      scanner.push(new Uint8Array(await response.arrayBuffer()));
+      return fail('catalog_unexpected_shape', response.status);
     } else {
+      let upstreamEnded = false;
       while (!scanner.finished) {
         const { done, value } = await reader.read();
-        if (done || !value) break;
+        if (done || !value) {
+          upstreamEnded = done === true;
+          break;
+        }
         scanner.push(value);
       }
       await reader.cancel().catch(() => undefined);
+      if (upstreamEnded && !scanner.complete) {
+        const partial = scanner.finish(true, 'upstream_incomplete');
+        return {
+          ...partial,
+          ok: false,
+          reason: 'catalog_invalid_json',
+          detail: catalogDiagnosticMessage('catalog_invalid_json', { limitBytes: options.maxBytes ?? CATALOG_MAX_BYTES }),
+          totalCount: null,
+          exactCountAvailable: false,
+          stopReason: 'upstream_incomplete',
+          latencyMs: Date.now() - started,
+        };
+      }
     }
     return { ...scanner.finish(), latencyMs: Date.now() - started };
   } catch (error) {
     const aborted = error instanceof DOMException && error.name === 'AbortError';
-    return fail(aborted ? 'catalog_timeout' : 'catalog_invalid_json');
+    if (aborted) {
+      const partial = scanner.finish(true, 'timeout');
+      return {
+        ...partial,
+        ok: false,
+        reason: 'catalog_timeout',
+        detail: catalogDiagnosticMessage('catalog_timeout'),
+        totalCount: null,
+        exactCountAvailable: false,
+        stopReason: 'timeout',
+        latencyMs: Date.now() - started,
+      };
+    }
+    return fail('catalog_invalid_json');
   } finally {
     clearTimeout(timer);
   }
@@ -347,15 +384,15 @@ function catalogCheck(
       counts: { categories: options.categories, items: result.count },
     });
   }
-  const counted = result.truncated ? `at least ${result.count}` : String(result.count);
-  const bound = result.truncated ? ' Bounded catalog scan; full provider dump was not retained.' : '';
+  const counted = result.exactCountAvailable ? String(result.totalCount) : `at least ${result.inspectedCount}`;
+  const bound = result.exactCountAvailable ? '' : ' Bounded catalog inspection; exact total unavailable.';
   return check(
     id,
     label,
     'pass',
     'critical',
     `Categories: ${options.categories}. ${options.countLabel}: ${counted}.${bound}`,
-    { latencyMs: result.latencyMs, counts: { categories: options.categories, items: result.count } },
+    { latencyMs: result.latencyMs, counts: { categories: options.categories, items: result.totalCount ?? result.inspectedCount } },
   );
 }
 
@@ -374,7 +411,7 @@ async function fetchContentList(
 
   const indexes = pickRepresentativeIndexes(categories.length, 3);
   const samples: CatalogRow[] = [];
-  let count = 0;
+  let inspectedCount = 0;
   let bytesRead = 0;
   let latencyMs = global.latencyMs ?? 0;
   let lastFail = global;
@@ -388,20 +425,25 @@ async function fetchContentList(
     latencyMs += part.latencyMs ?? 0;
     bytesRead += part.bytesRead;
     if (part.ok) {
-      count += part.count;
+      inspectedCount = Math.min(CATALOG_ITEM_SCAN_LIMIT, inspectedCount + part.inspectedCount);
       samples.push(...part.items);
     } else {
       lastFail = part;
     }
     await yieldMs(80);
   }
-  if (count === 0) return lastFail;
+  if (inspectedCount === 0) return lastFail;
   return {
     ok: true,
     reason: 'ok',
-    detail: catalogDiagnosticMessage('ok', { count }),
+    detail: catalogDiagnosticMessage('ok', { count: inspectedCount }),
     items: samples.slice(0, 40),
-    count,
+    count: inspectedCount,
+    totalCount: null,
+    inspectedCount,
+    exactCountAvailable: false,
+    diagnosticTruncated: true,
+    stopReason: 'fallback_sample',
     truncated: true,
     complete: false,
     bytesRead,
@@ -439,6 +481,16 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
     seriesCategories: 0,
     series: 0,
     episodeLookupOk: false,
+    countDetails: {
+      liveChannels: { totalCount: null, inspectedCount: 0, exactCountAvailable: false, diagnosticTruncated: false, bytesRead: 0, complete: false, stopReason: 'parse_failure' },
+      movies: { totalCount: null, inspectedCount: 0, exactCountAvailable: false, diagnosticTruncated: false, bytesRead: 0, complete: false, stopReason: 'parse_failure' },
+      series: { totalCount: null, inspectedCount: 0, exactCountAvailable: false, diagnosticTruncated: false, bytesRead: 0, complete: false, stopReason: 'parse_failure' },
+    },
+    truncated: {
+      liveChannels: false,
+      movies: false,
+      series: false,
+    },
   };
   const probes: StreamProbeResult[] = [];
 
@@ -594,11 +646,45 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
   seriesList = seriesListResult.items;
 
   catalogs.liveCategories = liveCategoryResult.count;
-  catalogs.liveChannels = liveStreamResult.count;
+  catalogs.liveChannels = liveStreamResult.totalCount ?? liveStreamResult.inspectedCount;
   catalogs.movieCategories = vodCategoryResult.count;
-  catalogs.movies = vodStreamResult.count;
+  catalogs.movies = vodStreamResult.totalCount ?? vodStreamResult.inspectedCount;
   catalogs.seriesCategories = seriesCategoryResult.count;
-  catalogs.series = seriesListResult.count;
+  catalogs.series = seriesListResult.totalCount ?? seriesListResult.inspectedCount;
+  catalogs.countDetails = {
+    liveChannels: {
+      totalCount: liveStreamResult.totalCount,
+      inspectedCount: liveStreamResult.inspectedCount,
+      exactCountAvailable: liveStreamResult.exactCountAvailable,
+      diagnosticTruncated: liveStreamResult.diagnosticTruncated,
+      bytesRead: liveStreamResult.bytesRead,
+      complete: liveStreamResult.complete,
+      stopReason: liveStreamResult.stopReason,
+    },
+    movies: {
+      totalCount: vodStreamResult.totalCount,
+      inspectedCount: vodStreamResult.inspectedCount,
+      exactCountAvailable: vodStreamResult.exactCountAvailable,
+      diagnosticTruncated: vodStreamResult.diagnosticTruncated,
+      bytesRead: vodStreamResult.bytesRead,
+      complete: vodStreamResult.complete,
+      stopReason: vodStreamResult.stopReason,
+    },
+    series: {
+      totalCount: seriesListResult.totalCount,
+      inspectedCount: seriesListResult.inspectedCount,
+      exactCountAvailable: seriesListResult.exactCountAvailable,
+      diagnosticTruncated: seriesListResult.diagnosticTruncated,
+      bytesRead: seriesListResult.bytesRead,
+      complete: seriesListResult.complete,
+      stopReason: seriesListResult.stopReason,
+    },
+  };
+  catalogs.truncated = {
+    liveChannels: liveStreamResult.diagnosticTruncated,
+    movies: vodStreamResult.diagnosticTruncated,
+    series: seriesListResult.diagnosticTruncated,
+  };
 
   checks.push(catalogCheck('live-catalog', 'Live TV Catalog', liveStreamResult, {
     required: true,
@@ -801,18 +887,18 @@ function finish(
   const live = summarizeProbeGroup(probes.filter((item) => item.kind === 'live'));
   const movies = summarizeProbeGroup(probes.filter((item) => item.kind === 'movie'));
   const episodes = summarizeProbeGroup(probes.filter((item) => item.kind === 'episode'));
-  const cloudPlaybackProbeRestricted = isGoldCloudProbeRestricted({ isGoldManaged: options.isGoldManaged === true, checks, probes, catalogs });
+  const cloudPlaybackProbeRestricted = isCloudPlaybackProbeRestricted({ checks, probes, catalogs });
   const playback = checks.find((check) => check.id === 'playback');
   if (cloudPlaybackProbeRestricted && playback) {
     playback.verdict = 'warn';
     playback.severity = 'noncritical';
     playback.detail = `Cloud playback probe restricted. ${playback.detail}`;
   }
-  const classified = classifyOverallHealth(checks);
+  const classified = classifyOverallHealth(cloudPlaybackProbeRestricted ? checks.filter((check) => check.id !== 'playback') : checks);
   return {
     overall: classified.overall,
     overallLabel: classified.overallLabel,
-    ...(cloudPlaybackProbeRestricted ? { cloudPlaybackProbeRestricted: true, cloudPlaybackProbeReason: 'gold_cloud_probe_restricted' as const } : {}),
+    ...(cloudPlaybackProbeRestricted ? { cloudPlaybackProbeRestricted: true, cloudPlaybackProbeReason: 'cloud_playback_restricted' as const } : {}),
     testedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAt,
     checks,

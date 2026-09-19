@@ -7,6 +7,10 @@ export type CatalogUiSurface = 'live' | 'movies' | 'series' | 'other';
 
 let catalogUiSurface: CatalogUiSurface = 'other';
 let activeForegroundCatalogReads = 0;
+export const LIVE_CATALOG_TUNING_COOLDOWN_MS = 1_200;
+let liveCatalogTuningUntilMs = 0;
+let liveCatalogResumeLogged = false;
+let liveCatalogGateBlockedLogged = false;
 const foregroundCatalogReadDrainWaiters = new Set<() => void>();
 const catalogUiSurfaceListeners = new Set<(surface: CatalogUiSurface) => void>();
 
@@ -15,6 +19,11 @@ export function setCatalogUiSurface(surface: CatalogUiSurface) {
     return;
   }
   catalogUiSurface = surface;
+  if (surface !== 'live' && liveCatalogTuningUntilMs > 0) {
+    liveCatalogTuningUntilMs = 0;
+    liveCatalogResumeLogged = false;
+    liveCatalogGateBlockedLogged = false;
+  }
   for (const listener of catalogUiSurfaceListeners) {
     listener(surface);
   }
@@ -70,17 +79,80 @@ export async function waitForForegroundCatalogReadsToDrain(): Promise<void> {
 }
 
 export function getCatalogBackgroundWriteYield(): { pauseMs: number; reason: string } {
+  if (catalogUiSurface === 'live' && Date.now() < liveCatalogTuningUntilMs) {
+    return { pauseMs: 250, reason: 'live-tuning' };
+  }
   if (activeForegroundCatalogReads > 0) {
     return { pauseMs: 80, reason: 'foreground-read' };
   }
   if (isCatalogUiBrowseActive()) {
-    return { pauseMs: 48, reason: `ui-${catalogUiSurface}` };
+    return { pauseMs: catalogUiSurface === 'live' ? 96 : 48, reason: `ui-${catalogUiSurface}` };
   }
   return { pauseMs: 0, reason: 'none' };
+}
+
+/** Briefly yield catalog writes while a Live TV tune/surf transition settles. */
+export function markLiveCatalogInteraction(reason = 'channel-change') {
+  if (catalogUiSurface !== 'live') return;
+  const wasTuning = Date.now() < liveCatalogTuningUntilMs;
+  liveCatalogTuningUntilMs = Date.now() + LIVE_CATALOG_TUNING_COOLDOWN_MS;
+  liveCatalogResumeLogged = false;
+  console.info('[NovaCast Catalog Live Priority]', {
+    state: 'live-tuning',
+    catalogAction: wasTuning ? 'cooldown-extended' : 'suspend',
+    reason,
+    cooldownMs: LIVE_CATALOG_TUNING_COOLDOWN_MS,
+  });
+}
+
+export function isLiveCatalogTuningActive() {
+  return catalogUiSurface === 'live' && Date.now() < liveCatalogTuningUntilMs;
+}
+
+export function isCatalogLiveGateActive() {
+  return catalogUiSurface === 'live';
+}
+
+/** Hard gate for new background work while the Live screen owns the foreground. */
+export async function waitForCatalogLiveGate() {
+  if (!isCatalogLiveGateActive()) return;
+  if (!liveCatalogGateBlockedLogged) {
+    liveCatalogGateBlockedLogged = true;
+    console.info('[NovaCast Catalog Live Gate]', {
+      state: 'blocked',
+      reason: 'live-screen-active',
+      pendingWork: true,
+    });
+  }
+  while (isCatalogLiveGateActive()) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  liveCatalogGateBlockedLogged = false;
+  console.info('[NovaCast Catalog Live Gate]', {
+    state: 'resumed',
+    reason: 'left-live-screen',
+  });
+}
+
+export async function waitForLiveCatalogTuningToSettle() {
+  while (isLiveCatalogTuningActive()) {
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, liveCatalogTuningUntilMs - Date.now()))));
+  }
+  if (catalogUiSurface === 'live' && !liveCatalogResumeLogged) {
+    liveCatalogResumeLogged = true;
+    console.info('[NovaCast Catalog Live Priority]', {
+      state: 'live-idle',
+      catalogAction: 'resume-throttled',
+      pauseMs: 96,
+    });
+  }
 }
 
 export function resetCatalogForegroundPriorityForTests() {
   catalogUiSurface = 'other';
   activeForegroundCatalogReads = 0;
   foregroundCatalogReadDrainWaiters.clear();
+  liveCatalogTuningUntilMs = 0;
+  liveCatalogResumeLogged = false;
+  liveCatalogGateBlockedLogged = false;
 }

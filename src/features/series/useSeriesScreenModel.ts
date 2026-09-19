@@ -16,6 +16,7 @@ import { subscribeCategoryCountIndex } from '@/features/providers/categoryCountI
 import { subscribeCatalogSyncPhase } from '@/features/providers/providerCatalogSync';
 import { subscribeSmartCategoryCache } from '@/features/providers/smartCategoryCacheStore';
 import { findDefaultBrowseCategoryId, isSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
+import { buildCategoryRegionalProfile } from '@/features/providers/categoryRegionalPipeline';
 import type { SeriesDataSource } from './data/SeriesDataSource';
 import { createProviderSeriesDataSource } from './data/ProviderSeriesDataSource';
 import { createSqliteFirstSeriesDataSource } from './data/SqliteSeriesDataSource';
@@ -31,6 +32,7 @@ import { emitSeriesStartup, emitSeriesStateHandoff, logSeriesPerf } from './seri
 import {
   evaluateSeriesStartupBudgets,
   mergeSeriesCategoriesPreservingCounts,
+  normalizeSeriesCategoryId,
   resolveSeriesStartupFocusTarget,
   SERIES_FOCUS_STAGE4O_MARKER,
   SERIES_STARTUP_VIEWPORT_LIMIT,
@@ -274,6 +276,62 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
     categoriesRef.current = categories;
   }, [categories]);
 
+  useEffect(() => {
+    if (typeof __DEV__ === 'undefined' || !__DEV__ || categories.length === 0) {
+      return;
+    }
+    console.info('[NovaCast Series Final Category Order]', JSON.stringify(
+      categories.slice(0, 40).map((category, index) => {
+        const profile = buildCategoryRegionalProfile({
+          name: category.name,
+          rawName: category.rawName,
+          countryCode: category.countryCode,
+          contentType: 'series',
+        });
+        return {
+          index,
+          id: category.id,
+          name: category.name,
+          classification: profile.regionGroup,
+          regionalTier: profile.sortPriority,
+          finalCount: category.count,
+          countKnown: category.countKnown === true,
+          countSource: category.countKnown === true ? 'resolved-datasource' : 'unknown',
+        };
+      }),
+    ));
+  }, [categories]);
+
+  useEffect(() => {
+    if (typeof __DEV__ === 'undefined' || !__DEV__ || !selectedCategoryId) {
+      return;
+    }
+    const category = categories.find((entry) => entry.id === selectedCategoryId);
+    if (!category || category.kind === 'section') {
+      return;
+    }
+    let cancelled = false;
+    void resolveReadableCatalogGeneration(activeProviderId, 'series').then((readableGeneration) => {
+      if (cancelled) return;
+      console.info('[NovaCast Series Count Audit]', JSON.stringify({
+        categoryId: category.id,
+        categoryName: category.name,
+        providerCount: category.count,
+        providerCountKnown: category.countKnown === true,
+        normalizedId: normalizeSeriesCategoryId(category.id),
+        readableGeneration,
+        groupedSqliteCount: category.countKnown === true ? category.count : null,
+        directVisibleRowCount: visibleItems.filter((item) => item.categoryId === category.id).length,
+        finalCount: category.count,
+        finalCountKnown: category.countKnown === true,
+        countSource: category.countKnown === true ? 'readable-generation-or-direct-query' : 'unknown',
+      }));
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProviderId, categories, selectedCategoryId, visibleItems]);
+
   const reload = useCallback(() => {
     setReloadToken((current) => current + 1);
   }, []);
@@ -283,7 +341,11 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       return;
     }
     setCategories((current) =>
-      current.map((category) => (category.id === categoryId ? { ...category, count, countKnown: true } : category)),
+      current.map((category) => (
+        normalizeSeriesCategoryId(category.id) === normalizeSeriesCategoryId(categoryId)
+          ? { ...category, count, countKnown: true }
+          : category
+      )),
     );
   }, []);
 

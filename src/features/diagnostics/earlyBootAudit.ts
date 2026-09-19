@@ -3,6 +3,8 @@
  * Logs operations over 50 ms during the first 15 s after launch.
  */
 
+import { recordLivePerformanceEvent } from './livePerformanceTelemetry.ts';
+
 const LOG_TAG = '[NovaCast EarlyBoot]';
 const WINDOW_MS = 15_000;
 const REPORT_THRESHOLD_MS = 50;
@@ -122,6 +124,7 @@ export function earlyBootTimedSync<T>(
 }
 
 export function earlyBootMark(name: string, meta: Record<string, unknown> = {}) {
+  recordLivePerformanceEvent('cold_start_milestone', { milestone: name, ...meta });
   if (!enabled || !isEarlyBootWindowOpen()) {
     return;
   }

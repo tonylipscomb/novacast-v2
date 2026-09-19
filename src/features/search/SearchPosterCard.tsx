@@ -147,6 +147,7 @@ export const SearchPosterCard = memo(function SearchPosterCard({
       {...(nextFocusLeft ? { nextFocusLeft } : null)}
       style={[focusChrome.card, styles.searchCard]}>
       <View style={[focusChrome.posterShell, showFocused && focusChrome.posterShellFocused]}>
+        {showFocused ? <View pointerEvents="none" style={focusChrome.posterFocusHalo} /> : null}
         <View
           style={[
             focusChrome.poster,

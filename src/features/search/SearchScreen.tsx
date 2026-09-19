@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 
 import { NovaTvShell, type NovaNavigationFocusHandles } from '@/components/nova';
 import { NovaFocusRow } from '@/components/nova/NovaFocusRow';
@@ -40,8 +41,9 @@ import { SearchMediaDetailLayer } from './SearchMediaDetailLayer';
 import { openSearchResult } from './searchNavigation';
 import { isSearchableQuery } from './searchQuery';
 import { searchResultKey } from './searchScopes';
-import { getSearchScreenMemory, rememberSearchResultSnapshot, rememberSearchScreenMemory } from './searchScreenMemory';
+import { getSearchScreenMemory, rememberSearchResultSnapshot, rememberSearchScreenMemory, resolveSearchFocusRestoreKey } from './searchScreenMemory';
 import { collectVisibleSearchResultKeys, isSearchFocusKeyVisible } from './searchFocusLogic';
+import { requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import {
   SEARCH_NOTIFICATION_DURATION_MS,
   SEARCH_NOTIFICATION_ID,
@@ -96,6 +98,11 @@ export function SearchScreen() {
   const retryRowRef = useRef<View>(null);
   const firstFlatResultRef = useRef<View>(null);
   const firstGroupedResultRef = useRef<View>(null);
+  const searchRestoreRowRef = useRef<View>(null);
+  const pendingSearchFocusRestoreRef = useRef<string | null>(null);
+  const searchFocusRestoreActiveRef = useRef(false);
+  const searchFocusRestoreContextRef = useRef<{ query: string; scope: SearchScope } | null>(null);
+  const [searchRestoreResultKey, setSearchRestoreResultKey] = useState<string | null>(null);
   const firstScopeTabRef = useRef<View>(null);
   const [navFocusHandles, setNavFocusHandles] = useState<NovaNavigationFocusHandles>({});
   const [focusedClearHistory, setFocusedClearHistory] = useState(false);
@@ -247,8 +254,98 @@ export function SearchScreen() {
       if (activeProviderId !== 'no-provider') {
         rememberSearchScreenMemory(activeProviderId, { focusedResultKey: key });
       }
+      if (searchFocusRestoreActiveRef.current && pendingSearchFocusRestoreRef.current === key) {
+        console.info('[NovaCast Search Focus Restore]', 'row-focus-confirmed', { itemKey: key });
+        pendingSearchFocusRestoreRef.current = null;
+        searchFocusRestoreContextRef.current = null;
+        searchFocusRestoreActiveRef.current = false;
+        setSearchRestoreResultKey(null);
+        if (activeProviderId !== 'no-provider') {
+          rememberSearchScreenMemory(activeProviderId, { pendingFocusRestoreKey: null });
+        }
+      }
     },
     [activeProviderId],
+  );
+
+  useEffect(() => {
+    const context = searchFocusRestoreContextRef.current;
+    if (!pendingSearchFocusRestoreRef.current || !context) {
+      return;
+    }
+    if (context.query === query && context.scope === scope) {
+      return;
+    }
+    console.info('[NovaCast Search Focus Restore]', 'restore-cleared-context-changed', {
+      itemKey: pendingSearchFocusRestoreRef.current,
+    });
+    pendingSearchFocusRestoreRef.current = null;
+    searchFocusRestoreContextRef.current = null;
+    searchFocusRestoreActiveRef.current = false;
+    setSearchRestoreResultKey(null);
+    if (activeProviderId !== 'no-provider') {
+      rememberSearchScreenMemory(activeProviderId, { pendingFocusRestoreKey: null });
+    }
+  }, [activeProviderId, query, scope]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const rememberedRestoreKey =
+        activeProviderId !== 'no-provider' ? getSearchScreenMemory(activeProviderId).pendingFocusRestoreKey : null;
+      const preferredKey = pendingSearchFocusRestoreRef.current ?? rememberedRestoreKey;
+      if (!preferredKey) {
+        return undefined;
+      }
+      pendingSearchFocusRestoreRef.current = preferredKey;
+
+      const visibleKeys = Array.from(collectVisibleSearchResultKeys(scope, results, groupedResults));
+      const resolved = resolveSearchFocusRestoreKey(preferredKey, visibleKeys);
+      console.info('[NovaCast Search Focus Restore]', 'resume-detected', {
+        itemKey: preferredKey,
+        itemIndex: visibleKeys.indexOf(preferredKey),
+      });
+      if (!resolved.key) {
+        console.info('[NovaCast Search Focus Restore]', 'restore-target-not-found', { itemKey: preferredKey });
+        pendingSearchFocusRestoreRef.current = null;
+        searchFocusRestoreContextRef.current = null;
+        searchFocusRestoreActiveRef.current = false;
+        setSearchRestoreResultKey(null);
+        if (activeProviderId !== 'no-provider') {
+          rememberSearchScreenMemory(activeProviderId, { pendingFocusRestoreKey: null });
+        }
+        return undefined;
+      }
+
+      if (resolved.usedFallback) {
+        console.info('[NovaCast Search Focus Restore]', 'fallback-used', {
+          requestedKey: preferredKey,
+          fallbackKey: resolved.key,
+        });
+      } else {
+        console.info('[NovaCast Search Focus Restore]', 'restore-target-found', { itemKey: resolved.key });
+      }
+      setSearchRestoreResultKey(preferredKey);
+      pendingSearchFocusRestoreRef.current = resolved.key;
+      searchFocusRestoreActiveRef.current = true;
+      const targetRef = resolved.usedFallback
+        ? (scope === 'all' && groupedResults ? firstGroupedResultRef : firstFlatResultRef)
+        : searchRestoreRowRef;
+      console.info('[NovaCast Search Focus Restore]', 'focus-request-issued', { itemKey: resolved.key });
+      return requestTvFocus({
+        screen: 'search',
+        source: 'SearchScreen',
+        region: 'search-results',
+        itemId: resolved.key,
+        reason: 'return-from-search-live-playback',
+        getTarget: () => targetRef.current as unknown as { focus: () => void } | null,
+        isActive: () => searchFocusRestoreActiveRef.current,
+        onSettled: (status) => {
+          if (status !== 'executed') {
+            console.info('[NovaCast Search Focus Restore]', 'focus-request-settled', { itemKey: resolved.key, status });
+          }
+        },
+      });
+    }, [activeProviderId, groupedResults, results, scope]),
   );
 
   const handleSelectResult = useCallback(
@@ -257,10 +354,19 @@ export function SearchScreen() {
       setFocusedResultKey(key);
 
       if (result.type === 'live') {
+        pendingSearchFocusRestoreRef.current = key;
+        searchFocusRestoreContextRef.current = { query, scope };
+        searchFocusRestoreActiveRef.current = false;
+        setSearchRestoreResultKey(key);
+        console.info('[NovaCast Search Focus Restore]', 'saved-before-playback', {
+          itemKey: key,
+          itemIndex: results.findIndex((item) => searchResultKey(item) === key),
+        });
         rememberSearchScreenMemory(activeProviderId, {
           query,
           scope,
           focusedResultKey: key,
+          pendingFocusRestoreKey: key,
         });
         const liveResults = scope === 'all' && groupedResults ? groupedResults.live.items : results;
         const livePlaybackChannels = liveResults
@@ -505,6 +611,9 @@ export function SearchScreen() {
               page={{ ...groupedResults.live, items: groupedResults.live.items as SearchResult[] }}
               loading={status === 'loading' && groupedResults.live.items.length === 0}
               focusedResultKey={focusedResultKey}
+              favoriteContentIds={favoriteContentIds}
+              restoreResultKey={searchRestoreResultKey}
+              restoreRowRef={searchRestoreRowRef}
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
               onToggleLiveFavorite={toggleSearchLiveFavorite}
@@ -519,6 +628,9 @@ export function SearchScreen() {
               page={{ ...groupedResults.movie, items: groupedResults.movie.items as SearchResult[] }}
               loading={status === 'loading' && groupedResults.movie.items.length === 0}
               focusedResultKey={focusedResultKey}
+              favoriteContentIds={favoriteContentIds}
+              restoreResultKey={searchRestoreResultKey}
+              restoreRowRef={searchRestoreRowRef}
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
               onToggleLiveFavorite={toggleSearchLiveFavorite}
@@ -536,6 +648,9 @@ export function SearchScreen() {
               page={{ ...groupedResults.series, items: groupedResults.series.items as SearchResult[] }}
               loading={status === 'loading' && groupedResults.series.items.length === 0}
               focusedResultKey={focusedResultKey}
+              favoriteContentIds={favoriteContentIds}
+              restoreResultKey={searchRestoreResultKey}
+              restoreRowRef={searchRestoreRowRef}
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
               onToggleLiveFavorite={toggleSearchLiveFavorite}
@@ -555,6 +670,9 @@ export function SearchScreen() {
               page={{ ...groupedResults.guide, items: groupedResults.guide.items as SearchResult[] }}
               loading={status === 'loading' && groupedResults.guide.items.length === 0}
               focusedResultKey={focusedResultKey}
+              favoriteContentIds={favoriteContentIds}
+              restoreResultKey={searchRestoreResultKey}
+              restoreRowRef={searchRestoreRowRef}
               onFocusResult={setFocusedResultKey}
               onSelectResult={handleSelectResult}
               onToggleLiveFavorite={toggleSearchLiveFavorite}
@@ -625,11 +743,12 @@ export function SearchScreen() {
                   focusedResultKey={focusedResultKey}
                   onFocusResult={setFocusedResultKey}
                   onSelectResult={handleSelectResult}
+                  favoriteContentIds={favoriteContentIds}
                   onToggleLiveFavorite={toggleSearchLiveFavorite}
                   onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}
                   consumeLiveFavoriteHoldSuppression={liveFavoriteController.consumeSuppressedPress}
-                  restoreResultKey={focusedResultKey}
-                  restoreRowRef={index === 0 ? firstFlatResultRef : undefined}
+                  restoreResultKey={searchRestoreResultKey}
+                  restoreRowRef={searchRestoreRowRef}
                   emphasized
                   focusUpHandle={index === 0 ? searchFocusUpHandle : undefined}
                   firstRowRef={index === 0 ? firstFlatResultRef : undefined}

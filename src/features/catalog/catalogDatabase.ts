@@ -2,6 +2,7 @@ import {
   CATALOG_MIGRATION_SQL_V1,
   CATALOG_MIGRATION_SQL_V2,
   CATALOG_MIGRATION_SQL_V4,
+  CATALOG_MIGRATION_SQL_V5,
   CATALOG_SCHEMA_VERSION,
 } from './catalogSchema.ts';
 import {
@@ -15,6 +16,8 @@ import { CATALOG_DATABASE_NAME } from './catalogTypes.ts';
 import { recordCatalogWritePhase } from './catalogWritePhaseAudit.ts';
 import {
   resetCatalogForegroundPriorityForTests,
+  getCatalogUiSurface,
+  waitForCatalogLiveGate,
   waitForForegroundCatalogReadsToDrain,
 } from './catalogForegroundPriority.ts';
 import { nowMs } from './jsChunkBudget.ts';
@@ -272,6 +275,10 @@ export async function withCatalogTransaction<T>(
 
   const run = catalogTransactionChain.then(async () => {
     await waitForForegroundCatalogReadsToDrain();
+    // Recheck after the serialized writer queue/mutex wait and immediately
+    // before opening a transaction. An in-flight transaction is allowed to
+    // drain; this prevents the next queued transaction starting on Live.
+    await waitForCatalogLiveGate();
     const queueWaitMs = nowMs() - waitStart;
     mutexWaitTotalMs += queueWaitMs;
     mutexWaitSamples += 1;
@@ -313,6 +320,13 @@ export async function withCatalogTransaction<T>(
           totalTransactionSpanMs: Math.round(totalTransactionSpanMs),
         });
       }
+      if (getCatalogUiSurface() === 'live') {
+        console.info('[NovaCast Catalog Live Gate]', {
+          state: 'inflight-draining',
+          writeType: diagnostics?.writeType ?? 'catalog',
+          elapsedMs: Math.round(transactionBodyMs),
+        });
+      }
       activeCatalogTransactions = Math.max(0, activeCatalogTransactions - 1);
     }
   }) as Promise<T>;
@@ -344,6 +358,9 @@ async function ensureCatalogItemSortColumns(db: CatalogDatabaseHandle) {
     if (!names.has('popularity')) {
       await db.exec(`ALTER TABLE ${table} ADD COLUMN popularity REAL`);
     }
+    if (!names.has('region_rank')) {
+      await db.exec(`ALTER TABLE ${table} ADD COLUMN region_rank INTEGER`);
+    }
   }
 }
 
@@ -369,6 +386,7 @@ export async function migrateCatalogDatabase(db: CatalogDatabaseHandle): Promise
   await db.exec(CATALOG_MIGRATION_SQL_V2);
   await ensureCatalogItemSortColumns(db);
   await db.exec(CATALOG_MIGRATION_SQL_V4);
+  await db.exec(CATALOG_MIGRATION_SQL_V5);
 
   if (databaseVersionBefore < 1) {
     await db.exec('PRAGMA user_version = 1');

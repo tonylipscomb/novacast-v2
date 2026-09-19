@@ -90,6 +90,36 @@ export function resolveLiveSurfAdjacent(input: {
   };
 }
 
+export function resolveLiveSurfTarget(input: {
+  channelIds: string[];
+  currentId: string | null;
+  targetId: string;
+}): LiveSurfAdjacentResult {
+  const queueLength = input.channelIds.length;
+  const fromIndex = input.currentId ? input.channelIds.indexOf(input.currentId) : -1;
+  const toIndex = input.channelIds.indexOf(input.targetId);
+
+  if (queueLength <= 0 || toIndex < 0 || input.targetId === input.currentId) {
+    return {
+      kind: 'noop',
+      reason: queueLength <= 0 ? 'empty-queue' : 'single-channel',
+      fromChannelId: input.currentId,
+      fromIndex,
+      toIndex: toIndex >= 0 ? toIndex : fromIndex,
+      queueLength,
+    };
+  }
+
+  return {
+    kind: 'adjacent',
+    fromChannelId: input.currentId,
+    toChannelId: input.targetId,
+    fromIndex: fromIndex >= 0 ? fromIndex : 0,
+    toIndex,
+    queueLength,
+  };
+}
+
 export function shouldApplyLiveSurfResolution(input: {
   requestId: number;
   latestRequestId: number;

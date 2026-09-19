@@ -1,9 +1,46 @@
 import type { NormalizedGuideRow } from './guideTimeline';
+import type { ProviderLiveCategory } from '@/features/providers/providerRepositories';
 
 export type GuideLoadStatus = 'loading' | 'ready' | 'empty' | 'no-epg' | 'no-favorites' | 'error';
 
 /** Categories a channel can never belong to; used to detect the synthetic Favorites bucket everywhere. */
 export const GUIDE_FAVORITES_CATEGORY_ID = 'favorites';
+/** Synthetic Guide category backed by the canonical recent-channel history. */
+export const GUIDE_RECENT_CATEGORY_ID = 'recent';
+
+export function buildGuideCategoryRail(
+  baseCategories: readonly ProviderLiveCategory[],
+  counts: { favorites: number; recent: number },
+): ProviderLiveCategory[] {
+  const allCount = baseCategories.every((category) => category.count != null)
+    ? baseCategories.reduce((total, category) => total + (category.count ?? 0), 0)
+    : null;
+  const smart: ProviderLiveCategory[] = [
+    {
+      id: 'all',
+      renderKey: 'all',
+      name: 'All Channels',
+      count: allCount,
+      icon: 'earth',
+    },
+    {
+      id: GUIDE_FAVORITES_CATEGORY_ID,
+      renderKey: GUIDE_FAVORITES_CATEGORY_ID,
+      name: 'Favorites',
+      count: counts.favorites,
+      icon: 'star-outline',
+    },
+    {
+      id: GUIDE_RECENT_CATEGORY_ID,
+      renderKey: GUIDE_RECENT_CATEGORY_ID,
+      name: 'Recent',
+      count: counts.recent,
+      icon: 'history',
+    },
+  ];
+
+  return [...smart, ...baseCategories];
+}
 
 /** NOVACAST_GUIDE_V2_FOUNDATION_V1: channel rows make Guide usable even when schedule data is absent or still hydrating. */
 export function statusForRows(categoryId: string, rows: NormalizedGuideRow[], favoritesAvailable: boolean): GuideLoadStatus {

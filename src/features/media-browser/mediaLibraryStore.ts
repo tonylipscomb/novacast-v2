@@ -5,6 +5,7 @@ import type { ContinueWatchingEntry, WatchHistoryEntry } from './mediaTypes';
 import type { FavoriteRecord } from '../personalization/personalizationModel.ts';
 
 import { COMPLETED_PROGRESS_PERCENT, isContinueWatchingEligible } from '../playback/continuity/playbackContinuity.ts';
+import { emitRecommendationTransition } from '../novapulse/recommendationBehavior.ts';
 
 const STORAGE_KEY = '@novacast/media-library';
 const LEGACY_MOVIE_KEY = '@novacast/movie-library';
@@ -265,17 +266,37 @@ export async function toggleMediaFavorite(
     : [...new Set([...current.favorites, mediaId])];
 
   await writeStore({ ...store, [providerId]: { ...current, favorites, favoriteRecords: [...current.favoriteRecords.filter((item) => item.mediaType !== mediaType), ...nextRecords] } });
+  if (metadata?.title) {
+    void emitRecommendationTransition({
+      eventType: favorites.includes(mediaId) ? 'favorite_add' : 'favorite_remove',
+      providerId,
+      providerContentId: mediaId,
+      contentType: mediaType,
+      title: metadata.title,
+    }).catch(() => undefined);
+  }
   return !exists;
 }
 
-export async function toggleMediaWatchlist(providerId: string, mediaId: string) {
+export async function toggleMediaWatchlist(providerId: string, mediaId: string, metadata?: { title?: string; year?: unknown; mediaType?: 'movie' | 'series' }) {
   const store = await readStore();
   const current = getProviderState(store, providerId);
-  const watchlist = current.watchlist.includes(mediaId)
+  const wasWatchlisted = current.watchlist.includes(mediaId);
+  const watchlist = wasWatchlisted
     ? current.watchlist.filter((id) => id !== mediaId)
     : [...current.watchlist, mediaId];
 
   await writeStore({ ...store, [providerId]: { ...current, watchlist } });
+  if (metadata?.title && metadata.mediaType) {
+    void emitRecommendationTransition({
+      eventType: watchlist.includes(mediaId) ? 'watchlist_add' : 'watchlist_remove',
+      providerId,
+      providerContentId: mediaId,
+      contentType: metadata.mediaType,
+      title: metadata.title,
+      year: metadata.year,
+    }).catch(() => undefined);
+  }
   return watchlist.includes(mediaId);
 }
 

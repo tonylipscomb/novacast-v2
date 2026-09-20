@@ -2,6 +2,7 @@ import type { PlaybackItem, PlaybackLaunchSource, UnifiedPlayerMachineState } fr
 
 import { enqueueAnalyticsEvent } from './novaAnalytics';
 import { recordDiagnostic } from '@/features/diagnostics/diagnosticsClient';
+import { recommendationBehaviorTracker } from '@/features/novapulse/recommendationBehavior';
 
 export type AnalyticsPlaybackType = 'live' | 'movie' | 'series';
 export type PlaybackFailureCategory = 'network' | 'provider' | 'timeout' | 'decoder' | 'unsupported' | 'user_cancelled' | 'unknown';
@@ -33,10 +34,21 @@ type PlaybackAttempt = {
   stopped: boolean;
   retryCount: number;
   sessionId: string;
+  recommendationSessionId: string | null;
+  lastPositionMs: number;
+  lastDurationMs: number;
   lastState: UnifiedPlayerMachineState;
 };
 
 export type PlaybackStartedSource = 'native_first_frame' | 'playing_transition' | 'current_time_progress';
+
+const noOpRecommendationTracker = {
+  begin: () => null,
+  started: (_sessionId: string) => undefined,
+  progress: (_sessionId: string, _positionMs: number, _durationMs: number) => undefined,
+  stop: (_sessionId: string, _positionMs: number, _durationMs: number) => undefined,
+};
+const safeRecommendationBehaviorTracker = recommendationBehaviorTracker ?? noOpRecommendationTracker;
 
 export function logPlaybackAnalytics(event: string, fields: Record<string, unknown> = {}) {
   if (typeof __DEV__ !== 'undefined' && __DEV__) {
@@ -167,8 +179,21 @@ export function createPlaybackAnalyticsTracker(
       stopped: false,
       retryCount: force ? (priorAttempt?.retryCount ?? 0) + 1 : 0,
       sessionId: createPlaybackSessionId(),
+      recommendationSessionId: null,
+      lastPositionMs: 0,
+      lastDurationMs: 0,
       lastState: 'loading',
     };
+    next.recommendationSessionId = safeRecommendationBehaviorTracker.begin({
+      providerId: next.item.providerId,
+      contentId: next.item.id,
+      contentType: next.item.mediaType,
+      title: next.item.title,
+      seriesTitle: next.item.subtitle,
+      seriesId: next.item.seriesId,
+      seasonNumber: next.item.seasonNumber,
+      episodeNumber: next.item.episodeNumber,
+    }, next.sessionId, force);
     attempt = next;
     send('playback_requested', {
       ...eventInput(next),
@@ -205,6 +230,7 @@ export function createPlaybackAnalyticsTracker(
     if (!attempt || attempt.stopped || attempt.startedAt !== null) return false;
     const timestamp = now();
     attempt.startedAt = timestamp;
+    if (attempt.recommendationSessionId) safeRecommendationBehaviorTracker.started(attempt.recommendationSessionId);
     const startupDurationMs = Math.max(0, timestamp - attempt.requestedAt);
     send('playback_started', {
       ...eventInput(attempt),
@@ -315,6 +341,15 @@ export function createPlaybackAnalyticsTracker(
     attempt.lastState = nextState;
   }
 
+  function progress(positionMs: number, durationMs: number) {
+    if (!attempt || attempt.stopped) return;
+    attempt.lastPositionMs = positionMs;
+    attempt.lastDurationMs = durationMs;
+    if (attempt.recommendationSessionId) {
+      safeRecommendationBehaviorTracker.progress(attempt.recommendationSessionId, positionMs, durationMs);
+    }
+  }
+
   function stop(reason: PlaybackStopReason = 'unknown') {
     if (!attempt || attempt.stopped) return false;
     const timestamp = now();
@@ -323,6 +358,9 @@ export function createPlaybackAnalyticsTracker(
       attempt.bufferingStartedAt = null;
     }
     attempt.stopped = true;
+    if (attempt.recommendationSessionId) {
+      safeRecommendationBehaviorTracker.stop(attempt.recommendationSessionId, attempt.lastPositionMs, attempt.lastDurationMs);
+    }
     const playbackDurationMs = attempt.startedAt === null ? undefined : Math.max(0, timestamp - attempt.startedAt);
     send('playback_stopped', {
       ...eventInput(attempt),
@@ -339,7 +377,7 @@ export function createPlaybackAnalyticsTracker(
     return true;
   }
 
-  return { request, firstFrame, failure, stateChanged, stop };
+  return { request, firstFrame, failure, stateChanged, progress, stop };
 }
 
 export const playbackAnalyticsTracker = createPlaybackAnalyticsTracker();

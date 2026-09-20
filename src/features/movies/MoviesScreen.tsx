@@ -5817,14 +5817,14 @@ useEffect(() => {
         onToggleFavorite={
           detailPopup.movie
             ? () => {
-                void toggleFavorite(activeProviderId, detailPopup.movie!.id);
+                void toggleFavorite(activeProviderId, detailPopup.movie!.id, { title: detailPopup.movie!.title, year: detailPopup.movie!.year });
               }
             : undefined
         }
         onToggleWatchlist={
           detailPopup.movie
             ? () => {
-                void toggleWatchlist(activeProviderId, detailPopup.movie!.id);
+                void toggleWatchlist(activeProviderId, detailPopup.movie!.id, { title: detailPopup.movie!.title, year: detailPopup.movie!.year });
               }
             : undefined
         }

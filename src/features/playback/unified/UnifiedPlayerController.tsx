@@ -937,10 +937,7 @@ export function UnifiedPlayerController() {
         playbackAnalyticsTracker.stop('route_change');
       }
 
-      const accepted = playbackAnalyticsTracker.request(
-        item,
-        snapshot.launchSource,
-      );
+      const accepted = playbackAnalyticsTracker.request(snapshot.item as PlaybackItem, snapshot.launchSource);
 
       if (accepted) {
         analyticsItemKeyRef.current = itemKey;
@@ -1268,6 +1265,7 @@ export function UnifiedPlayerController() {
     }
 
     setUnifiedPlayerProgress(positionMs, durationMs);
+    playbackAnalyticsTracker.progress(positionMs, durationMs);
 
     if (currentTime > 0 && player.status === 'readyToPlay' && player.playing) {
       playbackAnalyticsTracker.firstFrame('current_time_progress');

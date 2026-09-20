@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { isContinueWatchingEligible } from '../../playback/continuity/playbackContinuity.ts';
+import { emitRecommendationTransition } from '../../novapulse/recommendationBehavior.ts';
 
 const STORAGE_KEY = '@novacast/movie-library';
 
@@ -111,10 +112,11 @@ export async function getMovieLibraryState(providerId: string) {
   return getProviderState(store, providerId);
 }
 
-export async function toggleFavorite(providerId: string, movieId: string) {
+export async function toggleFavorite(providerId: string, movieId: string, metadata?: { title?: string; year?: unknown }) {
   const store = await readStore();
   const current = getProviderState(store, providerId);
-  const favorites = current.favorites.includes(movieId)
+  const wasFavorite = current.favorites.includes(movieId);
+  const favorites = wasFavorite
     ? current.favorites.filter((id) => id !== movieId)
     : [...current.favorites, movieId];
 
@@ -123,13 +125,25 @@ export async function toggleFavorite(providerId: string, movieId: string) {
     [providerId]: { ...current, favorites },
   });
 
+  if (metadata?.title) {
+    void emitRecommendationTransition({
+      eventType: favorites.includes(movieId) ? 'favorite_add' : 'favorite_remove',
+      providerId,
+      providerContentId: movieId,
+      contentType: 'movie',
+      title: metadata.title,
+      year: metadata.year,
+    }).catch(() => undefined);
+  }
+
   return favorites.includes(movieId);
 }
 
-export async function toggleWatchlist(providerId: string, movieId: string) {
+export async function toggleWatchlist(providerId: string, movieId: string, metadata?: { title?: string; year?: unknown }) {
   const store = await readStore();
   const current = getProviderState(store, providerId);
-  const watchlist = current.watchlist.includes(movieId)
+  const wasWatchlisted = current.watchlist.includes(movieId);
+  const watchlist = wasWatchlisted
     ? current.watchlist.filter((id) => id !== movieId)
     : [...current.watchlist, movieId];
 
@@ -137,6 +151,17 @@ export async function toggleWatchlist(providerId: string, movieId: string) {
     ...store,
     [providerId]: { ...current, watchlist },
   });
+
+  if (metadata?.title) {
+    void emitRecommendationTransition({
+      eventType: watchlist.includes(movieId) ? 'watchlist_add' : 'watchlist_remove',
+      providerId,
+      providerContentId: movieId,
+      contentType: 'movie',
+      title: metadata.title,
+      year: metadata.year,
+    }).catch(() => undefined);
+  }
 
   return watchlist.includes(movieId);
 }

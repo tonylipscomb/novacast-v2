@@ -2,12 +2,15 @@ import {
   getMediaLibraryState,
   toggleMediaWatchlist,
 } from '../media-browser/mediaLibraryStore.ts';
+import { emitRecommendationTransition } from '../novapulse/recommendationBehavior.ts';
 
 export const SERIES_WATCHLIST_MARKER = 'rc-series-watchlist-canonical';
 
 export type SeriesWatchlistIdentity = {
   id?: string;
   seriesId?: string;
+  title?: string;
+  year?: string | number;
 };
 
 export type SeriesWatchlistEvent = 'add' | 'remove' | 'hydrate' | 'press';
@@ -85,11 +88,11 @@ export async function toggleCanonicalSeriesWatchlist(
     for (const id of lookupIds) {
       const current = await getMediaLibraryState(providerId);
       if (current.watchlist.includes(id)) {
-        await toggleMediaWatchlist(providerId, id);
+        await toggleMediaWatchlist(providerId, id, { title: series?.title, year: series?.year, mediaType: 'series' });
       }
     }
   } else {
-    await toggleMediaWatchlist(providerId, canonicalId);
+    await toggleMediaWatchlist(providerId, canonicalId, { title: series?.title, year: series?.year, mediaType: 'series' });
   }
 
   const after = await getMediaLibraryState(providerId);

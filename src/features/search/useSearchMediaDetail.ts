@@ -316,16 +316,16 @@ export function useSearchMediaDetail(providerId: string, bundle: ProviderReposit
     setFocusedEpisodeId,
     handlePlaybackClosed,
     toggleMovieFavorite: (movieId: string) => {
-      void toggleFavorite(providerId, movieId);
+      void toggleFavorite(providerId, movieId, { title: selection?.movie?.title, year: selection?.movie?.year });
     },
     toggleMovieWatchlist: (movieId: string) => {
-      void toggleWatchlist(providerId, movieId);
+      void toggleWatchlist(providerId, movieId, { title: selection?.movie?.title, year: selection?.movie?.year });
     },
     toggleSeriesFavorite: (seriesId: string, title: string, artworkUrl?: string) => {
       void toggleMediaFavorite(providerId, seriesId, 'series', { title, artworkUrl });
     },
     toggleSeriesWatchlist: (seriesId: string) => {
-      void toggleMediaWatchlist(providerId, seriesId);
+      void toggleMediaWatchlist(providerId, seriesId, { title: selection?.series?.title, mediaType: 'series' });
     },
   };
 }

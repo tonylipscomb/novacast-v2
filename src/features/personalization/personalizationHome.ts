@@ -21,9 +21,12 @@ import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 
 export type HomeFavoriteChannel = {
   id: string;
+  providerId?: string;
   title: string;
   artworkUrl?: string;
   categoryId?: string;
+  streamId?: string;
+  containerExtension?: string;
 };
 
 export type HomeFavoriteMovie = MovieSummary;
@@ -135,6 +138,8 @@ export async function loadHomePersonalization(providerId: string, bundle: Provid
       contentId: entry.movieId,
       title: entry.title,
       artworkUrl: entry.artworkUrl ?? movieIndex.getEntry(entry.movieId)?.posterUrl,
+      progressPercent: entry.progressPercent,
+      completed: entry.completed === true || (entry.progressPercent != null && entry.progressPercent >= 90),
       lastOpenedAt: entry.watchedAt,
     })),
     ...mediaLibrary.watchHistory.map((entry) => ({
@@ -146,6 +151,8 @@ export async function loadHomePersonalization(providerId: string, bundle: Provid
       parentSeriesId: entry.seriesId,
       seasonNumber: entry.seasonNumber,
       episodeNumber: entry.episodeNumber,
+      progressPercent: entry.progressPercent,
+      completed: entry.progressPercent != null && entry.progressPercent >= 90,
       lastOpenedAt: entry.watchedAt,
     })),
     ...providerPersonalization.recentItems,
@@ -158,9 +165,12 @@ export async function loadHomePersonalization(providerId: string, bundle: Provid
     watchlistSeries,
     favoriteChannels: liveFavorites.map((item) => ({
       id: item.contentId,
+      providerId: item.providerId,
       title: item.title,
       artworkUrl: item.artworkUrl,
       categoryId: item.categoryId,
+      streamId: item.streamId,
+      containerExtension: item.extension,
     })),
     favoriteMovies,
     favoriteSeries,

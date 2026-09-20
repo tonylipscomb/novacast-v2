@@ -5,16 +5,42 @@ import { Image } from 'expo-image';
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { NOVA_PULSE_MOCK_FEED } from './novaPulseMockFeed';
-import { createNovaPulseCatalogSource, createNovaPulseMockSource, createNovaPulseSportsSource } from './novaPulseSources';
+import { createNovaPulseCatalogSource, createNovaPulseLiveEpgSource, createNovaPulseMockSource, createNovaPulseSportsSource } from './novaPulseSources';
 import { fetchNovaPulseSportsItems } from './novaPulseSportsSource';
 import type { NovaPulseItem } from './novaPulseTypes';
 import { createNovaPulseArtworkPrefetchPlan, inspectNovaPulseArtworkPrefetch } from './novaPulseArtworkPrefetch';
 import { composeNovaPulseFeedV2 } from './novaPulseV2';
+import { hasNovaPulseDisplayPrefix, preferNovaPulseEnglishVariants, type NovaPulseVariantDiagnostics } from './novaPulseLogic';
+import { getCachedProviderMovieInfo } from '@/features/movies/movieDetailEnrichment';
+import { getSeriesMetadataCacheEntry, type SeriesMetadataCacheEntry } from '@/features/series/metadata/seriesMetadataCache';
+import { enrichNovaPulsePresentation } from './novaPulsePresentation';
+import { runNovaPulseEnrichmentCycle, type NovaPulseEnrichmentDiagnostics, type NovaPulseMovieEnrichment } from './novaPulseEnrichment';
+import { runNovaPulseLiveEpgCycle, type NovaPulseLiveEpgDiagnostics } from './novaPulseLiveEpg';
+import type { HomeFavoriteChannel } from '@/features/personalization/personalizationHome';
+import type { RecentItemRecord } from '@/features/personalization/personalizationModel';
+import type { ProviderGuideProgram } from '@/features/providers/providerRepositories';
+import { getRecommendationCandidates, type RecommendationCandidate } from './recommendationCandidateClient';
+import {
+  buildNovaPulseCatalogBridge,
+  buildNovaPulsePersonalSeeds,
+  createLocalSignalMap,
+  recommendationSignalForCandidate,
+  type NovaPulseLocalRecommendationContext,
+} from './recommendationFeed';
 
 type UseNovaPulseFeedOptions = {
   providerId: string;
   movies: readonly MovieSummary[];
   series: readonly SeriesSummary[];
+  fetchMovieDetail?: (movieId: string) => Promise<import('@/features/media-browser/mediaTypes').MediaDetail | null>;
+  recommendationContext?: NovaPulseLocalRecommendationContext;
+  liveEpg?: {
+    favoriteChannels: readonly HomeFavoriteChannel[];
+    recentItems: readonly RecentItemRecord[];
+    getIndexEntry?: (channelId: string) => ReturnType<typeof import('@/features/search/liveChannelIndex').getLiveChannelIndexEntry>;
+    getIndexSize?: () => number;
+    getShortEpg?: (channelId: string, limit?: number, signal?: AbortSignal, epgChannelId?: string) => Promise<ProviderGuideProgram[]>;
+  };
   diagnostics?: {
     movieIndex: number;
     seriesIndex: number;
@@ -50,11 +76,25 @@ const NOVA_PULSE_BRANDED_FALLBACK: NovaPulseItem = {
   action: { type: 'none' },
 };
 
-export function useNovaPulseFeed({ providerId, movies, series, diagnostics }: UseNovaPulseFeedOptions): readonly NovaPulseItem[] {
+export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail, recommendationContext, liveEpg, diagnostics }: UseNovaPulseFeedOptions): readonly NovaPulseItem[] {
   const [realSports, setRealSports] = useState<readonly NovaPulseItem[] | null>(null);
   const [cachedArtworkRefs, setCachedArtworkRefs] = useState<ReadonlyMap<string, import('expo-image').ImageRef>>(() => new Map());
   const lastDiagnosticSignatureRef = useRef<string | null>(null);
   const lastV2SignatureRef = useRef<string | null>(null);
+  const lastRecommendationFeedSignatureRef = useRef<string | null>(null);
+  const [backendCandidates, setBackendCandidates] = useState<readonly RecommendationCandidate[]>([]);
+  const [recommendationRequestAttempted, setRecommendationRequestAttempted] = useState(false);
+  const [recommendationCacheHit, setRecommendationCacheHit] = useState(false);
+  const [cachedSeriesMetadataState, setCachedSeriesMetadataState] = useState<{ providerId: string; entries: ReadonlyMap<string, SeriesMetadataCacheEntry> }>({ providerId: '', entries: new Map() });
+  const [enrichmentState, setEnrichmentState] = useState<{ providerId: string; movies: ReadonlyMap<string, NovaPulseMovieEnrichment>; series: ReadonlyMap<string, SeriesMetadataCacheEntry>; diagnostics: NovaPulseEnrichmentDiagnostics | null }>({ providerId: '', movies: new Map(), series: new Map(), diagnostics: null });
+  const [liveEpgState, setLiveEpgState] = useState<{ providerId: string; items: readonly NovaPulseItem[]; diagnostics: NovaPulseLiveEpgDiagnostics | null }>({ providerId: '', items: [], diagnostics: null });
+  const fetchMovieDetailRef = useRef<UseNovaPulseFeedOptions['fetchMovieDetail']>(fetchMovieDetail);
+  fetchMovieDetailRef.current = fetchMovieDetail;
+  const liveEpgIndexEntryRef = useRef(liveEpg?.getIndexEntry);
+  const liveEpgFetcherRef = useRef(liveEpg?.getShortEpg);
+  liveEpgIndexEntryRef.current = liveEpg?.getIndexEntry;
+  liveEpgFetcherRef.current = liveEpg?.getShortEpg;
+  const seriesMetadataReadKeyRef = useRef<string | null>(null);
   useEffect(() => {
     let active = true;
     void fetchNovaPulseSportsItems().then((items) => { if (active) setRealSports(items); }).catch(() => { if (active) setRealSports(null); });
@@ -62,24 +102,180 @@ export function useNovaPulseFeed({ providerId, movies, series, diagnostics }: Us
   }, []);
   const boundedMovies = useMemo(() => movies.slice(0, 32), [movies]);
   const boundedSeries = useMemo(() => series.slice(0, 32), [series]);
+  const recommendationSeeds = useMemo(
+    () => buildNovaPulsePersonalSeeds(recommendationContext ?? {
+      recentlyWatched: [],
+      favoriteMovies: [],
+      watchlistMovies: [],
+      favoriteSeries: [],
+      watchlistSeries: [],
+    }),
+    [recommendationContext?.recentlyWatched, recommendationContext?.favoriteMovies, recommendationContext?.watchlistMovies, recommendationContext?.favoriteSeries, recommendationContext?.watchlistSeries],
+  );
+  const recommendationBridge = useMemo(
+    () => buildNovaPulseCatalogBridge(movies.slice(0, 100), series.slice(0, 100)),
+    [movies, series],
+  );
+  const seriesMetadataReadKey = useMemo(
+    () => `${providerId}::${boundedSeries.map((item) => `${item.id || item.seriesId}:${item.title}`).join('|')}`,
+    [boundedSeries, providerId],
+  );
+  useEffect(() => {
+    if (seriesMetadataReadKeyRef.current === seriesMetadataReadKey) return;
+    seriesMetadataReadKeyRef.current = seriesMetadataReadKey;
+    let active = true;
+    setCachedSeriesMetadataState({ providerId, entries: new Map() });
+    void Promise.all(boundedSeries.map(async (item) => [String(item.id || item.seriesId), await getSeriesMetadataCacheEntry(providerId, String(item.id || item.seriesId))] as const)).then((results) => {
+      if (!active) return;
+      const entries = new Map<string, SeriesMetadataCacheEntry>();
+      for (const [seriesId, entry] of results) {
+        if (entry) entries.set(seriesId, entry);
+      }
+      setCachedSeriesMetadataState({ providerId, entries });
+    });
+    return () => { active = false; };
+  }, [boundedSeries, providerId, seriesMetadataReadKey]);
+  const localRecommendationSignals = useMemo(
+    () => createLocalSignalMap(recommendationContext ?? {
+      recentlyWatched: [],
+      favoriteMovies: [],
+      watchlistMovies: [],
+      favoriteSeries: [],
+      watchlistSeries: [],
+    }),
+    [recommendationContext?.favoriteMovies, recommendationContext?.watchlistMovies, recommendationContext?.favoriteSeries, recommendationContext?.watchlistSeries],
+  );
+  useEffect(() => {
+    let active = true;
+    setBackendCandidates([]);
+    setRecommendationRequestAttempted(false);
+    setRecommendationCacheHit(false);
+    void getRecommendationCandidates({
+      providerId,
+      seeds: recommendationSeeds.seeds,
+      catalogFingerprints: recommendationBridge.entries.map(({ itemKey: _itemKey, ...entry }) => entry),
+      supportedContentTypes: ['movie', 'series'],
+      limit: 30,
+    }, recommendationSeeds.signature).then((response) => {
+      if (!active) return;
+      setRecommendationRequestAttempted(true);
+      setRecommendationCacheHit(response?.meta?.cacheHit === true);
+      setBackendCandidates(response?.candidates ?? []);
+    });
+    return () => { active = false; };
+  }, [providerId, recommendationSeeds.signature]);
+  const recommendationSignals = useMemo(() => {
+    const signals = new Map(localRecommendationSignals);
+    for (const candidate of backendCandidates) {
+      if (!candidate.catalogMatchToken) continue;
+      signals.set(candidate.catalogMatchToken, recommendationSignalForCandidate(candidate, recommendationSeeds.confidence));
+    }
+    return signals;
+  }, [backendCandidates, localRecommendationSignals, recommendationSeeds.confidence]);
+  const recommendationSignalSignature = useMemo(
+    () => [...recommendationSignals.entries()].map(([key, value]) => `${key}:${value.reason}:${value.behaviorScore ?? 0}:${value.affinityScore ?? 0}:${value.trendScore ?? 0}`).join('|'),
+    [recommendationSignals],
+  );
   const candidateInputSignature = useMemo(() => [
-    boundedMovies.map((movie) => [movie.id, movie.title, movie.description ?? '', movie.posterUrl ?? '', movie.rating ?? movie.score ?? '', movie.year ?? '', movie.addedAt ?? '', movie.popularity ?? '', movie.providerSortOrder ?? ''].join('~')).join('|'),
-    boundedSeries.map((seriesItem) => [seriesItem.id, seriesItem.title, seriesItem.description ?? '', seriesItem.backdropUrl ?? seriesItem.posterUrl ?? '', seriesItem.rating ?? '', seriesItem.year ?? '', seriesItem.addedAt ?? '', seriesItem.popularity ?? '', seriesItem.providerSortOrder ?? ''].join('~')).join('|'),
+    boundedMovies.map((movie) => [movie.id, movie.title, movie.rawTitle ?? '', movie.countryCode ?? '', movie.description ?? '', movie.posterUrl ?? '', movie.rating ?? movie.score ?? '', movie.year ?? '', movie.addedAt ?? '', movie.popularity ?? '', movie.providerSortOrder ?? ''].join('~')).join('|'),
+    boundedSeries.map((seriesItem) => [seriesItem.id, seriesItem.title, seriesItem.rawTitle ?? '', seriesItem.countryCode ?? '', seriesItem.description ?? '', seriesItem.backdropUrl ?? seriesItem.posterUrl ?? '', seriesItem.rating ?? '', seriesItem.year ?? '', seriesItem.addedAt ?? '', seriesItem.popularity ?? '', seriesItem.providerSortOrder ?? ''].join('~')).join('|'),
   ].join('||'), [boundedMovies, boundedSeries]);
+  const languageFilteredCatalog = useMemo(() => {
+    const movies = preferNovaPulseEnglishVariants(boundedMovies, 'movie');
+    const series = preferNovaPulseEnglishVariants(boundedSeries, 'series');
+    return {
+      movies: movies.items,
+      series: series.items,
+      diagnostics: {
+        foreignVariantsRejected: movies.diagnostics.foreignVariantsRejected + series.diagnostics.foreignVariantsRejected,
+        englishVariantsPreferred: movies.diagnostics.englishVariantsPreferred + series.diagnostics.englishVariantsPreferred,
+        duplicateVariantsCollapsed: movies.diagnostics.duplicateVariantsCollapsed + series.diagnostics.duplicateVariantsCollapsed,
+      } satisfies NovaPulseVariantDiagnostics,
+    };
+  }, [candidateInputSignature]);
+  const liveEpgSignature = useMemo(() => {
+    const favorites = (liveEpg?.favoriteChannels ?? []).map((item) => item.id).sort().join(',');
+    const recents = (liveEpg?.recentItems ?? []).filter((item) => item.mediaType === 'live').map((item) => `${item.contentId}:${item.lastOpenedAt}`).sort().join(',');
+    return `${providerId}|${favorites}|${recents}`;
+  }, [liveEpg?.favoriteChannels, liveEpg?.recentItems, providerId]);
+  const liveEpgFetcherAvailable = Boolean(liveEpg?.getShortEpg);
+  useEffect(() => {
+    let active = true;
+    setLiveEpgState({ providerId, items: [], diagnostics: null });
+    void runNovaPulseLiveEpgCycle({
+      providerId,
+      favoriteChannels: liveEpg?.favoriteChannels ?? [],
+      recentItems: liveEpg?.recentItems ?? [],
+      getIndexEntry: liveEpgIndexEntryRef.current,
+      getIndexSize: liveEpg?.getIndexSize,
+      getShortEpg: liveEpgFetcherRef.current,
+      isCurrent: () => active,
+    }).then((result) => {
+      if (!active) return;
+      setLiveEpgState({ providerId, items: result.items, diagnostics: result.diagnostics });
+      console.info('[NOVAPULSE_EPG]', JSON.stringify(result.diagnostics));
+      recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_epg', ...result.diagnostics } });
+    }).catch(() => {
+      if (active) setLiveEpgState({ providerId, items: [], diagnostics: null });
+    });
+    return () => { active = false; };
+  }, [liveEpgFetcherAvailable, liveEpgSignature, providerId]);
+  const liveEpgItems = liveEpgState.providerId === providerId ? liveEpgState.items : [];
   const realSportsSignature = useMemo(() => (realSports ?? []).slice(0, 32).map((item) => [item.id, item.title, item.subtype, item.updatedAt ?? ''].join('~')).join('|'), [realSports]);
   const composed = useMemo(() => {
     const includeMockCatalogFallback = { movie: boundedMovies.length === 0, series: boundedSeries.length === 0 };
     const result = composeNovaPulseFeedV2([
-      createNovaPulseCatalogSource(boundedMovies, boundedSeries),
+      createNovaPulseCatalogSource(languageFilteredCatalog.movies, languageFilteredCatalog.series, recommendationSignals),
       ...(realSports ? [createNovaPulseSportsSource(realSports)] : []),
+      ...(liveEpgItems.length ? [createNovaPulseLiveEpgSource(liveEpgItems)] : []),
       createNovaPulseMockSource(realSports ? NOVA_PULSE_MOCK_FEED.filter((item) => item.type !== 'sports') : NOVA_PULSE_MOCK_FEED, includeMockCatalogFallback),
     ]);
     return result.items.length ? result : { ...result, items: [NOVA_PULSE_BRANDED_FALLBACK] };
-  }, [candidateInputSignature, realSportsSignature]);
+  }, [languageFilteredCatalog, liveEpgItems, realSportsSignature, recommendationSignalSignature]);
+  const selectedEnrichmentSignature = useMemo(
+    () => `${providerId}::${composed.items.filter((item) => item.type === 'movie' || item.type === 'series').map((item) => `${item.type}:${item.sourceItemId ?? item.id}`).join('|')}`,
+    [composed.items, providerId],
+  );
+  const fetchMovieDetailAvailable = Boolean(fetchMovieDetail);
+  useEffect(() => {
+    let active = true;
+    setEnrichmentState({ providerId, movies: new Map(), series: new Map(), diagnostics: null });
+    void runNovaPulseEnrichmentCycle({
+      providerId,
+      items: composed.items,
+      fetchMovieDetail: (movieId) => fetchMovieDetailRef.current?.(movieId) ?? Promise.resolve(null),
+      isCurrent: () => active,
+    }).then((result) => {
+      if (!active) return;
+      setEnrichmentState({ providerId, movies: result.movies, series: result.series, diagnostics: result.diagnostics });
+      console.info('[NOVAPULSE_ENRICH]', JSON.stringify(result.diagnostics));
+      recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_enrich', ...result.diagnostics } });
+    }).catch(() => {
+      if (!active) return;
+      setEnrichmentState({ providerId, movies: new Map(), series: new Map(), diagnostics: null });
+    });
+    return () => { active = false; };
+  }, [composed.items, fetchMovieDetailAvailable, providerId, selectedEnrichmentSignature]);
+  const presentation = useMemo(
+    () => enrichNovaPulsePresentation({
+      items: composed.items,
+      movies: boundedMovies,
+      series: boundedSeries,
+      cachedSeriesMetadata: cachedSeriesMetadataState.providerId === providerId ? cachedSeriesMetadataState.entries : new Map(),
+      movieEnrichments: enrichmentState.providerId === providerId ? enrichmentState.movies : new Map(),
+      getCachedMovieDetail: (movieId) => getCachedProviderMovieInfo(providerId, movieId),
+    }),
+    [boundedMovies, boundedSeries, cachedSeriesMetadataState, composed.items, enrichmentState, providerId],
+  );
+  const displayPrefixesRemoved = useMemo(
+    () => boundedMovies.filter((movie) => hasNovaPulseDisplayPrefix(movie.title)).length +
+      boundedSeries.filter((item) => hasNovaPulseDisplayPrefix(item.title)).length,
+    [boundedMovies, boundedSeries],
+  );
 
   const artworkPrefetchPlan = useMemo(
-    () => createNovaPulseArtworkPrefetchPlan(composed.items, providerId),
-    [composed.items, providerId],
+    () => createNovaPulseArtworkPrefetchPlan(presentation.items, providerId),
+    [presentation.items, providerId],
   );
   const prefetchedArtworkSignatureRef = useRef<string | null>(null);
   useEffect(() => {
@@ -88,7 +284,7 @@ export function useNovaPulseFeed({ providerId, movies, series, diagnostics }: Us
     }
     prefetchedArtworkSignatureRef.current = artworkPrefetchPlan.signature;
     let cancelled = false;
-    void inspectNovaPulseArtworkPrefetch(composed.items, artworkPrefetchPlan, {
+    void inspectNovaPulseArtworkPrefetch(presentation.items, artworkPrefetchPlan, {
       prefetch: (url, options) => Image.prefetch(url, options),
       getCachePathAsync: (cacheKey) => Image.getCachePathAsync(cacheKey),
       readFromCacheAsync: (cacheKey) => Image.readFromCacheAsync(cacheKey),
@@ -104,7 +300,7 @@ export function useNovaPulseFeed({ providerId, movies, series, diagnostics }: Us
     return () => {
       cancelled = true;
     };
-  }, [artworkPrefetchPlan, composed.items]);
+  }, [artworkPrefetchPlan, presentation.items]);
 
   useEffect(() => {
     const previous = lastV2SignatureRef.current;
@@ -125,6 +321,47 @@ export function useNovaPulseFeed({ providerId, movies, series, diagnostics }: Us
     console.info('[NOVAPULSE_V2]', JSON.stringify(payload));
     recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_v2', ...payload } });
   }, [composed]);
+
+  useEffect(() => {
+    const feedSignature = [recommendationSeeds.signature, composed.diagnostics.signature, recommendationSignalSignature].join('||');
+    const previousFeedSignature = lastRecommendationFeedSignatureRef.current;
+    lastRecommendationFeedSignatureRef.current = feedSignature;
+    const reasonCounts = composed.items.reduce<Record<string, number>>((counts, item) => {
+      const reason = item.recommendation?.reason ?? 'fallback';
+      counts[reason] = (counts[reason] ?? 0) + 1;
+      return counts;
+    }, {});
+    const payload = {
+      movieSourceWindow: composed.diagnostics.movieSourceWindow,
+      seriesSourceWindow: composed.diagnostics.seriesSourceWindow,
+      movieRankedCandidates: composed.diagnostics.movieRankedCandidates,
+      seriesRankedCandidates: composed.diagnostics.seriesRankedCandidates,
+      seedCount: recommendationSeeds.seeds.length,
+      behaviorConfidence: recommendationSeeds.confidence,
+      backendCandidates: backendCandidates.length,
+      catalogMatched: backendCandidates.filter((candidate) => Boolean(candidate.catalogMatchToken)).length,
+      behavioralSelected: composed.items.filter((item) => Boolean(item.recommendation?.behaviorScore)).length,
+      trendSelected: composed.items.filter((item) => item.recommendation?.reason === 'trending_novacast').length,
+      affinitySelected: composed.items.filter((item) => item.recommendation?.reason === 'viewers_also_watched').length,
+      fallbackSelected: composed.items.filter((item) => !item.recommendation).length,
+      sportsAvailable: composed.diagnostics.sportsAvailable,
+      sportsSelected: composed.diagnostics.sportsSelected,
+      announcementsSelected: composed.diagnostics.announcementsSelected,
+      sportsGuardApplied: composed.diagnostics.sportsGuardApplied,
+      displayPrefixesRemoved,
+      ...presentation.diagnostics,
+      ...languageFilteredCatalog.diagnostics,
+      ...(enrichmentState.diagnostics ?? {}),
+      ...(liveEpgState.diagnostics ?? {}),
+      finalCount: composed.items.length,
+      cacheHit: recommendationCacheHit,
+      requestAttempted: recommendationRequestAttempted,
+      reasonCounts,
+      feedSignatureChanged: previousFeedSignature !== null && previousFeedSignature !== feedSignature,
+    };
+    console.info('[NOVAPULSE_RECS_FEED]', JSON.stringify(payload));
+    recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_recs_feed', ...payload } });
+  }, [backendCandidates, composed, displayPrefixesRemoved, liveEpgState.diagnostics, presentation.diagnostics, recommendationCacheHit, recommendationRequestAttempted, recommendationSeeds.confidence, recommendationSeeds.seeds.length, recommendationSeeds.signature, recommendationSignalSignature]);
 
   useEffect(() => {
     const upcoming = (realSports ?? []).filter((item) => item.subtype === 'upcoming' || item.subtype === 'live').length;
@@ -201,11 +438,11 @@ export function useNovaPulseFeed({ providerId, movies, series, diagnostics }: Us
       }, [composed, diagnostics, movies.length, realSports, series.length]);
 
   return useMemo(
-    () => composed.items.map((item) => {
+    () => presentation.items.map((item) => {
       const uri = item.artworkUrl?.trim() ?? '';
       const artworkRef = (item.type === 'movie' || item.type === 'series') && uri ? cachedArtworkRefs.get(uri) : undefined;
       return artworkRef ? { ...item, artworkRef } : item;
     }),
-    [cachedArtworkRefs, composed.items],
+    [cachedArtworkRefs, presentation.items],
   );
 }

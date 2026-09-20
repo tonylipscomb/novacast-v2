@@ -15,6 +15,7 @@ import {
   hasMeaningfulRecommendationSession,
   recordMeaningfulRecommendationSession,
 } from './recommendationEventQueue.ts';
+import { scheduleRecommendationFlush } from './recommendationEventSync.ts';
 
 type PlaybackContext = {
   providerId?: string;
@@ -63,7 +64,7 @@ export function createRecommendationBehaviorTracker(
       sessionId: context.sessionId,
       occurredAt: new Date(now()).toISOString(),
       ...extra,
-    })).catch(() => undefined);
+    })).then(() => scheduleRecommendationFlush()).catch(() => undefined);
     return true;
   };
 
@@ -144,5 +145,8 @@ export async function emitRecommendationTransition(input: {
     providerContentId: input.providerContentId,
     sessionId: 'state-transition',
     occurredAt: new Date().toISOString(),
-  }));
+  })).then((queued) => {
+    if (queued) scheduleRecommendationFlush();
+    return queued;
+  });
 }

@@ -131,6 +131,7 @@ import {
 } from '../catalog/vodCategoryFilterCapability.ts';
 import type { MovieSummary } from '../movies/movieTypes.ts';
 import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
+import { queueInventoryReport, type InventoryMediaType } from '../device/inventoryTelemetry';
 import { emitSeriesSqliteEvent } from '../series/seriesDiagnostics.ts';
 import {
   classifyCatalogMediaJobResults,
@@ -1612,6 +1613,32 @@ function resolveLiveChannelCount(providerId: string) {
 
   // Provider-reported per-category counts overlap; wait for stream-based refresh.
   return 0;
+}
+
+async function queueCompletedVodInventoryReport(
+  providerId: string,
+  mediaType: Exclude<InventoryMediaType, 'live'>,
+  generation: number | null | undefined,
+) {
+  if (!Number.isInteger(generation) || Number(generation) < 1) return;
+  const count = await getCatalogTotalCount(providerId, mediaType, { generation: Number(generation) }).catch(() => null);
+  if (!Number.isInteger(count) || Number(count) < 0) return;
+  queueInventoryReport({
+    mediaType,
+    count: Number(count),
+    catalogGeneration: Number(generation),
+    completedAt: new Date().toISOString(),
+  });
+}
+
+function queueCompletedLiveInventoryReport(providerId: string, generation: number | null | undefined, count: number) {
+  if (!Number.isInteger(generation) || Number(generation) < 1 || !Number.isInteger(count) || count < 0) return;
+  queueInventoryReport({
+    mediaType: 'live',
+    count,
+    catalogGeneration: Number(generation),
+    completedAt: new Date().toISOString(),
+  });
 }
 
 async function refreshLiveChannelSummary(
@@ -3788,6 +3815,7 @@ export async function runMovieCatalogSync(
     });
     markCatalogAuditSync('completed', { providerId, mediaType: 'movie', durationMs: Date.now() - started });
     notifyMovieCatalogReady(providerId, sqliteHandle?.generation ?? 0);
+    void queueCompletedVodInventoryReport(providerId, 'movie', sqliteHandle?.generation);
     releaseSeriesRetries('movies-readable-generation');
     markMediaJobComplete(providerId, 'movie');
     setMovieReturnReason('completed-after-sqlite');
@@ -4492,6 +4520,7 @@ export async function runSeriesCatalogSync(
       seriesCatalog: seriesIndex?.getCompleteness(),
     });
     markCatalogAuditSync('completed', { providerId, mediaType: 'series', durationMs: Date.now() - started });
+    void queueCompletedVodInventoryReport(providerId, 'series', seriesFinishHandle.generation);
     markMediaJobComplete(providerId, 'series');
     endSeriesDumpCancellationAudit('worker-completed', {
       abortReason: null,
@@ -4769,6 +4798,7 @@ export async function runLiveCatalogSync(
 
     await mergeCategoryCountIndex(providerId, 'live', published.counts);
     await writeProviderLibrarySummary(providerId, { liveChannelCount: published.channelCount });
+    queueCompletedLiveInventoryReport(providerId, generation, published.channelCount);
     logLivePublicationTrace('live-publication-complete', {
       providerId,
       requestSource,

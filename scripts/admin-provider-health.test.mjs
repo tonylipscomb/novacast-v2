@@ -10,6 +10,9 @@ const adminUi = fs.readFileSync(new URL('../pairing-web/src/AdminProviders.tsx',
 const pairing = fs.readFileSync(new URL('../pairing-web/src/pairing.ts', import.meta.url), 'utf8');
 const cloud = fs.readFileSync(new URL('../pairing-web/src/AdminCloud.tsx', import.meta.url), 'utf8');
 const migration = fs.readFileSync(new URL('../supabase/migrations/20260816180000_provider_health_validation.sql', import.meta.url), 'utf8');
+const inventoryMigration = fs.readFileSync(new URL('../supabase/migrations/20260920120000_inventory_telemetry_v1.sql', import.meta.url), 'utf8');
+const heartbeat = fs.readFileSync(new URL('../supabase/functions/device-heartbeat/index.ts', import.meta.url), 'utf8');
+const catalogSync = fs.readFileSync(new URL('../src/features/providers/providerCatalogSync.ts', import.meta.url), 'utf8');
 
 test('new providers are created as drafts, not active', () => {
   assert.match(providersFn, /status:\s*'draft'/);
@@ -69,9 +72,24 @@ test('bounded catalog counts carry truncation metadata and the Admin UI renders 
   assert.match(runner, /'get_vod_streams'/);
   assert.match(runner, /'get_series'/);
   assert.match(adminUi, /isCappedCatalogCount/);
-  assert.match(adminUi, /formatCount\(provider\.live_channel_count, isCappedCatalogCount/);
-  assert.match(adminUi, /formatCount\(provider\.movie_count, isCappedCatalogCount/);
-  assert.match(adminUi, /formatCount\(provider\.series_count, isCappedCatalogCount/);
+  assert.match(adminUi, /formatInventoryCount\(provider\.inventory_live_count, provider\.live_channel_count/);
+  assert.match(adminUi, /formatInventoryCount\(provider\.inventory_movie_count, provider\.movie_count/);
+  assert.match(adminUi, /formatInventoryCount\(provider\.inventory_series_count, provider\.series_count/);
+});
+
+test('inventory telemetry is separate, completion-gated, and assignment-owned', () => {
+  for (const field of ['inventory_live_count', 'inventory_movie_count', 'inventory_series_count', 'inventory_live_counted_at', 'inventory_movie_counted_at', 'inventory_series_counted_at']) {
+    assert.match(inventoryMigration, new RegExp(field));
+  }
+  assert.match(heartbeat, /authenticateDevice\(request, client\)/);
+  assert.match(heartbeat, /device_provider_assignments/);
+  assert.match(heartbeat, /inventoryReports/);
+  assert.doesNotMatch(heartbeat, /body\.managed_provider_id/);
+  assert.match(heartbeat, /sameDevice/);
+  assert.match(heartbeat, /incomingTime < storedTime/);
+  assert.match(catalogSync, /queueCompletedVodInventoryReport/);
+  assert.match(catalogSync, /queueCompletedLiveInventoryReport/);
+  assert.match(catalogSync, /getCatalogTotalCount\(providerId, mediaType/);
 });
 
 test('cloud-only 404/511 restrictions are separate from provider health', () => {
@@ -115,6 +133,26 @@ test('stream probes remain sequential, bounded, and connection-limit aware', () 
   assert.doesNotMatch(runner, /playback endpoints are rejecting stream requests/);
   assert.match(health, /normalizePlaybackExtension/);
   assert.match(runner, /buildXtreamStreamUrl/);
+});
+
+test('diagnostic watchdog and frontend failure paths are terminal and retryable', () => {
+  assert.match(runner, /PROVIDER_HEALTH_WATCHDOG_MS = 90_000/);
+  assert.match(runner, /Promise\.race\(\[/);
+  assert.match(runner, /controller\.abort\(\)/);
+  assert.match(runner, /finally \{[\s\S]*?clearTimeout\(timer\)/);
+  assert.match(adminUi, /setFailedTestingId/);
+  assert.match(adminUi, /setTestingId\(null\)/);
+  assert.match(adminUi, /setInterval\(update, 1000\)/);
+  assert.match(adminUi, /testingLeaseFresh = health === 'testing' && id !== failedTestingId/);
+});
+
+test('catalog counting stops expensive object parsing after the inspection cap', () => {
+  assert.match(catalog, /if \(inspectedCount >= maxItems\)/);
+  assert.match(catalog, /totalCount \+= 1/);
+  assert.match(catalog, /diagnosticTruncated = true/);
+  assert.match(runner, /exactCount: false/);
+  assert.doesNotMatch(runner, /response\.json\(\)/);
+  assert.match(runner, /bounded_response_body_unavailable/);
 });
 
 test('health status stays independent from activation status', () => {

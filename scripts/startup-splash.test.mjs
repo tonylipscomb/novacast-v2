@@ -34,6 +34,7 @@ const introSource = readFileSync(new URL('../src/features/startup/NovaCastIntroS
 const layoutSource = readFileSync(new URL('../src/app/_layout.tsx', import.meta.url), 'utf8');
 const shellSource = readFileSync(new URL('../src/components/nova/NovaTvShell.tsx', import.meta.url), 'utf8');
 const visualGateSource = readFileSync(new URL('../src/features/startup/startupVisualGate.tsx', import.meta.url), 'utf8');
+const startupGateSource = readFileSync(new URL('../src/features/startup/StartupGate.tsx', import.meta.url), 'utf8');
 
 test('cold intro trusts sourceLoad duration and rejects an early playToEnd', () => {
   assert.match(introSource, /confirmedDurationRef = useRef<number \| null>\(null\)/);
@@ -228,4 +229,14 @@ test('startup diagnostics record safe phase timestamps once', () => {
   markStartupReady();
   assert.equal(isStartupReady(), true);
   assert.equal(STARTUP_EXIT_FADE_MS, 300);
+});
+
+test('startup overlay is one-way after a usable Home shell is established', () => {
+  assert.match(startupGateSource, /useState\(isStartupReady\(\)\)/);
+  assert.match(startupGateSource, /hasReachedUsableShell/);
+  assert.match(startupGateSource, /startupBlocking && !hasReachedUsableShell/);
+  assert.match(startupGateSource, /onUsableShellReady/);
+  assert.match(startupGateSource, /errorType: 'background_refresh'/);
+  assert.match(startupGateSource, /outcome: 'suppressed'/);
+  assert.match(startupGateSource, /operation: 'startup_overlay'/);
 });

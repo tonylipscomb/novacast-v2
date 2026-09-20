@@ -31,6 +31,7 @@ export type MovieCatalogEntry = {
   providerSortOrder?: number;
   /** Derived once per unique id; undefined until ranked. */
   regionRank?: number;
+  description?: string;
 };
 
 export const MAX_MOVIE_CATALOG_INDEX_ENTRIES = MAX_CATALOG_INDEX_ITEMS;
@@ -61,6 +62,7 @@ function toEntry(movie: MovieSummary, added = 0): MovieCatalogEntry {
     genreTags,
     providerSortOrder: movie.providerSortOrder,
     regionRank: movie.regionRank,
+    description: movie.description,
   };
 }
 
@@ -76,7 +78,7 @@ export function entryToSummary(entry: MovieCatalogEntry): MovieSummary {
     popularity: entry.popularity,
     rating: entry.rating > 0 ? `${entry.rating}` : undefined,
     genres: entry.genreTags.length ? entry.genreTags : ['Movies'],
-    description: 'Curated from your NovaCast movie library.',
+    description: entry.description,
     posterStyleKey: entry.posterStyleKey,
     posterUrl: entry.posterUrl,
     containerExtension: entry.containerExtension,
@@ -170,6 +172,7 @@ export class MovieCatalogIndex {
       this.entries.set(movie.id, next);
     }
     scheduleCatalogPersist(this.providerId, this);
+    notifyIndexListeners(this.providerId);
   }
 
   setRegionRank(id: string, regionRank: number) {
@@ -204,6 +207,15 @@ export class MovieCatalogIndex {
 
   listAllEntries() {
     return [...this.entries.values()];
+  }
+
+  listSummaries(limit = 8) {
+    const summaries: MovieSummary[] = [];
+    for (const entry of this.entries.values()) {
+      if (summaries.length >= limit) break;
+      summaries.push(entryToSummary(entry));
+    }
+    return summaries;
   }
 
   forEachEntry(callback: (entry: MovieCatalogEntry) => void) {
@@ -292,7 +304,12 @@ export class MovieCatalogIndex {
 }
 
 const indexes = new Map<string, MovieCatalogIndex>();
+const indexListeners = new Map<string, Set<() => void>>();
 const CATALOG_STORAGE_PREFIX = '@novacast/movie-catalog/';
+
+function notifyIndexListeners(providerId: string) {
+  indexListeners.get(providerId)?.forEach((listener) => listener());
+}
 
 function catalogStorageKey(providerId: string) {
   return `${CATALOG_STORAGE_PREFIX}${providerId}`;
@@ -327,9 +344,22 @@ export function getMovieCatalogIndex(providerId: string) {
   return next;
 }
 
+export function subscribeMovieCatalogIndex(providerId: string, listener: () => void) {
+  const listeners = indexListeners.get(providerId) ?? new Set();
+  listeners.add(listener);
+  indexListeners.set(providerId, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (!listeners.size) {
+      indexListeners.delete(providerId);
+    }
+  };
+}
+
 export function resetMovieCatalogIndex(providerId?: string) {
   if (providerId) {
     indexes.delete(providerId);
+    indexListeners.delete(providerId);
     if (typeof AsyncStorage.removeItem === 'function') {
       void AsyncStorage.removeItem(catalogStorageKey(providerId));
     }
@@ -337,4 +367,5 @@ export function resetMovieCatalogIndex(providerId?: string) {
   }
 
   indexes.clear();
+  indexListeners.clear();
 }

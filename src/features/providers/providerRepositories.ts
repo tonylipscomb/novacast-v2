@@ -175,6 +175,8 @@ export type ProviderGuideProgram = {
   endAt?: number;
   genre?: string;
   rating?: string;
+  /** Internal provenance for bounded NovaPulse/Guide diagnostics; never rendered. */
+  epgSource?: 'managed' | 'provider';
 };
 
 export type ProviderGuideRow = {
@@ -553,6 +555,7 @@ function mapXtreamEpg(response: XtreamShortEpgResponse | null | undefined) {
       end,
       startAt: Number.isFinite(startAt) ? startAt : undefined,
       endAt: Number.isFinite(endAt) ? endAt : undefined,
+      epgSource: 'provider',
     } satisfies ProviderGuideProgram;
   });
 }

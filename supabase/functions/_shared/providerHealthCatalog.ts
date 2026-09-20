@@ -14,6 +14,7 @@ export type CatalogFailureReason =
 
 export type CatalogStopReason =
   | 'complete'
+  | 'diagnostic_cap'
   | 'byte_limit'
   | 'timeout'
   | 'upstream_incomplete'
@@ -70,11 +71,13 @@ export function createXtreamCatalogScanner(options: {
   maxItems?: number;
   maxBytes?: number;
   keepAll?: boolean;
+  exactCount?: boolean;
 } = {}) {
   const sampleSize = options.sampleSize ?? CATALOG_SAMPLE_LIMIT;
   const maxItems = options.maxItems ?? CATALOG_ITEM_SCAN_LIMIT;
   const maxBytes = options.maxBytes ?? CATALOG_READ_LIMIT_BYTES;
   const keepAll = options.keepAll === true;
+  const exactCount = options.exactCount !== false;
   const decoder = new TextDecoder();
   let buffer = '';
   let bytesRead = 0;
@@ -99,11 +102,13 @@ export function createXtreamCatalogScanner(options: {
     totalCount += 1;
     if (inspectedCount >= maxItems) {
       diagnosticTruncated = true;
+      if (!exactCount) finished = true;
       return;
     }
     inspectedCount += 1;
     if (keepAll) {
       samples.push(item);
+      if (!exactCount && inspectedCount >= maxItems) finished = true;
       return;
     }
     if (samples.length < Math.min(8, sampleSize)) {
@@ -112,6 +117,7 @@ export function createXtreamCatalogScanner(options: {
       samples.push(item);
     }
     lastItems = [...lastItems, item].slice(-8);
+    if (!exactCount && inspectedCount >= maxItems) finished = true;
   };
 
   const processBuffer = (flush: boolean) => {
@@ -176,6 +182,13 @@ export function createXtreamCatalogScanner(options: {
       const end = findMatchingBrace(buffer, index);
       if (end < 0) break;
       const raw = buffer.slice(index, end + 1);
+      if (inspectedCount >= maxItems) {
+        totalCount += 1;
+        diagnosticTruncated = true;
+        index = end + 1;
+        if (!exactCount) finished = true;
+        continue;
+      }
       try {
         const parsed = JSON.parse(raw) as unknown;
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
@@ -270,6 +283,7 @@ export function createXtreamCatalogScanner(options: {
       const exactCountAvailable = ok && complete && !truncated && !inputEndedIncomplete;
       const stopReason = forcedStopReason ?? (
         exactCountAvailable ? 'complete' :
+          !exactCount && diagnosticTruncated ? 'diagnostic_cap' :
           truncated ? 'byte_limit' :
             inputEndedIncomplete ? 'upstream_incomplete' :
               reason !== 'ok' ? 'parse_failure' : 'upstream_incomplete'
@@ -296,7 +310,7 @@ export function createXtreamCatalogScanner(options: {
 
 export function parseXtreamCatalogText(
   text: string,
-  options: { truncatedInput?: boolean; maxBytes?: number; maxItems?: number; sampleSize?: number; keepAll?: boolean } = {},
+  options: { truncatedInput?: boolean; maxBytes?: number; maxItems?: number; sampleSize?: number; keepAll?: boolean; exactCount?: boolean } = {},
 ) {
   const scanner = createXtreamCatalogScanner(options);
   scanner.push(new TextEncoder().encode(text));

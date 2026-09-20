@@ -17,6 +17,8 @@ import { reportNetworkOutcome } from '@/features/resilience/offlineStatus';
 import { router } from 'expo-router';
 import { setDiagnosticsEnabled } from '@/features/diagnostics/diagnosticsConfig';
 import { applyDiagnosticCaptureCommand } from '@/features/diagnostics/diagnosticCapture';
+import { acknowledgeInventoryReports, getPendingInventoryReports, loadPendingInventoryReports } from './inventoryTelemetry';
+import type { DeviceInventoryReport } from './deviceTypes';
 
 type CommandHandlerResult = { id: string; status: 'completed' | 'failed'; result?: Record<string, unknown> };
 
@@ -93,7 +95,9 @@ export async function sendDeviceHeartbeat(options?: {
   const apiUrl = process.env.EXPO_PUBLIC_NOVACAST_PAIRING_API_URL?.trim().replace(/\/+$/, '');
   const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim();
   if (!apiUrl || !anonKey) return null;
+  await loadPendingInventoryReports();
 
+  const inventoryReports = getPendingInventoryReports();
   const response = await fetch(`${apiUrl}/device-heartbeat`, {
     method: 'POST',
     headers: {
@@ -110,6 +114,7 @@ export async function sendDeviceHeartbeat(options?: {
         ...(options?.diagnostics ?? {}),
         ...getAppliedAssignmentDiagnostics(),
       },
+      ...(inventoryReports.length ? { inventoryReports } : {}),
     }),
   }).catch(() => null);
 
@@ -117,6 +122,7 @@ export async function sendDeviceHeartbeat(options?: {
     reportNetworkOutcome(false);
     return null;
   }
+  acknowledgeInventoryReports(inventoryReports as DeviceInventoryReport[]);
 
   // A successful heartbeat response is direct evidence that the device is
   // online, even if a malformed/empty payload prevents the rest of the

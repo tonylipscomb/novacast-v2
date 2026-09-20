@@ -98,7 +98,7 @@ export type CatalogCountDetail = {
   diagnosticTruncated: boolean;
   bytesRead: number;
   complete: boolean;
-  stopReason: 'complete' | 'byte_limit' | 'timeout' | 'upstream_incomplete' | 'fallback_sample' | 'parse_failure';
+  stopReason: 'complete' | 'diagnostic_cap' | 'byte_limit' | 'timeout' | 'upstream_incomplete' | 'fallback_sample' | 'parse_failure';
 };
 
 export const STREAM_PROBE_CAVEAT =

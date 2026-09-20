@@ -15,7 +15,7 @@ import { autoProvisionXtreamEpg } from '../_shared/autoProvisionProviderEpg.ts';
 import { canonicalizeEpgName, normalizeEpgMode, probeXmltvFeed, safeEpgUrl, testXmltvFeed, traceXmltvFeed, type EpgLiveChannel, type EpgMode, type XmltvStreamSink } from '../_shared/xmltvEpg.ts';
 
 const PROVIDER_SELECT =
-  'id,slug,display_name,status,content_policy,notes,last_validated_at,last_tested_at,last_successful_test_at,health_status,live_channel_count,movie_count,series_count,validation_stale,last_health_summary,epg_mode,custom_epg_url_ciphertext,epg_last_refresh_at,epg_last_refresh_status,epg_last_refresh_summary,created_at,updated_at';
+  'id,slug,display_name,status,content_policy,notes,last_validated_at,last_tested_at,last_successful_test_at,health_status,live_channel_count,movie_count,series_count,inventory_live_count,inventory_movie_count,inventory_series_count,inventory_live_generation,inventory_movie_generation,inventory_series_generation,inventory_live_counted_at,inventory_movie_counted_at,inventory_series_counted_at,inventory_count_source,validation_stale,last_health_summary,epg_mode,custom_epg_url_ciphertext,epg_last_refresh_at,epg_last_refresh_status,epg_last_refresh_summary,created_at,updated_at';
 const EPG_SOURCE_SELECT = 'id,managed_provider_id,source_kind,safe_label,priority,enabled,last_refresh_at,last_refresh_status,channel_count,programme_count,diagnostic_summary,active_cache_generation,created_at,updated_at';
 const EPG_SOURCE_SELECT_WITH_SECRETS = `${EPG_SOURCE_SELECT},url_ciphertext,url_iv`;
 const EPG_SOURCE_KINDS = ['national', 'local', 'sports', 'fallback'] as const;

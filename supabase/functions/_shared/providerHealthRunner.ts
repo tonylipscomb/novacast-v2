@@ -46,6 +46,7 @@ const PROBE_TIMEOUT_MS = 8_000;
 const PROBE_MAX_BYTES = 2_048;
 const CATALOG_MAX_BYTES = CATALOG_READ_LIMIT_BYTES;
 const PROBE_YIELD_MS = 120;
+export const PROVIDER_HEALTH_WATCHDOG_MS = 90_000;
 
 type XtreamCredentials = {
   baseUrl: string;
@@ -55,17 +56,28 @@ type XtreamCredentials = {
 
 type CatalogRow = Record<string, unknown>;
 
-function timeoutSignal(ms: number) {
+function timeoutSignal(ms: number, parentSignal?: AbortSignal) {
   const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  if (parentSignal) {
+    if (parentSignal.aborted) controller.abort();
+    else parentSignal.addEventListener('abort', abortFromParent, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), ms);
-  return { controller, timer };
+  return {
+    controller,
+    timer,
+    cleanup: () => {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', abortFromParent);
+    },
+  };
 }
 
 async function readLimited(response: Response, maxBytes: number) {
   const reader = response.body?.getReader();
   if (!reader) {
-    const text = await response.arrayBuffer();
-    return new Uint8Array(text).slice(0, maxBytes);
+    throw new Error('bounded_response_body_unavailable');
   }
   const chunks: Uint8Array[] = [];
   let received = 0;
@@ -89,7 +101,7 @@ async function readLimited(response: Response, maxBytes: number) {
 }
 
 async function fetchSafe(url: URL, init: RequestInit & { timeoutMs: number; maxBytes?: number; hop?: number; maxHops?: number; skipBody?: boolean }) {
-  const { controller, timer } = timeoutSignal(init.timeoutMs);
+  const { controller, cleanup } = timeoutSignal(init.timeoutMs, init.signal ?? undefined);
   const maxHops = init.maxHops ?? 1;
   try {
     const response = await fetch(url, {
@@ -116,20 +128,21 @@ async function fetchSafe(url: URL, init: RequestInit & { timeoutMs: number; maxB
     const bytes = await readLimited(response, init.maxBytes ?? CATALOG_MAX_BYTES);
     return { response, bytes, latencyHint: 0, redirected: (init.hop ?? 0) > 0 };
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
 }
 
 async function fetchXtreamCatalog(
   url: URL,
   timeoutMs: number,
-  options: { keepAll?: boolean; maxBytes?: number } = {},
+  options: { keepAll?: boolean; maxBytes?: number; signal?: AbortSignal; exactCount?: boolean } = {},
 ): Promise<CatalogScanResult> {
   const started = Date.now();
-  const { controller, timer } = timeoutSignal(timeoutMs);
+  const { controller, cleanup } = timeoutSignal(timeoutMs, options.signal);
   const scanner = createXtreamCatalogScanner({
     keepAll: options.keepAll,
     maxBytes: options.maxBytes ?? CATALOG_MAX_BYTES,
+    exactCount: options.exactCount,
   });
   const fail = (reason: CatalogScanResult['reason'], httpStatus?: number | null, stopReason: CatalogStopReason = 'parse_failure'): CatalogScanResult => ({
     ok: false,
@@ -210,13 +223,13 @@ async function fetchXtreamCatalog(
     }
     return fail('catalog_invalid_json');
   } finally {
-    clearTimeout(timer);
+    cleanup();
   }
 }
 
-async function fetchJsonObject(url: URL, timeoutMs: number) {
+async function fetchJsonObject(url: URL, timeoutMs: number, signal?: AbortSignal) {
   const started = Date.now();
-  const { response, bytes } = await fetchSafe(url, { timeoutMs, maxBytes: 1_000_000 });
+  const { response, bytes } = await fetchSafe(url, { timeoutMs, maxBytes: 1_000_000, signal });
   const latencyMs = Date.now() - started;
   if (!response.ok) throw new Error(`http_${response.status}`);
   try {
@@ -262,6 +275,7 @@ export async function probeStream(input: {
   directSource?: string | null;
   maxConnections?: number | null;
   activeConnections?: number | null;
+  signal?: AbortSignal;
 }): Promise<StreamProbeResult> {
   const started = Date.now();
   const fail = (code: StreamProbeCode, httpStatus: number | null = null, extra: Partial<StreamProbeResult> = {}): StreamProbeResult => ({
@@ -312,6 +326,7 @@ export async function probeStream(input: {
       maxBytes: PROBE_MAX_BYTES,
       maxHops: 2,
       headers: headers(range),
+      signal: input.signal,
     });
     return { response, bytes, redirected: Boolean(redirected) };
   };
@@ -401,10 +416,12 @@ async function fetchContentList(
   credentials: XtreamCredentials,
   action: string,
   categories: CatalogRow[],
+  signal?: AbortSignal,
 ): Promise<CatalogScanResult> {
   const global = await fetchXtreamCatalog(
     buildXtreamPlayerApiUrl(baseUrl, credentials.username, credentials.password, action),
     CATALOG_TIMEOUT_MS,
+    { signal, exactCount: false },
   );
   if (global.ok && global.count > 0) return global;
   if (!categories.length) return global;
@@ -421,6 +438,7 @@ async function fetchContentList(
     const part = await fetchXtreamCatalog(
       buildXtreamPlayerApiUrl(baseUrl, credentials.username, credentials.password, action, { category_id: categoryId }),
       CATALOG_TIMEOUT_MS,
+      { signal, exactCount: false },
     );
     latencyMs += part.latencyMs ?? 0;
     bytesRead += part.bytesRead;
@@ -468,7 +486,7 @@ export async function fetchLiveChannelsForEpgMapping(credentials: XtreamCredenti
   };
 }
 
-export async function runProviderHealthCheck(credentials: XtreamCredentials, options: { isGoldManaged?: boolean } = {}): Promise<ProviderHealthSummary> {
+async function runProviderHealthCheckInternal(credentials: XtreamCredentials, options: { isGoldManaged?: boolean; signal?: AbortSignal } = {}): Promise<ProviderHealthSummary> {
   const startedAt = Date.now();
   const checks: ProviderHealthCheck[] = [];
   const notes: string[] = [];
@@ -501,7 +519,7 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
   try {
     const origin = new URL('/', normalizedBase.endsWith('/') ? normalizedBase : `${normalizedBase}/`);
     const started = Date.now();
-    const { response } = await fetchSafe(origin, { timeoutMs: REACHABILITY_TIMEOUT_MS, maxBytes: 256 });
+    const { response } = await fetchSafe(origin, { timeoutMs: REACHABILITY_TIMEOUT_MS, maxBytes: 256, signal: options.signal });
     checks.push(
       check(
         'server',
@@ -530,7 +548,7 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
 
   try {
     const authUrl = buildXtreamPlayerApiUrl(normalizedBase, safeCreds.username, safeCreds.password);
-    const { payload, latencyMs } = await fetchJsonObject(authUrl, AUTH_TIMEOUT_MS);
+    const { payload, latencyMs } = await fetchJsonObject(authUrl, AUTH_TIMEOUT_MS, options.signal);
     const userInfo = (payload.user_info ?? {}) as Record<string, unknown>;
     const serverInfo = (payload.server_info ?? {}) as Record<string, unknown>;
     const authenticated = userInfo.auth === 1 || userInfo.auth === '1';
@@ -607,17 +625,17 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
   const liveCategoryResult = await fetchXtreamCatalog(
     buildXtreamPlayerApiUrl(normalizedBase, safeCreds.username, safeCreds.password, 'get_live_categories'),
     CATALOG_TIMEOUT_MS,
-    { keepAll: true },
+    { signal: options.signal, exactCount: false },
   );
   const vodCategoryResult = await fetchXtreamCatalog(
     buildXtreamPlayerApiUrl(normalizedBase, safeCreds.username, safeCreds.password, 'get_vod_categories'),
     CATALOG_TIMEOUT_MS,
-    { keepAll: true },
+    { signal: options.signal, exactCount: false },
   );
   const seriesCategoryResult = await fetchXtreamCatalog(
     buildXtreamPlayerApiUrl(normalizedBase, safeCreds.username, safeCreds.password, 'get_series_categories'),
     CATALOG_TIMEOUT_MS,
-    { keepAll: true },
+    { signal: options.signal, exactCount: false },
   );
   liveCategories = liveCategoryResult.items;
   vodCategories = vodCategoryResult.items;
@@ -628,18 +646,21 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
     safeCreds,
     'get_live_streams',
     liveCategories,
+    options.signal,
   );
   const vodStreamResult = await fetchContentList(
     normalizedBase,
     safeCreds,
     'get_vod_streams',
     vodCategories,
+    options.signal,
   );
   const seriesListResult = await fetchContentList(
     normalizedBase,
     safeCreds,
     'get_series',
     seriesCategories,
+    options.signal,
   );
   liveStreams = liveStreamResult.items;
   vodStreams = vodStreamResult.items;
@@ -698,6 +719,7 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
   }));
 
   let episodeOk = false;
+  let episodePayload: Record<string, unknown> | null = null;
   if (seriesListResult.ok && seriesList.length) {
     try {
       const sample = sampleRows(seriesList, 1, 'series_id', 'name')[0];
@@ -706,7 +728,8 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
         const infoUrl = buildXtreamPlayerApiUrl(normalizedBase, safeCreds.username, safeCreds.password, 'get_series_info', {
           series_id: seriesId,
         });
-        const { payload } = await fetchJsonObject(infoUrl, CATALOG_TIMEOUT_MS);
+        const { payload } = await fetchJsonObject(infoUrl, CATALOG_TIMEOUT_MS, options.signal);
+        episodePayload = payload;
         const episodes = payload.episodes;
         episodeOk = Boolean(episodes && typeof episodes === 'object');
         catalogs.episodeLookupOk = episodeOk;
@@ -768,6 +791,7 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
           directSource: typeof row.direct_source === 'string' ? row.direct_source : null,
           maxConnections: account?.maxConnections,
           activeConnections: account?.activeConnections,
+          signal: options.signal,
         }),
       );
       await yieldMs(PROBE_YIELD_MS);
@@ -785,6 +809,7 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
           extension: normalizePlaybackExtension(String(row.container_extension ?? ''), 'mp4'),
           maxConnections: account?.maxConnections,
           activeConnections: account?.activeConnections,
+          signal: options.signal,
         }),
       );
       await yieldMs(PROBE_YIELD_MS);
@@ -798,7 +823,9 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
         const infoUrl = buildXtreamPlayerApiUrl(normalizedBase, safeCreds.username, safeCreds.password, 'get_series_info', {
           series_id: seriesId,
         });
-        const { payload } = await fetchJsonObject(infoUrl, CATALOG_TIMEOUT_MS);
+        const { payload } = episodePayload
+          ? { payload: episodePayload }
+          : await fetchJsonObject(infoUrl, CATALOG_TIMEOUT_MS, options.signal);
         const seasons = payload.episodes && typeof payload.episodes === 'object' ? Object.values(payload.episodes as Record<string, unknown>) : [];
         const flat: CatalogRow[] = [];
         for (const season of seasons) {
@@ -822,6 +849,7 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
           extension: episode.extension,
           maxConnections: account?.maxConnections,
           activeConnections: account?.activeConnections,
+          signal: options.signal,
         }),
       );
       await yieldMs(PROBE_YIELD_MS);
@@ -859,7 +887,7 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
       stream_id: streamId,
       limit: '6',
     });
-    const { payload, latencyMs } = await fetchJsonObject(epgUrl, REACHABILITY_TIMEOUT_MS);
+    const { payload, latencyMs } = await fetchJsonObject(epgUrl, REACHABILITY_TIMEOUT_MS, options.signal);
     const listings = Array.isArray((payload as { epg_listings?: unknown[] }).epg_listings)
       ? (payload as { epg_listings: unknown[] }).epg_listings
       : [];
@@ -873,6 +901,83 @@ export async function runProviderHealthCheck(credentials: XtreamCredentials, opt
   }
 
   return finish(checks, notes, startedAt, account, catalogs, probes, options);
+}
+
+function terminalHealthSummary(startedAt: number, detail: string): ProviderHealthSummary {
+  const checkDefinitions = [
+    ['server', 'Server Reachable', 'critical'],
+    ['authentication', 'Authentication', 'critical'],
+    ['live-catalog', 'Live TV Catalog', 'critical'],
+    ['movie-catalog', 'Movies', 'critical'],
+    ['series-catalog', 'Series', 'noncritical'],
+    ['compatibility', 'NovaCast Compatibility', 'critical'],
+    ['playback', 'Stream Probe', 'noncritical'],
+    ['epg', 'EPG', 'noncritical'],
+  ] as const;
+  return {
+    overall: 'failed',
+    overallLabel: 'Provider validation failed before checks completed.',
+    testedAt: new Date().toISOString(),
+    durationMs: Date.now() - startedAt,
+    checks: checkDefinitions.map(([id, label, severity]) => check(id, label, 'fail', severity, detail)),
+    catalogs: {
+      liveCategories: 0,
+      liveChannels: 0,
+      movieCategories: 0,
+      movies: 0,
+      seriesCategories: 0,
+      series: 0,
+      episodeLookupOk: false,
+      countDetails: {
+        liveChannels: { totalCount: null, inspectedCount: 0, exactCountAvailable: false, diagnosticTruncated: false, bytesRead: 0, complete: false, stopReason: 'timeout' },
+        movies: { totalCount: null, inspectedCount: 0, exactCountAvailable: false, diagnosticTruncated: false, bytesRead: 0, complete: false, stopReason: 'timeout' },
+        series: { totalCount: null, inspectedCount: 0, exactCountAvailable: false, diagnosticTruncated: false, bytesRead: 0, complete: false, stopReason: 'timeout' },
+      },
+      truncated: { liveChannels: false, movies: false, series: false },
+    },
+    probes: {
+      live: { passed: 0, total: 0, averageMs: null },
+      movies: { passed: 0, total: 0, averageMs: null },
+      episodes: { passed: 0, total: 0, averageMs: null },
+    },
+    notes: [detail],
+    decoderCaveat: STREAM_PROBE_CAVEAT,
+  };
+}
+
+export async function runProviderHealthCheck(
+  credentials: XtreamCredentials,
+  options: { isGoldManaged?: boolean } = {},
+): Promise<ProviderHealthSummary> {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const watchdog = new Promise<ProviderHealthSummary>((resolve) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      resolve(terminalHealthSummary(startedAt, `Provider diagnostic timed out after ${PROVIDER_HEALTH_WATCHDOG_MS / 1000}s.`));
+    }, PROVIDER_HEALTH_WATCHDOG_MS);
+  });
+
+  try {
+    const result = await Promise.race([
+      runProviderHealthCheckInternal(credentials, { ...options, signal: controller.signal }),
+      watchdog,
+    ]);
+    return timedOut ? terminalHealthSummary(startedAt, `Provider diagnostic timed out after ${PROVIDER_HEALTH_WATCHDOG_MS / 1000}s.`) : result;
+  } catch (error) {
+    return terminalHealthSummary(
+      startedAt,
+      timedOut
+        ? `Provider diagnostic timed out after ${PROVIDER_HEALTH_WATCHDOG_MS / 1000}s.`
+        : `Provider diagnostic failed before checks completed. ${sanitizeFailureMessage(error, credentials.username, credentials.password)}`,
+    );
+  } finally {
+    if (timer) clearTimeout(timer);
+    controller.abort();
+  }
 }
 
 function finish(

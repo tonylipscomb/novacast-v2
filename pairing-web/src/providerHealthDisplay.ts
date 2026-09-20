@@ -5,12 +5,13 @@ export function displayHealthLabel(input: {
   activationStatus: string;
   healthStatus: string;
   validationStale: boolean;
+  testingLeaseFresh?: boolean;
   expired?: boolean;
   offline?: boolean;
 }) {
   if (input.activationStatus === 'paused' || input.activationStatus === 'revoked') return 'DISABLED';
   if (input.activationStatus === 'draft' && (input.healthStatus === 'unvalidated' || input.validationStale)) return 'DRAFT';
-  if (input.healthStatus === 'testing') return 'TESTING';
+  if (input.healthStatus === 'testing') return input.testingLeaseFresh === false ? 'VALIDATION REQUIRED' : 'TESTING';
   if (input.validationStale) return 'VALIDATION REQUIRED';
   if (input.expired) return 'EXPIRED';
   if (input.offline) return 'OFFLINE';
@@ -57,6 +58,16 @@ export function formatTimestamp(value: unknown) {
   const time = Date.parse(String(value ?? ''));
   if (!Number.isFinite(time)) return 'Never';
   return new Date(time).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+export function formatInventoryCount(value: unknown, diagnosticValue: unknown, diagnosticAtLeast: boolean) {
+  if (value !== null && value !== undefined && Number.isInteger(Number(value)) && Number(value) >= 0) {
+    return formatCount(value);
+  }
+  if (diagnosticValue !== null && diagnosticValue !== undefined && Number.isFinite(Number(diagnosticValue))) {
+    return formatCount(diagnosticValue, diagnosticAtLeast);
+  }
+  return 'Not counted';
 }
 
 export const HEALTH_STEPS = [

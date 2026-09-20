@@ -53,6 +53,13 @@ export type DeviceHeartbeatResponse = {
   diagnosticsEnabled?: boolean;
 };
 
+export type DeviceInventoryReport = {
+  mediaType: 'live' | 'movie' | 'series';
+  count: number;
+  catalogGeneration: number;
+  completedAt: string;
+};
+
 export type DeviceAuthorization = {
   backendActivated: boolean;
   localBypassAuthorized: boolean;

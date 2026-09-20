@@ -9,6 +9,7 @@ import {
   formatTimestamp,
   healthTone,
   isCappedCatalogCount,
+  formatInventoryCount,
 } from './providerHealthDisplay';
 
 type Row = Record<string, unknown>;
@@ -102,6 +103,8 @@ export function AdminProviders({
   const [form, setForm] = useState<FormState>(emptyForm);
   const [busy, setBusy] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
+  const [testingStartedAt, setTestingStartedAt] = useState<string | null>(null);
+  const [failedTestingId, setFailedTestingId] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [liveSummary, setLiveSummary] = useState<Summary | null>(null);
   const [epgResult, setEpgResult] = useState<EpgResult | null>(null);
@@ -128,14 +131,22 @@ export function AdminProviders({
   }, [openCreate, onOpenCreateHandled]);
 
   useEffect(() => {
-    if (!testingId) {
+    const persistedTestingProvider = providers.find((provider) => {
+      const id = String(provider.id ?? '');
+      return id !== failedTestingId && String(provider.health_status ?? '') === 'testing' && isFreshProviderValidationLease(provider);
+    });
+    const elapsedRunKey = testingId ?? String(persistedTestingProvider?.id ?? '');
+    const startedAt = testingId ? testingStartedAt : String(persistedTestingProvider?.updated_at ?? '');
+    const startedMs = Date.parse(startedAt ?? '');
+    if (!elapsedRunKey || !Number.isFinite(startedMs)) {
       setElapsed(0);
       return;
     }
-    const started = Date.now();
-    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 500);
+    const update = () => setElapsed(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);
-  }, [testingId]);
+  }, [failedTestingId, providers, testingId, testingStartedAt]);
 
   useEffect(() => {
     if (!providers.some((provider) => String(provider.health_status ?? '') === 'testing')) return;
@@ -163,7 +174,9 @@ export function AdminProviders({
 
   const runTest = async (id: string) => {
     if (testingId || busy) return;
+    setFailedTestingId(null);
     setTestingId(id);
+    setTestingStartedAt(new Date().toISOString());
     setBusy(true);
     try {
       const result = await request({ action: 'test', id });
@@ -171,18 +184,22 @@ export function AdminProviders({
       onMessage('Provider health check completed.');
       await onRefresh();
     } catch (error) {
+      setFailedTestingId(id);
       const category = error instanceof Error ? error.message : 'admin_request_failed';
       onMessage(category === 'validation_in_progress' ? 'Provider validation is already running.' : `Health check failed (${category}).`);
       await onRefresh();
     } finally {
       setBusy(false);
       setTestingId(null);
+      setTestingStartedAt(null);
     }
   };
 
   const probeUnsaved = async () => {
     if (testingId || busy) return;
+    setFailedTestingId(null);
     setTestingId('new');
+    setTestingStartedAt(new Date().toISOString());
     setBusy(true);
     setLiveSummary(null);
     try {
@@ -198,13 +215,18 @@ export function AdminProviders({
     } finally {
       setBusy(false);
       setTestingId(null);
+      setTestingStartedAt(null);
     }
   };
 
   const saveDraft = async (then: 'draft' | 'test' | 'activate') => {
     if (busy) return;
     setBusy(true);
-    if (then !== 'draft') setTestingId('new');
+    if (then !== 'draft') {
+      setFailedTestingId(null);
+      setTestingId('new');
+      setTestingStartedAt(new Date().toISOString());
+    }
     try {
       await request({
         displayName: form.displayName,
@@ -227,6 +249,7 @@ export function AdminProviders({
     } finally {
       setBusy(false);
       setTestingId(null);
+      setTestingStartedAt(null);
     }
   };
 
@@ -509,9 +532,9 @@ export function AdminProviders({
             const serverCheck = summary?.checks?.find((check) => String(check.id) === 'server');
             const expired = Boolean(summary?.account?.expiresAt && Date.parse(String(summary.account.expiresAt)) <= Date.now());
             const offline = health === 'failed' && (authenticationCheck?.verdict === 'fail' || serverCheck?.verdict === 'fail') && !expired;
-            const testingLeaseFresh = health === 'testing' && isFreshProviderValidationLease(provider);
+            const testingLeaseFresh = health === 'testing' && id !== failedTestingId && isFreshProviderValidationLease(provider);
             const testing = testingId === id || testingLeaseFresh;
-            const label = displayHealthLabel({ activationStatus: activation, healthStatus: health, validationStale: stale, expired, offline });
+            const label = displayHealthLabel({ activationStatus: activation, healthStatus: health, validationStale: stale, testingLeaseFresh, expired, offline });
             const healthToneLabel = healthTone(label);
             return (
               <article key={id} className={`providerCard tone-${healthToneLabel}`}>
@@ -523,9 +546,9 @@ export function AdminProviders({
                   <b className={`providerBadge badge-${healthToneLabel}`}>{label}</b>
                 </header>
                 <dl>
-                  <div><span>Live TV</span><strong>{formatCount(provider.live_channel_count, isCappedCatalogCount(provider.live_channel_count, catalogTruncated.liveChannels, catalogDetails.liveChannels?.exactCountAvailable))}</strong></div>
-                  <div><span>Movies</span><strong>{formatCount(provider.movie_count, isCappedCatalogCount(provider.movie_count, catalogTruncated.movies, catalogDetails.movies?.exactCountAvailable))}</strong></div>
-                  <div><span>Series</span><strong>{formatCount(provider.series_count, isCappedCatalogCount(provider.series_count, catalogTruncated.series, catalogDetails.series?.exactCountAvailable))}</strong></div>
+                  <div><span>Live TV</span><strong>{formatInventoryCount(provider.inventory_live_count, provider.live_channel_count, isCappedCatalogCount(provider.live_channel_count, catalogTruncated.liveChannels, catalogDetails.liveChannels?.exactCountAvailable))}</strong></div>
+                  <div><span>Movies</span><strong>{formatInventoryCount(provider.inventory_movie_count, provider.movie_count, isCappedCatalogCount(provider.movie_count, catalogTruncated.movies, catalogDetails.movies?.exactCountAvailable))}</strong></div>
+                  <div><span>Series</span><strong>{formatInventoryCount(provider.inventory_series_count, provider.series_count, isCappedCatalogCount(provider.series_count, catalogTruncated.series, catalogDetails.series?.exactCountAvailable))}</strong></div>
                 </dl>
                 <p>Last tested: {formatTimestamp(provider.last_tested_at)}</p>
                 <p>Last successful: {formatTimestamp(provider.last_successful_test_at)}</p>

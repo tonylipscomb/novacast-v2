@@ -1,5 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import * as ReactNative from 'react-native';
 import { StyleSheet, Text, View } from 'react-native';
+import { useRef, useState } from 'react';
 
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
@@ -21,6 +23,25 @@ export function NovaPulseRail({ items, onAction, nextFocusUp, nextFocusDown, onF
   const { theme } = useAppTheme();
   const styles = createStyles(theme);
   const pulse = useNovaPulse({ items, onAction, onEvent: recordNovaPulseEvent });
+  const [cardHandle, setCardHandle] = useState<number | null>(null);
+  const lastDirectionalInputRef = useRef<{ direction: 'left' | 'right'; at: number } | null>(null);
+  const moveDirectional = (direction: 'left' | 'right') => {
+    const now = Date.now();
+    const previous = lastDirectionalInputRef.current;
+    if (previous && previous.direction === direction && now - previous.at < 80) return;
+    lastDirectionalInputRef.current = { direction, at: now };
+    if (direction === 'left') pulse.previous();
+    else pulse.next();
+  };
+  const reactNativeTv = ReactNative as typeof ReactNative & {
+    useTVEventHandler?: (handler: (event: { eventType?: string }) => void) => void;
+  };
+  const useTVEventHandler = reactNativeTv.useTVEventHandler ?? ((_handler: (event: { eventType?: string }) => void) => {});
+  useTVEventHandler((event: { eventType?: string }) => {
+    if (!pulse.focused || items.length <= 1) return;
+    if (event.eventType === 'left' || event.eventType === 'arrowleft' || event.eventType === 'swipeLeft') moveDirectional('left');
+    if (event.eventType === 'right' || event.eventType === 'arrowright' || event.eventType === 'swipeRight') moveDirectional('right');
+  });
   if (!pulse.item) return null;
   return (
     <View style={styles.section}>
@@ -30,9 +51,12 @@ export function NovaPulseRail({ items, onAction, nextFocusUp, nextFocusDown, onF
         onFocus={() => pulse.setFocus(true)}
         onBlur={() => pulse.setFocus(false)}
         onPress={pulse.activate}
-        onFocusHandle={onFocusHandle}
+        onFocusHandle={(handle) => { setCardHandle(handle); onFocusHandle?.(handle); }}
         nextFocusUp={nextFocusUp}
         nextFocusDown={nextFocusDown}
+        nextFocusLeft={cardHandle ?? undefined}
+        nextFocusRight={cardHandle ?? undefined}
+        onDirectionalInput={moveDirectional}
         onArtworkStatus={(status, diagnostics) => onArtworkStatus?.(pulse.item!, status, diagnostics)}
       />
       {pulse.canRotate ? <View style={styles.footer}><View style={styles.dots}>{items.map((item, index) => <View key={item.id} style={[styles.dot, index === pulse.index && styles.dotActive]} />)}</View><Text style={styles.hint}><MaterialCommunityIcons name="arrow-left-right" size={15} color={theme.colors.textMuted} /> LEFT / RIGHT to browse</Text></View> : null}

@@ -10,7 +10,25 @@ type HeartbeatBody = {
   appFocus?: string;
   acknowledgedCommandIds?: string[];
   commandResults?: Array<{ id: string; status: 'completed' | 'failed'; result?: Record<string, unknown> }>;
+  inventoryReports?: Array<{
+    mediaType?: unknown;
+    count?: unknown;
+    catalogGeneration?: unknown;
+    completedAt?: unknown;
+  }>;
 };
+
+const INVENTORY_MEDIA = {
+  live: { count: 'inventory_live_count', generation: 'inventory_live_generation', countedAt: 'inventory_live_counted_at', device: 'inventory_live_source_device_id' },
+  movie: { count: 'inventory_movie_count', generation: 'inventory_movie_generation', countedAt: 'inventory_movie_counted_at', device: 'inventory_movie_source_device_id' },
+  series: { count: 'inventory_series_count', generation: 'inventory_series_generation', countedAt: 'inventory_series_counted_at', device: 'inventory_series_source_device_id' },
+} as const;
+
+function validInventoryTimestamp(value: unknown, nowMs: number) {
+  if (typeof value !== 'string') return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && time <= nowMs + 5 * 60 * 1000 && time >= nowMs - 30 * 24 * 60 * 60 * 1000;
+}
 
 function remainingMs(expiresAt: string | null | undefined, nowMs: number) {
   if (!expiresAt) return null;
@@ -106,6 +124,42 @@ Deno.serve(async (request) => {
       .eq('device_id', device.id)
       .eq('status', 'active')
       .maybeSingle();
+
+    if (assignment?.managed_provider_id && Array.isArray(body?.inventoryReports)) {
+      const { data: provider } = await client
+        .from('managed_providers')
+        .select('id,inventory_live_count,inventory_movie_count,inventory_series_count,inventory_live_generation,inventory_movie_generation,inventory_series_generation,inventory_live_counted_at,inventory_movie_counted_at,inventory_series_counted_at,inventory_live_source_device_id,inventory_movie_source_device_id,inventory_series_source_device_id')
+        .eq('id', assignment.managed_provider_id)
+        .maybeSingle();
+      if (provider) {
+        const inventoryPatch: Record<string, unknown> = {};
+        for (const raw of body.inventoryReports.slice(0, 3)) {
+          const mediaType = raw?.mediaType;
+          const fields = typeof mediaType === 'string' ? INVENTORY_MEDIA[mediaType as keyof typeof INVENTORY_MEDIA] : undefined;
+          const count = raw?.count;
+          const generation = raw?.catalogGeneration;
+          const completedAt = raw?.completedAt;
+          if (!fields || !Number.isInteger(count) || Number(count) < 0 || !Number.isInteger(generation) || Number(generation) < 1 || !validInventoryTimestamp(completedAt, nowMs)) continue;
+          const incomingTime = Date.parse(String(completedAt));
+          const storedDevice = provider[fields.device] as string | null | undefined;
+          const storedGeneration = Number(provider[fields.generation] ?? 0);
+          const storedTime = Date.parse(String(provider[fields.countedAt] ?? ''));
+          const sameDevice = storedDevice === device.id;
+          const stale = sameDevice
+            ? Number(generation) < storedGeneration || (Number(generation) === storedGeneration && Number.isFinite(storedTime) && incomingTime < storedTime)
+            : Number.isFinite(storedTime) && incomingTime < storedTime;
+          if (stale) continue;
+          inventoryPatch[fields.count] = Number(count);
+          inventoryPatch[fields.generation] = Number(generation);
+          inventoryPatch[fields.countedAt] = new Date(incomingTime).toISOString();
+          inventoryPatch[fields.device] = device.id;
+        }
+        if (Object.keys(inventoryPatch).length) {
+          inventoryPatch.inventory_count_source = 'completed_device_catalog_sync';
+          await client.from('managed_providers').update(inventoryPatch).eq('id', assignment.managed_provider_id);
+        }
+      }
+    }
 
     const { data: pendingCommands } = await client
       .from('device_commands')

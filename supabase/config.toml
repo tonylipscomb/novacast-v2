@@ -31,6 +31,9 @@ verify_jwt = false
 [functions.analytics-ingest]
 verify_jwt = false
 
+[functions.recommendation-events-ingest]
+verify_jwt = false
+
 [functions.device-epg]
 verify_jwt = false
 
@@ -56,4 +59,13 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.admin-gold-panel]
+verify_jwt = false
+
+[functions.novapulse-sports-refresh]
+verify_jwt = false
+
+[functions.novapulse-recommendation-aggregate]
+verify_jwt = false
+
+[functions.novapulse-recommendation-candidates]
 verify_jwt = false

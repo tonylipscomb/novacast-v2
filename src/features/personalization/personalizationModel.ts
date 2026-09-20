@@ -18,10 +18,15 @@ export type RecentItemRecord = {
   contentId: string;
   title: string;
   artworkUrl?: string;
+  streamId?: string;
+  containerExtension?: string;
+  epgChannelId?: string;
   categoryId?: string;
   parentSeriesId?: string;
   seasonNumber?: string;
   episodeNumber?: string;
+  progressPercent?: number;
+  completed?: boolean;
   lastOpenedAt: number;
 };
 

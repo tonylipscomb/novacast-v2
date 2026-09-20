@@ -1,6 +1,6 @@
 import type { ImageRef } from 'expo-image';
 
-export type NovaPulseItemType = 'movie' | 'series' | 'sports' | 'live_event' | 'announcement';
+export type NovaPulseItemType = 'movie' | 'series' | 'sports' | 'live_event' | 'live_epg' | 'announcement';
 
 export type NovaPulseSubtype = 'featured' | 'upcoming' | 'starting_soon' | 'live' | 'final';
 export type NovaPulseAnnouncementType = 'feature' | 'update' | 'beta' | 'maintenance' | 'service_alert' | 'notice' | 'promotion' | 'general';
@@ -11,6 +11,25 @@ export type NovaPulseAction = {
   target?: string;
   contentId?: string;
   seriesId?: string;
+};
+
+export type NovaPulseRecommendationReason =
+  | 'viewers_also_watched'
+  | 'trending_novacast'
+  | 'because_you_watched'
+  | 'favorite_affinity'
+  | 'watchlist_affinity'
+  | 'continue_watching';
+
+export type NovaPulseRecommendationSignals = {
+  reason: NovaPulseRecommendationReason;
+  behaviorScore?: number;
+  affinityScore?: number;
+  trendScore?: number;
+  velocity?: number;
+  scope?: 'global' | 'provider';
+  seedCorrelationToken?: string;
+  catalogMatchToken?: string;
 };
 
 export type NovaPulseSportsData = {
@@ -69,6 +88,7 @@ export type NovaPulseItem = {
   year?: number;
   genres?: string[];
   runtimeMinutes?: number;
+  network?: string;
   rating?: number;
   ratingSource?: string;
   contentRating?: string;
@@ -95,6 +115,18 @@ export type NovaPulseItem = {
   updatedAt?: number;
   sortPriority?: number;
   dedupeKey?: string;
+  recommendation?: NovaPulseRecommendationSignals;
+  channelId?: string;
+  channelCategoryId?: string;
+  channelName?: string;
+  channelLogoUrl?: string;
+  programTitle?: string;
+  programDescription?: string;
+  programStartAt?: number;
+  programEndAt?: number;
+  timingReason?: 'on_now' | 'up_next' | 'tonight';
+  channelReason?: 'favorite_channel' | 'recent_channel';
+  progress?: number;
 };
 
 export type NovaPulseSourceResult = {

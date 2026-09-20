@@ -19,6 +19,9 @@ import { useProviderStore } from '@/features/providers/providerStore';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 import type { ProviderLiveChannel } from '@/features/providers/providerRepositories';
 import { rememberLiveTvMemory } from '@/features/live/liveTvMemory';
+import { getLiveChannelIndexEntry, getLiveChannelIndexSize } from '@/features/search/liveChannelIndex';
+import { getPublishedLiveChannelById } from '@/features/search/liveSearchSqliteCatalog';
+import { liveChannelFromIndexEntry } from '@/features/live/liveFavoriteHydration';
 import { rememberMoviesScreenMemory } from '@/features/movies/moviesScreenMemory';
 import { rememberSeriesScreenMemory } from '@/features/series/seriesScreenMemory';
 import { buildLiveChannelPlaybackUrl, buildMoviePlaybackUrlResolved } from '@/features/providers/providerPlayback';
@@ -123,11 +126,6 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
   const styles = useMemo(() => createHomeStyles(theme), [theme]);
   const router = useRouter();
   const [novaPulseFocusHandle, setNovaPulseFocusHandle] = useState<number | null>(null);
-  const handleNovaPulseAction = useCallback((item: NovaPulseItem) => {
-    if (item.action?.type !== 'details') return;
-    if (item.action.target === '/movies') router.push('/movies');
-    if (item.action.target === '/series') router.push('/series');
-  }, [router]);
   const navigationGateRef = useRef(createTvNavigationGate());
   const { selectedProvider } = useProviderStore();
   const { bundle, generation: providerBundleGeneration } = useActiveProviderBundle();
@@ -414,7 +412,27 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     seriesIndexExtracted: seriesCandidatePool.length,
     ...novaPulseLocalHydration,
   }), [movieCatalogIndex, seriesCatalogIndex, recentlyWatchedMovieIds.length, recentlyWatchedSeriesIds.length, personalization.watchlistMovies.length, personalization.watchlistSeries.length, personalization.favoriteMovies.length, personalization.favoriteSeries.length, movieCandidatePool.length, seriesCandidatePool.length, novaPulseCatalogRevision, novaPulseLocalHydration]);
-  const novaPulseItems = useNovaPulseFeed({ providerId: activeProviderId, movies: novaPulseMovies, series: novaPulseSeries, diagnostics: novaPulseFeedDiagnostics });
+  const novaPulseItems = useNovaPulseFeed({
+    providerId: activeProviderId,
+    movies: novaPulseMovies,
+    series: novaPulseSeries,
+    fetchMovieDetail: bundle?.movies.getMovieInfo,
+    recommendationContext: {
+      recentlyWatched: personalization.recentlyWatched,
+      favoriteMovies: personalization.favoriteMovies,
+      watchlistMovies: personalization.watchlistMovies,
+      favoriteSeries: personalization.favoriteSeries,
+      watchlistSeries: personalization.watchlistSeries,
+    },
+    liveEpg: personalization.providerId === activeProviderId ? {
+      favoriteChannels: personalization.favoriteChannels,
+      recentItems: personalization.recentlyWatched,
+      getIndexEntry: (channelId) => getLiveChannelIndexEntry(activeProviderId, channelId),
+      getIndexSize: () => getLiveChannelIndexSize(activeProviderId),
+      getShortEpg: bundle?.live.getShortEpg,
+    } : undefined,
+    diagnostics: novaPulseFeedDiagnostics,
+  });
   const continueWatchingCount = personalization.providerId === activeProviderId
     ? personalization.continueWatching.length
     : 0;
@@ -549,11 +567,11 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
   const homeFocusDecision = useMemo(
     () =>
       resolveHomeNavbarRightTarget({
-        firstVisibleHomeTargetId: firstHomeFocusId,
-        contentHandle: homeContentHandle,
+        firstVisibleHomeTargetId: novaPulseFocusHandle ? 'novapulse' : firstHomeFocusId,
+        contentHandle: novaPulseFocusHandle ?? homeContentHandle,
         walkthroughVisible: guide.visible,
       }),
-    [firstHomeFocusId, guide.visible, homeContentHandle],
+    [firstHomeFocusId, guide.visible, homeContentHandle, novaPulseFocusHandle],
   );
   const navigationContentFocusHandle =
     homeFocusDecision.nextFocusMode === 'content' ? (novaPulseFocusHandle ?? homeContentHandle ?? undefined) : undefined;
@@ -839,6 +857,25 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
       { launchSource: 'channel', contentFit: 'cover' },
     );
   };
+
+  const handleNovaPulseAction = useCallback((item: NovaPulseItem) => {
+    if (item.action?.type === 'details') {
+      if (item.action.target === '/movies') router.push('/movies');
+      if (item.action.target === '/series') router.push('/series');
+      return;
+    }
+    if (item.action?.type !== 'channel' || item.action.target !== '/live') return;
+    const channelId = item.action.contentId ?? item.channelId;
+    if (!channelId || !bundle) return;
+    const entry = getLiveChannelIndexEntry(activeProviderId, channelId);
+    if (entry) {
+      void playLiveChannelFullscreen(liveChannelFromIndexEntry(entry));
+      return;
+    }
+    void getPublishedLiveChannelById(activeProviderId, channelId)
+      .then((channel) => { if (channel) void playLiveChannelFullscreen(channel); })
+      .catch(() => undefined);
+  }, [activeProviderId, bundle, router]);
 
   const openContinueItem = async (item: HomeContinueWatchingItem) => {
     const memoryCatalogMovie = getMovieCatalogIndex(activeProviderId).getEntry(item.contentId);

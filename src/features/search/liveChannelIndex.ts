@@ -137,6 +137,10 @@ export function getLiveChannelIndexEntry(providerId: string, channelId: string) 
   return indexes.get(providerId)?.get(channelId);
 }
 
+export function getLiveChannelIndexSize(providerId: string) {
+  return indexes.get(providerId)?.size ?? 0;
+}
+
 export function resetLiveChannelIndex(providerId?: string) {
   if (providerId) {
     indexes.delete(providerId);

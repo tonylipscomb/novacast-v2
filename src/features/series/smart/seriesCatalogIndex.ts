@@ -25,6 +25,7 @@ export type SeriesCatalogEntry = {
   posterUrl?: string;
   posterStyleKey: string;
   genreTags: string[];
+  description?: string;
 };
 
 export const MAX_SERIES_CATALOG_INDEX_ENTRIES = MAX_CATALOG_INDEX_ITEMS;
@@ -48,6 +49,7 @@ function toEntry(series: SeriesSummary): SeriesCatalogEntry {
     posterUrl: series.posterUrl,
     posterStyleKey: series.posterStyleKey,
     genreTags: inferGenreTags(title, series.genres),
+    description: series.description,
   };
 }
 
@@ -66,7 +68,7 @@ export function entryToSeriesSummary(entry: SeriesCatalogEntry): SeriesSummary {
     latestEpisodeDate: entry.latestEpisodeDate,
     popularity: entry.popularity,
     genres: entry.genreTags.length ? entry.genreTags : ['Series'],
-    description: 'Curated from your NovaCast series library.',
+    description: entry.description,
     posterStyleKey: entry.posterStyleKey,
     posterUrl: entry.posterUrl,
   };
@@ -170,6 +172,15 @@ export class SeriesCatalogIndex {
 
   listAllEntries() {
     return [...this.entries.values()];
+  }
+
+  listSummaries(limit = 8) {
+    const summaries: SeriesSummary[] = [];
+    for (const entry of this.entries.values()) {
+      if (summaries.length >= limit) break;
+      summaries.push(entryToSeriesSummary(entry));
+    }
+    return summaries;
   }
 
   forEachEntry(callback: (entry: SeriesCatalogEntry) => void) {

@@ -1,4 +1,5 @@
 import type { NovaPulseAction, NovaPulseItem, NovaPulseSportsData } from './novaPulseTypes';
+import { extractYearFromTitle, normalizeProviderTitle, parseProviderTitlePrefix, stripProviderStreamTitlePrefix } from '../series/metadata/titleNormalization.ts';
 
 export function nextNovaPulseIndex(length: number, currentIndex: number, direction: -1 | 1) {
   if (length <= 1) return 0;
@@ -62,12 +63,25 @@ const NOVA_PULSE_PROVIDER_PREFIX = /^(?:(?:4K|UHD|FHD|HD|SD|AMZ|NF|DSNP|HMAX|ATV
 const NOVA_PULSE_TOP_PREFIX = /^TOP\s*[-|:•]\s*/;
 
 /** Presentation-only cleanup; provider/catalog values remain unchanged. */
+const NOVA_PULSE_STRUCTURED_PROVIDER_PREFIX = /^(?:AR(?:-SUBS)?|A\+)(?:\s*[-|:\u2022]\s*|\s+)/i;
+
+export function hasNovaPulseDisplayPrefix(title?: string) {
+  const value = title?.trim() ?? '';
+  return Boolean(value) && (NOVA_PULSE_PROVIDER_PREFIX.test(value) || NOVA_PULSE_STRUCTURED_PROVIDER_PREFIX.test(value) || NOVA_PULSE_TOP_PREFIX.test(value));
+}
+
 export function sanitizeNovaPulseDisplayTitle(title?: string) {
   const original = title?.trim() ?? '';
   if (!original) return '';
   const withoutYear = original.replace(/\s*\((?:19|20)\d{2}\)\s*$/, '').trim();
   const withoutQualityPrefix = withoutYear.replace(NOVA_PULSE_PROVIDER_PREFIX, '').trim();
-  return withoutQualityPrefix.replace(NOVA_PULSE_TOP_PREFIX, '').trim() || withoutQualityPrefix || withoutYear;
+  let withoutStructuredPrefix = withoutQualityPrefix;
+  for (let pass = 0; pass < 4; pass += 1) {
+    const next = withoutStructuredPrefix.replace(NOVA_PULSE_STRUCTURED_PROVIDER_PREFIX, '').trim();
+    if (next === withoutStructuredPrefix) break;
+    withoutStructuredPrefix = next;
+  }
+  return withoutStructuredPrefix.replace(NOVA_PULSE_TOP_PREFIX, '').trim() || withoutStructuredPrefix || withoutYear;
 }
 
 export function getNovaPulseDisplayYear(value?: number, now = new Date()) {
@@ -102,6 +116,95 @@ export function resolveNovaPulseDescription(input: {
   return [input.overview, input.plot, input.description, input.cachedDescription]
     .map((value) => value?.trim())
     .find((value): value is string => Boolean(value)) ?? fallback;
+}
+
+export type NovaPulseLanguageEvidence = 'us-english' | 'neutral' | 'foreign';
+
+const NOVA_PULSE_FOREIGN_LANGUAGE_PREFIXES = new Set(['AR', 'AR-SUBS', 'ES', 'FR', 'DE', 'IT', 'PT', 'RU', 'HI', 'JP', 'KO', 'ZH']);
+const NOVA_PULSE_ENGLISH_PREFIXES = new Set(['EN', 'ENG']);
+const NOVA_PULSE_ENGLISH_REGION_CODES = new Set(['US', 'GB', 'CA', 'AU', 'NZ']);
+const NON_LATIN_SCRIPT_RANGES = [
+  /[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]/g,
+  /[\u0400-\u052f\u2de0-\u2dff\uA640-\uA69F]/g,
+  /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g,
+  /[\uac00-\ud7af]/g,
+  /[\u0590-\u05ff\u0900-\u097f\u0e00-\u0e7f]/g,
+];
+
+function prefixTokens(rawTitle: string) {
+  const tokens = rawTitle.toUpperCase().match(/^(?:\[?([A-Z][A-Z+]*(?:-[A-Z]+)?)\]?)(?:\s*[-|:\u2022]\s*|\s+)/);
+  return tokens?.[1] ? [tokens[1], tokens[1].replace(/-SUBS$/, '')] : [];
+}
+
+/** Conservative NovaPulse-only language/region evidence; raw provider values remain unchanged. */
+export function getNovaPulseLanguageEvidence(rawTitle?: string, countryCode?: string): NovaPulseLanguageEvidence {
+  const parsed = parseProviderTitlePrefix(rawTitle ?? '');
+  const normalizedCountry = countryCode?.trim().toUpperCase() || parsed.countryCode;
+  if (normalizedCountry === 'US') return 'us-english';
+  if (normalizedCountry && NOVA_PULSE_ENGLISH_REGION_CODES.has(normalizedCountry)) return 'neutral';
+  const tokens = prefixTokens(rawTitle ?? '');
+  if (tokens.some((token) => NOVA_PULSE_ENGLISH_PREFIXES.has(token))) return 'us-english';
+  if (tokens.some((token) => NOVA_PULSE_FOREIGN_LANGUAGE_PREFIXES.has(token))) return 'foreign';
+  return 'neutral';
+}
+
+/** Reject only descriptions dominated by clearly non-Latin scripts. Accented Latin remains valid. */
+export function isNovaPulseEnglishDescription(value?: string) {
+  const text = value?.trim() ?? '';
+  if (!text) return false;
+  const letters = [...text].filter((character) => /\p{L}/u.test(character)).length;
+  if (!letters) return true;
+  const nonLatin = NON_LATIN_SCRIPT_RANGES.reduce((count, pattern) => count + (text.match(pattern)?.length ?? 0), 0);
+  return !(nonLatin >= 2 && (nonLatin / letters >= 0.25 || nonLatin >= 8));
+}
+
+export function buildNovaPulseVariantKey(input: { type: 'movie' | 'series'; title: string; rawTitle?: string; year?: number | string }) {
+  const sourceTitle = normalizeProviderTitle(sanitizeNovaPulseDisplayTitle(stripProviderStreamTitlePrefix(input.rawTitle || input.title)))
+    .replace(/\b(?:19|20)\d{2}\b/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+    .toLocaleLowerCase();
+  const parsedYear = typeof input.year === 'number' ? input.year : Number.parseInt(String(input.year ?? ''), 10) || extractYearFromTitle(input.rawTitle || input.title);
+  return `${input.type}|${sourceTitle}|${Number.isInteger(parsedYear) ? parsedYear : ''}`;
+}
+
+export type NovaPulseVariantDiagnostics = {
+  foreignVariantsRejected: number;
+  englishVariantsPreferred: number;
+  duplicateVariantsCollapsed: number;
+};
+
+export function preferNovaPulseEnglishVariants<T extends { id: string; title: string; rawTitle?: string; countryCode?: string; year?: number | string; description?: string; rating?: string | number; posterUrl?: string; backdropUrl?: string }>(
+  items: readonly T[],
+  type: 'movie' | 'series',
+): { items: T[]; diagnostics: NovaPulseVariantDiagnostics } {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const group = groups.get(buildNovaPulseVariantKey({ type, title: item.title, rawTitle: item.rawTitle, year: item.year })) ?? [];
+    group.push(item);
+    groups.set(buildNovaPulseVariantKey({ type, title: item.title, rawTitle: item.rawTitle, year: item.year }), group);
+  }
+  const diagnostics: NovaPulseVariantDiagnostics = { foreignVariantsRejected: 0, englishVariantsPreferred: 0, duplicateVariantsCollapsed: 0 };
+  const selected: T[] = [];
+  for (const variants of groups.values()) {
+    const ranked = variants.map((item, index) => {
+      const evidence = getNovaPulseLanguageEvidence(item.rawTitle, item.countryCode);
+      const descriptionScore = isNovaPulseEnglishDescription(item.description) ? 1 : 0;
+      const richness = Number(Boolean(item.backdropUrl)) * 3 + Number(Boolean(item.posterUrl)) * 2 + Number(Boolean(item.description)) + Number(item.rating != null);
+      return { item, index, evidence, score: (evidence === 'us-english' ? 30 : evidence === 'neutral' ? 20 : 0) + descriptionScore + richness };
+    }).sort((left, right) => right.score - left.score || left.index - right.index);
+    const winner = ranked[0];
+    if (!winner) continue;
+    selected.push(winner.item);
+    if (variants.length > 1) {
+      diagnostics.duplicateVariantsCollapsed += variants.length - 1;
+      if (winner.evidence !== 'foreign' && ranked.some((entry) => entry.evidence === 'foreign')) {
+        diagnostics.englishVariantsPreferred += 1;
+        diagnostics.foreignVariantsRejected += ranked.filter((entry) => entry.evidence === 'foreign').length;
+      }
+    }
+  }
+  return { items: selected, diagnostics };
 }
 
 export function buildNovaPulseCandidateSignature(items: readonly {

@@ -10,6 +10,7 @@ import {
   setRecommendationStorageForTests,
   RECOMMENDATION_QUEUE_MAX_EVENTS,
 } from '../src/features/novapulse/recommendationEventQueue.ts';
+import { flushRecommendationEvents, resetRecommendationSyncForTests } from '../src/features/novapulse/recommendationEventSync.ts';
 import { createRecommendationEvent } from '../src/features/novapulse/recommendationContract.ts';
 
 function memoryStorage(initial = {}) {
@@ -97,5 +98,58 @@ test('queue storage failure is fail-closed and does not throw', async () => {
   });
   assert.equal(await enqueueRecommendationEvent(event(1)), false);
   assert.deepEqual(await listPendingRecommendationEvents(), []);
+  setRecommendationStorageForTests(null);
+});
+
+test('flusher ACKs accepted, duplicate, and permanent-invalid events but retains transient failures', async () => {
+  setRecommendationStorageForTests(memoryStorage());
+  resetRecommendationSyncForTests();
+  await enqueueRecommendationEvent(event(1));
+  await enqueueRecommendationEvent(event(2));
+  await enqueueRecommendationEvent(event(3));
+  await flushRecommendationEvents(async () => ({
+    ok: false,
+    accepted: 1,
+    duplicates: 1,
+    invalid: 1,
+    transientFailed: 0,
+    results: [
+      { index: 0, status: 'accepted' },
+      { index: 1, status: 'duplicate' },
+      { index: 2, status: 'invalid' },
+    ],
+  }));
+  assert.deepEqual(await listPendingRecommendationEvents(), []);
+
+  await enqueueRecommendationEvent(event(4));
+  let calls = 0;
+  const send = async () => {
+    calls += 1;
+    throw new Error('offline');
+  };
+  await flushRecommendationEvents(send);
+  assert.equal(calls, 1);
+  assert.equal((await listPendingRecommendationEvents()).length, 1);
+  setRecommendationStorageForTests(null);
+});
+
+test('concurrent flush calls share one in-flight request', async () => {
+  setRecommendationStorageForTests(memoryStorage());
+  resetRecommendationSyncForTests();
+  await enqueueRecommendationEvent(event(5));
+  let calls = 0;
+  let release;
+  const send = async (events) => {
+    calls += 1;
+    await new Promise((resolve) => { release = resolve; });
+    return { ok: true, accepted: events.length, results: events.map((_event, index) => ({ index, status: 'accepted' })) };
+  };
+  const first = flushRecommendationEvents(send);
+  const second = flushRecommendationEvents(send);
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  await Promise.all([first, second]);
+  assert.equal(calls, 1);
+  assert.equal((await listPendingRecommendationEvents()).length, 0);
   setRecommendationStorageForTests(null);
 });

@@ -39,6 +39,7 @@ export function mapManagedEpgPrograms(input: ManagedEpgProgram[], limit = 3, now
       end,
       startAt,
       endAt,
+      epgSource: 'managed',
     } satisfies ProviderGuideProgram);
   });
   return mapped.sort((left, right) => {

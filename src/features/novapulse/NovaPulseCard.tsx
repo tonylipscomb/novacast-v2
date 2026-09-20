@@ -38,17 +38,21 @@ type NovaPulseCardProps = {
   onFocusHandle?: (handle: number | null) => void;
   nextFocusUp?: number;
   nextFocusDown?: number;
+  nextFocusLeft?: number;
+  nextFocusRight?: number;
+  onDirectionalInput?: (direction: 'left' | 'right') => void;
   onArtworkStatus?: (status: NovaPulseArtworkStatus, diagnostics?: NovaPulseArtworkDiagnostics) => void;
 };
 
-export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, nextFocusUp, nextFocusDown, onArtworkStatus }: NovaPulseCardProps) {
+export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, nextFocusUp, nextFocusDown, nextFocusLeft, nextFocusRight, onDirectionalInput, onArtworkStatus }: NovaPulseCardProps) {
   const { theme } = useAppTheme();
   const styles = createStyles(theme);
   const sports = item.type === 'sports';
   const announcement = item.type === 'announcement';
+  const liveEpg = item.type === 'live_epg';
   const [focused, setFocused] = useState(false);
-  const badge = announcement ? getNovaPulseAnnouncementBadge(item) : sports ? item.sports?.eventStatus ?? (item.subtype === 'final' ? 'FINAL' : formatNovaPulseUpcomingStatus(item.startsAt)) : getNovaPulseCatalogBadge(item);
-  const catalogMeta = !sports ? formatNovaPulseCatalogMeta(item) : null;
+  const badge = announcement ? getNovaPulseAnnouncementBadge(item) : sports ? item.sports?.eventStatus ?? (item.subtype === 'final' ? 'FINAL' : formatNovaPulseUpcomingStatus(item.startsAt)) : liveEpg ? item.badge ?? item.timingReason?.replace('_', ' ').toUpperCase() ?? 'LIVE' : getNovaPulseCatalogBadge(item);
+  const catalogMeta = !sports && !liveEpg ? formatNovaPulseCatalogMeta(item) : null;
   const episodeMeta = item.type === 'series' ? formatNovaPulseEpisodeMeta(item) : null;
   const rating = !sports ? formatNovaPulseRating(item) : null;
   const announcementSecondary = item.secondaryText ?? (item.version ? `Version ${item.version}` : null);
@@ -123,7 +127,7 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
   }, [hasRemoteArtwork, mediaKey]);
   const artworkFit = item.artworkFit ?? 'cover';
   const fallbackArtwork = item.type === 'movie' || item.type === 'series' ? NOVACAST_FALLBACK_CARD : null;
-  const fallbackIcon = item.type === 'announcement' ? 'bullhorn-outline' : item.type === 'series' ? 'television-classic' : item.type === 'movie' ? 'movie-open-outline' : 'trophy-outline';
+  const fallbackIcon = item.type === 'announcement' ? 'bullhorn-outline' : item.type === 'series' ? 'television-classic' : item.type === 'movie' ? 'movie-open-outline' : item.type === 'live_epg' ? 'television' : 'trophy-outline';
   return (
     <Pressable
       ref={(node) => onFocusHandle?.(node ? findNodeHandle(node) : null)}
@@ -132,6 +136,13 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
       hasTVPreferredFocus={false}
       {...(nextFocusUp != null ? { nextFocusUp } : null)}
       {...(nextFocusDown != null ? { nextFocusDown } : null)}
+      {...(nextFocusLeft != null ? { nextFocusLeft } : null)}
+      {...(nextFocusRight != null ? { nextFocusRight } : null)}
+      {...({ onKeyDown: (event: { nativeEvent?: { eventType?: string; key?: string }; preventDefault?: () => void }) => {
+        const eventType = String(event.nativeEvent?.eventType ?? event.nativeEvent?.key ?? '').toLowerCase();
+        if (eventType === 'left' || eventType === 'arrowleft') { event.preventDefault?.(); onDirectionalInput?.('left'); }
+        if (eventType === 'right' || eventType === 'arrowright') { event.preventDefault?.(); onDirectionalInput?.('right'); }
+      }} as any)}
       onFocus={() => { setFocused(true); onFocus(); }}
       onBlur={() => { setFocused(false); onBlur(); }}
       onPress={onPress}
@@ -145,7 +156,7 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
         {episodeMeta ? <Text numberOfLines={1} style={styles.episodeMeta}>{episodeMeta}</Text> : null}
         {!announcement && item.description ? <Text numberOfLines={2} style={styles.description}>{item.description}</Text> : null}
         {rating ? <Text numberOfLines={1} style={styles.rating}>{rating}</Text> : null}
-        {announcement ? <>{announcementSecondary || announcementTiming ? <View style={styles.announcementMeta}>{announcementSecondary ? <Text numberOfLines={1} style={styles.announcementSecondary}>{announcementSecondary}</Text> : null}{announcementTiming ? <Text numberOfLines={1} style={styles.announcementTiming}>{announcementTiming}</Text> : null}</View> : null}{item.ctaLabel ? <Text numberOfLines={1} style={styles.announcementCta}>{item.ctaLabel}</Text> : null}</> : sports ? <NovaPulseSportsCard item={item} /> : action ? <View style={styles.actionHint}><MaterialCommunityIcons name="play-circle-outline" size={17} color={theme.colors.accent} /><Text style={styles.actionText}>Press OK</Text></View> : null}
+        {announcement ? <>{announcementSecondary || announcementTiming ? <View style={styles.announcementMeta}>{announcementSecondary ? <Text numberOfLines={1} style={styles.announcementSecondary}>{announcementSecondary}</Text> : null}{announcementTiming ? <Text numberOfLines={1} style={styles.announcementTiming}>{announcementTiming}</Text> : null}</View> : null}{item.ctaLabel ? <Text numberOfLines={1} style={styles.announcementCta}>{item.ctaLabel}</Text> : null}</> : sports ? <NovaPulseSportsCard item={item} /> : liveEpg && item.secondaryText ? <Text numberOfLines={1} style={styles.liveEpgSecondary}>{item.secondaryText}</Text> : action ? <View style={styles.actionHint}><MaterialCommunityIcons name="play-circle-outline" size={17} color={theme.colors.accent} /><Text style={styles.actionText}>Press OK</Text></View> : null}
       </View>
       <View style={styles.media} onLayout={(event) => { const { width, height } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ mediaWidth: width, height })); }}>
         {(!remoteArtworkUrl && !item.artworkSource || artworkFailed || artworkTimedOut || (!remoteArtworkUrl && !artworkLoaded)) ? <View style={styles.backdropFallback}>{fallbackArtwork ? <><Image source={fallbackArtwork} style={styles.fallbackArtwork} contentFit="cover" /><View pointerEvents="none" style={styles.fallbackGlow} /><MaterialCommunityIcons name={fallbackIcon} size={30} color="rgba(211, 205, 255, 0.78)" style={styles.fallbackIcon} /></> : <MaterialCommunityIcons name={fallbackIcon} size={46} color="rgba(154, 139, 255, 0.62)" style={styles.fallbackIcon} />}</View> : null}
@@ -202,6 +213,7 @@ function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {
     announcementMeta: { marginTop: 7, gap: 3 },
     announcementSecondary: { color: theme.colors.textMuted, fontSize: 13, lineHeight: 17, fontWeight: '700' },
     announcementTiming: { color: theme.colors.accent, fontSize: 12, lineHeight: 16, fontWeight: '800' },
+    liveEpgSecondary: { marginTop: 6, color: theme.colors.accent, fontSize: 13, lineHeight: 17, fontWeight: '800' },
     announcementCta: { marginTop: 6, color: theme.colors.textPrimary, fontSize: 13, lineHeight: 17, fontWeight: '800' },
     actionHint: { marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 6 },
     actionText: { color: theme.colors.textMuted, fontSize: 12, fontWeight: '700' },

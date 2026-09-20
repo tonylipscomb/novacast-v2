@@ -122,6 +122,7 @@ function mapCatalogItemToMovie(item: CatalogItemRecord): MovieSummary {
     score: item.rating ?? undefined,
     posterStyleKey: 'ember',
     posterUrl: item.artworkUrl ?? undefined,
+    backdropUrl: item.backdropUrl ?? undefined,
     containerExtension: item.streamExtension ?? undefined,
     providerSortOrder: item.providerSortOrder ?? undefined,
     regionRank: item.regionRank ?? undefined,

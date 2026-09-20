@@ -1,6 +1,6 @@
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
-import type { NovaPulseItem, NovaPulseSourceResult } from './novaPulseTypes';
+import type { NovaPulseItem, NovaPulseRecommendationSignals, NovaPulseSourceResult } from './novaPulseTypes';
 import { getNovaPulseDisplayYear, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
 
 export type NovaPulseSource = {
@@ -32,11 +32,11 @@ function presentationScore(input: {
   return score;
 }
 
-function preferPresentable<T>(items: readonly T[], score: (item: T) => number, limit = 8) {
+function preferPresentable<T>(items: readonly T[], score: (item: T) => number, limit = 32) {
   return [...items].sort((left, right) => score(right) - score(left)).slice(0, limit);
 }
 
-function stableMovie(movie: MovieSummary): NovaPulseItem {
+function stableMovie(movie: MovieSummary, recommendations?: ReadonlyMap<string, NovaPulseRecommendationSignals>): NovaPulseItem {
   const id = String(movie.id);
   return {
     id: `catalog-movie-${id}`,
@@ -50,6 +50,8 @@ function stableMovie(movie: MovieSummary): NovaPulseItem {
     rating: finiteRating(movie.rating ?? movie.score),
     ratingSource: movie.rating ? 'Rating' : undefined,
     artworkUrl: movie.posterUrl,
+    posterUrl: movie.posterUrl,
+    backdropUrl: movie.backdropUrl,
     priority: 90,
     sourceId: 'catalog-movies',
     sourceItemId: id,
@@ -57,11 +59,12 @@ function stableMovie(movie: MovieSummary): NovaPulseItem {
     updatedAt: movie.addedAt,
     sortPriority: movie.popularity ?? movie.regionRank,
     dedupeKey: `movie:${id}`,
+    recommendation: recommendations?.get(`movie:${id}`),
     action: { type: 'details', target: '/movies', contentId: id },
   };
 }
 
-function stableSeries(series: SeriesSummary): NovaPulseItem {
+function stableSeries(series: SeriesSummary, recommendations?: ReadonlyMap<string, NovaPulseRecommendationSignals>): NovaPulseItem {
   const id = String(series.id || series.seriesId);
   return {
     id: `catalog-series-${id}`,
@@ -74,6 +77,8 @@ function stableSeries(series: SeriesSummary): NovaPulseItem {
     rating: finiteRating(series.rating),
     ratingSource: series.rating ? 'Rating' : undefined,
     artworkUrl: series.backdropUrl ?? series.posterUrl,
+    posterUrl: series.posterUrl,
+    backdropUrl: series.backdropUrl,
     artworkFit: series.backdropUrl ? 'cover' : 'contain',
     priority: 80,
     sourceId: 'catalog-series',
@@ -82,6 +87,7 @@ function stableSeries(series: SeriesSummary): NovaPulseItem {
     updatedAt: series.latestEpisodeDate ? Date.parse(String(series.latestEpisodeDate)) || undefined : series.addedAt,
     sortPriority: series.popularity ?? series.providerSortOrder,
     dedupeKey: `series:${id}`,
+    recommendation: recommendations?.get(`series:${id}`),
     action: { type: 'details', target: '/series', contentId: id, seriesId: series.seriesId || id },
   };
 }
@@ -90,19 +96,23 @@ function bounded<T>(items: readonly T[], limit = 8) {
   return items.filter(Boolean).slice(0, limit);
 }
 
-export function createNovaPulseCatalogSource(movies: readonly MovieSummary[], series: readonly SeriesSummary[]): NovaPulseSource {
+export function createNovaPulseCatalogSource(
+  movies: readonly MovieSummary[],
+  series: readonly SeriesSummary[],
+  recommendations?: ReadonlyMap<string, NovaPulseRecommendationSignals>,
+): NovaPulseSource {
   return {
     id: 'catalog',
     getItems: () => ({
       sourceId: 'catalog',
       fetchedAt: Date.now(),
       items: [
-        ...preferPresentable(movies.filter(Boolean).slice(0, 32), (movie) => presentationScore(movie)).map(stableMovie),
+        ...preferPresentable(movies.filter(Boolean).slice(0, 32), (movie) => presentationScore(movie)).map((movie) => stableMovie(movie, recommendations)),
         ...preferPresentable(series.filter(Boolean).slice(0, 32), (seriesItem) => presentationScore({
           ...seriesItem,
           year: seriesItem.year ? Number.parseInt(seriesItem.year, 10) || undefined : undefined,
           artworkUrl: seriesItem.backdropUrl ?? seriesItem.posterUrl,
-        })).map(stableSeries),
+        })).map((seriesItem) => stableSeries(seriesItem, recommendations)),
       ],
     }),
   };
@@ -137,5 +147,12 @@ export function createNovaPulseSportsSource(items: readonly NovaPulseItem[]): No
   return {
     id: 'sports',
     getItems: () => ({ sourceId: 'sports', fetchedAt: Date.now(), items: items.filter((item) => item.type === 'sports') }),
+  };
+}
+
+export function createNovaPulseLiveEpgSource(items: readonly NovaPulseItem[]): NovaPulseSource {
+  return {
+    id: 'live-epg',
+    getItems: () => ({ sourceId: 'live-epg', fetchedAt: Date.now(), items: items.filter((item) => item.type === 'live_epg') }),
   };
 }

@@ -109,6 +109,23 @@ Deno.test('counts a complete 20000-item catalog while bounding diagnostic inspec
   assertEquals(parsed.items.length, 12_000);
 });
 
+Deno.test('diagnostic cap stops a large catalog without consuming the remaining response', () => {
+  const rows = Array.from({ length: 20_000 }, (_, index) => channel(index + 1));
+  const encoded = new TextEncoder().encode(JSON.stringify(rows));
+  const scanner = createXtreamCatalogScanner({ exactCount: false });
+  for (let offset = 0; offset < encoded.length && !scanner.finished; offset += 4096) {
+    scanner.push(encoded.slice(offset, offset + 4096));
+  }
+  const parsed = scanner.finish();
+  assertEquals(parsed.ok, true);
+  assertEquals(parsed.totalCount, null);
+  assertEquals(parsed.inspectedCount, 12_000);
+  assertEquals(parsed.exactCountAvailable, false);
+  assertEquals(parsed.stopReason, 'diagnostic_cap');
+  assertEquals(parsed.diagnosticTruncated, true);
+  assert(parsed.bytesRead < encoded.length);
+});
+
 Deno.test('an interrupted full count is not reported as exact', () => {
   const text = JSON.stringify(Array.from({ length: 20_000 }, (_, index) => channel(index + 1)));
   const parsed = parseXtreamCatalogText(text.slice(0, Math.floor(text.length * 0.8)), {

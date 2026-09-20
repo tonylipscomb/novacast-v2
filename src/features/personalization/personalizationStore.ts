@@ -39,8 +39,8 @@ function normalizeFavorite(value: unknown, providerId: string): FavoriteRecord |
     contentId: entry.contentId,
     title: entry.title,
     artworkUrl: typeof entry.artworkUrl === 'string' ? entry.artworkUrl : undefined,
-    categoryId: typeof entry.categoryId === 'string' ? entry.categoryId : undefined,
     streamId: typeof entry.streamId === 'string' ? entry.streamId : undefined,
+    categoryId: typeof entry.categoryId === 'string' ? entry.categoryId : undefined,
     extension: typeof entry.extension === 'string' ? entry.extension : undefined,
     createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
   };
@@ -66,10 +66,15 @@ function normalizeRecent(value: unknown, providerId: string): RecentItemRecord |
     contentId: entry.contentId,
     title: entry.title,
     artworkUrl: typeof entry.artworkUrl === 'string' ? entry.artworkUrl : undefined,
+    streamId: typeof entry.streamId === 'string' ? entry.streamId : undefined,
+    containerExtension: typeof entry.containerExtension === 'string' ? entry.containerExtension : undefined,
+    epgChannelId: typeof entry.epgChannelId === 'string' ? entry.epgChannelId : undefined,
     categoryId: typeof entry.categoryId === 'string' ? entry.categoryId : undefined,
     parentSeriesId: typeof entry.parentSeriesId === 'string' ? entry.parentSeriesId : undefined,
     seasonNumber: typeof entry.seasonNumber === 'string' ? entry.seasonNumber : undefined,
     episodeNumber: typeof entry.episodeNumber === 'string' ? entry.episodeNumber : undefined,
+    progressPercent: typeof entry.progressPercent === 'number' ? entry.progressPercent : undefined,
+    completed: entry.completed === true,
     lastOpenedAt: typeof entry.lastOpenedAt === 'number' ? entry.lastOpenedAt : Date.now(),
   };
 }

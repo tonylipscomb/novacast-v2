@@ -226,8 +226,8 @@ test('provider-scoped hydration reports attempted and populated local counts', (
 
 test('real catalog candidates suppress only their matching fallback type', () => {
   const feedSource = fs.readFileSync(new URL('../src/features/novapulse/useNovaPulseFeed.ts', import.meta.url), 'utf8');
-  assert.match(feedSource, /movie: movies\.length === 0/);
-  assert.match(feedSource, /series: series\.length === 0/);
+  assert.match(feedSource, /movie: boundedMovies\.length === 0/);
+  assert.match(feedSource, /series: boundedSeries\.length === 0/);
   const cardSource = fs.readFileSync(new URL('../src/features/novapulse/NovaPulseCard.tsx', import.meta.url), 'utf8');
   assert.match(cardSource, /NOVACAST_FALLBACK_CARD/);
   assert.match(cardSource, /fallbackArtwork/);
@@ -346,7 +346,7 @@ test('sports footer keeps venue metadata and countdown in one bounded row', () =
   assert.match(cardSource, /styles\.footer/);
   assert.match(cardSource, /numberOfLines=\{1\} ellipsizeMode="tail" style=\{styles\.footerText\}/);
   assert.match(cardSource, /maxWidth: '43%'/);
-  assert.match(cardSource, /marginTop: 7/);
+  assert.match(cardSource, /marginTop: 3/);
 });
 
 test('late catalog index hydration invalidates NovaPulse candidates without Home reload', () => {
@@ -436,9 +436,9 @@ test('catalog sources normalize actionable movie and series records', () => {
 test('catalog candidate extraction is bounded and prefers the prepared collection order', () => {
   const movies = Array.from({ length: 20 }, (_, index) => ({ id: `m${index}`, categoryId: 'c', title: `Movie ${index}`, genres: [], posterStyleKey: 'ember', priority: 1 }));
   const result = createNovaPulseCatalogSource(movies, []).getItems();
-  assert.equal(result.items.length, 8);
+  assert.equal(result.items.length, 20);
   assert.equal(result.items[0].sourceItemId, 'm0');
-  assert.equal(result.items.at(-1)?.sourceItemId, 'm7');
+  assert.equal(result.items.at(-1)?.sourceItemId, 'm19');
 });
 
 test('composer caps the rail, balances types, and removes duplicate source items', () => {
@@ -466,8 +466,8 @@ test('catalog absence or a failing source does not break remaining mock sources'
 test('release feed keeps per-type local fallback slots when catalog data is unavailable', () => {
   const source = fs.readFileSync(new URL('../src/features/novapulse/useNovaPulseFeed.ts', import.meta.url), 'utf8');
   const mockSource = fs.readFileSync(new URL('../src/features/novapulse/novaPulseSources.ts', import.meta.url), 'utf8');
-  assert.match(source, /movie: movies\.length === 0/);
-  assert.match(source, /series: series\.length === 0/);
+  assert.match(source, /movie: boundedMovies\.length === 0/);
+  assert.match(source, /series: boundedSeries\.length === 0/);
   assert.match(source, /NOVAPULSE_FEED_RELEASE/);
   assert.match(source, /recordDiagnostic/);
   assert.match(mockSource, /includeMovieFallback/);
@@ -587,8 +587,8 @@ test('TvRemoteImage forwards native display diagnostics without a visibility gat
 test('NovaPulse prefetch uses composed feed items and leaves rotation cadence unchanged', () => {
   const feedSource = fs.readFileSync(new URL('../src/features/novapulse/useNovaPulseFeed.ts', import.meta.url), 'utf8');
   const pulseSource = fs.readFileSync(new URL('../src/features/novapulse/useNovaPulse.ts', import.meta.url), 'utf8');
-  assert.match(feedSource, /createNovaPulseArtworkPrefetchPlan\(composed, providerId\)/);
-  assert.match(feedSource, /inspectNovaPulseArtworkPrefetch\(composed, artworkPrefetchPlan/);
+  assert.match(feedSource, /createNovaPulseArtworkPrefetchPlan\(presentation\.items, providerId\)/);
+  assert.match(feedSource, /inspectNovaPulseArtworkPrefetch\(presentation\.items, artworkPrefetchPlan/);
   assert.match(feedSource, /NOVAPULSE_MEDIA_PREFETCH/);
   assert.doesNotMatch(feedSource, /listSummaries/);
   assert.match(pulseSource, /8_000/);

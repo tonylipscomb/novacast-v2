@@ -45,6 +45,7 @@ export type MovieSummary = {
   externalScore?: number;
   posterStyleKey: string;
   posterUrl?: string;
+  backdropUrl?: string;
   containerExtension?: string;
   /** Provider response order within the category (0-based). */
   providerSortOrder?: number;

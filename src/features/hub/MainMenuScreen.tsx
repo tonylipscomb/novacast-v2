@@ -1,9 +1,9 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { findNodeHandle, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import * as ReactNative from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 import { NovaTvShell } from '@/components/nova';
 import type { NovaNavigationFocusHandles, NovaNavigationId } from '@/components/nova';
@@ -46,7 +46,9 @@ import { requestLaunchOverlayExit } from '@/features/startup/launchOverlay';
 import { useUnifiedPlayer } from '@/features/playback/unified';
 import { launchSeriesEpisodePlayback } from '@/features/series/seriesPlayback';
 import { loadHomePersonalization, type HomePersonalizationSnapshot } from '@/features/personalization/personalizationHome';
-import { getMovieCatalogIndex } from '@/features/movies/smart/movieCatalogIndex';
+import { getMovieCatalogIndex, subscribeMovieCatalogIndex } from '@/features/movies/smart/movieCatalogIndex';
+import { getSeriesCatalogIndex } from '@/features/series/smart/seriesCatalogIndex';
+import { subscribeSeriesCatalogIndex } from '@/features/series/smart/SmartSeriesDataSource';
 import { recordRecentItem, removeContinueWatchingItem, subscribePersonalization } from '@/features/personalization/personalizationStore';
 import { subscribeMovieLibrary } from '@/features/movies/smart/movieLibraryStore';
 import { subscribeMediaLibrary } from '@/features/media-browser/mediaLibraryStore';
@@ -63,6 +65,14 @@ import { processTimeBudgeted } from '@/features/catalog/jsChunkBudget';
 import { showNotification } from '@/features/notifications/notificationStore';
 import { maybeTriggerDevCatalogRefreshOnce } from '@/features/diagnostics/devCatalogRefreshOnce';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
+import { NovaPulseRail } from '@/features/novapulse/NovaPulseRail';
+import { useNovaPulseFeed } from '@/features/novapulse/useNovaPulseFeed';
+import type { NovaPulseItem } from '@/features/novapulse/novaPulseTypes';
+import type { NovaPulseArtworkDiagnostics, NovaPulseArtworkStatus } from '@/features/novapulse/NovaPulseCard';
+import { loadNovaPulseLocalCatalog } from '@/features/novapulse/novaPulseLocalCatalog';
+import { buildNovaPulseCandidateSignature, describeNovaPulseArtwork } from '@/features/novapulse/novaPulseLogic';
+import { recordDiagnostic } from '@/features/diagnostics/diagnosticsClient';
+import { subscribeCatalogSyncPhase } from '@/features/providers/providerCatalogSync';
 
 /**
  * Resolves a channel's category type for accent-color purposes. Prefers an
@@ -112,6 +122,12 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
   const { theme } = useAppTheme();
   const styles = useMemo(() => createHomeStyles(theme), [theme]);
   const router = useRouter();
+  const [novaPulseFocusHandle, setNovaPulseFocusHandle] = useState<number | null>(null);
+  const handleNovaPulseAction = useCallback((item: NovaPulseItem) => {
+    if (item.action?.type !== 'details') return;
+    if (item.action.target === '/movies') router.push('/movies');
+    if (item.action.target === '/series') router.push('/series');
+  }, [router]);
   const navigationGateRef = useRef(createTvNavigationGate());
   const { selectedProvider } = useProviderStore();
   const { bundle, generation: providerBundleGeneration } = useActiveProviderBundle();
@@ -120,8 +136,111 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
   const guide = useGuideWalkthrough(ONBOARDING_GUIDES.hub.key);
   const exitConfirm = useExitConfirmOnBack(!playbackActive && !playbackClosing && !guide.visible);
   const activeProviderId = selectedProvider?.id ?? 'demo-provider';
+  const activeProviderIdRef = useRef(activeProviderId);
+  const bundleRef = useRef(bundle);
+  const homeFocusedRef = useRef(false);
+  const homeHydratedRef = useRef(false);
+  const homeDirtyRef = useRef(true);
+  const homeRefreshInFlightRef = useRef<Promise<void> | null>(null);
+  const homeRefreshQueuedRef = useRef(false);
+  const homeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const novaPulseLocalCatalogInFlightRef = useRef<{ providerId: string; promise: Promise<void> } | null>(null);
+  const novaPulsePreviousProviderIdRef = useRef(activeProviderId);
+  const novaPulseCandidateCacheRef = useRef<{ providerId: string; movies: MovieSummary[]; series: SeriesSummary[] }>({ providerId: activeProviderId, movies: [], series: [] });
+  const novaPulseCandidateSignaturesRef = useRef({ providerId: activeProviderId, movie: '', series: '' });
+  const novaPulseLocalHydrationSignatureRef = useRef('');
+  const novaPulseArtworkStatusSeenRef = useRef(new Set<string>());
+  const homeProviderIdRef = useRef(activeProviderId);
+  activeProviderIdRef.current = activeProviderId;
+  bundleRef.current = bundle;
   const freshFocusLoggedRef = useRef(false);
   const [categoryTypeById, setCategoryTypeById] = useState<Map<string, ProviderCategoryType>>(new Map());
+  const [novaPulseCatalogRevision, setNovaPulseCatalogRevision] = useState(0);
+  const [novaPulseLocalHydration, setNovaPulseLocalHydration] = useState({
+    activeProviderChanged: false,
+    movieLocalHydrationAttempted: false,
+    seriesLocalHydrationAttempted: false,
+    movieLocalHydrationCount: 0,
+    seriesLocalHydrationCount: 0,
+    movieArtworkLoadSuccess: 0,
+    movieArtworkLoadError: 0,
+    seriesArtworkLoadSuccess: 0,
+    seriesArtworkLoadError: 0,
+  });
+  const handleNovaPulseArtworkStatus = useCallback((item: NovaPulseItem, status: NovaPulseArtworkStatus, diagnostics?: NovaPulseArtworkDiagnostics) => {
+    if (item.type !== 'movie' && item.type !== 'series') return;
+    const key = `${activeProviderId}:${item.id}:${status}:${diagnostics?.layoutNonZero ?? 'unknown'}`;
+    if (novaPulseArtworkStatusSeenRef.current.has(key)) return;
+    novaPulseArtworkStatusSeenRef.current.add(key);
+    if (diagnostics?.cardWidth != null && diagnostics.rowWidth != null && diagnostics.leftWidth != null && diagnostics.mediaWidth != null && diagnostics.artworkWidth != null && diagnostics.height != null) {
+      const layoutKey = `${activeProviderId}:${item.id}:layout:${diagnostics.cardWidth}:${diagnostics.rowWidth}:${diagnostics.leftWidth}:${diagnostics.mediaWidth}:${diagnostics.artworkWidth}:${diagnostics.height}`;
+      if (!novaPulseArtworkStatusSeenRef.current.has(layoutKey)) {
+        novaPulseArtworkStatusSeenRef.current.add(layoutKey);
+        console.info('[NOVAPULSE_LAYOUT]', JSON.stringify({ cardWidth: diagnostics.cardWidth, rowWidth: diagnostics.rowWidth, leftWidth: diagnostics.leftWidth, mediaWidth: diagnostics.mediaWidth, artworkWidth: diagnostics.artworkWidth, height: diagnostics.height }));
+      }
+    }
+    const artwork = describeNovaPulseArtwork(item.artworkUrl);
+    const remoteArtworkSucceeded = artwork.present && (status === 'loaded' || status === 'displayed');
+    const remoteArtworkFailed = artwork.present && status === 'error';
+    const remoteArtworkTimedOut = artwork.present && status === 'timeout';
+    const mediaPayload = {
+      type: item.type,
+      hasArtwork: artwork.present,
+      remoteImageMounted: status === 'loading' && artwork.present,
+      scheme: artwork.scheme,
+      hostPresent: artwork.hostPresent,
+      sourceKind: item.artworkRef ? 'cache-ref' : artwork.present ? 'remote' : 'fallback',
+      loadState: status === 'displayed' ? 'loaded' : status,
+      displayState: status === 'displayed' ? 'displayed' : undefined,
+      layoutNonZero: diagnostics?.layoutNonZero,
+      errorKind: remoteArtworkFailed ? 'remote-image-load-failed' : remoteArtworkTimedOut ? 'remote-image-timeout' : undefined,
+      ...(diagnostics ?? {}),
+    };
+    console.info('[NOVAPULSE_MEDIA]', JSON.stringify(mediaPayload));
+    recordDiagnostic({
+      eventType: 'live_performance',
+      contentType: item.type === 'movie' || item.type === 'series' ? item.type : undefined,
+      contentId: item.sourceItemId ?? item.id,
+      metadata: {
+        summary: 'novapulse_artwork_selected',
+        mediaType: item.type,
+        ...mediaPayload,
+        ...(item.type === 'movie'
+          ? {
+              movieArtworkPresent: artwork.present,
+              movieArtworkScheme: artwork.scheme,
+              movieArtworkHostPresent: artwork.hostPresent,
+              movieArtworkLoadSuccess: remoteArtworkSucceeded,
+              movieArtworkLoadError: remoteArtworkFailed,
+              movieArtworkLoadTimeout: remoteArtworkTimedOut,
+            }
+          : {
+              seriesArtworkPresent: artwork.present,
+              seriesArtworkScheme: artwork.scheme,
+              seriesArtworkHostPresent: artwork.hostPresent,
+              seriesArtworkLoadSuccess: remoteArtworkSucceeded,
+              seriesArtworkLoadError: remoteArtworkFailed,
+              seriesArtworkLoadTimeout: remoteArtworkTimedOut,
+            }),
+      },
+    });
+    setNovaPulseLocalHydration((previous) => ({
+      ...previous,
+      ...(item.type === 'movie'
+        ? remoteArtworkSucceeded
+          ? { movieArtworkLoadSuccess: previous.movieArtworkLoadSuccess + 1 }
+          : remoteArtworkFailed
+            ? { movieArtworkLoadError: previous.movieArtworkLoadError + 1 }
+            : {}
+        : item.type === 'series'
+          ? remoteArtworkSucceeded
+            ? { seriesArtworkLoadSuccess: previous.seriesArtworkLoadSuccess + 1 }
+            : remoteArtworkFailed
+              ? { seriesArtworkLoadError: previous.seriesArtworkLoadError + 1 }
+              : {}
+          : {}),
+    }));
+  }, [activeProviderId]);
   const [personalization, setPersonalization] = useState<HomePersonalizationSnapshot>(() => ({
     providerId: '',
     continueWatching: [] as HomeContinueWatchingItem[],
@@ -132,6 +251,91 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     favoriteSeries: [] as SeriesSummary[],
     recentlyWatched: [] as RecentItemRecord[],
   }));
+  const hydrateNovaPulseLocalCatalog = useCallback(() => {
+    const providerId = activeProviderIdRef.current;
+    const inFlight = novaPulseLocalCatalogInFlightRef.current;
+    if (inFlight?.providerId === providerId) {
+      return inFlight.promise;
+    }
+    const movieIndex = getMovieCatalogIndex(providerId);
+    const seriesIndex = getSeriesCatalogIndex(providerId);
+    setNovaPulseLocalHydration((previous) => ({
+      ...previous,
+      movieLocalHydrationAttempted: true,
+      seriesLocalHydrationAttempted: true,
+      movieLocalHydrationCount: 0,
+      seriesLocalHydrationCount: 0,
+    }));
+    const hydration = loadNovaPulseLocalCatalog(providerId)
+      .then(({ movies, series }) => {
+        if (activeProviderIdRef.current !== providerId) {
+          return;
+        }
+        setNovaPulseLocalHydration((previous) => ({
+          ...previous,
+          movieLocalHydrationCount: movies.length,
+          seriesLocalHydrationCount: series.length,
+        }));
+        if (movies.length > 0) {
+          movieIndex.ingest(movies);
+        }
+        if (series.length > 0) {
+          seriesIndex.ingest(series);
+        }
+        const hydrationSignature = `${buildNovaPulseCandidateSignature(movies)}||${buildNovaPulseCandidateSignature(series)}`;
+        if (hydrationSignature !== novaPulseLocalHydrationSignatureRef.current) {
+          novaPulseLocalHydrationSignatureRef.current = hydrationSignature;
+          setNovaPulseCatalogRevision((revision) => revision + 1);
+        }
+      })
+      .catch(() => {
+        // The release fallback remains valid when no readable local generation exists.
+      })
+      .finally(() => {
+        if (novaPulseLocalCatalogInFlightRef.current?.providerId === providerId) {
+          novaPulseLocalCatalogInFlightRef.current = null;
+        }
+      });
+    novaPulseLocalCatalogInFlightRef.current = { providerId, promise: hydration };
+    return hydration;
+  }, []);
+  const refreshHomePersonalization = useCallback(() => {
+    const providerId = activeProviderIdRef.current;
+    if (!providerId) {
+      return;
+    }
+
+    if (homeRefreshInFlightRef.current) {
+      homeRefreshQueuedRef.current = true;
+      return;
+    }
+
+    const refresh = loadHomePersonalization(providerId, bundleRef.current)
+      .then((next) => {
+        if (activeProviderIdRef.current !== providerId) {
+          return;
+        }
+        // Stale-while-revalidate: never clear populated Home rails while a
+        // background/return refresh is in flight or completes.
+        setPersonalization(next);
+        homeHydratedRef.current = true;
+        homeDirtyRef.current = false;
+      })
+      .catch(() => {
+        // Keep the last usable snapshot on transient refresh failures.
+      })
+      .finally(() => {
+        homeRefreshInFlightRef.current = null;
+        if (homeRefreshQueuedRef.current) {
+          homeRefreshQueuedRef.current = false;
+          if (homeFocusedRef.current) {
+            refreshHomePersonalization();
+          }
+        }
+      });
+
+    homeRefreshInFlightRef.current = refresh;
+  }, []);
   const [startupFocusLayout, setStartupFocusLayout] = useState<{ width: number; height: number } | null>(null);
   const [startupFocusUserInteracted, setStartupFocusUserInteracted] = useState(false);
   const watchlistItems = personalization.providerId === activeProviderId
@@ -146,6 +350,71 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
         ...personalization.favoriteSeries.map((item) => ({ kind: 'series' as const, item })),
       ]
       : [];
+  const movieCatalogIndex = getMovieCatalogIndex(activeProviderId);
+  const seriesCatalogIndex = getSeriesCatalogIndex(activeProviderId);
+  if (novaPulseCandidateCacheRef.current.providerId !== activeProviderId) {
+    novaPulseCandidateCacheRef.current = { providerId: activeProviderId, movies: [], series: [] };
+  }
+  const recentlyWatchedMovieIds = useMemo(
+    () => personalization.recentlyWatched.filter((item) => item.mediaType === 'movie').map((item) => item.contentId),
+    [personalization.recentlyWatched],
+  );
+  const recentlyWatchedSeriesIds = useMemo(
+    () => personalization.recentlyWatched.filter((item) => item.mediaType === 'series').map((item) => item.contentId),
+    [personalization.recentlyWatched],
+  );
+  const movieRecentCandidates = useMemo(
+    () => movieCatalogIndex.getSummaries(recentlyWatchedMovieIds),
+    [movieCatalogIndex, recentlyWatchedMovieIds, novaPulseCatalogRevision],
+  );
+  const movieIndexCandidates = useMemo(
+    () => movieCatalogIndex.listSummaries(32),
+    [movieCatalogIndex, novaPulseCatalogRevision],
+  );
+  const seriesRecentCandidates = useMemo(
+    () => seriesCatalogIndex.getSummaries(recentlyWatchedSeriesIds),
+    [seriesCatalogIndex, recentlyWatchedSeriesIds, novaPulseCatalogRevision],
+  );
+  const seriesIndexCandidates = useMemo(
+    () => seriesCatalogIndex.listSummaries(32),
+    [seriesCatalogIndex, novaPulseCatalogRevision],
+  );
+  const movieCandidatePool = useMemo(() => {
+    if (movieRecentCandidates.length || movieIndexCandidates.length) {
+      novaPulseCandidateCacheRef.current.movies = [...movieRecentCandidates, ...movieIndexCandidates];
+    }
+    return novaPulseCandidateCacheRef.current.movies;
+  }, [movieRecentCandidates, movieIndexCandidates]);
+  const seriesCandidatePool = useMemo(() => {
+    if (seriesRecentCandidates.length || seriesIndexCandidates.length) {
+      novaPulseCandidateCacheRef.current.series = [...seriesRecentCandidates, ...seriesIndexCandidates];
+    }
+    return novaPulseCandidateCacheRef.current.series;
+  }, [seriesRecentCandidates, seriesIndexCandidates]);
+  const novaPulseMovies = useMemo(() => [
+    ...movieCandidatePool,
+    ...personalization.watchlistMovies,
+    ...personalization.favoriteMovies,
+  ], [movieCandidatePool, personalization.watchlistMovies, personalization.favoriteMovies, providerBundleGeneration, novaPulseCatalogRevision]);
+  const novaPulseSeries = useMemo(() => [
+    ...seriesCandidatePool,
+    ...personalization.watchlistSeries,
+    ...personalization.favoriteSeries,
+  ], [seriesCandidatePool, personalization.watchlistSeries, personalization.favoriteSeries, providerBundleGeneration, novaPulseCatalogRevision]);
+  const novaPulseFeedDiagnostics = useMemo(() => ({
+    movieIndex: movieCatalogIndex.size,
+    seriesIndex: seriesCatalogIndex.size,
+    movieRecentlyWatched: recentlyWatchedMovieIds.length,
+    seriesRecentlyWatched: recentlyWatchedSeriesIds.length,
+    movieWatchlist: personalization.watchlistMovies.length,
+    seriesWatchlist: personalization.watchlistSeries.length,
+    movieFavorites: personalization.favoriteMovies.length,
+    seriesFavorites: personalization.favoriteSeries.length,
+    movieIndexExtracted: movieCandidatePool.length,
+    seriesIndexExtracted: seriesCandidatePool.length,
+    ...novaPulseLocalHydration,
+  }), [movieCatalogIndex, seriesCatalogIndex, recentlyWatchedMovieIds.length, recentlyWatchedSeriesIds.length, personalization.watchlistMovies.length, personalization.watchlistSeries.length, personalization.favoriteMovies.length, personalization.favoriteSeries.length, movieCandidatePool.length, seriesCandidatePool.length, novaPulseCatalogRevision, novaPulseLocalHydration]);
+  const novaPulseItems = useNovaPulseFeed({ providerId: activeProviderId, movies: novaPulseMovies, series: novaPulseSeries, diagnostics: novaPulseFeedDiagnostics });
   const continueWatchingCount = personalization.providerId === activeProviderId
     ? personalization.continueWatching.length
     : 0;
@@ -287,7 +556,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     [firstHomeFocusId, guide.visible, homeContentHandle],
   );
   const navigationContentFocusHandle =
-    homeFocusDecision.nextFocusMode === 'content' ? (homeContentHandle ?? undefined) : undefined;
+    homeFocusDecision.nextFocusMode === 'content' ? (novaPulseFocusHandle ?? homeContentHandle ?? undefined) : undefined;
   const navigationNextFocusRight =
     homeFocusDecision.nextFocusMode === 'retain-navbar' && Object.keys(navFocusHandles).length > 0
       ? navFocusHandles
@@ -391,40 +660,135 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     };
   }, [activeProviderId, bundle, providerBundleGeneration]);
 
-  useEffect(() => {
-    let cancelled = false;
-    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  useFocusEffect(
+    useCallback(() => {
+      homeFocusedRef.current = true;
+      // Initial Home hydration and every return-to-Home refresh use the same
+      // path. Existing rails remain visible while this promise resolves.
+      refreshHomePersonalization();
+      void hydrateNovaPulseLocalCatalog();
 
-    const refresh = () => {
-      void loadHomePersonalization(activeProviderId, bundle).then((next) => {
-        if (!cancelled) {
-          setPersonalization(next);
+      return () => {
+        homeFocusedRef.current = false;
+        if (homeRefreshTimerRef.current) {
+          clearTimeout(homeRefreshTimerRef.current);
+          homeRefreshTimerRef.current = null;
         }
-      });
-    };
+      };
+    }, [hydrateNovaPulseLocalCatalog, refreshHomePersonalization]),
+  );
 
-    const debouncedRefresh = () => {
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
+  useEffect(() => {
+    if (homeProviderIdRef.current === activeProviderId) {
+      return;
+    }
+    homeProviderIdRef.current = activeProviderId;
+    homeDirtyRef.current = true;
+    if (homeFocusedRef.current) {
+      refreshHomePersonalization();
+    }
+  }, [activeProviderId, refreshHomePersonalization]);
+
+  useEffect(() => {
+    if (homeHydratedRef.current) {
+      homeDirtyRef.current = true;
+    }
+  }, [providerBundleGeneration]);
+
+  useEffect(() => {
+    let revisionTimer: ReturnType<typeof setTimeout> | null = null;
+    novaPulseCandidateSignaturesRef.current = { providerId: activeProviderId, movie: '', series: '' };
+    const markCatalogReady = () => {
+      const movieSignature = buildNovaPulseCandidateSignature(getMovieCatalogIndex(activeProviderId).listSummaries(32));
+      const seriesSignature = buildNovaPulseCandidateSignature(getSeriesCatalogIndex(activeProviderId).listSummaries(32));
+      const previous = novaPulseCandidateSignaturesRef.current;
+      if (previous.providerId === activeProviderId && previous.movie === movieSignature && previous.series === seriesSignature) {
+        return;
       }
-      debounceTimer = setTimeout(refresh, 300);
+      novaPulseCandidateSignaturesRef.current = { providerId: activeProviderId, movie: movieSignature, series: seriesSignature };
+      if (revisionTimer) {
+        clearTimeout(revisionTimer);
+      }
+      revisionTimer = setTimeout(() => {
+        revisionTimer = null;
+        setNovaPulseCatalogRevision((revision) => revision + 1);
+      }, 120);
     };
 
-    refresh();
-    const unsubscribeMovie = subscribeMovieLibrary(debouncedRefresh);
-    const unsubscribeMedia = subscribeMediaLibrary(debouncedRefresh);
-    const unsubscribePersonalization = subscribePersonalization(debouncedRefresh);
+    markCatalogReady();
+
+    const unsubscribeMovies = subscribeMovieCatalogIndex(activeProviderId, markCatalogReady);
+    const unsubscribeSeries = subscribeSeriesCatalogIndex(activeProviderId, markCatalogReady);
 
     return () => {
-      cancelled = true;
-      if (debounceTimer) {
-        clearTimeout(debounceTimer);
+      if (revisionTimer) {
+        clearTimeout(revisionTimer);
+      }
+      unsubscribeMovies();
+      unsubscribeSeries();
+    };
+  }, [activeProviderId]);
+
+  useEffect(() => {
+    const providerChanged = novaPulsePreviousProviderIdRef.current !== activeProviderId;
+    novaPulsePreviousProviderIdRef.current = activeProviderId;
+    if (providerChanged) {
+      setNovaPulseCatalogRevision(0);
+      novaPulseCandidateSignaturesRef.current = { providerId: activeProviderId, movie: '', series: '' };
+      novaPulseLocalHydrationSignatureRef.current = '';
+      setNovaPulseLocalHydration({
+        activeProviderChanged: true,
+        movieLocalHydrationAttempted: false,
+        seriesLocalHydrationAttempted: false,
+        movieLocalHydrationCount: 0,
+        seriesLocalHydrationCount: 0,
+        movieArtworkLoadSuccess: 0,
+        movieArtworkLoadError: 0,
+        seriesArtworkLoadSuccess: 0,
+        seriesArtworkLoadError: 0,
+      });
+      novaPulseArtworkStatusSeenRef.current.clear();
+    }
+    void hydrateNovaPulseLocalCatalog();
+  }, [activeProviderId, hydrateNovaPulseLocalCatalog]);
+
+  useEffect(() => {
+    return subscribeCatalogSyncPhase(activeProviderId, (phase) => {
+      if (phase === 'ready') {
+        void hydrateNovaPulseLocalCatalog();
+      }
+    });
+  }, [activeProviderId, hydrateNovaPulseLocalCatalog]);
+
+  useEffect(() => {
+    const scheduleRefresh = () => {
+      homeDirtyRef.current = true;
+      if (!homeFocusedRef.current) {
+        return;
+      }
+      if (homeRefreshTimerRef.current) {
+        clearTimeout(homeRefreshTimerRef.current);
+      }
+      homeRefreshTimerRef.current = setTimeout(() => {
+        homeRefreshTimerRef.current = null;
+        refreshHomePersonalization();
+      }, 300);
+    };
+
+    const unsubscribeMovie = subscribeMovieLibrary(scheduleRefresh);
+    const unsubscribeMedia = subscribeMediaLibrary(scheduleRefresh);
+    const unsubscribePersonalization = subscribePersonalization(scheduleRefresh);
+
+    return () => {
+      if (homeRefreshTimerRef.current) {
+        clearTimeout(homeRefreshTimerRef.current);
+        homeRefreshTimerRef.current = null;
       }
       unsubscribeMovie();
       unsubscribeMedia();
       unsubscribePersonalization();
     };
-  }, [activeProviderId, bundle, providerBundleGeneration]);
+  }, [refreshHomePersonalization]);
 
   const navigateTo = (route: '/live' | '/movies' | '/series' | '/guide') => {
     if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
@@ -835,6 +1199,14 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
             contentContainerStyle={styles.screen}
             showsVerticalScrollIndicator={false}
             nestedScrollEnabled>
+        <NovaPulseRail
+          items={novaPulseItems}
+          onAction={handleNovaPulseAction}
+          onArtworkStatus={handleNovaPulseArtworkStatus}
+          onFocusHandle={setNovaPulseFocusHandle}
+          nextFocusUp={navFocusHandles.home}
+          nextFocusDown={homeContentHandle ?? undefined}
+        />
         <View style={styles.rows}>
           {personalization.providerId === activeProviderId && personalization.continueWatching.length ? (
             <HomeRow title="Continue Watching" sectionType="continue-watching" itemCount={continueWatchingCount} onAuditLayout={registerFirstHomeSectionLayout}>
@@ -846,7 +1218,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
                   artworkUrl={item.artworkUrl}
                   progress={item.progressPercent}
                   preferredFocus={false}
-                  nextFocusUp={firstHomeFocusId === `continue-${item.contentId}` ? navFocusHandles.home : undefined}
+                  nextFocusUp={firstHomeFocusId === `continue-${item.contentId}` ? (novaPulseFocusHandle ?? navFocusHandles.home) : undefined}
                   onFocusHandle={
                     firstHomeFocusId === `continue-${item.contentId}`
                       ? (handle) => registerHomeFocusHandle(`continue-${item.contentId}`, handle)
@@ -872,7 +1244,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
                   subtitle={entry.kind === 'movie' ? 'Movie watchlist' : 'Series watchlist'}
                   artworkUrl={entry.item.posterUrl}
                   preferredFocus={false}
-                  nextFocusUp={firstHomeFocusId === `watchlist-${entry.kind}-${entry.item.id}` ? navFocusHandles.home : undefined}
+                  nextFocusUp={firstHomeFocusId === `watchlist-${entry.kind}-${entry.item.id}` ? (novaPulseFocusHandle ?? navFocusHandles.home) : undefined}
                   onFocusHandle={
                     firstHomeFocusId === `watchlist-${entry.kind}-${entry.item.id}`
                       ? (handle) => registerHomeFocusHandle(`watchlist-${entry.kind}-${entry.item.id}`, handle)
@@ -940,7 +1312,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
                   categoryType={resolveChannelCategoryType({ categoryId: item.categoryId, name: item.title }, categoryTypeById)}
                   isLive
                   preferredFocus={false}
-                  nextFocusUp={firstHomeFocusId === `favorite-channel-${item.id}` ? navFocusHandles.home : undefined}
+                  nextFocusUp={firstHomeFocusId === `favorite-channel-${item.id}` ? (novaPulseFocusHandle ?? navFocusHandles.home) : undefined}
                   onFocusHandle={
                     firstHomeFocusId === `favorite-channel-${item.id}`
                       ? (handle) => registerHomeFocusHandle(`favorite-channel-${item.id}`, handle)
@@ -970,7 +1342,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
                   subtitle={entry.kind === 'movie' ? 'Favorite movie' : 'Favorite series'}
                   artworkUrl={entry.item.posterUrl}
                   preferredFocus={false}
-                  nextFocusUp={firstHomeFocusId === `favorite-${entry.kind}-${entry.item.id}` ? navFocusHandles.home : undefined}
+                  nextFocusUp={firstHomeFocusId === `favorite-${entry.kind}-${entry.item.id}` ? (novaPulseFocusHandle ?? navFocusHandles.home) : undefined}
                   onFocusHandle={
                     firstHomeFocusId === `favorite-${entry.kind}-${entry.item.id}`
                       ? (handle) => registerHomeFocusHandle(`favorite-${entry.kind}-${entry.item.id}`, handle)

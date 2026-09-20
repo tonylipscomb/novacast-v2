@@ -24,7 +24,7 @@ import {
   resolveStartupProvider,
   type StartupProviderSource,
 } from '@/features/startup/resolveStartupProvider';
-import { markStartupReady } from '@/features/startup/startupReadiness';
+import { isStartupReady, markStartupReady } from '@/features/startup/startupReadiness';
 import { enableCatalogInteractiveStartupProtection, markCatalogInteractiveUiReady } from '@/features/catalog/catalogInteractiveStartup';
 import {
   STARTUP_NETWORK_TIMEOUT_MS,
@@ -76,8 +76,10 @@ export function StartupGate() {
   const [startupTimedOut, setStartupTimedOut] = useState(false);
   const [libraryMissing, setLibraryMissing] = useState(false);
   const [diagnosticsDisclosure, setDiagnosticsDisclosure] = useState<boolean | null>(null);
+  const [hasReachedUsableShell, setHasReachedUsableShell] = useState(isStartupReady());
   const initAttemptRef = useRef(0);
   const providerErrorSnapshotSignatureRef = useRef<string | null>(null);
+  const lastSuppressedOverlayStateRef = useRef<string | null>(null);
   const activeBundle = getActiveRepositoryBundle();
   const providerInitialized = Boolean(activeBundle) && !providerSwitchError;
   const providerResolutionTelemetryRef = useRef({
@@ -182,6 +184,31 @@ export function StartupGate() {
       markStartupReady();
     }
   }, [bootstrapping, isSwitchingProvider, ready]);
+
+  const startupBlocking =
+    device.state === 'idle' ||
+    device.state === 'registering' ||
+    device.state === 'checking' ||
+    bootstrapping ||
+    !ready ||
+    isSwitchingProvider;
+
+  useEffect(() => {
+    if (!hasReachedUsableShell || !startupBlocking) {
+      if (!startupBlocking) lastSuppressedOverlayStateRef.current = null;
+      return;
+    }
+    const state = `${device.state}:${bootstrapping}:${ready}:${isSwitchingProvider}`;
+    if (lastSuppressedOverlayStateRef.current === state) return;
+    lastSuppressedOverlayStateRef.current = state;
+    recordSanitizedDiagnostic({
+      operation: 'startup_overlay',
+      screen: 'StartupGate',
+      errorType: 'background_refresh',
+      outcome: 'suppressed',
+      detail: 'usable_shell_latched',
+    });
+  }, [bootstrapping, device.state, hasReachedUsableShell, isSwitchingProvider, ready, startupBlocking]);
 
   const applyProviderResolution = useCallback((
     result: Awaited<ReturnType<typeof resolveStartupProvider>>,
@@ -296,7 +323,7 @@ export function StartupGate() {
     );
   }
 
-  if (device.state === 'idle' || device.state === 'registering' || device.state === 'checking' || bootstrapping) {
+  if (startupBlocking && !hasReachedUsableShell) {
     return (
       <StartupHomeShell
         label={bootstrapping ? 'Preparing your library…' : 'Starting NovaCast…'}
@@ -339,7 +366,7 @@ export function StartupGate() {
     );
   }
 
-  if (!ready || isSwitchingProvider) {
+  if ((!ready || isSwitchingProvider) && !hasReachedUsableShell) {
     return (
       <StartupHomeShell label="Loading your provider…" showHome={device.authorization.effectiveAuthorized} />
     );
@@ -397,19 +424,38 @@ export function StartupGate() {
         />;
   }
 
-  return <StartupHomeShell label="" showHome startupProviderBootstrapTerminal={!bootstrapping && providerInitialized} />;
+  return <StartupHomeShell label="" showHome startupProviderBootstrapTerminal={!bootstrapping && providerInitialized} onUsableShellReady={() => setHasReachedUsableShell(true)} />;
 }
 
-function StartupHomeShell({ label, showHome, startupProviderBootstrapTerminal = false }: {
+function StartupHomeShell({ label, showHome, startupProviderBootstrapTerminal = false, onUsableShellReady }: {
   label: string;
   showHome: boolean;
   startupProviderBootstrapTerminal?: boolean;
+  onUsableShellReady?: () => void;
 }) {
+  const lastOverlayVisibleRef = useRef<boolean | null>(null);
   useLayoutEffect(() => {
     if (showHome) {
       markCatalogInteractiveUiReady();
     }
   }, [showHome]);
+  useEffect(() => {
+    const visible = Boolean(label);
+    if (lastOverlayVisibleRef.current !== visible) {
+      lastOverlayVisibleRef.current = visible;
+      recordSanitizedDiagnostic({
+        operation: 'startup_overlay',
+        screen: 'StartupGate',
+        errorType: visible ? 'initial_boot' : 'usable_shell_ready',
+        outcome: visible ? 'visible' : 'hidden',
+      });
+    }
+  }, [label]);
+  useLayoutEffect(() => {
+    if (showHome && !label && startupProviderBootstrapTerminal) {
+      onUsableShellReady?.();
+    }
+  }, [label, onUsableShellReady, showHome, startupProviderBootstrapTerminal]);
   if (showHome) {
     console.info('[NovaCast Startup Gate]', JSON.stringify({
       event: 'shell-render-eligible',

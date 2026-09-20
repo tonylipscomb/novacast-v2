@@ -1,0 +1,141 @@
+import type { MovieSummary } from '@/features/movies/movieTypes';
+import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
+import type { NovaPulseItem, NovaPulseSourceResult } from './novaPulseTypes';
+import { getNovaPulseDisplayYear, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
+
+export type NovaPulseSource = {
+  id: string;
+  getItems: () => NovaPulseSourceResult;
+};
+
+function finiteRating(value?: string | number) {
+  const rating = Number(value);
+  return Number.isFinite(rating) && rating > 0 ? rating : undefined;
+}
+
+function presentationScore(input: {
+  title?: string;
+  artworkUrl?: string;
+  description?: string;
+  rating?: string | number;
+  year?: number;
+  releaseDate?: string | number;
+}) {
+  let score = 0;
+  if (input.artworkUrl?.trim()) score += 3;
+  else score -= 1;
+  if (input.description?.trim()) score += 3;
+  else score -= 2;
+  if (finiteRating(input.rating)) score += 1;
+  if (getNovaPulseDisplayYear(input.year) || input.releaseDate) score += 1;
+  if (sanitizeNovaPulseDisplayTitle(input.title)) score += 1;
+  return score;
+}
+
+function preferPresentable<T>(items: readonly T[], score: (item: T) => number, limit = 8) {
+  return [...items].sort((left, right) => score(right) - score(left)).slice(0, limit);
+}
+
+function stableMovie(movie: MovieSummary): NovaPulseItem {
+  const id = String(movie.id);
+  return {
+    id: `catalog-movie-${id}`,
+    type: 'movie',
+    subtype: 'featured',
+    title: sanitizeNovaPulseDisplayTitle(movie.title),
+    description: resolveNovaPulseDescription({ description: movie.description }, '') || undefined,
+    year: getNovaPulseDisplayYear(movie.year),
+    genres: normalizeNovaPulseGenres(movie.genres),
+    runtimeMinutes: movie.durationMinutes,
+    rating: finiteRating(movie.rating ?? movie.score),
+    ratingSource: movie.rating ? 'Rating' : undefined,
+    artworkUrl: movie.posterUrl,
+    priority: 90,
+    sourceId: 'catalog-movies',
+    sourceItemId: id,
+    publishedAt: movie.releaseDate ? Date.parse(String(movie.releaseDate)) || undefined : movie.addedAt,
+    updatedAt: movie.addedAt,
+    sortPriority: movie.popularity ?? movie.regionRank,
+    dedupeKey: `movie:${id}`,
+    action: { type: 'details', target: '/movies', contentId: id },
+  };
+}
+
+function stableSeries(series: SeriesSummary): NovaPulseItem {
+  const id = String(series.id || series.seriesId);
+  return {
+    id: `catalog-series-${id}`,
+    type: 'series',
+    subtype: 'featured',
+    title: sanitizeNovaPulseDisplayTitle(series.title),
+    description: resolveNovaPulseDescription({ description: series.description }, '') || undefined,
+    year: getNovaPulseDisplayYear(series.year ? Number.parseInt(series.year, 10) || undefined : undefined),
+    genres: normalizeNovaPulseGenres(series.genres),
+    rating: finiteRating(series.rating),
+    ratingSource: series.rating ? 'Rating' : undefined,
+    artworkUrl: series.backdropUrl ?? series.posterUrl,
+    artworkFit: series.backdropUrl ? 'cover' : 'contain',
+    priority: 80,
+    sourceId: 'catalog-series',
+    sourceItemId: id,
+    publishedAt: series.releaseDate ? Date.parse(String(series.releaseDate)) || undefined : series.addedAt,
+    updatedAt: series.latestEpisodeDate ? Date.parse(String(series.latestEpisodeDate)) || undefined : series.addedAt,
+    sortPriority: series.popularity ?? series.providerSortOrder,
+    dedupeKey: `series:${id}`,
+    action: { type: 'details', target: '/series', contentId: id, seriesId: series.seriesId || id },
+  };
+}
+
+function bounded<T>(items: readonly T[], limit = 8) {
+  return items.filter(Boolean).slice(0, limit);
+}
+
+export function createNovaPulseCatalogSource(movies: readonly MovieSummary[], series: readonly SeriesSummary[]): NovaPulseSource {
+  return {
+    id: 'catalog',
+    getItems: () => ({
+      sourceId: 'catalog',
+      fetchedAt: Date.now(),
+      items: [
+        ...preferPresentable(movies.filter(Boolean).slice(0, 32), (movie) => presentationScore(movie)).map(stableMovie),
+        ...preferPresentable(series.filter(Boolean).slice(0, 32), (seriesItem) => presentationScore({
+          ...seriesItem,
+          year: seriesItem.year ? Number.parseInt(seriesItem.year, 10) || undefined : undefined,
+          artworkUrl: seriesItem.backdropUrl ?? seriesItem.posterUrl,
+        })).map(stableSeries),
+      ],
+    }),
+  };
+}
+
+export function createNovaPulseMockSource(
+  items: readonly NovaPulseItem[],
+  includeCatalogFallback: boolean | { movie?: boolean; series?: boolean } = false,
+): NovaPulseSource {
+  const includeMovieFallback = typeof includeCatalogFallback === 'boolean'
+    ? includeCatalogFallback
+    : includeCatalogFallback.movie === true;
+  const includeSeriesFallback = typeof includeCatalogFallback === 'boolean'
+    ? includeCatalogFallback
+    : includeCatalogFallback.series === true;
+  return {
+    id: 'mock',
+    getItems: () => ({
+      sourceId: 'mock',
+      items: items.filter((item) =>
+        item.type === 'movie'
+          ? includeMovieFallback
+          : item.type === 'series'
+            ? includeSeriesFallback
+            : true,
+      ),
+    }),
+  };
+}
+
+export function createNovaPulseSportsSource(items: readonly NovaPulseItem[]): NovaPulseSource {
+  return {
+    id: 'sports',
+    getItems: () => ({ sourceId: 'sports', fetchedAt: Date.now(), items: items.filter((item) => item.type === 'sports') }),
+  };
+}

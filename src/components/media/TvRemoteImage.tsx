@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { Image, type ImageContentFit } from 'expo-image';
+import { Image, type ImageContentFit, type ImageRef } from 'expo-image';
 import { type ImageResizeMode, type ImageStyle, StyleSheet } from 'react-native';
 
 import {
@@ -16,9 +16,14 @@ export { normalizeTvRemoteImageUri } from './tvRemoteImageUri';
 
 type TvRemoteImageProps = {
   uri?: string;
+  imageRef?: ImageRef;
   style?: ImageStyle;
   resizeMode?: ImageResizeMode;
   onError?: () => void;
+  /** Diagnostics-only hook for the native image success transition. */
+  onLoad?: () => void;
+  /** Diagnostics-only hook for native display; never gates visibility. */
+  onDisplay?: () => void;
   /** Diagnostics-only hook (e.g. Movies search first-poster timing). */
   onLoadEnd?: () => void;
 };
@@ -46,14 +51,14 @@ function toContentFit(resizeMode: ImageResizeMode): ImageContentFit {
   }
 }
 
-function TvRemoteImageComponent({ uri, style, resizeMode = 'cover', onError, onLoadEnd }: TvRemoteImageProps) {
+function TvRemoteImageComponent({ uri, imageRef, style, resizeMode = 'cover', onError, onLoad, onDisplay, onLoadEnd }: TvRemoteImageProps) {
   const normalizedUri = normalizeTvRemoteImageUri(uri);
   // Sticky failure is keyed to the URI — a recycled card with a new URI auto-recovers.
   const [failedUri, setFailedUri] = useState<string | null>(null);
   const pendingRef = useRef(false);
   const lastUriRef = useRef<string | null>(null);
   const failed = Boolean(normalizedUri) && failedUri === normalizedUri;
-  const source = useMemo(() => (normalizedUri ? { uri: normalizedUri } : null), [normalizedUri]);
+  const source = useMemo(() => imageRef ?? (normalizedUri ? { uri: normalizedUri } : null), [imageRef, normalizedUri]);
 
   useEffect(() => {
     if (!normalizedUri) {
@@ -92,6 +97,12 @@ function TvRemoteImageComponent({ uri, style, resizeMode = 'cover', onError, onL
       cachePolicy="disk"
       recyclingKey={normalizedUri}
       transition={0}
+      onLoad={() => {
+        onLoad?.();
+      }}
+      onDisplay={() => {
+        onDisplay?.();
+      }}
       onLoadEnd={() => {
         if (pendingRef.current) {
           pendingRef.current = false;

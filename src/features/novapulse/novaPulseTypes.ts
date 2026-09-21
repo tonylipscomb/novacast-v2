@@ -98,6 +98,7 @@ export type NovaPulseItem = {
   episodeTitle?: string;
   catalogStatus?: 'NEW RELEASE' | 'NEW EPISODE' | 'TRENDING' | 'FEATURED' | 'COMING SOON';
   artworkFit?: 'cover' | 'contain';
+  artworkKind?: 'program' | 'channel_logo' | 'fallback';
   announcementType?: NovaPulseAnnouncementType;
   announcementPriority?: NovaPulseAnnouncementPriority;
   message?: string;

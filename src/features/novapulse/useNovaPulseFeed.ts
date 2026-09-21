@@ -309,11 +309,13 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       candidateSeries: composed.diagnostics.candidateSeries,
       candidateSports: composed.diagnostics.candidateSports,
       candidateAnnouncements: composed.diagnostics.candidateAnnouncements,
+      candidateLive: composed.diagnostics.candidateLive,
       selectedCount: composed.diagnostics.selectedCount,
       selectedMovies: composed.diagnostics.selectedMovies,
       selectedSeries: composed.diagnostics.selectedSeries,
       selectedSports: composed.diagnostics.selectedSports,
       selectedAnnouncements: composed.diagnostics.selectedAnnouncements,
+      selectedLive: composed.diagnostics.selectedLive,
       feedSignatureChanged: previous !== null && previous !== composed.diagnostics.signature,
     };
     if (previous === composed.diagnostics.signature) return;
@@ -347,6 +349,8 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       sportsAvailable: composed.diagnostics.sportsAvailable,
       sportsSelected: composed.diagnostics.sportsSelected,
       announcementsSelected: composed.diagnostics.announcementsSelected,
+      candidateLive: composed.diagnostics.candidateLive,
+      selectedLive: composed.diagnostics.selectedLive,
       sportsGuardApplied: composed.diagnostics.sportsGuardApplied,
       displayPrefixesRemoved,
       ...presentation.diagnostics,
@@ -357,6 +361,10 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       cacheHit: recommendationCacheHit,
       requestAttempted: recommendationRequestAttempted,
       reasonCounts,
+      sourceCounts: composed.items.reduce<Record<string, number>>((counts, item) => {
+        counts[item.type] = (counts[item.type] ?? 0) + 1;
+        return counts;
+      }, {}),
       feedSignatureChanged: previousFeedSignature !== null && previousFeedSignature !== feedSignature,
     };
     console.info('[NOVAPULSE_RECS_FEED]', JSON.stringify(payload));

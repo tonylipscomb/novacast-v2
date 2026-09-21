@@ -14,12 +14,14 @@ export type NovaPulseV2Diagnostics = {
   candidateSeries: number;
   candidateSports: number;
   candidateAnnouncements: number;
+  candidateLive: number;
   sportsAvailable: number;
   selectedCount: number;
   selectedMovies: number;
   selectedSeries: number;
   selectedSports: number;
   selectedAnnouncements: number;
+  selectedLive: number;
   sportsSelected: number;
   announcementsSelected: number;
   sportsGuardApplied: boolean;
@@ -110,15 +112,15 @@ function selectSports(ranked: readonly NovaPulseItem[]) {
   return [...new Set([upcoming, final, ...sports].filter((item): item is NovaPulseItem => Boolean(item)))].slice(0, 2);
 }
 
-function selectProtected(ranked: readonly NovaPulseItem[]) {
+function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[]) {
   const critical = ranked.find(isCriticalAnnouncement);
   const sports = selectSports(ranked);
   const normalAnnouncement = ranked.find((item) => item.type === 'announcement' && !isCriticalAnnouncement(item));
-  return [critical, ...sports, normalAnnouncement].filter((item): item is NovaPulseItem => Boolean(item));
+  return [critical, ...sports, normalAnnouncement, ...liveCandidates.slice(0, 2)].filter((item): item is NovaPulseItem => Boolean(item));
 }
 
-function selectDiverse(ranked: readonly NovaPulseItem[]) {
-  const protectedItems = selectProtected(ranked);
+function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[]) {
+  const protectedItems = selectProtected(ranked, liveCandidates);
   const selected: NovaPulseItem[] = [];
   const remaining = ranked.filter((item) => !protectedItems.some((protectedItem) => stableKey(protectedItem) === stableKey(item)));
   const reserved = new Set(protectedItems.map(stableKey));
@@ -176,7 +178,12 @@ export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[]): Nov
     .filter(({ item, score }) => isUseful(item, score))
     .sort((left, right) => right.score - left.score || left.index - right.index)
     .map(({ item }) => item);
-  const items = selectDiverse(ranked);
+  const liveCandidates = all
+    .filter((item) => item.type === 'live_epg' && item.action?.type === 'channel')
+    .sort((left, right) => right.priority - left.priority)
+    .slice(0, 2);
+  const nonLiveRanked = ranked.filter((item) => item.type !== 'live_epg');
+  const items = selectDiverse(nonLiveRanked, liveCandidates);
   const diagnostics: NovaPulseV2Diagnostics = {
     movieSourceWindow: typeCount(all, 'movie'),
     seriesSourceWindow: typeCount(all, 'series'),
@@ -186,12 +193,14 @@ export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[]): Nov
     candidateSeries: typeCount(ranked, 'series'),
     candidateSports: typeCount(ranked, 'sports'),
     candidateAnnouncements: typeCount(ranked, 'announcement'),
+    candidateLive: liveCandidates.length,
     sportsAvailable: typeCount(ranked, 'sports'),
     selectedCount: items.length,
     selectedMovies: typeCount(items, 'movie'),
     selectedSeries: typeCount(items, 'series'),
     selectedSports: typeCount(items, 'sports'),
     selectedAnnouncements: typeCount(items, 'announcement'),
+    selectedLive: typeCount(items, 'live_epg'),
     sportsSelected: typeCount(items, 'sports'),
     announcementsSelected: typeCount(items, 'announcement'),
     sportsGuardApplied: typeCount(ranked, 'sports') > 0 && typeCount(items, 'sports') > 0,

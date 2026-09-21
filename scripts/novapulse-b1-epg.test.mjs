@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   NOVA_PULSE_LIVE_CANDIDATE_LIMIT,
   NOVA_PULSE_LIVE_EPG_CONCURRENCY,
+  NOVA_PULSE_LIVE_EPG_CARD_LIMIT,
   NOVA_PULSE_LIVE_EPG_LIMIT,
   NOVA_PULSE_LIVE_EPG_TTL_MS,
   resetNovaPulseLiveEpgCache,
@@ -94,6 +95,18 @@ test('B1 timing chooses ON NOW, UP NEXT, TONIGHT, and rejects expired programs',
   assert.deepEqual(result.items.map((item) => item.timingReason), ['on_now', 'up_next']);
   assert.equal(result.diagnostics.onNowCandidates, 1);
   assert.equal(result.diagnostics.upNextCandidates, 1);
+  assert.equal(result.diagnostics.tonightCandidates, 0);
+});
+
+test('B1 classifies a later same-day future program as TONIGHT within the two-card cap', async () => {
+  resetNovaPulseLiveEpgCache();
+  const result = await runNovaPulseLiveEpgCycle(input({
+    favoriteChannels: [{ id: 'a', title: 'A' }],
+    recentItems: [],
+    getShortEpg: async () => [program('tonight', now + 3 * 60 * 60_000, now + 4 * 60 * 60_000)],
+  }));
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].timingReason, 'tonight');
   assert.equal(result.diagnostics.tonightCandidates, 1);
 });
 
@@ -119,6 +132,22 @@ test('B1 bounds requests, concurrency, cards, and EPG rows', async () => {
   assert.equal(requests, 6);
   assert.equal(maxActive, 2);
   assert.equal(result.items.length, 2);
+  assert.equal(result.diagnostics.epgCardsSelected, NOVA_PULSE_LIVE_EPG_CARD_LIMIT);
+  assert.ok(result.diagnostics.epgCardsSelected <= 2);
+});
+
+test('B1 returns exactly two cards and truthful diagnostics from three valid UP NEXT candidates', async () => {
+  resetNovaPulseLiveEpgCache();
+  const result = await runNovaPulseLiveEpgCycle(input({
+    favoriteChannels: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }, { id: 'c', title: 'C' }],
+    recentItems: [],
+    getShortEpg: async (id) => [program(`up-next-${id}`, now + 30 * 60_000, now + 60 * 60_000)],
+  }));
+  assert.equal(result.items.length, 2);
+  assert.equal(result.diagnostics.epgCardsSelected, 2);
+  assert.equal(result.diagnostics.directTuneCards, 2);
+  assert.equal(result.diagnostics.favoriteCardsSelected, 2);
+  assert.equal(result.diagnostics.recentCardsSelected, 0);
 });
 
 test('B1 uses stable direct-tune channel identity and provider-scoped five-minute cache', async () => {
@@ -139,7 +168,7 @@ test('B1 omits unsuitable program descriptions without removing the card', async
   const result = await runNovaPulseLiveEpgCycle(input({ getShortEpg: async () => [program('language', now - 1, now + 60_000, { description: '\u0647\u0630\u0627 \u0641\u064a\u0644\u0645' })] }));
   assert.equal(result.items.length, 2);
   assert.equal(result.items[0].description, undefined);
-  assert.equal(result.diagnostics.nonEnglishDescriptionsOmitted, 3);
+  assert.equal(result.diagnostics.nonEnglishDescriptionsOmitted, 2);
   assert.doesNotMatch(result.items[0].title, /NEW EPISODE/i);
 });
 

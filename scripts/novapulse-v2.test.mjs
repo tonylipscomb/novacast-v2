@@ -3,6 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 
 import { composeNovaPulseFeedV2, NOVA_PULSE_V2_MAX_ITEMS, NOVA_PULSE_V2_MIN_ITEMS } from '../src/features/novapulse/novaPulseV2.ts';
+import { createNovaPulseLiveEpgSource } from '../src/features/novapulse/novaPulseSources.ts';
 import { createNovaPulseArtworkPrefetchPlan } from '../src/features/novapulse/novaPulseArtworkPrefetch.ts';
 import { preserveNovaPulseIndex } from '../src/features/novapulse/novaPulseComposer.ts';
 
@@ -84,6 +85,30 @@ test('V2 keeps sports and announcements bounded and compatible', () => {
   assert.ok(result.items.some((entry) => entry.type === 'sports'));
   assert.ok(result.items.some((entry) => entry.type === 'announcement'));
   assert.ok(result.diagnostics.selectedSports <= 2);
+});
+
+test('V2 admits actionable live EPG candidates as a protected family', () => {
+  const live = item('live-1', 'live_epg', { priority: 80, action: { type: 'channel', target: '/live', contentId: 'channel-1' } });
+  const result = composeNovaPulseFeedV2([
+    source([item('m1'), item('m2'), item('s1', 'series'), item('s2', 'series')]),
+    createNovaPulseLiveEpgSource([live]),
+  ]);
+  assert.equal(result.diagnostics.candidateLive, 1);
+  assert.equal(result.diagnostics.selectedLive, 1);
+  assert.equal(result.items.find((entry) => entry.type === 'live_epg')?.action?.contentId, 'channel-1');
+});
+
+test('V2 caps final live EPG selection at two and keeps the overall cap at twelve', () => {
+  const live = Array.from({ length: 3 }, (_, index) => item(`live-${index}`, 'live_epg', {
+    priority: 80 - index,
+    action: { type: 'channel', target: '/live', contentId: `channel-${index}` },
+  }));
+  const catalog = Array.from({ length: 20 }, (_, index) => item(`movie-${index}`));
+  const result = composeNovaPulseFeedV2([source(catalog), createNovaPulseLiveEpgSource(live)]);
+  assert.equal(result.diagnostics.candidateLive, 2);
+  assert.equal(result.diagnostics.selectedLive, 2);
+  assert.equal(result.items.filter((entry) => entry.type === 'live_epg').length, 2);
+  assert.ok(result.items.length <= NOVA_PULSE_V2_MAX_ITEMS);
 });
 
 test('V2 does not use weak candidates only to fill the maximum', () => {

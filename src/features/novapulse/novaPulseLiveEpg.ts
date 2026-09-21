@@ -10,6 +10,7 @@ export const NOVA_PULSE_LIVE_CANDIDATE_LIMIT = 6;
 export const NOVA_PULSE_LIVE_EPG_LIMIT = 3;
 export const NOVA_PULSE_LIVE_EPG_CONCURRENCY = 2;
 export const NOVA_PULSE_LIVE_EPG_TTL_MS = 5 * 60 * 1000;
+export const NOVA_PULSE_LIVE_EPG_CARD_LIMIT = 2;
 const NOVA_PULSE_UP_NEXT_HORIZON_MS = 2 * 60 * 60 * 1000;
 const NOVA_PULSE_EPG_CACHE_VERSION = 'normalized-v2';
 
@@ -376,6 +377,7 @@ export async function runNovaPulseLiveEpgCycle(input: {
 
   const items: NovaPulseItem[] = [];
   for (const candidate of candidates) {
+    if (items.length >= NOVA_PULSE_LIVE_EPG_CARD_LIMIT) break;
     const candidatePrograms = resolved.get(candidate.channel.id) ?? [];
     const chosen = chooseProgram(candidatePrograms, nowMs);
     const validCandidates = candidatePrograms.filter((program) => isTimed(program) && program.endAt > nowMs);
@@ -406,6 +408,7 @@ export async function runNovaPulseLiveEpgCycle(input: {
       secondaryText: isNow && isTimed(program) ? `Ends in ${formatRelativeTime(program.endAt, nowMs)}` : chosen.timingReason === 'up_next' && isTimed(program) ? `Starts in ${formatRelativeTime(program.startAt, nowMs)}` : formatProgramTime(program),
       artworkUrl: candidate.channel.logoUrl,
       artworkFit: 'contain',
+      artworkKind: candidate.channel.logoUrl ? 'channel_logo' : 'fallback',
       priority: (candidate.favorite ? 10 : 0) + (chosen.timingReason === 'on_now' ? 84 : chosen.timingReason === 'up_next' ? 76 : 68),
       sourceId: 'live-epg',
       sourceItemId: candidate.channel.id,
@@ -427,7 +430,7 @@ export async function runNovaPulseLiveEpgCycle(input: {
     else diagnostics.recentCardsSelected += 1;
     diagnostics.directTuneCards += 1;
   }
-  return { items: items.slice(0, 2), diagnostics };
+  return { items, diagnostics };
 }
 
 export function resetNovaPulseLiveEpgCache() {

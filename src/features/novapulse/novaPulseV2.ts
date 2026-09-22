@@ -3,6 +3,7 @@ import type { NovaPulseSource } from './novaPulseSources';
 
 export const NOVA_PULSE_V2_MIN_ITEMS = 5;
 export const NOVA_PULSE_V2_MAX_ITEMS = 12;
+export const NOVA_PULSE_COMPOSITION_BUCKET_MS = 6 * 60 * 60_000;
 const CANDIDATE_WINDOW = 32;
 
 export type NovaPulseV2Diagnostics = {
@@ -33,8 +34,36 @@ export type NovaPulseV2Result = {
   diagnostics: NovaPulseV2Diagnostics;
 };
 
+export type NovaPulseComposeOptions = {
+  seed?: string | number;
+  nowMs?: number;
+};
+
+export type NovaPulseCompositionSession = {
+  seed: number;
+  startedAt: number;
+};
+
+export function createNovaPulseCompositionSession(nowMs = Date.now()): NovaPulseCompositionSession {
+  return { seed: Math.floor(nowMs / NOVA_PULSE_COMPOSITION_BUCKET_MS), startedAt: nowMs };
+}
+
 function stableKey(item: NovaPulseItem) {
-  return item.dedupeKey ?? item.id;
+  if (item.sourceItemId) return `${item.type}:${item.sourceId ?? ''}:${item.sourceItemId}`;
+  return item.dedupeKey ?? `${item.type}:${item.id}`;
+}
+
+function hash(value: string) {
+  let result = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    result ^= value.charCodeAt(index);
+    result = Math.imul(result, 16777619);
+  }
+  return result >>> 0;
+}
+
+function seededTie(item: NovaPulseItem, seed: string | number) {
+  return hash(`${seed}:${stableKey(item)}`);
 }
 
 function unique(items: readonly NovaPulseItem[]) {
@@ -47,19 +76,16 @@ function unique(items: readonly NovaPulseItem[]) {
   });
 }
 
-function qualityScore(item: NovaPulseItem, providerOrder: number) {
+function qualityScore(item: NovaPulseItem) {
+  const year = Number(item.year);
   let score = 0;
   if (item.title.trim()) score += 1;
   if (item.artworkUrl?.trim() || item.artworkSource) score += 3;
   if (item.description?.trim() || item.message?.trim()) score += 2;
   if (item.rating != null) score += 1;
-  if (item.year != null || item.releaseDate) score += 1;
+  if (Number.isInteger(year) && year >= 1888 && year <= new Date().getFullYear() + 2) score += 1;
+  if (Number.isFinite(item.runtimeMinutes) && (item.runtimeMinutes ?? 0) > 0) score += 1;
   if (item.priority > 0) score += Math.min(3, Math.floor(item.priority / 30));
-  const suppliedSortPriority = Number(item.sortPriority);
-  if (Number.isFinite(suppliedSortPriority)) score += Math.max(-1, Math.min(2, suppliedSortPriority / 100));
-  const suppliedTimestamp = item.updatedAt ?? item.publishedAt;
-  if (Number.isFinite(suppliedTimestamp)) score += Math.max(0, Math.min(2, (Number(suppliedTimestamp) - 1_600_000_000_000) / 100_000_000_000));
-  score += Math.max(0, 1 - providerOrder / 1000);
   if (item.recommendation) {
     // Behavioral candidates intentionally dominate metadata quality. Metadata
     // remains a deterministic tie-breaker for equally relevant local items.
@@ -72,7 +98,9 @@ function qualityScore(item: NovaPulseItem, providerOrder: number) {
 }
 
 function isUseful(item: NovaPulseItem, score: number) {
-  return item.type === 'sports' || item.type === 'announcement' || score >= 3;
+  if (item.type === 'sports' || item.type === 'announcement') return true;
+  if (score >= 3) return true;
+  return Boolean(item.sourceItemId);
 }
 
 function typeCount(items: readonly NovaPulseItem[], type: NovaPulseItem['type']) {
@@ -80,52 +108,70 @@ function typeCount(items: readonly NovaPulseItem[], type: NovaPulseItem['type'])
 }
 
 function candidateSignature(items: readonly NovaPulseItem[]) {
-  const hash = (value: string) => {
-    let result = 2166136261;
-    for (let index = 0; index < value.length; index += 1) {
-      result ^= value.charCodeAt(index);
-      result = Math.imul(result, 16777619);
-    }
-    return result >>> 0;
-  };
-  return items.slice(0, CANDIDATE_WINDOW).map((item) => [
-    item.id,
+  const aggregate = items.slice(0, CANDIDATE_WINDOW).map((item) => [
     item.type,
-    item.title,
-    hash(item.artworkUrl ?? ''),
-    item.description ?? '',
-    item.rating ?? '',
-    item.year ?? '',
-    item.publishedAt ?? '',
-    item.updatedAt ?? '',
+    item.title.trim().length,
+    item.description?.trim().length ?? 0,
+    item.artworkUrl ? 1 : 0,
+    item.rating != null ? 1 : 0,
+    item.year != null ? 1 : 0,
+    item.runtimeMinutes != null ? 1 : 0,
   ].join('~')).join('|');
+  return hash(aggregate).toString(16);
 }
 
 function isCriticalAnnouncement(item: NovaPulseItem) {
   return item.type === 'announcement' && item.announcementPriority === 'critical';
 }
 
-function selectSports(ranked: readonly NovaPulseItem[]) {
-  const sports = ranked.filter((item) => item.type === 'sports');
-  const upcoming = sports.find((item) => item.subtype === 'upcoming' || item.subtype === 'live');
-  const leagueKey = (item: NovaPulseItem | undefined) => item?.sports?.league?.trim().toLowerCase() || null;
-  const final = sports.find((item) => item.subtype === 'final' && leagueKey(item) !== leagueKey(upcoming))
-    ?? sports.find((item) => item.subtype === 'final');
-  const second = sports.find((item) => leagueKey(item) !== leagueKey(upcoming) && stableKey(item) !== (final ? stableKey(final) : null));
-  return [...new Set([upcoming, final, second, ...sports].filter((item): item is NovaPulseItem => Boolean(item)))].slice(0, 2);
+function isValidSportsItem(item: NovaPulseItem, nowMs: number) {
+  if (item.type !== 'sports') return true;
+  if (item.expiresAt && Number.isFinite(Date.parse(item.expiresAt)) && Date.parse(item.expiresAt) <= nowMs) return false;
+  if ((item.subtype === 'upcoming' || item.subtype === 'starting_soon') && (!item.startsAt || !Number.isFinite(Date.parse(item.startsAt)))) return false;
+  return true;
 }
 
-function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[]) {
+function selectSports(ranked: readonly NovaPulseItem[], nowMs: number) {
+  const sports = ranked.filter((item) => item.type === 'sports' && isValidSportsItem(item, nowMs));
+  const statusRank = (item: NovaPulseItem) => item.subtype === 'live' ? 0 : item.subtype === 'starting_soon' ? 1 : item.subtype === 'final' ? 2 : 3;
+  const timestamp = (item: NovaPulseItem) => {
+    if (item.subtype === 'final') {
+      const completed = item.sports?.completedAt ? Date.parse(item.sports.completedAt) : Number.NaN;
+      return Number.isFinite(completed) ? completed : (item.startsAt ? Date.parse(item.startsAt) : Number.NaN);
+    }
+    return item.startsAt ? Date.parse(item.startsAt) : Number.NaN;
+  };
+  const ordered = [...sports].sort((left, right) => {
+    const group = statusRank(left) - statusRank(right);
+    if (group) return group;
+    const leftTime = timestamp(left);
+    const rightTime = timestamp(right);
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+      return left.subtype === 'final' ? rightTime - leftTime : leftTime - rightTime;
+    }
+    if (Number.isFinite(leftTime)) return -1;
+    if (Number.isFinite(rightTime)) return 1;
+    return right.priority - left.priority;
+  });
+  const primary = ordered[0];
+  const leagueKey = (item: NovaPulseItem | undefined) => item?.sports?.league?.trim().toLowerCase() || null;
+  const second = ordered.find((item) => stableKey(item) !== (primary ? stableKey(primary) : null) && leagueKey(item) !== leagueKey(primary))
+    ?? ordered.find((item) => stableKey(item) !== (primary ? stableKey(primary) : null));
+  return [...new Set([primary, second, ...ordered].filter((item): item is NovaPulseItem => Boolean(item)))].slice(0, 2);
+}
+
+function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[], nowMs: number) {
   const critical = ranked.find(isCriticalAnnouncement);
-  const sports = selectSports(ranked);
+  const sports = selectSports(ranked, nowMs);
   const normalAnnouncement = ranked.find((item) => item.type === 'announcement' && !isCriticalAnnouncement(item));
   return [critical, ...sports, normalAnnouncement, ...liveCandidates.slice(0, 2)].filter((item): item is NovaPulseItem => Boolean(item));
 }
 
-function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[]) {
-  const protectedItems = selectProtected(ranked, liveCandidates);
+function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[], nowMs: number) {
+  const protectedItems = selectProtected(ranked, liveCandidates, nowMs);
   const selected: NovaPulseItem[] = [];
   const remaining = ranked.filter((item) => item.type !== 'sports' && item.type !== 'announcement' && !protectedItems.some((protectedItem) => stableKey(protectedItem) === stableKey(item)));
+  const mixedCatalog = new Set(remaining.filter((item) => item.type === 'movie' || item.type === 'series').map((item) => item.type)).size > 1;
   const reserved = new Set(protectedItems.map(stableKey));
   while ((remaining.length || protectedItems.some((item) => !selected.some((selectedItem) => stableKey(selectedItem) === stableKey(item)))) && selected.length < NOVA_PULSE_V2_MAX_ITEMS) {
     const protectedRemaining = protectedItems.filter((item) => !selected.some((selectedItem) => stableKey(selectedItem) === stableKey(item)));
@@ -159,7 +205,8 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
       if (item.type === 'announcement' && !isCriticalAnnouncement(item) && selected.some((selectedItem) => selectedItem.type === 'announcement' && !isCriticalAnnouncement(selectedItem))) return false;
       return !(item.type === last && item.type === previous);
     });
-    const index = candidateIndex >= 0 ? candidateIndex : fallbackIndex >= 0 ? fallbackIndex : 0;
+    const index = candidateIndex >= 0 ? candidateIndex : fallbackIndex >= 0 ? fallbackIndex : mixedCatalog ? -1 : 0;
+    if (index < 0) break;
     const chosen = pool[index];
     selected.push(chosen);
     const remainingIndex = remaining.findIndex((item) => stableKey(item) === stableKey(chosen));
@@ -168,25 +215,27 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
   return selected;
 }
 
-export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[]): NovaPulseV2Result {
+export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[], options: NovaPulseComposeOptions = {}): NovaPulseV2Result {
+  const nowMs = options.nowMs ?? Date.now();
+  const seed = options.seed ?? 0;
   const all = unique(sources.flatMap((source) => {
     try {
       return source.getItems().items ?? [];
     } catch {
       return [];
     }
-  }).slice(0, CANDIDATE_WINDOW * 4));
+  })).slice(0, CANDIDATE_WINDOW * 4);
   const ranked = all
-    .map((item, index) => ({ item, score: qualityScore(item, index), index }))
+    .map((item, index) => ({ item, score: qualityScore(item), index }))
     .filter(({ item, score }) => isUseful(item, score))
-    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .sort((left, right) => right.score - left.score || seededTie(right.item, seed) - seededTie(left.item, seed) || left.index - right.index)
     .map(({ item }) => item);
   const liveCandidates = all
     .filter((item) => item.type === 'live_epg' && item.action?.type === 'channel')
     .sort((left, right) => right.priority - left.priority)
     .slice(0, 2);
   const nonLiveRanked = ranked.filter((item) => item.type !== 'live_epg');
-  const items = selectDiverse(nonLiveRanked, liveCandidates);
+  const items = selectDiverse(nonLiveRanked, liveCandidates, nowMs);
   const diagnostics: NovaPulseV2Diagnostics = {
     movieSourceWindow: typeCount(all, 'movie'),
     seriesSourceWindow: typeCount(all, 'series'),

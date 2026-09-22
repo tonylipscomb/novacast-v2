@@ -9,7 +9,7 @@ import { createNovaPulseCatalogSource, createNovaPulseLiveEpgSource, createNovaP
 import { fetchNovaPulseSportsItems, NOVA_PULSE_SPORTS_ENABLED } from './novaPulseSportsSource';
 import type { NovaPulseItem } from './novaPulseTypes';
 import { createNovaPulseArtworkPrefetchPlan, inspectNovaPulseArtworkPrefetch } from './novaPulseArtworkPrefetch';
-import { composeNovaPulseFeedV2 } from './novaPulseV2';
+import { composeNovaPulseFeedV2, createNovaPulseCompositionSession } from './novaPulseV2';
 import { hasNovaPulseDisplayPrefix, preferNovaPulseEnglishVariants, type NovaPulseVariantDiagnostics } from './novaPulseLogic';
 import { getCachedProviderMovieInfo } from '@/features/movies/movieDetailEnrichment';
 import { getSeriesMetadataCacheEntry, type SeriesMetadataCacheEntry } from '@/features/series/metadata/seriesMetadataCache';
@@ -89,6 +89,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const [cachedSeriesMetadataState, setCachedSeriesMetadataState] = useState<{ providerId: string; entries: ReadonlyMap<string, SeriesMetadataCacheEntry> }>({ providerId: '', entries: new Map() });
   const [enrichmentState, setEnrichmentState] = useState<{ providerId: string; movies: ReadonlyMap<string, NovaPulseMovieEnrichment>; series: ReadonlyMap<string, SeriesMetadataCacheEntry>; seriesDetails: ReadonlyMap<string, import('@/features/media-browser/mediaTypes').SeriesDetail>; translations: ReadonlyMap<string, string>; diagnostics: NovaPulseEnrichmentDiagnostics | null }>({ providerId: '', movies: new Map(), series: new Map(), seriesDetails: new Map(), translations: new Map(), diagnostics: null });
   const [liveEpgState, setLiveEpgState] = useState<{ providerId: string; items: readonly NovaPulseItem[]; diagnostics: NovaPulseLiveEpgDiagnostics | null }>({ providerId: '', items: [], diagnostics: null });
+  const [compositionSession] = useState(() => createNovaPulseCompositionSession());
   const fetchMovieDetailRef = useRef<UseNovaPulseFeedOptions['fetchMovieDetail']>(fetchMovieDetail);
   fetchMovieDetailRef.current = fetchMovieDetail;
   const fetchSeriesDetailRef = useRef<UseNovaPulseFeedOptions['fetchSeriesDetail']>(fetchSeriesDetail);
@@ -236,9 +237,9 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       ...(realSports ? [createNovaPulseSportsSource(realSports)] : []),
       ...(liveEpgItems.length ? [createNovaPulseLiveEpgSource(liveEpgItems)] : []),
       createNovaPulseMockSource(realSports ? NOVA_PULSE_MOCK_FEED.filter((item) => item.type !== 'sports') : NOVA_PULSE_MOCK_FEED, includeMockCatalogFallback),
-    ]);
+    ], { seed: compositionSession.seed, nowMs: compositionSession.startedAt });
     return result.items.length ? result : { ...result, items: [NOVA_PULSE_BRANDED_FALLBACK] };
-  }, [languageFilteredCatalog, liveEpgItems, realSportsSignature, recommendationSignalSignature]);
+  }, [compositionSession, languageFilteredCatalog, liveEpgItems, realSportsSignature, recommendationSignalSignature]);
   const selectedEnrichmentSignature = useMemo(
     () => `${providerId}::${composed.items.filter((item) => item.type === 'movie' || item.type === 'series').map((item) => `${item.type}:${item.sourceItemId ?? item.id}`).join('|')}`,
     [composed.items, providerId],

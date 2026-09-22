@@ -1,7 +1,7 @@
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import type { NovaPulseItem, NovaPulseRecommendationSignals, NovaPulseSourceResult } from './novaPulseTypes';
-import { getNovaPulseDisplayYear, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
+import { getNovaPulseDisplayCountry, getNovaPulseDisplayRuntimeMinutes, getNovaPulseDisplayYear, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
 
 export type NovaPulseSource = {
   id: string;
@@ -45,13 +45,15 @@ function stableMovie(movie: MovieSummary, recommendations?: ReadonlyMap<string, 
     title: sanitizeNovaPulseDisplayTitle(movie.title),
     description: resolveNovaPulseDescription({ description: movie.description }, '') || undefined,
     year: getNovaPulseDisplayYear(movie.year),
+    countryCode: movie.countryCode ?? getNovaPulseDisplayCountry(movie.title),
     genres: normalizeNovaPulseGenres(movie.genres),
-    runtimeMinutes: movie.durationMinutes,
+    runtimeMinutes: getNovaPulseDisplayRuntimeMinutes(movie.durationMinutes),
     rating: finiteRating(movie.rating ?? movie.score),
     ratingSource: movie.rating ? 'Rating' : undefined,
     artworkUrl: movie.posterUrl,
     posterUrl: movie.posterUrl,
     backdropUrl: movie.backdropUrl,
+    artworkFit: movie.backdropUrl ? 'cover' : 'contain',
     priority: 90,
     sourceId: 'catalog-movies',
     sourceItemId: id,
@@ -73,6 +75,7 @@ function stableSeries(series: SeriesSummary, recommendations?: ReadonlyMap<strin
     title: sanitizeNovaPulseDisplayTitle(series.title),
     description: resolveNovaPulseDescription({ description: series.description }, '') || undefined,
     year: getNovaPulseDisplayYear(series.year ? Number.parseInt(series.year, 10) || undefined : undefined),
+    countryCode: series.countryCode ?? getNovaPulseDisplayCountry(series.title),
     genres: normalizeNovaPulseGenres(series.genres),
     rating: finiteRating(series.rating),
     ratingSource: series.rating ? 'Rating' : undefined,

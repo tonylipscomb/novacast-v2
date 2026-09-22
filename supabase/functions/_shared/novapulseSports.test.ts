@@ -1,104 +1,124 @@
-import { assert, assertEquals } from 'jsr:@std/assert@1.0.19';
-import { createTheSportsDbAdapter, normalizeTheSportsDbEvent, resolveTheSportsDbStatus } from './novapulseSports.ts';
+import { assert, assertEquals, assertFalse, assertStringIncludes } from 'jsr:@std/assert@1.0.19';
+import { createTheSportsDbAdapter, configuredLeagueIds, normalizeTheSportsDbEvent, NOVA_PULSE_SUPPORTED_LEAGUES, resolveTheSportsDbStatus } from './novapulseSports.ts';
 
-const env = { get(name: string) { return name === 'THESPORTSDB_API_KEY' ? 'test-key' : name === 'NOVAPULSE_SPORTS_LEAGUE_IDS' ? '1,2,ignored,3,4,5,6,7,8,9' : undefined; } };
+const now = new Date('2026-09-20T12:00:00.000Z');
+const base = { idEvent: '42', strSport: 'Basketball', strLeague: 'NBA', strEvent: 'Away vs Home', dateEvent: '2026-09-21', strTime: '18:00:00', strAwayTeam: 'Away', strHomeTeam: 'Home', idAwayTeam: 'a', idHomeTeam: 'h' };
+const env = { get(name: string) {
+  if (name === 'THESPORTSDB_API_KEY') return 'test-key';
+  if (name === 'NOVAPULSE_SPORTS_LEAGUE_IDS') return '4391,4387';
+  return undefined;
+} };
 
-Deno.test('normalizes team and final event semantics', () => {
-  const event = normalizeTheSportsDbEvent({ idEvent: '42', strSport: 'Soccer', strLeague: 'Test League', strEvent: 'Away v Home', dateEvent: '2030-01-01', strTime: '20:00:00', strAwayTeam: 'Away', strHomeTeam: 'Home', intAwayScore: '2', intHomeScore: '1', strStatus: 'Match Finished', strVenue: 'Arena' });
+Deno.test('normalizes a scheduled event with stable source identity and UTC time', () => {
+  const event = normalizeTheSportsDbEvent(base, now, '4387');
   assert(event);
-  assertEquals(event.provider_event_id, '42');
-  assertEquals(event.event_status, 'final');
-  assertEquals(event.away_name, 'Away');
-  assertEquals(event.home_score, '1');
+  assertEquals(event.source, 'thesportsdb');
+  assertEquals(event.source_event_id, '42');
+  assertEquals(event.status, 'scheduled');
+  assertEquals(event.starts_at, '2026-09-21T18:00:00.000Z');
+  assertEquals(event.league_id, '4387');
 });
 
-Deno.test('adapter filters to configured leagues and bounded date windows', async () => {
-  const now = new Date('2030-01-01T00:00:00.000Z');
-  const fetchImpl: typeof fetch = async (url) => {
-    const id = new URL(String(url)).searchParams.get('id');
-    return new Response(JSON.stringify({ events: [
-      { idEvent: `in-${id}`, strSport: 'Basketball', strLeague: 'League', strEvent: `In ${id}`, dateEvent: '2030-01-02', strTime: '12:00:00', strAwayTeam: 'A', strHomeTeam: 'B' },
-      { idEvent: `out-${id}`, strSport: 'Basketball', strLeague: 'League', strEvent: `Out ${id}`, dateEvent: '2030-02-01', strTime: '12:00:00', strAwayTeam: 'A', strHomeTeam: 'B' },
-    ] }), { status: 200 });
-  };
-  const adapter = createTheSportsDbAdapter(env as unknown as Deno.Env, fetchImpl);
-  const events = await adapter.upcoming(now, 7);
-  assertEquals(events.length, 8);
-  assert(events.every((event) => event.provider_event_id.startsWith('in-')));
+Deno.test('starting-soon uses a bounded one-hour window', () => {
+  assertEquals(resolveTheSportsDbStatus({}, '2026-09-20T12:45:00.000Z', now), 'starting_soon');
+  assertEquals(resolveTheSportsDbStatus({}, '2026-09-20T13:01:00.000Z', now), 'scheduled');
 });
 
-Deno.test('provider failure is isolated to one league and live scores stay live', async () => {
-  const now = new Date('2030-01-01T00:00:00.000Z');
-  const fetchImpl: typeof fetch = async (url) => {
-    const id = new URL(String(url)).searchParams.get('id');
-    if (id === '2') throw new Error('provider_failure');
-    return new Response(JSON.stringify({ events: [{ idEvent: `live-${id}`, strSport: 'Basketball', strLeague: 'League', strEvent: 'Live Game', dateEvent: '2030-01-01', strTime: '12:00:00', strStatus: 'In Progress', intAwayScore: '2', intHomeScore: '1', strAwayTeam: 'A', strHomeTeam: 'B' }] }), { status: 200 });
-  };
-  const adapter = createTheSportsDbAdapter(env as unknown as Deno.Env, fetchImpl);
-  const events = await adapter.upcoming(now, 1);
-  assertEquals(events.length, 7);
-  assert(events.every((event) => event.event_status === 'live'));
+Deno.test('live and final require explicit upstream lifecycle text', () => {
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'In Progress' }, '2026-09-19T12:00:00.000Z', now), 'live');
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'Match Finished', intHomeScore: '2', intAwayScore: '1' }, '2026-09-19T12:00:00.000Z', now), 'final');
+  assertEquals(resolveTheSportsDbStatus({ intHomeScore: '2', intAwayScore: '1' }, '2026-09-19T12:00:00.000Z', now), 'scheduled');
 });
 
-Deno.test('upcoming NFL rows discard misleading winner and fight-result fields', () => {
-  const event = normalizeTheSportsDbEvent({ idEvent: 'nfl-1', strSport: 'American Football', strEvent: 'Atlanta Falcons vs Carolina Panthers', dateEvent: '2030-01-02', strTime: '12:00:00', strStatus: 'Scheduled', strWinner: 'Atlanta Falcons', strResult: 'Quarter 1: 7 - 0; Quarter 2: 3 - 7', strRound: '2', intHomeScore: '1', strHomeTeam: 'Atlanta Falcons', strAwayTeam: 'Carolina Panthers' });
+Deno.test('verified TheSportsDB AOT response is final and preserves its display detail', () => {
+  const event = normalizeTheSportsDbEvent({
+    ...base,
+    idEvent: 'aot-2475404',
+    strStatus: 'AOT',
+    intHomeScore: '2',
+    intAwayScore: '1',
+    strProgress: 'AOT',
+  }, now, '4391');
   assert(event);
-  assertEquals(event.event_status, 'upcoming');
-  assertEquals(event.winner_name, null);
-  assertEquals(event.loser_name, null);
-  assertEquals(event.result_method, null);
-  assertEquals(event.result_round, null);
+  assertEquals(event.status, 'final');
+  assertEquals(event.status_detail, 'AOT');
+  assertEquals(event.home_score, '2');
+  assertEquals(event.away_score, '1');
 });
 
-Deno.test('completed NFL, soccer, and football rows use the conservative past-score fallback', () => {
-  const now = new Date('2026-09-19T22:00:00.000Z');
-  const base = { dateEvent: '2026-09-18', strTime: '00:15:00', intHomeScore: '41', intAwayScore: '31', strHomeTeam: 'Buffalo Bills', strAwayTeam: 'Detroit Lions' };
-  assertEquals(resolveTheSportsDbStatus(base, '2026-09-18T00:15:00.000Z', 'American Football', now), 'final');
-  assertEquals(resolveTheSportsDbStatus({ ...base, intHomeScore: '0', intAwayScore: '1' }, '2026-09-18T23:30:00.000Z', 'Soccer', now), 'final');
-  assertEquals(resolveTheSportsDbStatus({ ...base, intHomeScore: '0', intAwayScore: '1' }, '2026-09-19T16:30:00.000Z', 'Soccer', now), 'final');
+Deno.test('hypothetical explicit overtime and extra-inning lifecycle fixtures are safe', () => {
+  // These exact strings are representative fixtures, not claimed observed
+  // TheSportsDB values; only the AOT fixture above is from the probe.
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'OT', strProgress: 'In Progress' }, '2026-09-19T12:00:00.000Z', now), 'live');
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'In Progress', strProgress: '10th Inning' }, '2026-09-19T12:00:00.000Z', now), 'live');
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'Final/10', strProgress: 'Final/10' }, '2026-09-19T12:00:00.000Z', now), 'final');
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'OT' }, '2026-09-19T12:00:00.000Z', now), 'scheduled');
 });
 
-Deno.test('upcoming MLB partial scores remain upcoming and team detail is not a result method', () => {
-  const event = normalizeTheSportsDbEvent({ idEvent: 'mlb-1', strSport: 'Baseball', strEvent: 'Mets vs Phillies', dateEvent: '2030-01-02', strTime: '12:00:00', strStatus: 'Scheduled', strResult: 'Innings: 1, Hits: 4, Errors: 0', intHomeScore: '1', strHomeTeam: 'Phillies', strAwayTeam: 'Mets' });
-  assert(event);
-  assertEquals(event.event_status, 'upcoming');
-  assertEquals(event.result_method, null);
-  assertEquals(event.result_round, null);
+Deno.test('status matching does not promote incidental words to live or final', () => {
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'Inactive' }, '2026-09-19T12:00:00.000Z', now), 'scheduled');
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'Unfinished' }, '2026-09-19T12:00:00.000Z', now), 'scheduled');
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'Not live' }, '2026-09-19T12:00:00.000Z', now), 'scheduled');
 });
 
-Deno.test('scheduled and future events stay upcoming despite stale or partial scores', () => {
-  const now = new Date('2026-09-19T20:00:00.000Z');
-  assertEquals(resolveTheSportsDbStatus({ strStatus: 'Scheduled', intHomeScore: '1', intAwayScore: '1' }, '2026-09-19T12:00:00.000Z', 'Baseball', now), 'upcoming');
-  assertEquals(resolveTheSportsDbStatus({ intHomeScore: '1', intAwayScore: null }, '2026-09-19T20:10:00.000Z', 'Baseball', now), 'upcoming');
-  assertEquals(resolveTheSportsDbStatus({}, '2026-09-19T23:00:00.000Z', 'Ice Hockey', now), 'upcoming');
-  assertEquals(resolveTheSportsDbStatus({}, '2026-09-20T17:00:00.000Z', 'American Football', now), 'upcoming');
+Deno.test('postponed and cancelled states are preserved safely', () => {
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'Postponed' }, '2026-09-21T18:00:00.000Z', now), 'postponed');
+  assertEquals(resolveTheSportsDbStatus({ strStatus: 'Cancelled' }, '2026-09-21T18:00:00.000Z', now), 'cancelled');
 });
 
-Deno.test('explicit lifecycle state wins over score-based fallback', () => {
-  const now = new Date('2026-09-19T20:00:00.000Z');
-  const scored = { intHomeScore: '2', intAwayScore: '1' };
-  assertEquals(resolveTheSportsDbStatus({ ...scored, strStatus: 'In Progress' }, '2026-09-18T00:00:00.000Z', 'Soccer', now), 'live');
-  assertEquals(resolveTheSportsDbStatus({ ...scored, strStatus: 'Final' }, '2026-09-20T00:00:00.000Z', 'Soccer', now), 'final');
-  assertEquals(resolveTheSportsDbStatus({ ...scored, strStatus: 'Scheduled' }, '2026-09-18T00:00:00.000Z', 'Soccer', now), 'upcoming');
+Deno.test('scores, winner, draw, and missing score values normalize without fabrication', () => {
+  const final = normalizeTheSportsDbEvent({ ...base, strStatus: 'Final', intHomeScore: '3', intAwayScore: '1', strWinner: 'Home', strHomeTeamBadge: 'https://img/home.png', strAwayTeamBadge: 'https://img/away.png' }, now, '4387');
+  const missing = normalizeTheSportsDbEvent({ ...base, strStatus: 'Final', intHomeScore: 'N/A' }, now, '4387');
+  assert(final && missing);
+  assertEquals(final.home_score, '3');
+  assertEquals(final.winner_name, 'Home');
+  assertEquals(final.home_team_logo_url, 'https://img/home.png');
+  assertEquals(missing.home_score, null);
+  assertEquals(missing.winner_name, null);
 });
 
-Deno.test('final soccer derives the away winner and final draw derives is_draw', () => {
-  const final = normalizeTheSportsDbEvent({ idEvent: 'soccer-1', strSport: 'Soccer', strEvent: 'NYCFC vs NY Red Bulls', dateEvent: '2030-01-01', strTime: '12:00:00', strStatus: 'Match Finished', intHomeScore: '0', intAwayScore: '1', strHomeTeam: 'NYCFC', strAwayTeam: 'NY Red Bulls' });
-  const draw = normalizeTheSportsDbEvent({ idEvent: 'soccer-2', strSport: 'Soccer', strEvent: 'A vs B', dateEvent: '2030-01-01', strTime: '12:00:00', strStatus: 'Final', intHomeScore: '1', intAwayScore: '1', strHomeTeam: 'A', strAwayTeam: 'B' });
-  assert(final && draw);
-  assertEquals(final.winner_name, 'NY Red Bulls');
-  assertEquals(final.loser_name, 'NYCFC');
-  assertEquals(final.is_draw, false);
-  assertEquals(draw.winner_name, null);
-  assertEquals(draw.loser_name, null);
-  assertEquals(draw.is_draw, true);
-});
-
-Deno.test('combat finals preserve method and round while event stage stays separate', () => {
-  const event = normalizeTheSportsDbEvent({ idEvent: 'fight-1', strSport: 'Boxing', strEvent: 'Fighter A vs Fighter B', dateEvent: '2030-01-01', strTime: '12:00:00', strStatus: 'Final', strResult: 'Unanimous Decision', strRound: '3', strResultTime: '2:14', strHomeTeam: 'Fighter A', strAwayTeam: 'Fighter B' });
+Deno.test('combat result fields stay separate from team result fields', () => {
+  const event = normalizeTheSportsDbEvent({ idEvent: 'fight-1', strSport: 'Boxing', strEvent: 'Fighter A vs Fighter B', dateEvent: '2026-09-20', strTime: '18:00:00', strStatus: 'Final', strResult: 'Unanimous Decision', strRound: '3', strResultTime: '2:14', strHomeTeam: 'Fighter A', strAwayTeam: 'Fighter B' }, now);
   assert(event);
   assertEquals(event.result_method, 'Unanimous Decision');
   assertEquals(event.result_round, '3');
-  assertEquals(event.result_time, '2:14');
-  assertEquals(event.event_stage, '3');
+  assertEquals(event.competitor_a, 'Fighter A');
+  assertEquals(event.home_score, null);
+});
+
+Deno.test('league configuration is canonical and rejects unknown ids', () => {
+  assertEquals(NOVA_PULSE_SUPPORTED_LEAGUES.length, 6);
+  assertEquals(configuredLeagueIds(env as unknown as Deno.Env), ['4391', '4387']);
+  assertEquals(configuredLeagueIds({ get: () => '999999' } as unknown as Deno.Env), []);
+});
+
+Deno.test('adapter applies configured league windows and isolates one league failure', async () => {
+  const fetchImpl: typeof fetch = async (url) => {
+    const id = new URL(String(url)).searchParams.get('id');
+    if (id === '4387') throw new Error('provider_failure');
+    return new Response(JSON.stringify({ events: [{ ...base, idEvent: 'event-' + id, dateEvent: '2026-09-21', strTime: '12:00:00' }, { ...base, idEvent: 'old-' + id, dateEvent: '2026-10-01' }] }), { status: 200 });
+  };
+  const adapter = createTheSportsDbAdapter(env as unknown as Deno.Env, fetchImpl);
+  const result = await adapter.upcoming(now, 7);
+  assertEquals(result.events.length, 1);
+  assertEquals(result.failedLeagues, ['4387']);
+  assertStringIncludes(result.events[0].source_event_id, 'event-4391');
+});
+
+Deno.test('missing upstream key produces an unconfigured adapter without a request', async () => {
+  let requests = 0;
+  const adapter = createTheSportsDbAdapter({ get: () => undefined } as unknown as Deno.Env, async () => { requests += 1; return new Response('{}'); });
+  assertFalse(adapter.configured);
+  const result = await adapter.upcoming(now, 7);
+  assertEquals(result.events, []);
+  assertEquals(requests, 0);
+});
+
+Deno.test('malformed upstream event is discarded and event ids remain source scoped', () => {
+  assertEquals(normalizeTheSportsDbEvent({ strEvent: 'missing id' }, now), null);
+  const one = normalizeTheSportsDbEvent({ ...base, idEvent: 'same', strStatus: 'Scheduled' }, now, '4391');
+  const two = normalizeTheSportsDbEvent({ ...base, idEvent: 'same', strStatus: 'Scheduled' }, now, '4387');
+  assert(one && two);
+  assertEquals(one.source + ':' + one.source_event_id, 'thesportsdb:same');
+  assertEquals(two.source + ':' + two.source_event_id, 'thesportsdb:same');
 });

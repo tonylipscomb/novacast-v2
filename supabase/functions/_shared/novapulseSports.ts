@@ -1,15 +1,23 @@
+export type NovaPulseSportsStatus = 'scheduled' | 'starting_soon' | 'live' | 'final' | 'postponed' | 'cancelled';
+
 export type NormalizedSportsEvent = {
-  provider: string;
-  provider_event_id: string;
+  source: string;
+  source_event_id: string;
   sport: string | null;
-  league: string | null;
-  event_title: string;
+  league_id: string | null;
+  league_name: string | null;
+  event_name: string;
   event_stage: string | null;
-  event_status: 'upcoming' | 'live' | 'final' | 'unknown';
+  status: NovaPulseSportsStatus;
+  status_detail: string | null;
   competitor_a: string | null;
   competitor_b: string | null;
+  home_team_id: string | null;
   home_name: string | null;
+  home_team_logo_url: string | null;
+  away_team_id: string | null;
   away_name: string | null;
+  away_team_logo_url: string | null;
   home_score: string | null;
   away_score: string | null;
   winner_name: string | null;
@@ -19,31 +27,49 @@ export type NormalizedSportsEvent = {
   decision_type: string | null;
   result_round: string | null;
   result_time: string | null;
-  period_detail: string | null;
+  period: string | null;
+  clock: string | null;
   went_overtime: boolean;
   shootout: boolean;
   is_draw: boolean;
   is_no_contest: boolean;
-  start_time: string | null;
+  starts_at: string | null;
   completed_at: string | null;
   network: string | null;
   venue: string | null;
-  artwork_url: string | null;
-  raw_updated_at: string | null;
+  event_artwork_url: string | null;
+  source_updated_at: string | null;
+  expires_at: string | null;
+  metadata: Record<string, unknown>;
 };
 
+export const NOVA_PULSE_SUPPORTED_LEAGUES = [
+  { id: '4391', name: 'NFL', sport: 'American Football' },
+  { id: '4479', name: 'NCAA Division 1 Football', sport: 'American Football' },
+  { id: '4387', name: 'NBA', sport: 'Basketball' },
+  { id: '4607', name: "NCAA Men's Basketball", sport: 'Basketball' },
+  { id: '4424', name: 'MLB', sport: 'Baseball' },
+  { id: '4380', name: 'NHL', sport: 'Ice Hockey' },
+] as const;
+
 type TheSportsDbEvent = Record<string, unknown>;
+type EnvLike = Pick<Deno.Env, 'get'>;
 
 function text(value: unknown) {
   const result = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
   return result || null;
 }
 
+function numericScore(value: string | null) {
+  if (!value || !/^\d+(?:\.\d+)?$/.test(value)) return null;
+  return value;
+}
+
 function parseDate(event: TheSportsDbEvent) {
   const timestamp = text(event.strTimestamp);
   if (timestamp && Number.isFinite(Date.parse(timestamp))) return new Date(timestamp).toISOString();
   const date = text(event.dateEvent);
-  const time = text(event.strTime)?.replace('Z', '') || '00:00:00';
+  const time = text(event.strTime)?.replace(/Z$/i, '') || '00:00:00';
   if (date && Number.isFinite(Date.parse(`${date}T${time}Z`))) return new Date(`${date}T${time}Z`).toISOString();
   return null;
 }
@@ -52,18 +78,7 @@ function isFight(sport: string | null) {
   return /box|mma|ufc|fight|wrestl/i.test(sport ?? '');
 }
 
-function isTeamSport(sport: string | null) {
-  return !isFight(sport);
-}
-
-function completionBufferHours(sport: string | null) {
-  const value = sport ?? '';
-  if (/baseball/i.test(value)) return 5;
-  if (/soccer|football|basketball|hockey/i.test(value)) return 4;
-  return 4;
-}
-
-function stateText(event: TheSportsDbEvent) {
+function statusText(event: TheSportsDbEvent) {
   return [event.strStatus, event.status, event.strProgress]
     .map(text)
     .filter((value): value is string => Boolean(value))
@@ -71,27 +86,21 @@ function stateText(event: TheSportsDbEvent) {
     .toLowerCase();
 }
 
-export function resolveTheSportsDbStatus(event: TheSportsDbEvent, startTime: string | null, sport: string | null, now = new Date()): NormalizedSportsEvent['event_status'] {
-  const explicit = stateText(event);
-  if (/postpon|cancel|suspend|abandon/.test(explicit)) return 'unknown';
-  if (/live|in progress|playing|active|halftime|half time|currently underway/.test(explicit)) return 'live';
-  if (/finish|final|completed|ended|\bft\b|after extra time|after penalties/.test(explicit)) return 'final';
-  if (/scheduled|not started|upcoming|tbd|pending/.test(explicit)) return 'upcoming';
-
-  // Free-tier responses can omit lifecycle text. Only team events with two
-  // numeric scores and a conservative post-start buffer may use this fallback.
-  const homeScore = numericScore(text(event.intHomeScore));
-  const awayScore = numericScore(text(event.intAwayScore));
-  const startedAt = startTime ? Date.parse(startTime) : Number.NaN;
-  const elapsedHours = Number.isFinite(startedAt) ? (now.getTime() - startedAt) / 3_600_000 : 0;
-  if (isTeamSport(sport) && homeScore !== null && awayScore !== null && elapsedHours >= completionBufferHours(sport)) return 'final';
-  return 'upcoming';
-}
-
-function numericScore(value: string | null) {
-  if (value === null || value.trim() === '') return null;
-  const score = Number(value);
-  return Number.isFinite(score) ? score : null;
+export function resolveTheSportsDbStatus(event: TheSportsDbEvent, startsAt: string | null, now = new Date()): NovaPulseSportsStatus {
+  const explicit = statusText(event);
+  if (/cancel|abandon/.test(explicit)) return 'cancelled';
+  if (/postpon|suspend/.test(explicit)) return 'postponed';
+  // TheSportsDB uses compact result labels such as AOT (after overtime).
+  // Preserve the original status_detail separately, but classify verified
+  // completed/extra-period labels as final before considering live markers.
+  if (/\baot\b|\bfinal(?:\s*\/\s*\d+)?\b|\bfinished?\b|\bcompleted\b|\bended\b|\bft\b|after extra time|after overtime|after extra innings|after penalties/.test(explicit)) return 'final';
+  if (/\b(?:not live|not in progress|not started)\b/.test(explicit)) return 'scheduled';
+  const explicitInProgress = /\blive\b|\bin progress\b|\bplaying\b|\bactive\b|\bhalftime\b|\bhalf time\b|\bcurrently underway\b/.test(explicit);
+  const explicitExtraInning = /\b(?:extra innings?|\d+(?:st|nd|rd|th)?\s+inning)\b/.test(explicit);
+  if (explicitInProgress || (explicitExtraInning && !/scheduled|not started|upcoming|tbd|pending/.test(explicit))) return 'live';
+  const start = startsAt ? Date.parse(startsAt) : Number.NaN;
+  if (Number.isFinite(start) && start >= now.getTime() && start <= now.getTime() + 60 * 60_000) return 'starting_soon';
+  return 'scheduled';
 }
 
 function explicitCompletionTime(event: TheSportsDbEvent) {
@@ -99,67 +108,78 @@ function explicitCompletionTime(event: TheSportsDbEvent) {
   return value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
 }
 
-export function normalizeTheSportsDbEvent(event: TheSportsDbEvent, now = new Date()): NormalizedSportsEvent | null {
-  const providerEventId = text(event.idEvent);
-  const title = text(event.strEvent) ?? text(event.strEventAlternate);
-  if (!providerEventId || !title) return null;
+function expiryFor(status: NovaPulseSportsStatus, startsAt: string | null, completedAt: string | null) {
+  const base = status === 'final' ? completedAt ?? startsAt : startsAt;
+  if (!base) return null;
+  const hours = status === 'final' ? 18 : 8 * 24;
+  return new Date(Date.parse(base) + hours * 60 * 60_000).toISOString();
+}
+
+export function normalizeTheSportsDbEvent(event: TheSportsDbEvent, now = new Date(), leagueId?: string): NormalizedSportsEvent | null {
+  const sourceEventId = text(event.idEvent);
+  const eventName = text(event.strEvent) ?? text(event.strEventAlternate);
+  if (!sourceEventId || !eventName) return null;
   const sport = text(event.strSport);
-  const home = text(event.strHomeTeam);
-  const away = text(event.strAwayTeam);
-  const startTime = parseDate(event);
-  const status = resolveTheSportsDbStatus(event, startTime, sport, now);
-  const homeScore = text(event.intHomeScore);
-  const awayScore = text(event.intAwayScore);
+  const homeName = text(event.strHomeTeam);
+  const awayName = text(event.strAwayTeam);
+  const startsAt = parseDate(event);
+  const status = resolveTheSportsDbStatus(event, startsAt, now);
+  const homeScore = numericScore(text(event.intHomeScore));
+  const awayScore = numericScore(text(event.intAwayScore));
   const result = text(event.strResult);
   const combat = isFight(sport);
-  const homeNumeric = numericScore(homeScore);
-  const awayNumeric = numericScore(awayScore);
   const explicitWinner = text(event.strWinner);
-  const providerWinner = explicitWinner && (explicitWinner === home || explicitWinner === away)
+  const providerWinner = explicitWinner && (explicitWinner === homeName || explicitWinner === awayName)
     ? explicitWinner
-    : result && home && result.toLowerCase() === home.toLowerCase()
-      ? home
-      : result && away && result.toLowerCase() === away.toLowerCase()
-        ? away
+    : result && homeName && result.toLowerCase() === homeName.toLowerCase()
+      ? homeName
+      : result && awayName && result.toLowerCase() === awayName.toLowerCase()
+        ? awayName
         : null;
-  const derivedWinner = status === 'final' && homeNumeric !== null && awayNumeric !== null && homeNumeric !== awayNumeric
-    ? homeNumeric > awayNumeric ? home : away
-    : null;
-  const winner = status === 'final' ? (providerWinner ?? derivedWinner) : null;
-  const draw = status === 'final' && ((homeNumeric !== null && awayNumeric !== null && homeNumeric === awayNumeric) || /\bdraw\b/i.test(result ?? ''));
+  const winner = status === 'final' ? providerWinner : null;
+  const draw = status === 'final' && homeScore !== null && awayScore !== null && homeScore === awayScore;
   const noContest = status === 'final' && /no contest/i.test(result ?? '');
-  // TheSportsDB does not currently provide a reliable completion timestamp for these rows.
-  // completed_at therefore uses the event timestamp as a stable ordering fallback, not as a precise finish time.
-  const completedAt = status === 'final' ? (explicitCompletionTime(event) ?? startTime) : null;
+  const completedAt = status === 'final' ? (explicitCompletionTime(event) ?? startsAt) : null;
+  const league = NOVA_PULSE_SUPPORTED_LEAGUES.find((candidate) => candidate.id === leagueId);
   return {
-    provider: 'thesportsdb', provider_event_id: providerEventId, sport, league: text(event.strLeague), event_title: title,
-    event_stage: text(event.strRound) ?? text(event.intRound), event_status: status,
-    competitor_a: isFight(sport) ? home : away, competitor_b: isFight(sport) ? away : home,
-    home_name: home, away_name: away, home_score: homeScore, away_score: awayScore,
-    winner_name: winner, winner_id: winner === home ? text(event.idHomeTeam) : winner === away ? text(event.idAwayTeam) : null,
-    loser_name: status === 'final' && !draw && !noContest ? (winner === home ? away : winner === away ? home : null) : null,
-    result_method: status === 'final' && combat ? (text(event.strResultMethod) ?? result) : null,
+    source: 'thesportsdb', source_event_id: sourceEventId, sport, league_id: leagueId ?? null, league_name: text(event.strLeague) ?? league?.name ?? null,
+    event_name: eventName, event_stage: text(event.strRound) ?? text(event.intRound), status,
+    status_detail: text(event.strProgress) ?? text(event.strStatus), competitor_a: combat ? homeName : awayName, competitor_b: combat ? awayName : homeName,
+    home_team_id: text(event.idHomeTeam), home_name: homeName, home_team_logo_url: text(event.strHomeTeamBadge) ?? text(event.strHomeTeamLogo),
+    away_team_id: text(event.idAwayTeam), away_name: awayName, away_team_logo_url: text(event.strAwayTeamBadge) ?? text(event.strAwayTeamLogo),
+    home_score: homeScore, away_score: awayScore, winner_name: winner, winner_id: winner === homeName ? text(event.idHomeTeam) : winner === awayName ? text(event.idAwayTeam) : null,
+    loser_name: status === 'final' && !draw && !noContest ? (winner === homeName ? awayName : winner === awayName ? homeName : null) : null,
+    result_method: status === 'final' && combat ? text(event.strResultMethod) ?? result : null,
     decision_type: status === 'final' && combat ? text(event.strDecision) : null,
-    result_round: status === 'final' && combat ? (text(event.intRound) ?? text(event.strRound)) : null,
-    result_time: status === 'final' && combat ? (text(event.strResultTime) ?? text(event.strFightTime)) : null,
-    period_detail: text(event.strProgress), went_overtime: /overtime|extra time/i.test(`${event.strStatus ?? ''} ${event.strProgress ?? ''}`),
-    shootout: /shootout/i.test(`${event.strStatus ?? ''} ${event.strProgress ?? ''}`), is_draw: draw, is_no_contest: noContest,
-    start_time: startTime, completed_at: completedAt, network: text(event.strTVStation), venue: text(event.strVenue),
-    artwork_url: text(event.strThumb) ?? text(event.strPoster) ?? text(event.strEventPoster), raw_updated_at: null,
+    result_round: status === 'final' && combat ? text(event.intRound) ?? text(event.strRound) : null,
+    result_time: status === 'final' && combat ? text(event.strResultTime) ?? text(event.strFightTime) : null,
+    period: status === 'live' ? text(event.strPeriod) ?? text(event.strProgress) : null,
+    clock: status === 'live' ? text(event.strClock) : null,
+    went_overtime: /overtime|extra time/i.test(`${event.strStatus ?? ''} ${event.strProgress ?? ''}`), shootout: /shootout/i.test(`${event.strStatus ?? ''} ${event.strProgress ?? ''}`),
+    is_draw: draw, is_no_contest: noContest, starts_at: startsAt, completed_at: completedAt, network: text(event.strTVStation), venue: text(event.strVenue),
+    event_artwork_url: text(event.strThumb) ?? text(event.strPoster) ?? text(event.strEventPoster), source_updated_at: null,
+    expires_at: expiryFor(status, startsAt, completedAt), metadata: {},
   };
 }
 
-export function configuredLeagueIds(env = Deno.env) {
-  return (env.get('NOVAPULSE_SPORTS_LEAGUE_IDS') ?? '').split(',').map((value) => value.trim()).filter((value) => /^\d+$/.test(value)).slice(0, 8);
+function configuredLeagues(env: EnvLike = Deno.env) {
+  const raw = env.get('NOVAPULSE_SPORTS_LEAGUE_IDS')?.trim();
+  if (!raw) return [...NOVA_PULSE_SUPPORTED_LEAGUES];
+  const allowed = new Set(raw.split(',').map((value) => value.trim()).filter((value) => /^\d+$/.test(value)));
+  return NOVA_PULSE_SUPPORTED_LEAGUES.filter((league) => allowed.has(league.id));
+}
+
+export function configuredLeagueIds(env: EnvLike = Deno.env) {
+  return configuredLeagues(env).map((league) => league.id);
 }
 
 function withinWindow(event: NormalizedSportsEvent, from: Date, to: Date) {
-  if (!event.start_time) return false;
-  const time = Date.parse(event.start_time);
+  if (!event.starts_at) return false;
+  const time = Date.parse(event.starts_at);
   return Number.isFinite(time) && time >= from.getTime() && time <= to.getTime();
 }
 
-export function createTheSportsDbAdapter(env = Deno.env, fetchImpl: typeof fetch = fetch) {
+export function createTheSportsDbAdapter(env: EnvLike = Deno.env, fetchImpl: typeof fetch = fetch) {
   const key = env.get('THESPORTSDB_API_KEY')?.trim() ?? '';
   const timeoutMs = Math.min(20_000, Math.max(3_000, Number(env.get('NOVAPULSE_SPORTS_TIMEOUT_MS') ?? 10_000)));
   async function request(path: string) {
@@ -173,20 +193,22 @@ export function createTheSportsDbAdapter(env = Deno.env, fetchImpl: typeof fetch
       return Array.isArray(payload.events) ? payload.events.filter((item): item is TheSportsDbEvent => Boolean(item && typeof item === 'object')) : [];
     } finally { clearTimeout(timeout); }
   }
-  async function collect(from: Date, to: Date, path: (leagueId: string) => string) {
+  async function collect(now: Date, from: Date, to: Date, path: (leagueId: string) => string) {
     const output: NormalizedSportsEvent[] = [];
-    for (const leagueId of configuredLeagueIds(env)) {
-      let rawEvents: TheSportsDbEvent[] = [];
-      try { rawEvents = await request(path(leagueId)); } catch { continue; }
-      for (const raw of rawEvents) {
-        const event = normalizeTheSportsDbEvent(raw);
-        if (event && withinWindow(event, from, to)) output.push(event);
-      }
+    const failedLeagues: string[] = [];
+    for (const league of configuredLeagues(env)) {
+      try {
+        for (const raw of await request(path(league.id))) {
+          const event = normalizeTheSportsDbEvent(raw, now, league.id);
+          if (event && withinWindow(event, from, to)) output.push(event);
+        }
+      } catch { failedLeagues.push(league.id); }
     }
-    return output;
+    return { events: output, failedLeagues };
   }
   return {
-    async upcoming(now = new Date(), days = 7) { return collect(now, new Date(now.getTime() + days * 86_400_000), (id) => `eventsnextleague.php?id=${id}`); },
-    async recent(now = new Date(), days = 2) { return collect(new Date(now.getTime() - days * 86_400_000), now, (id) => `eventspastleague.php?id=${id}`); },
+    configured: Boolean(key),
+    async upcoming(now = new Date(), days = 7) { return collect(now, new Date(now.getTime() - 12 * 60 * 60_000), new Date(now.getTime() + days * 86_400_000), (id) => `eventsnextleague.php?id=${id}`); },
+    async recent(now = new Date(), hours = 18) { return collect(now, new Date(now.getTime() - hours * 60 * 60_000), now, (id) => `eventspastleague.php?id=${id}`); },
   };
 }

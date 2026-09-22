@@ -87,6 +87,17 @@ test('V2 keeps sports and announcements bounded and compatible', () => {
   assert.ok(result.diagnostics.selectedSports <= 2);
 });
 
+test('V2 prefers different sports leagues when two comparable cards are available', () => {
+  const result = composeNovaPulseFeedV2([source([
+    item('nba-upcoming', 'sports', { subtype: 'upcoming', sports: { eventStatus: 'UPCOMING', league: 'NBA' } }),
+    item('nba-final', 'sports', { subtype: 'final', sports: { eventStatus: 'FINAL', league: 'NBA' } }),
+    item('nfl-final', 'sports', { subtype: 'final', sports: { eventStatus: 'FINAL', league: 'NFL' } }),
+  ])]);
+  const selected = result.items.filter((entry) => entry.type === 'sports');
+  assert.equal(selected.length, 2);
+  assert.deepEqual(selected.map((entry) => entry.sports?.league), ['NBA', 'NFL']);
+});
+
 test('V2 admits actionable live EPG candidates as a protected family', () => {
   const live = item('live-1', 'live_epg', { priority: 80, action: { type: 'channel', target: '/live', contentId: 'channel-1' } });
   const result = composeNovaPulseFeedV2([

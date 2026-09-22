@@ -416,7 +416,8 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     providerId: activeProviderId,
     movies: novaPulseMovies,
     series: novaPulseSeries,
-    fetchMovieDetail: bundle?.movies.getMovieInfo,
+    fetchMovieDetail: bundle?.movies.enrichMovieInfo ?? bundle?.movies.getMovieInfo,
+    fetchSeriesDetail: bundle?.seriesDataSource.getSeriesInfo,
     recommendationContext: {
       recentlyWatched: personalization.recentlyWatched,
       favoriteMovies: personalization.favoriteMovies,

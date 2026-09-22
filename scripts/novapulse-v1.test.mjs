@@ -4,8 +4,9 @@ import test from 'node:test';
 
 import { composeNovaPulseFeed, preserveNovaPulseIndex } from '../src/features/novapulse/novaPulseComposer.ts';
 import { createNovaPulseArtworkPrefetchPlan, inspectNovaPulseArtworkPrefetch } from '../src/features/novapulse/novaPulseArtworkPrefetch.ts';
-import { canNovaPulseAutoRotate, describeNovaPulseArtwork, formatNovaPulseAnnouncementTiming, formatNovaPulseCatalogMeta, formatNovaPulseCountdown, formatNovaPulseEpisodeMeta, formatNovaPulseEventTime, formatNovaPulseRating, formatNovaPulseResultSummary, formatNovaPulseStage, formatNovaPulseStart, formatNovaPulseTeamLabel, formatNovaPulseUpcomingStatus, getNovaPulseAnnouncementBadge, getNovaPulseCatalogBadge, getNovaPulseDisplayYear, getNovaPulseTeamInitials, getNovaPulseWinner, nextNovaPulseIndex, normalizeNovaPulseGenres, resolveNovaPulseAction, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from '../src/features/novapulse/novaPulseLogic.ts';
+import { canNovaPulseAutoRotate, describeNovaPulseArtwork, formatNovaPulseAnnouncementTiming, formatNovaPulseCatalogMeta, formatNovaPulseCountdown, formatNovaPulseEpisodeMeta, formatNovaPulseEventTime, formatNovaPulseRating, formatNovaPulseResultSummary, formatNovaPulseStage, formatNovaPulseStart, formatNovaPulseTeamLabel, formatNovaPulseUpcomingStatus, getNovaPulseAnnouncementBadge, getNovaPulseCatalogBadge, getNovaPulseDisplayCountry, getNovaPulseDisplayYear, getNovaPulseTeamInitials, getNovaPulseWinner, nextNovaPulseIndex, normalizeNovaPulseGenres, resolveNovaPulseAction, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from '../src/features/novapulse/novaPulseLogic.ts';
 import { createNovaPulseCatalogSource, createNovaPulseMockSource } from '../src/features/novapulse/novaPulseSources.ts';
+import { mapNovaPulseSportsRow } from '../src/features/novapulse/novaPulseSportsSource.ts';
 
 const item = (action) => ({ id: 'demo', type: 'movie', title: 'Demo', priority: 1, action });
 
@@ -132,7 +133,34 @@ test('provider titles are sanitized for display without mutating the raw value',
   assert.equal(sanitizeNovaPulseDisplayTitle('Top Gun'), 'Top Gun');
   assert.equal(rawMovie, '4K-AMZ - American Fiction (2023)');
   assert.equal(sanitizeNovaPulseDisplayTitle('HDMI'), 'HDMI');
-  assert.equal(formatNovaPulseTeamLabel('Toronto Maple Leafs'), 'Maple Leafs');
+  assert.equal(sanitizeNovaPulseDisplayTitle('Dope Thief (2025) (US)'), 'Dope Thief');
+  assert.equal(sanitizeNovaPulseDisplayTitle("The Thing (1982) (Director's Cut)"), "The Thing (1982) (Director's Cut)");
+  assert.equal(getNovaPulseDisplayCountry('Dope Thief (2025) (US)'), 'US');
+  assert.equal(getNovaPulseDisplayCountry("The Thing (1982) (Director's Cut)"), undefined);
+  assert.equal(formatNovaPulseTeamLabel('Toronto Maple Leafs'), 'Toronto Maple Leafs');
+});
+
+test('catalog artwork uses contain for poster-only cards and cover for backdrops', () => {
+  const sources = fs.readFileSync(new URL('../src/features/novapulse/novaPulseSources.ts', import.meta.url), 'utf8');
+  const presentation = fs.readFileSync(new URL('../src/features/novapulse/novaPulsePresentation.ts', import.meta.url), 'utf8');
+  assert.match(sources, /artworkFit: movie\.backdropUrl \? 'cover' : 'contain'/);
+  assert.match(presentation, /artworkFit: backdropUrl \? 'cover' as const : 'contain' as const/);
+});
+
+test('stale sports promos cannot create a TONIGHT card without a verified kickoff', () => {
+  const stale = mapNovaPulseSportsRow({ source: 'test', source_event_id: 'stale', event_name: 'Stale promo', status: 'starting_soon' });
+  assert.equal(stale, null);
+  const verified = mapNovaPulseSportsRow({
+    source: 'test', source_event_id: 'verified', event_name: 'Verified game', status: 'starting_soon',
+    starts_at: '2026-09-22T00:00:00.000Z', away_name: 'Away', home_name: 'Home',
+  });
+  assert.equal(verified?.subtype, 'upcoming');
+  assert.equal(verified?.sports?.eventStatus, undefined);
+  assert.equal(verified?.startsAt, '2026-09-22T00:00:00.000Z');
+});
+
+test('catalog metadata keeps validated country beside the year', () => {
+  assert.equal(formatNovaPulseCatalogMeta({ id: 'm', type: 'movie', title: 'Dope Thief', priority: 1, year: 2025, countryCode: 'US', genres: [] }), '2025 • US');
 });
 
 test('display year validation keeps plausible years and omits malformed/future values', () => {
@@ -239,7 +267,7 @@ test('catalog status and fixed card layout have safe fallbacks', () => {
   assert.equal(getNovaPulseCatalogBadge({ id: 'series', type: 'series', title: 'Demo', priority: 1 }), 'SERIES');
   const cardSource = fs.readFileSync(new URL('../src/features/novapulse/NovaPulseCard.tsx', import.meta.url), 'utf8');
   assert.match(cardSource, /height: 272/);
-  assert.match(cardSource, /numberOfLines=\{2\} style=\{styles\.description\}/);
+  assert.match(cardSource, /numberOfLines=\{3\} style=\{styles\.description\}/);
   assert.match(cardSource, /sportsCopy: \{ width: '55%'/);
   assert.match(cardSource, /<TvRemoteImage uri=\{remoteArtworkUrl \?\? undefined\}/);
   assert.match(cardSource, /backdropFallback/);
@@ -307,9 +335,7 @@ test('sports artwork fallback is exclusive to the pre-load and error states', ()
   assert.match(cardSource, /!remoteArtworkUrl && !artworkLoaded/);
   assert.match(cardSource, /hasRemoteArtwork && !artworkFailed/);
   assert.match(cardSource, /artworkFrameContained/);
-  assert.match(cardSource, /mediaBlendOne/);
-  assert.match(cardSource, /mediaBlendTwo/);
-  assert.match(cardSource, /mediaBlendThree/);
+  assert.doesNotMatch(cardSource, /mediaBlendOne|mediaBlendTwo|mediaBlendThree|mediaScrim/);
 });
 
 test('remote NovaPulse artwork is visible without waiting for a load callback', () => {
@@ -346,7 +372,7 @@ test('sports footer keeps venue metadata and countdown in one bounded row', () =
   assert.match(cardSource, /styles\.footer/);
   assert.match(cardSource, /numberOfLines=\{1\} ellipsizeMode="tail" style=\{styles\.footerText\}/);
   assert.match(cardSource, /maxWidth: '43%'/);
-  assert.match(cardSource, /marginTop: 3/);
+  assert.match(cardSource, /marginTop: 7/);
 });
 
 test('late catalog index hydration invalidates NovaPulse candidates without Home reload', () => {
@@ -466,12 +492,17 @@ test('catalog absence or a failing source does not break remaining mock sources'
 test('release feed keeps per-type local fallback slots when catalog data is unavailable', () => {
   const source = fs.readFileSync(new URL('../src/features/novapulse/useNovaPulseFeed.ts', import.meta.url), 'utf8');
   const mockSource = fs.readFileSync(new URL('../src/features/novapulse/novaPulseSources.ts', import.meta.url), 'utf8');
+  const homeSource = fs.readFileSync(new URL('../src/features/hub/MainMenuScreen.tsx', import.meta.url), 'utf8');
+  const mockFeedSource = fs.readFileSync(new URL('../src/features/novapulse/novaPulseMockFeed.ts', import.meta.url), 'utf8');
   assert.match(source, /movie: boundedMovies\.length === 0/);
   assert.match(source, /series: boundedSeries\.length === 0/);
   assert.match(source, /NOVAPULSE_FEED_RELEASE/);
   assert.match(source, /recordDiagnostic/);
   assert.match(mockSource, /includeMovieFallback/);
   assert.match(mockSource, /includeSeriesFallback/);
+  assert.match(homeSource, /fetchMovieDetail: bundle\?\.movies\.enrichMovieInfo \?\? bundle\?\.movies\.getMovieInfo/);
+  assert.doesNotMatch(mockFeedSource, /featured-movie-demo|Superman/);
+  assert.doesNotMatch(mockFeedSource, /featured-series-demo|The Last Horizon/);
 });
 
 test('stable item IDs preserve the active card across recomposition without focus requests', () => {
@@ -489,18 +520,12 @@ test('catalog adaptor introduces no provider fetch path', () => {
   assert.doesNotMatch(source, /fetch\(|XtreamClient|providerRepositories|bundle\.syncCatalog/);
 });
 
-test('NovaPulse source declares the normalized demonstration variants', () => {
+test('NovaPulse source keeps only non-catalog demonstration variants', () => {
   const source = fs.readFileSync(new URL('../src/features/novapulse/novaPulseMockFeed.ts', import.meta.url), 'utf8');
-  assert.equal((source.match(/id: '/g) ?? []).length, 9);
+  assert.equal((source.match(/id: '/g) ?? []).length, 3);
   assert.match(source, /type: 'announcement'/);
-  assert.match(source, /type: 'movie'/);
-  assert.match(source, /type: 'series'/);
-  assert.match(source, /subtype: 'upcoming'/);
-  assert.match(source, /subtype: 'final'/);
-  assert.match(source, /competitorA: 'Canelo Alvarez'/);
-  assert.match(source, /awayName: 'Baltimore Ravens'/);
-  assert.match(source, /winnerName: 'Portland FC'/);
-  assert.match(source, /winnerName: 'Canelo Alvarez'/);
+  assert.doesNotMatch(source, /featured-movie-demo|featured-series-demo|Superman|The Last Horizon|Ravens|Lions|Rams|Canelo|Portland FC/);
+  assert.doesNotMatch(source, /type: 'sports'/);
   assert.match(source, /title: 'NovaCast Beta 24'/);
   assert.match(source, /title: 'Scheduled Maintenance'/);
 });

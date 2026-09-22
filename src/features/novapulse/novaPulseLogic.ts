@@ -64,6 +64,13 @@ const NOVA_PULSE_TOP_PREFIX = /^TOP\s*[-|:•]\s*/;
 
 /** Presentation-only cleanup; provider/catalog values remain unchanged. */
 const NOVA_PULSE_STRUCTURED_PROVIDER_PREFIX = /^(?:AR(?:-SUBS)?|A\+)(?:\s*[-|:\u2022]\s*|\s+)/i;
+const NOVA_PULSE_COUNTRY_CODES = new Set(['US', 'GB', 'CA', 'AU', 'NZ', 'IE', 'FR', 'DE', 'ES', 'IT', 'PT', 'BR', 'MX', 'IN', 'JP', 'KR', 'CN', 'PL']);
+
+export function getNovaPulseDisplayCountry(title?: string) {
+  const match = title?.trim().match(/\s+\(([^()]{2})\)\s*$/);
+  const code = match?.[1]?.toUpperCase();
+  return code && NOVA_PULSE_COUNTRY_CODES.has(code) ? code : undefined;
+}
 
 export function hasNovaPulseDisplayPrefix(title?: string) {
   const value = title?.trim() ?? '';
@@ -73,7 +80,8 @@ export function hasNovaPulseDisplayPrefix(title?: string) {
 export function sanitizeNovaPulseDisplayTitle(title?: string) {
   const original = title?.trim() ?? '';
   if (!original) return '';
-  const withoutYear = original.replace(/\s*\((?:19|20)\d{2}\)\s*$/, '').trim();
+  const withoutCountryYear = original.replace(/\s*\((?:19|20)\d{2}\)\s+\((?:US|GB|CA|AU|NZ|IE|FR|DE|ES|IT|PT|BR|MX|IN|JP|KR|CN|PL)\)\s*$/i, '').trim();
+  const withoutYear = withoutCountryYear.replace(/\s*\((?:19|20)\d{2}\)\s*$/, '').trim();
   const withoutQualityPrefix = withoutYear.replace(NOVA_PULSE_PROVIDER_PREFIX, '').trim();
   let withoutStructuredPrefix = withoutQualityPrefix;
   for (let pass = 0; pass < 4; pass += 1) {
@@ -256,17 +264,24 @@ export function describeNovaPulseArtwork(value?: string) {
 
 /** Compact team label for the constrained matchup columns. */
 export function formatNovaPulseTeamLabel(name?: string) {
-  const words = name?.trim().split(/\s+/).filter(Boolean) ?? [];
-  if (words.length <= 1) return words[0] ?? 'Competitor';
-  return words.length >= 3 ? words.slice(-2).join(' ') : words[words.length - 1];
+  return name?.trim() || 'Competitor';
+}
+
+/** Display-only runtime guard; tiny provider placeholders are not useful metadata. */
+export function getNovaPulseDisplayRuntimeMinutes(value?: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value)) return undefined;
+  return value >= 5 && value <= 600 ? value : undefined;
 }
 
 export function formatNovaPulseCatalogMeta(item: NovaPulseItem) {
   const genres = normalizeNovaPulseGenres(item.genres);
   const validYear = getNovaPulseDisplayYear(item.year);
-  const parts = [validYear ? String(validYear) : null, ...genres];
-  if (item.runtimeMinutes && item.runtimeMinutes > 0) {
-    parts.push(`${Math.floor(item.runtimeMinutes / 60)}h ${item.runtimeMinutes % 60}m`);
+  const countryCandidate = item.countryCode?.trim().toUpperCase();
+  const country = countryCandidate && NOVA_PULSE_COUNTRY_CODES.has(countryCandidate) ? countryCandidate : undefined;
+  const parts = [validYear ? String(validYear) : null, country || null, ...genres];
+  const runtimeMinutes = getNovaPulseDisplayRuntimeMinutes(item.runtimeMinutes);
+  if (runtimeMinutes) {
+    parts.push(`${Math.floor(runtimeMinutes / 60)}h ${runtimeMinutes % 60}m`);
   }
   if (item.contentRating) parts.unshift(item.contentRating);
   return parts.filter(Boolean).join(' • ');

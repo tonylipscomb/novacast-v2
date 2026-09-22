@@ -14,10 +14,9 @@ test('B1.5 live channel-logo cards select contained logo mode', () => {
   assert.match(card, /resizeMode=\{artworkFit === 'contain' \? 'contain' : 'cover'\}/);
 });
 
-test('B1.5 suppresses strip overlays only in live logo mode', () => {
-  assert.match(card, /!liveLogoMode \? <><View pointerEvents="none" style=\{styles\.mediaBlendOne\}/);
+test('B1.5 removes repeated artwork strip overlays while preserving the card scrim', () => {
+  assert.doesNotMatch(card, /mediaBlendOne|mediaBlendTwo|mediaBlendThree|mediaScrim/);
   assert.match(card, /!liveLogoMode \? <View style=\{styles\.scrim\}/);
-  assert.match(card, /mediaBlendOne:.*width: '18%'/s);
   assert.match(card, /scrim:.*width: '64%'/s);
 });
 

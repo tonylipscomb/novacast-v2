@@ -6,6 +6,8 @@ import {
   getNovaPulseLanguageEvidence,
   isNovaPulseEnglishDescription,
   preferNovaPulseEnglishVariants,
+  formatNovaPulseCatalogMeta,
+  getNovaPulseDisplayRuntimeMinutes,
   sanitizeNovaPulseDisplayTitle,
 } from '../src/features/novapulse/novaPulseLogic.ts';
 import { enrichNovaPulsePresentation } from '../src/features/novapulse/novaPulsePresentation.ts';
@@ -66,6 +68,58 @@ test('all unsuitable descriptions are omitted without empty presentation copy', 
   assert.equal(result.items[0].description, undefined);
   assert.equal(result.diagnostics.descriptionOmittedForLanguage, 1);
   assert.doesNotMatch(fs.readFileSync(new URL('../src/features/novapulse/NovaPulseCard.tsx', import.meta.url), 'utf8'), /Available in your NovaCast library|Curated for you/);
+});
+
+test('provider fallback keeps the language preference for Movie and Series cards', () => {
+  const movieEnglish = enrichNovaPulsePresentation({
+    items: [{ id: 'movie-en', type: 'movie', title: 'Movie', sourceItemId: 'm-en', priority: 1 }],
+    movies: [{ id: 'm-en', categoryId: 'all', title: 'Movie', genres: [], posterStyleKey: 'ember' }],
+    movieEnrichments: new Map([['m-en', { providerId: 'p', movieId: 'm-en', status: 'matched', updatedAt: Date.now(), synopsis: 'An English provider synopsis.', genres: [] }]]),
+  });
+  const movieForeign = enrichNovaPulsePresentation({
+    items: [{ id: 'movie-foreign', type: 'movie', title: 'Movie', sourceItemId: 'm-foreign', priority: 1 }],
+    movies: [{ id: 'm-foreign', categoryId: 'all', title: 'Movie', genres: [], posterStyleKey: 'ember' }],
+    movieEnrichments: new Map([['m-foreign', { providerId: 'p', movieId: 'm-foreign', status: 'matched', updatedAt: Date.now(), synopsis: 'Это фильм без английского описания.' , genres: [] }]]),
+  });
+  const seriesEnglish = enrichNovaPulsePresentation({
+    items: [{ id: 'series-en', type: 'series', title: 'Series', sourceItemId: 's-en', priority: 1 }],
+    series: [{ id: 's-en', seriesId: 's-en', title: 'Series', genres: [], posterStyleKey: 'orbit' }],
+    seriesDetails: new Map([['s-en', { seriesId: 's-en', title: 'Series', description: 'An English provider overview.', seasons: [], episodesBySeason: {} }]]),
+  });
+  const seriesForeign = enrichNovaPulsePresentation({
+    items: [{ id: 'series-foreign', type: 'series', title: 'Series', sourceItemId: 's-foreign', priority: 1 }],
+    series: [{ id: 's-foreign', seriesId: 's-foreign', title: 'Series', genres: [], posterStyleKey: 'orbit' }],
+    seriesDetails: new Map([['s-foreign', { seriesId: 's-foreign', title: 'Series', description: 'Это сериал без английского описания.', seasons: [], episodesBySeason: {} }]]),
+  });
+  const movieUncertain = enrichNovaPulsePresentation({
+    items: [{ id: 'movie-uncertain', type: 'movie', title: 'Movie', sourceItemId: 'm-uncertain', priority: 1 }],
+    movies: [{ id: 'm-uncertain', categoryId: 'all', title: 'Movie', genres: [], posterStyleKey: 'ember' }],
+    movieEnrichments: new Map([['m-uncertain', { providerId: 'p', movieId: 'm-uncertain', status: 'matched', updatedAt: Date.now(), synopsis: 'Café déjà vu — a story with résumé details.', genres: [] }]]),
+  });
+  const seriesUncertain = enrichNovaPulsePresentation({
+    items: [{ id: 'series-uncertain', type: 'series', title: 'Series', sourceItemId: 's-uncertain', priority: 1 }],
+    series: [{ id: 's-uncertain', seriesId: 's-uncertain', title: 'Series', genres: [], posterStyleKey: 'orbit' }],
+    seriesDetails: new Map([['s-uncertain', { seriesId: 's-uncertain', title: 'Series', description: 'Café déjà vu — an uncertain but Latin-script overview.', seasons: [], episodesBySeason: {} }]]),
+  });
+  assert.equal(movieEnglish.items[0].description, 'An English provider synopsis.');
+  assert.equal(movieForeign.items[0].description, undefined);
+  assert.equal(seriesEnglish.items[0].description, 'An English provider overview.');
+  assert.equal(seriesForeign.items[0].description, undefined);
+  assert.match(movieUncertain.items[0].description, /Café/);
+  assert.match(seriesUncertain.items[0].description, /Café/);
+});
+
+test('NovaPulse display metadata keeps only validated country codes', () => {
+  assert.equal(sanitizeNovaPulseDisplayTitle('The Doll (2026) (PL)'), 'The Doll');
+  assert.equal(formatNovaPulseCatalogMeta({ type: 'movie', year: 2026, countryCode: '1923', genres: [], runtimeMinutes: undefined }), '2026');
+  assert.equal(formatNovaPulseCatalogMeta({ type: 'series', year: 2026, countryCode: 'PL', genres: [], runtimeMinutes: undefined }), '2026 • PL');
+});
+
+test('NovaPulse omits implausible runtime placeholders without changing raw catalog data', () => {
+  assert.equal(getNovaPulseDisplayRuntimeMinutes(1), undefined);
+  assert.equal(formatNovaPulseCatalogMeta({ type: 'movie', year: 2024, genres: [], runtimeMinutes: 1 }), '2024');
+  assert.equal(getNovaPulseDisplayRuntimeMinutes(96), 96);
+  assert.equal(formatNovaPulseCatalogMeta({ type: 'movie', year: 2024, genres: [], runtimeMinutes: 96 }), '2024 • 1h 36m');
 });
 
 test('catalog, sports, announcements, and ranking mechanics remain outside the language helper', () => {

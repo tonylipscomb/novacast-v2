@@ -141,6 +141,55 @@ test('enriched Movie and Series metadata merge into presentation without changin
   assert.equal(presentation.items[1].artworkUrl, 'tmdb-s1');
 });
 
+test('trusted provider series detail supplies a bounded real description before title matching', async () => {
+  resetNovaPulseEnrichmentForTests();
+  let requests = 0;
+  const result = await runNovaPulseEnrichmentCycle({
+    providerId: 'p-provider',
+    items: [seriesItem('s-provider')],
+    fetchSeriesDetail: async () => {
+      requests += 1;
+      return {
+        seriesId: 's-provider',
+        title: 'Dope Thief',
+        description: 'A trusted provider synopsis.',
+        rating: '7.2',
+        genres: ['Drama'],
+        seasons: [],
+        episodesBySeason: {},
+      };
+    },
+    matchSeries: async () => { throw new Error('title-only fallback should not run'); },
+  });
+  const presentation = enrichNovaPulsePresentation({
+    items: [seriesItem('s-provider')],
+    series: [{ id: 's-provider', seriesId: 's-provider', title: 'Dope Thief (2025) (US)', genres: [], posterStyleKey: 'orbit' }],
+    seriesDetails: result.seriesDetails,
+  });
+  assert.equal(requests, 1);
+  assert.equal(presentation.items[0].description, 'A trusted provider synopsis.');
+  assert.equal(result.series.size, 0);
+});
+
+test('NovaPulse does not create a new title-only metadata match without a trusted cache entry', async () => {
+  resetNovaPulseEnrichmentForTests();
+  const result = await runNovaPulseEnrichmentCycle({
+    providerId: 'p-untrusted',
+    items: [seriesItem('s-untrusted')],
+    fetchSeriesDetail: async () => ({
+      seriesId: 's-untrusted',
+      title: 'Series s-untrusted',
+      genres: [],
+      seasons: [],
+      episodesBySeason: {},
+    }),
+    readSeriesCache: async () => null,
+  });
+  assert.equal(result.series.size, 0);
+  assert.equal(result.seriesDetails.size, 0);
+  assert.equal(result.diagnostics.seriesRequestsStarted, 0);
+});
+
 test('coordinator source is selected-feed-only and does not add recommendation requests', async () => {
   resetNovaPulseEnrichmentForTests();
   let requests = 0;

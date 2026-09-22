@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { TmdbSeriesMatch } from './tmdbClient.ts';
 
 const STORAGE_KEY = '@novacast/series-metadata-cache';
+export const FAILED_SERIES_METADATA_RETRY_MS = 24 * 60 * 60 * 1000;
 
 export type SeriesMetadataCacheEntry = {
   providerId: string;
@@ -15,6 +16,13 @@ export type SeriesMetadataCacheEntry = {
   failureReason?: string;
   updatedAt: number;
 };
+
+export function isFailedSeriesMetadataCacheExpired(
+  entry: SeriesMetadataCacheEntry,
+  now = Date.now(),
+) {
+  return entry.status === 'failed' && now - entry.updatedAt >= FAILED_SERIES_METADATA_RETRY_MS;
+}
 
 type CacheStore = Record<string, SeriesMetadataCacheEntry>;
 
@@ -100,7 +108,11 @@ async function writeCache(next: CacheStore) {
 
 export async function getSeriesMetadataCacheEntry(providerId: string, seriesId: string) {
   const store = await readCache();
-  return store[cacheKey(providerId, seriesId)] ?? null;
+  const entry = store[cacheKey(providerId, seriesId)] ?? null;
+  if (entry && isFailedSeriesMetadataCacheExpired(entry)) {
+    return null;
+  }
+  return entry;
 }
 
 export async function setSeriesMetadataCacheEntry(entry: SeriesMetadataCacheEntry) {

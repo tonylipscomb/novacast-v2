@@ -43,6 +43,8 @@ export type NovaPulseSportsData = {
   competitorB?: string;
   awayName?: string;
   homeName?: string;
+  awayTeamLogoUrl?: string;
+  homeTeamLogoUrl?: string;
   awayScore?: string | number;
   homeScore?: string | number;
   statusText?: string;
@@ -86,6 +88,7 @@ export type NovaPulseItem = {
   startsAt?: string;
   expiresAt?: string;
   year?: number;
+  countryCode?: string;
   genres?: string[];
   runtimeMinutes?: number;
   network?: string;

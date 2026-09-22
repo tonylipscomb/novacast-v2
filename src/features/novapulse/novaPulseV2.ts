@@ -108,8 +108,11 @@ function isCriticalAnnouncement(item: NovaPulseItem) {
 function selectSports(ranked: readonly NovaPulseItem[]) {
   const sports = ranked.filter((item) => item.type === 'sports');
   const upcoming = sports.find((item) => item.subtype === 'upcoming' || item.subtype === 'live');
-  const final = sports.find((item) => item.subtype === 'final');
-  return [...new Set([upcoming, final, ...sports].filter((item): item is NovaPulseItem => Boolean(item)))].slice(0, 2);
+  const leagueKey = (item: NovaPulseItem | undefined) => item?.sports?.league?.trim().toLowerCase() || null;
+  const final = sports.find((item) => item.subtype === 'final' && leagueKey(item) !== leagueKey(upcoming))
+    ?? sports.find((item) => item.subtype === 'final');
+  const second = sports.find((item) => leagueKey(item) !== leagueKey(upcoming) && stableKey(item) !== (final ? stableKey(final) : null));
+  return [...new Set([upcoming, final, second, ...sports].filter((item): item is NovaPulseItem => Boolean(item)))].slice(0, 2);
 }
 
 function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[]) {
@@ -122,7 +125,7 @@ function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: reado
 function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[]) {
   const protectedItems = selectProtected(ranked, liveCandidates);
   const selected: NovaPulseItem[] = [];
-  const remaining = ranked.filter((item) => !protectedItems.some((protectedItem) => stableKey(protectedItem) === stableKey(item)));
+  const remaining = ranked.filter((item) => item.type !== 'sports' && item.type !== 'announcement' && !protectedItems.some((protectedItem) => stableKey(protectedItem) === stableKey(item)));
   const reserved = new Set(protectedItems.map(stableKey));
   while ((remaining.length || protectedItems.some((item) => !selected.some((selectedItem) => stableKey(selectedItem) === stableKey(item)))) && selected.length < NOVA_PULSE_V2_MAX_ITEMS) {
     const protectedRemaining = protectedItems.filter((item) => !selected.some((selectedItem) => stableKey(selectedItem) === stableKey(item)));

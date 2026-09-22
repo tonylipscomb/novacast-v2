@@ -14,7 +14,9 @@ import {
 } from '../src/features/series/metadata/titleNormalization.ts';
 import {
   clearSeriesMetadataCacheForTests,
+  FAILED_SERIES_METADATA_RETRY_MS,
   getSeriesMetadataCacheEntry,
+  isFailedSeriesMetadataCacheExpired,
   markSeriesMetadataFailed,
   markSeriesMetadataMatched,
 } from '../src/features/series/metadata/seriesMetadataCache.ts';
@@ -177,6 +179,21 @@ test('metadata matcher returns cached entries without network', async () => {
 
   assert.equal(result.status, 'cached');
   assert.equal(result.metadata?.title, 'Cached Series');
+});
+
+test('failed metadata entries become retryable after the bounded retry window', () => {
+  const failed = {
+    providerId: 'demo',
+    seriesId: '103',
+    providerTitle: 'Retryable Series',
+    normalizedTitle: 'Retryable Series',
+    status: 'failed',
+    failureReason: 'provider unavailable',
+    updatedAt: 1_000,
+  };
+
+  assert.equal(isFailedSeriesMetadataCacheExpired(failed, 1_000 + FAILED_SERIES_METADATA_RETRY_MS - 1), false);
+  assert.equal(isFailedSeriesMetadataCacheExpired(failed, 1_000 + FAILED_SERIES_METADATA_RETRY_MS), true);
 });
 
 test('media library store tracks episode continue watching', async () => {

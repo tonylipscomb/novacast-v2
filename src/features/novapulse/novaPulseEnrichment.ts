@@ -4,8 +4,9 @@ import {
   getSeriesMetadataCacheEntry,
   type SeriesMetadataCacheEntry,
 } from '../series/metadata/seriesMetadataCache.ts';
-import { matchSeriesMetadata } from '../series/metadata/seriesMetadataMatcher.ts';
 import type { NovaPulseItem } from './novaPulseTypes.ts';
+import type { SeriesDetail } from '@/features/media-browser/mediaTypes.ts';
+import { translateNovaPulseDescription } from './novaPulseTranslationClient.ts';
 
 export const NOVA_PULSE_MOVIE_ENRICHMENT_BUDGET = 4;
 export const NOVA_PULSE_SERIES_ENRICHMENT_BUDGET = 2;
@@ -55,6 +56,8 @@ export type NovaPulseEnrichmentResult = {
   providerId: string;
   movies: ReadonlyMap<string, NovaPulseMovieEnrichment>;
   series: ReadonlyMap<string, SeriesMetadataCacheEntry>;
+  seriesDetails: ReadonlyMap<string, SeriesDetail>;
+  translations: ReadonlyMap<string, string>;
   diagnostics: NovaPulseEnrichmentDiagnostics;
 };
 
@@ -70,6 +73,10 @@ const seriesInFlight = new Map<string, Promise<SeriesMetadataCacheEntry | null>>
 
 function key(providerId: string, contentId: string) {
   return `${providerId}::${contentId}`;
+}
+
+function translationKey(mediaType: 'movie' | 'series', itemId: string) {
+  return `${mediaType}:${itemId}`;
 }
 
 function pruneMovieCache(providerId: string) {
@@ -169,11 +176,15 @@ async function enrichMovie(providerId: string, movieId: string, fetchMovie: Movi
   return request;
 }
 
-async function enrichSeries(providerId: string, item: NovaPulseItem, readCache: SeriesCacheReader, match: SeriesMatcher) {
+async function enrichSeries(providerId: string, item: NovaPulseItem, readCache: SeriesCacheReader, match?: SeriesMatcher) {
   const seriesId = item.sourceItemId ?? '';
   const cacheKey = key(providerId, seriesId);
   const cached = await readCache(providerId, seriesId);
   if (cached) return { cached, requested: false };
+  // NovaPulse must not create a new title-only external metadata match. A
+  // cached entry represents an already accepted provider-to-metadata mapping;
+  // otherwise the provider detail is the only trusted source for this card.
+  if (!match) return { cached: null, requested: false };
   const existing = seriesInFlight.get(cacheKey);
   if (existing) return { cached: await existing, requested: false };
 
@@ -201,6 +212,7 @@ export async function runNovaPulseEnrichmentCycle(input: {
   providerId: string;
   items: readonly NovaPulseItem[];
   fetchMovieDetail?: MovieFetcher;
+  fetchSeriesDetail?: (seriesId: string) => Promise<SeriesDetail | null>;
   getCachedMovieDetail?: (providerId: string, movieId: string) => MediaDetail | null;
   readSeriesCache?: SeriesCacheReader;
   matchSeries?: SeriesMatcher;
@@ -231,10 +243,12 @@ export async function runNovaPulseEnrichmentCycle(input: {
   };
   const movies = new Map<string, NovaPulseMovieEnrichment>();
   const series = new Map<string, SeriesMetadataCacheEntry>();
+  const seriesDetails = new Map<string, SeriesDetail>();
+  const translations = new Map<string, string>();
   const fetchMovieDetail = input.fetchMovieDetail;
   const getCachedMovieDetail = input.getCachedMovieDetail ?? getCachedProviderMovieInfo;
   const readSeriesCache = input.readSeriesCache ?? getSeriesMetadataCacheEntry;
-  const matchSeries = input.matchSeries ?? matchSeriesMetadata;
+  const matchSeries = input.matchSeries;
 
   if (fetchMovieDetail) {
     await runBounded(movieWork, NOVA_PULSE_MOVIE_CONCURRENCY, async (item) => {
@@ -257,12 +271,33 @@ export async function runNovaPulseEnrichmentCycle(input: {
         return;
       }
       movies.set(movieId, result);
+      const sourceText = result.synopsis?.trim() || item.description?.trim();
+      if (sourceText) {
+        const translation = await translateNovaPulseDescription({ providerId: input.providerId, mediaType: 'movie', itemId: movieId, sourceText });
+        if (translation) translations.set(translationKey('movie', movieId), translation);
+      }
       if (result.status === 'matched') diagnostics.movieEnriched += 1;
       else diagnostics.movieFailed += 1;
     });
   }
 
   await runBounded(seriesWork, NOVA_PULSE_SERIES_CONCURRENCY, async (item) => {
+    if (input.fetchSeriesDetail) {
+      const detail = await input.fetchSeriesDetail(item.sourceItemId ?? '').catch(() => null);
+      if (input.isCurrent && !input.isCurrent()) {
+        diagnostics.staleProviderResultsIgnored += 1;
+        return;
+      }
+      if (detail?.description?.trim()) {
+        seriesDetails.set(item.sourceItemId ?? '', detail);
+        if (detail.description.trim()) {
+          const translation = await translateNovaPulseDescription({ providerId: input.providerId, mediaType: 'series', itemId: item.sourceItemId ?? '', sourceText: detail.description });
+          if (translation) translations.set(translationKey('series', item.sourceItemId ?? ''), translation);
+        }
+        diagnostics.seriesEnriched += 1;
+        return;
+      }
+    }
     const result = await enrichSeries(input.providerId, item, readSeriesCache, matchSeries);
     if (input.isCurrent && !input.isCurrent()) {
       diagnostics.staleProviderResultsIgnored += 1;
@@ -277,7 +312,7 @@ export async function runNovaPulseEnrichmentCycle(input: {
     }
   });
 
-  return { providerId: input.providerId, movies, series, diagnostics };
+  return { providerId: input.providerId, movies, series, seriesDetails, translations, diagnostics };
 }
 
 export function resetNovaPulseEnrichmentForTests() {

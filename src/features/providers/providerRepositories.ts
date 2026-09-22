@@ -200,6 +200,7 @@ export type ProviderSeriesPoster = {
   releaseDate?: string;
   latestEpisodeDate?: string | number;
   popularity?: number;
+  description?: string;
 };
 
 export type ProviderSearchHit =
@@ -490,6 +491,7 @@ function mapXtreamSeriesPoster(
     addedAt: normalizeAddedTimestamp(stream.added),
     latestEpisodeDate: stream.last_modified ?? stream.releasedate ?? stream.added,
     popularity: normalizeRating(stream.popularity) || undefined,
+    description: readText(stream as unknown as Record<string, unknown>, 'plot', 'description', 'overview'),
   };
 }
 
@@ -1117,7 +1119,7 @@ function mapVodStream(
     durationMinutes: undefined,
     rating,
     genres: [categoryId.replace(/-/g, ' ') || 'Movies'],
-    description: undefined,
+    description: readText(stream as unknown as Record<string, unknown>, 'plot', 'description', 'overview'),
     director: undefined,
     cast: undefined,
     audio: undefined,
@@ -1234,6 +1236,33 @@ function mapVodInfo(movieId: string, response: XtreamVodInfoResponse | null, bas
     seasons: [],
     episodes: [],
   };
+}
+
+function logMovieInfoOutcome(response: XtreamVodInfoResponse | null, detail: MediaDetail | null) {
+  const fields = [response?.movie_data, response?.info]
+    .filter((value): value is Record<string, unknown> => Boolean(value && typeof value === 'object'));
+  const fieldLengths = Object.fromEntries(
+    (['plot', 'description', 'overview'] as const).map((field) => {
+      const value = fields.map((entry) => entry[field]).find((candidate) => typeof candidate === 'string');
+      return [field, typeof value === 'string' ? value.trim().length : 0];
+    }),
+  );
+  console.info('[NovaCast Movie Info Outcome]', JSON.stringify({
+    outcome: response == null
+      ? 'provider-json-null'
+      : fields.length === 0
+        ? 'info-object-missing'
+        : Object.values(fieldLengths).some((length) => length > 0)
+          ? detail?.synopsis?.trim()
+            ? 'description-mapped'
+            : 'description-mapping-failed'
+          : 'info-object-without-description',
+    responseInfoObjectPresent: Boolean(response?.info && typeof response.info === 'object'),
+    responseMovieDataObjectPresent: Boolean(response?.movie_data && typeof response.movie_data === 'object'),
+    descriptionFieldsPresent: Object.entries(fieldLengths).filter(([, length]) => length > 0).map(([field]) => field),
+    descriptionFieldLengths: fieldLengths,
+    normalizedDescriptionLength: detail?.synopsis?.trim().length ?? 0,
+  }));
 }
 
 function mapSeriesPoster(stream: XtreamSeriesResponse, index: number, categoryId: string, baseUrl: string): ProviderSeriesPoster {
@@ -1559,7 +1588,10 @@ export function createXtreamProviderRepositories(
       return mapVodCategories(categories, options);
     },
     async getMovieInfo(movieId: string) {
-      return mapVodInfo(movieId, await client.getVodInfo(movieId).catch(() => null), client.baseUrl);
+      const response = await client.getVodInfo(movieId).catch(() => null);
+      const detail = mapVodInfo(movieId, response, client.baseUrl);
+      logMovieInfoOutcome(response, detail);
+      return detail;
     },
     async getCategoryCount(categoryId: string) {
       if (!categoryId || categoryId === 'all') {
@@ -1966,6 +1998,16 @@ export function createXtreamProviderRepositories(
             ...classification,
             durationMs: Date.now() - startedAt,
           });
+          if (isNovaCastTraceLoggingEnabled()) {
+            console.info('[NovaCast Series Info Outcome]', JSON.stringify({
+              outcome: classification.errorCategory === 'timeout' ? 'request-timeout' : 'request-failed',
+              errorCategory: classification.errorCategory,
+              httpStatus: classification.httpStatus,
+              providerSeriesIdPresent: Boolean(String(seriesId).trim()),
+              descriptionFieldsPresent: [],
+              descriptionLength: 0,
+            }));
+          }
           return null;
         });
       },

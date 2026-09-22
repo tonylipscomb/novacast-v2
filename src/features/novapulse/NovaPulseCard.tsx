@@ -52,7 +52,7 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
   const liveEpg = item.type === 'live_epg';
   const liveLogoMode = liveEpg && item.artworkKind === 'channel_logo';
   const [focused, setFocused] = useState(false);
-  const badge = announcement ? getNovaPulseAnnouncementBadge(item) : sports ? item.sports?.eventStatus ?? (item.subtype === 'final' ? 'FINAL' : formatNovaPulseUpcomingStatus(item.startsAt)) : liveEpg ? item.badge ?? item.timingReason?.replace('_', ' ').toUpperCase() ?? 'LIVE' : getNovaPulseCatalogBadge(item);
+  const badge = announcement ? getNovaPulseAnnouncementBadge(item) : sports ? item.subtype === 'final' || item.sports?.eventStatus === 'FINAL' ? 'FINAL' : item.subtype === 'live' || item.sports?.eventStatus === 'LIVE' ? 'LIVE NOW' : formatNovaPulseUpcomingStatus(item.startsAt) : liveEpg ? item.badge ?? item.timingReason?.replace('_', ' ').toUpperCase() ?? 'LIVE' : getNovaPulseCatalogBadge(item);
   const catalogMeta = !sports && !liveEpg ? formatNovaPulseCatalogMeta(item) : null;
   const episodeMeta = item.type === 'series' ? formatNovaPulseEpisodeMeta(item) : null;
   const rating = !sports ? formatNovaPulseRating(item) : null;
@@ -155,14 +155,13 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
         <Text numberOfLines={2} style={[styles.title, sports ? styles.sportsTitle : null]}>{item.title}</Text>
         {announcement ? <Text numberOfLines={3} style={styles.announcementMessage}>{item.message ?? item.description ?? item.subtitle}</Text> : catalogMeta ? <Text numberOfLines={1} style={styles.catalogMeta}>{catalogMeta}</Text> : item.subtitle ? <Text numberOfLines={1} style={styles.subtitle}>{item.subtitle}</Text> : null}
         {episodeMeta ? <Text numberOfLines={1} style={styles.episodeMeta}>{episodeMeta}</Text> : null}
-        {!announcement && item.description ? <Text numberOfLines={2} style={styles.description}>{item.description}</Text> : null}
+        {!announcement && item.description ? <Text numberOfLines={3} style={styles.description}>{item.description}</Text> : null}
         {rating ? <Text numberOfLines={1} style={styles.rating}>{rating}</Text> : null}
         {announcement ? <>{announcementSecondary || announcementTiming ? <View style={styles.announcementMeta}>{announcementSecondary ? <Text numberOfLines={1} style={styles.announcementSecondary}>{announcementSecondary}</Text> : null}{announcementTiming ? <Text numberOfLines={1} style={styles.announcementTiming}>{announcementTiming}</Text> : null}</View> : null}{item.ctaLabel ? <Text numberOfLines={1} style={styles.announcementCta}>{item.ctaLabel}</Text> : null}</> : sports ? <NovaPulseSportsCard item={item} /> : liveEpg && item.secondaryText ? <Text numberOfLines={1} style={styles.liveEpgSecondary}>{item.secondaryText}</Text> : action ? <View style={styles.actionHint}><MaterialCommunityIcons name="play-circle-outline" size={17} color={theme.colors.accent} /><Text style={styles.actionText}>Press OK</Text></View> : null}
       </View>
       <View style={[styles.media, liveLogoMode ? styles.liveLogoMedia : null]} onLayout={(event) => { const { width, height } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ mediaWidth: width, height })); }}>
         {(!remoteArtworkUrl && !item.artworkSource || artworkFailed || artworkTimedOut || (!remoteArtworkUrl && !artworkLoaded)) ? <View style={[styles.backdropFallback, liveEpg ? styles.liveFallback : null]}>{liveEpg ? <><MaterialCommunityIcons name="television" size={46} color="rgba(154, 139, 255, 0.78)" style={styles.fallbackIcon} /><Text style={styles.liveFallbackLabel}>LIVE TV</Text>{item.channelName ? <Text numberOfLines={1} style={styles.liveFallbackChannel}>{item.channelName}</Text> : null}</> : fallbackArtwork ? <><Image source={fallbackArtwork} style={styles.fallbackArtwork} contentFit="cover" /><View pointerEvents="none" style={styles.fallbackGlow} /><MaterialCommunityIcons name={fallbackIcon} size={30} color="rgba(211, 205, 255, 0.78)" style={styles.fallbackIcon} /></> : <MaterialCommunityIcons name={fallbackIcon} size={46} color="rgba(154, 139, 255, 0.62)" style={styles.fallbackIcon} />}</View> : null}
         {hasRemoteArtwork && !artworkFailed ? <View key={mediaKey} onLayout={(event) => { const { width, height } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', { ...reportLayout({ artworkWidth: width, height }), viewWidth: width, viewHeight: height, layoutNonZero: width > 0 && height > 0 }); }} style={[styles.artworkFrame, artworkFit === 'contain' ? styles.artworkFrameContained : null, liveLogoMode ? styles.liveLogoArtworkFrame : null]}><TvRemoteImage uri={remoteArtworkUrl ?? undefined} imageRef={cachedArtworkRef} style={styles.backdrop} resizeMode={artworkFit === 'contain' ? 'contain' : 'cover'} onLoad={() => { if (artworkTimeoutRef.current) { clearTimeout(artworkTimeoutRef.current); artworkTimeoutRef.current = null; } artworkStateRef.current = 'loaded'; setArtworkTimedOut(false); setArtworkLoaded(true); onArtworkStatusRef.current?.('loaded', artworkDiagnostics()); }} onDisplay={() => { onArtworkStatusRef.current?.('displayed', artworkDiagnostics()); }} onError={() => { if (artworkTimeoutRef.current) { clearTimeout(artworkTimeoutRef.current); artworkTimeoutRef.current = null; } artworkStateRef.current = 'error'; setArtworkLoaded(false); setArtworkFailed(true); onArtworkStatusRef.current?.('error', artworkDiagnostics()); }} /></View> : item.artworkSource && !hasRemoteArtwork ? <View key={mediaKey} style={[styles.artworkFrame, artworkFit === 'contain' ? styles.artworkFrameContained : null]}><Image source={item.artworkSource} style={styles.backdrop} contentFit={artworkFit} onLoad={() => { setArtworkLoaded(true); }} onError={() => { setArtworkLoaded(false); setArtworkFailed(true); }} /></View> : null}
-        {!liveLogoMode ? <><View pointerEvents="none" style={styles.mediaBlendOne} /><View pointerEvents="none" style={styles.mediaBlendTwo} /><View pointerEvents="none" style={styles.mediaBlendThree} /><View pointerEvents="none" style={styles.mediaScrim} /></> : null}
       </View>
       </View>
       {!liveLogoMode ? <View style={styles.scrim} /> : null}
@@ -193,16 +192,12 @@ function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {
     liveFallback: { backgroundColor: '#0b1233' },
     liveFallbackLabel: { marginTop: 8, color: theme.colors.textPrimary, fontSize: 13, fontWeight: '900', letterSpacing: 1 },
     liveFallbackChannel: { maxWidth: '80%', marginTop: 4, color: theme.colors.textMuted, fontSize: 11, fontWeight: '700' },
-    mediaBlendOne: { position: 'absolute', top: 0, bottom: 0, left: 0, width: '18%', backgroundColor: 'rgba(3, 6, 23, 0.40)' },
-    mediaBlendTwo: { position: 'absolute', top: 0, bottom: 0, left: '10%', width: '20%', backgroundColor: 'rgba(3, 6, 23, 0.24)' },
-    mediaBlendThree: { position: 'absolute', top: 0, bottom: 0, left: '22%', width: '18%', backgroundColor: 'rgba(3, 6, 23, 0.10)' },
-    mediaScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(3, 6, 23, 0.22)' },
     scrim: { ...StyleSheet.absoluteFillObject, width: '64%', backgroundColor: 'rgba(3, 6, 23, 0.78)' },
     topHighlight: { position: 'absolute', top: 1, left: 1, right: 1, height: 1, backgroundColor: NOVA_GLASS.active.topHighlight },
     innerBorder: { ...StyleSheet.absoluteFillObject, borderWidth: 1, borderColor: 'rgba(170, 190, 255, 0.10)', borderRadius: NOVA_GLASS.radius.base - 1 },
     innerBorderFocused: { borderColor: NOVA_FOCUS.poster.innerHighlight },
-    copy: { width: '55%', height: '100%', minWidth: 0, justifyContent: 'center', padding: 22 },
-    sportsCopy: { width: '55%', padding: 22 },
+    copy: { width: '55%', height: '100%', minWidth: 0, justifyContent: 'center', padding: 18 },
+    sportsCopy: { width: '55%', padding: 22, paddingBottom: 16 },
     sportsTitle: { maxWidth: '100%', fontSize: 26, lineHeight: 30 },
     badge: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 7, backgroundColor: 'rgba(97, 65, 220, 0.86)', marginBottom: 8 },
     badgeText: { color: '#fff', fontSize: 12, fontWeight: '900', letterSpacing: 1 },
@@ -210,15 +205,15 @@ function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {
     subtitle: { marginTop: 4, color: theme.colors.textSecondary, fontSize: 18, lineHeight: 22, fontWeight: '700' },
     catalogMeta: { marginTop: 4, color: theme.colors.textSecondary, fontSize: 16, lineHeight: 20, fontWeight: '700' },
     episodeMeta: { marginTop: 3, color: theme.colors.textSecondary, fontSize: 14, lineHeight: 18, fontWeight: '700' },
-    description: { marginTop: 7, color: theme.colors.textMuted, fontSize: 16, lineHeight: 20, maxWidth: 560 },
-    rating: { marginTop: 5, color: theme.colors.accent, fontSize: 13, lineHeight: 17, fontWeight: '800' },
+    description: { marginTop: 6, color: theme.colors.textMuted, fontSize: 15, lineHeight: 18, maxWidth: 560, maxHeight: 54 },
+    rating: { marginTop: 4, color: theme.colors.accent, fontSize: 13, lineHeight: 17, fontWeight: '800' },
     announcementMessage: { marginTop: 1, color: theme.colors.textSecondary, fontSize: 16, lineHeight: 20, fontWeight: '600' },
     announcementMeta: { marginTop: 7, gap: 3 },
     announcementSecondary: { color: theme.colors.textMuted, fontSize: 13, lineHeight: 17, fontWeight: '700' },
     announcementTiming: { color: theme.colors.accent, fontSize: 12, lineHeight: 16, fontWeight: '800' },
     liveEpgSecondary: { marginTop: 6, color: theme.colors.accent, fontSize: 13, lineHeight: 17, fontWeight: '800' },
     announcementCta: { marginTop: 6, color: theme.colors.textPrimary, fontSize: 13, lineHeight: 17, fontWeight: '800' },
-    actionHint: { marginTop: 10, flexDirection: 'row', alignItems: 'center', gap: 6 },
+    actionHint: { marginTop: 7, flexDirection: 'row', alignItems: 'center', gap: 6 },
     actionText: { color: theme.colors.textMuted, fontSize: 12, fontWeight: '700' },
   });
 }

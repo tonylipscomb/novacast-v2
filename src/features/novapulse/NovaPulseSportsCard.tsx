@@ -1,3 +1,4 @@
+import { Image } from 'expo-image';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -27,7 +28,7 @@ export function NovaPulseSportsCard({ item }: { item: NovaPulseItem }) {
       {stage || isLive ? <View style={styles.contextRow}><Text style={styles.context}>{isLive ? 'LIVE NOW' : stage}</Text>{isLive && sports?.periodDetail ? <Text style={styles.contextDetail}>{sports.periodDetail}</Text> : null}</View> : null}
       <View style={styles.matchup}>
         <View style={[styles.competitor, winner === firstCompetitor ? styles.winnerCompetitor : null]}>
-          <View style={[styles.identity, winner === firstCompetitor ? styles.winnerIdentity : null]}><Text style={styles.identityText}>{getNovaPulseTeamInitials(firstCompetitor)}</Text></View>
+          <View style={[styles.identity, winner === firstCompetitor ? styles.winnerIdentity : null]}>{sports?.awayTeamLogoUrl && !isFight ? <Image source={{ uri: sports.awayTeamLogoUrl }} contentFit="contain" style={styles.identityLogo} /> : <Text style={styles.identityText}>{getNovaPulseTeamInitials(firstCompetitor)}</Text>}</View>
           <Text numberOfLines={2} ellipsizeMode="tail" style={[styles.teamName, winner === firstCompetitor ? styles.winnerText : null]}>{firstDisplayName ?? 'Competitor A'}</Text>
           {isLive || isFinal ? (!isFight ? <Text style={styles.teamScore}>{firstScore ?? '—'}</Text> : null) : null}
         </View>
@@ -35,7 +36,7 @@ export function NovaPulseSportsCard({ item }: { item: NovaPulseItem }) {
           <Text style={[styles.vs, isLive ? styles.liveVs : null]}>{isFinal ? 'FINAL' : isLive ? 'LIVE' : 'VS'}</Text>
         </View>
         <View style={[styles.competitor, styles.competitorRight, winner === secondCompetitor ? styles.winnerCompetitor : null]}>
-          <View style={[styles.identity, winner === secondCompetitor ? styles.winnerIdentity : null]}><Text style={styles.identityText}>{getNovaPulseTeamInitials(secondCompetitor)}</Text></View>
+          <View style={[styles.identity, winner === secondCompetitor ? styles.winnerIdentity : null]}>{sports?.homeTeamLogoUrl && !isFight ? <Image source={{ uri: sports.homeTeamLogoUrl }} contentFit="contain" style={styles.identityLogo} /> : <Text style={styles.identityText}>{getNovaPulseTeamInitials(secondCompetitor)}</Text>}</View>
           <Text numberOfLines={2} ellipsizeMode="tail" style={[styles.teamName, styles.teamNameRight, winner === secondCompetitor ? styles.winnerText : null]}>{secondDisplayName ?? 'Competitor B'}</Text>
           {isLive || isFinal ? (!isFight ? <Text style={[styles.teamScore, styles.teamScoreRight]}>{secondScore ?? '—'}</Text> : null) : null}
         </View>
@@ -53,13 +54,14 @@ function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {
     contextRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 3 },
     context: { color: theme.colors.accent, fontSize: 11, fontWeight: '900', letterSpacing: 1.2 },
     contextDetail: { color: theme.colors.textMuted, fontSize: 11, fontWeight: '800' },
-    matchup: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 58 },
+    matchup: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 72 },
     competitor: { width: '42%', flexGrow: 0, flexShrink: 1, alignItems: 'center', gap: 3, minWidth: 0 },
     competitorRight: { alignItems: 'center' },
     identity: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 16, borderWidth: 1, borderColor: 'rgba(170, 160, 255, 0.34)', backgroundColor: 'rgba(97, 65, 220, 0.28)' },
     winnerIdentity: { borderColor: theme.colors.accent, backgroundColor: 'rgba(118, 87, 255, 0.48)' },
     identityText: { color: theme.colors.textPrimary, fontSize: 11, fontWeight: '900' },
-    teamName: { width: '100%', color: theme.colors.textSecondary, fontSize: 13, lineHeight: 15, fontWeight: '800', textAlign: 'center' },
+    identityLogo: { width: 26, height: 26 },
+    teamName: { width: '100%', color: theme.colors.textSecondary, fontSize: 12, lineHeight: 14, fontWeight: '800', textAlign: 'center' },
     teamNameRight: { textAlign: 'center' },
     winnerCompetitor: { opacity: 1 },
     winnerText: { color: theme.colors.textPrimary, fontWeight: '900' },
@@ -71,8 +73,8 @@ function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {
     fightResult: { marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 8 },
     resultLabel: { color: theme.colors.accent, fontSize: 10, fontWeight: '900', letterSpacing: 1 },
     resultText: { flex: 1, color: theme.colors.textPrimary, fontSize: 13, fontWeight: '800' },
-    summary: { marginTop: 3, color: theme.colors.textPrimary, fontSize: 12, lineHeight: 15, fontWeight: '800' },
-    footer: { marginTop: 3, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 5 },
+    summary: { marginTop: 7, color: theme.colors.textPrimary, fontSize: 12, lineHeight: 15, fontWeight: '800' },
+    footer: { marginTop: 7, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 5 },
     footerText: { flex: 1, minWidth: 0, color: theme.colors.textMuted, fontSize: 10, lineHeight: 12, fontWeight: '700' },
     countdown: { flexShrink: 0, maxWidth: '43%', color: theme.colors.accent, fontSize: 10, lineHeight: 12, fontWeight: '800', textAlign: 'right' },
   });

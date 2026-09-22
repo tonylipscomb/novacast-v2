@@ -57,6 +57,7 @@ function mapPosterToSummary(poster: ProviderSeriesPoster, categoryId: string, in
     rawTitle: poster.rawTitle,
     year: poster.year,
     rating: poster.rating,
+    description: poster.description,
     releaseDate: poster.releaseDate,
     genres: inferGenreTags(poster.title, []),
     posterStyleKey: posterStyleKeyForIndex(index),
@@ -67,6 +68,16 @@ function mapPosterToSummary(poster: ProviderSeriesPoster, categoryId: string, in
   };
 }
 
+function readDescriptionField(rawInfo: Record<string, unknown>) {
+  for (const field of ['plot', 'description', 'overview'] as const) {
+    const value = rawInfo[field];
+    if (typeof value === 'string' && value.trim()) {
+      return { field, value: value.trim() };
+    }
+  }
+  return null;
+}
+
 function mapSeriesInfo(seriesId: string, info: XtreamSeriesInfoResponse | null, mediaBaseUrl?: string): SeriesDetail | null {
   if (!info) {
     return null;
@@ -75,7 +86,7 @@ function mapSeriesInfo(seriesId: string, info: XtreamSeriesInfoResponse | null, 
   const rawInfo = info.info ?? {};
   const rawTitle = typeof rawInfo.name === 'string' ? rawInfo.name : `Series ${seriesId}`;
   const title = stripProviderStreamTitlePrefix(rawTitle) || rawTitle;
-  const description = typeof rawInfo.plot === 'string' ? rawInfo.plot : undefined;
+  const description = readDescriptionField(rawInfo)?.value;
   const ratingValue = parseRatingNumber(
     typeof rawInfo.rating === 'number' || typeof rawInfo.rating === 'string' ? rawInfo.rating : undefined,
   );
@@ -321,6 +332,20 @@ export function createProviderSeriesDataSource(
           selectedSeason: null,
           selectedSeasonEpisodeCount: null,
           errorCategory: null,
+          outcome: info == null
+            ? 'provider-json-null'
+            : !info.info || typeof info.info !== 'object'
+              ? 'info-object-missing'
+              : readDescriptionField(info.info)?.field
+                ? detail?.description
+                  ? 'description-mapped'
+                  : 'description-mapping-failed'
+                : 'info-object-without-description',
+          descriptionFieldsPresent: info?.info && typeof info.info === 'object'
+            ? ['plot', 'description', 'overview'].filter((field) => typeof info.info?.[field] === 'string')
+            : [],
+          descriptionLength: detail?.description?.length ?? 0,
+          normalizedDescriptionLength: detail?.description?.length ?? 0,
         });
         if (!detail || !providerId) return detail;
 

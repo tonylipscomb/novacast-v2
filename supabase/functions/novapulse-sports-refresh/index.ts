@@ -4,7 +4,7 @@ import { configuredLeagueIds, createTheSportsDbAdapter, type NormalizedSportsEve
 import { isNovaPulseSportsRefreshAuthorized } from '../_shared/novapulseSportsAuth.ts';
 
 const UPCOMING_DAYS = 7;
-const RECENT_DAYS = 2;
+const RECENT_HOURS = 18;
 
 function authorized(request: Request) {
   return isNovaPulseSportsRefreshAuthorized({
@@ -16,23 +16,37 @@ function authorized(request: Request) {
 }
 
 function row(event: NormalizedSportsEvent) {
-  return { ...event, updated_at: new Date().toISOString() };
+  return { ...event, updated_at: new Date().toISOString(), source_updated_at: new Date().toISOString() };
 }
 
 async function refresh() {
-  const client = getAdminClient();
   const adapter = createTheSportsDbAdapter();
+  if (!adapter.configured) {
+    return { ok: false, reason: 'source_unconfigured', provider: 'thesportsdb', configuredLeagueCount: configuredLeagueIds().length };
+  }
+  const client = getAdminClient();
   const now = new Date();
-  const [upcoming, recent] = await Promise.all([adapter.upcoming(now, UPCOMING_DAYS), adapter.recent(now, RECENT_DAYS)]);
-  const events = Array.from(new Map([...upcoming, ...recent].map((event) => [`${event.provider}:${event.provider_event_id}`, event])).values()).map(row);
-  if (!events.length) return { provider: 'thesportsdb', configuredLeagueCount: configuredLeagueIds().length, eventsSeen: 0, eventsUpserted: 0, inserted: 0, updated: 0, upcomingDays: UPCOMING_DAYS, recentDays: RECENT_DAYS };
-  const keys = events.map((event) => event.provider_event_id);
-  const { data: existing, error: existingError } = await client.from('novapulse_sports_events').select('provider_event_id').eq('provider', 'thesportsdb').in('provider_event_id', keys);
+  const upcoming = await adapter.upcoming(now, UPCOMING_DAYS);
+  const recent = await adapter.recent(now, RECENT_HOURS);
+  const events = Array.from(new Map([...upcoming.events, ...recent.events].map((event) => [`${event.source}:${event.source_event_id}`, event])).values()).map(row);
+  const keys = events.map((event) => event.source_event_id);
+  const { data: existing, error: existingError } = keys.length
+    ? await client.from('novapulse_sports_events').select('source_event_id').eq('source', 'thesportsdb').in('source_event_id', keys)
+    : { data: [], error: null };
   if (existingError) throw new Error('sports_existing_lookup_failed');
-  const existingIds = new Set((existing ?? []).map((event) => String(event.provider_event_id)));
-  const { error } = await client.from('novapulse_sports_events').upsert(events, { onConflict: 'provider,provider_event_id' });
+  const existingIds = new Set((existing ?? []).map((event) => String(event.source_event_id)));
+  const { error } = events.length ? await client.from('novapulse_sports_events').upsert(events, { onConflict: 'source,source_event_id' }) : { error: null };
   if (error) throw new Error('sports_upsert_failed');
-  return { provider: 'thesportsdb', configuredLeagueCount: configuredLeagueIds().length, eventsSeen: events.length, eventsUpserted: events.length, inserted: events.filter((event) => !existingIds.has(event.provider_event_id)).length, updated: events.filter((event) => existingIds.has(event.provider_event_id)).length, upcomingDays: UPCOMING_DAYS, recentDays: RECENT_DAYS };
+  const { count: expiredCount, error: expireError } = await client.from('novapulse_sports_events').delete({ count: 'exact' }).lt('expires_at', now.toISOString());
+  if (expireError) throw new Error('sports_expire_failed');
+  return {
+    ok: true, provider: 'thesportsdb', configuredLeagueCount: configuredLeagueIds().length,
+    eventsSeen: events.length, eventsUpserted: events.length,
+    inserted: events.filter((event) => !existingIds.has(event.source_event_id)).length,
+    updated: events.filter((event) => existingIds.has(event.source_event_id)).length,
+    failedLeagues: [...new Set([...upcoming.failedLeagues, ...recent.failedLeagues])], expiredCount: expiredCount ?? 0,
+    upcomingDays: UPCOMING_DAYS, recentHours: RECENT_HOURS,
+  };
 }
 
 Deno.serve(async (request) => {
@@ -40,7 +54,7 @@ Deno.serve(async (request) => {
   if (request.method !== 'POST') return jsonResponse({ error: 'method_not_allowed' }, 405);
   if (!authorized(request)) return jsonResponse({ error: 'unauthorized' }, 401);
   try {
-    return jsonResponse({ ok: true, summary: await refresh() });
+    return jsonResponse(await refresh());
   } catch (error) {
     return jsonResponse({ ok: false, error: error instanceof Error ? error.message : 'sports_refresh_failed' }, 502);
   }

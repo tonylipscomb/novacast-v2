@@ -9,6 +9,9 @@ function source(items) {
   return { id: 'test', getItems: () => ({ sourceId: 'test', items }) };
 }
 
+const REFERENCE_NOW = Date.parse('2026-09-22T12:00:00Z');
+const VALID_UPCOMING_START = new Date(REFERENCE_NOW + 30 * 60_000).toISOString();
+
 function movie(id, overrides = {}) {
   return {
     id,
@@ -20,7 +23,7 @@ function movie(id, overrides = {}) {
   };
 }
 
-function sports(id, subtype, priority = 1) {
+function sports(id, subtype, priority = 1, overrides = {}) {
   return {
     id,
     type: 'sports',
@@ -28,6 +31,7 @@ function sports(id, subtype, priority = 1) {
     title: id,
     priority,
     action: { type: 'none' },
+    ...overrides,
   };
 }
 
@@ -84,13 +88,13 @@ test('sports guard preserves upcoming and final cards when the movie pool is ful
       year: 2024,
       priority: 90,
     })),
-    sports('upcoming-1', 'upcoming'),
+    sports('upcoming-1', 'upcoming', 1, { startsAt: VALID_UPCOMING_START }),
     sports('final-1', 'final'),
     sports('extra-1', 'upcoming'),
     { id: 'critical', type: 'announcement', title: 'Critical', announcementPriority: 'critical', priority: 1 },
     { id: 'normal-1', type: 'announcement', title: 'Normal one', announcementPriority: 'normal', priority: 1 },
     { id: 'normal-2', type: 'announcement', title: 'Normal two', announcementPriority: 'normal', priority: 1 },
-  ])]);
+  ])], { nowMs: REFERENCE_NOW });
   assert.equal(result.items.length, 12);
   assert.ok(result.items.some((item) => item.id === 'upcoming-1'));
   assert.ok(result.items.some((item) => item.id === 'final-1'));
@@ -104,8 +108,25 @@ test('behavioral recommendation remains ahead of fallback while sports protectio
   const result = composeNovaPulseFeedV2([source([
     { id: 'behavioral', type: 'movie', title: 'Behavioral', priority: 1, recommendation: { reason: 'viewers_also_watched', behaviorScore: 0.95 } },
     ...Array.from({ length: 12 }, (_, index) => ({ id: `fallback-${index}`, type: 'movie', title: `Fallback ${index}`, priority: 90, description: 'fallback', artworkUrl: `https://cdn.example/fallback-${index}.jpg` })),
-    sports('upcoming-2', 'upcoming'),
-  ])]);
+    sports('upcoming-2', 'upcoming', 1, { startsAt: VALID_UPCOMING_START }),
+  ])], { nowMs: REFERENCE_NOW });
   assert.ok(result.items.some((item) => item.id === 'behavioral'));
   assert.ok(result.items.some((item) => item.id === 'upcoming-2'));
+});
+
+test('sports fixtures require valid starts for scheduled states and reject expired events', () => {
+  const result = composeNovaPulseFeedV2([source([
+    sports('missing-upcoming-start', 'upcoming'),
+    sports('missing-starting-soon-start', 'starting_soon'),
+    sports('valid-upcoming', 'upcoming', 1, { startsAt: VALID_UPCOMING_START }),
+    sports('expired-upcoming', 'upcoming', 1, {
+      startsAt: new Date(REFERENCE_NOW - 60 * 60_000).toISOString(),
+      expiresAt: new Date(REFERENCE_NOW - 30 * 60_000).toISOString(),
+    }),
+  ])], { nowMs: REFERENCE_NOW });
+
+  assert.ok(result.items.some((item) => item.id === 'valid-upcoming'));
+  assert.ok(!result.items.some((item) => item.id === 'missing-upcoming-start'));
+  assert.ok(!result.items.some((item) => item.id === 'missing-starting-soon-start'));
+  assert.ok(!result.items.some((item) => item.id === 'expired-upcoming'));
 });

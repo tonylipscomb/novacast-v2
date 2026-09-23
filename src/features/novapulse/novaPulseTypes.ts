@@ -99,7 +99,7 @@ export type NovaPulseItem = {
   seasonNumber?: number;
   episodeNumber?: number;
   episodeTitle?: string;
-  catalogStatus?: 'NEW RELEASE' | 'NEW EPISODE' | 'TRENDING' | 'FEATURED' | 'COMING SOON';
+  catalogStatus?: 'RECENTLY ADDED' | 'NEW RELEASE' | 'NEW EPISODE' | 'TRENDING' | 'FEATURED' | 'COMING SOON';
   artworkFit?: 'cover' | 'contain';
   artworkKind?: 'program' | 'channel_logo' | 'fallback';
   announcementType?: NovaPulseAnnouncementType;
@@ -117,6 +117,8 @@ export type NovaPulseItem = {
   sourceItemId?: string;
   publishedAt?: number;
   updatedAt?: number;
+  /** Provider `added` lineage; carried only for Movie freshness presentation/ranking. */
+  addedAt?: number;
   sortPriority?: number;
   dedupeKey?: string;
   recommendation?: NovaPulseRecommendationSignals;

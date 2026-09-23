@@ -1,7 +1,7 @@
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import type { NovaPulseItem, NovaPulseRecommendationSignals, NovaPulseSourceResult } from './novaPulseTypes';
-import { getNovaPulseDisplayCountry, getNovaPulseDisplayRuntimeMinutes, getNovaPulseDisplayYear, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
+import { getNovaPulseDisplayCountry, getNovaPulseDisplayRuntimeMinutes, getNovaPulseDisplayYear, getNovaPulseMovieFreshness, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
 
 export type NovaPulseSource = {
   id: string;
@@ -36,8 +36,10 @@ function preferPresentable<T>(items: readonly T[], score: (item: T) => number, l
   return [...items].sort((left, right) => score(right) - score(left)).slice(0, limit);
 }
 
-function stableMovie(movie: MovieSummary, recommendations?: ReadonlyMap<string, NovaPulseRecommendationSignals>): NovaPulseItem {
+function stableMovie(movie: MovieSummary, recommendations: ReadonlyMap<string, NovaPulseRecommendationSignals> | undefined, sessionNowMs: number): NovaPulseItem {
   const id = String(movie.id);
+  const addedAt = Number.isFinite(movie.addedAt) ? movie.addedAt : undefined;
+  const freshness = getNovaPulseMovieFreshness(addedAt, sessionNowMs);
   return {
     id: `catalog-movie-${id}`,
     type: 'movie',
@@ -55,6 +57,8 @@ function stableMovie(movie: MovieSummary, recommendations?: ReadonlyMap<string, 
     backdropUrl: movie.backdropUrl,
     artworkFit: movie.backdropUrl ? 'cover' : 'contain',
     priority: 90,
+    ...(addedAt !== undefined ? { addedAt } : {}),
+    ...(freshness ? { catalogStatus: 'RECENTLY ADDED' as const } : {}),
     sourceId: 'catalog-movies',
     sourceItemId: id,
     publishedAt: movie.releaseDate ? Date.parse(String(movie.releaseDate)) || undefined : movie.addedAt,
@@ -103,6 +107,7 @@ export function createNovaPulseCatalogSource(
   movies: readonly MovieSummary[],
   series: readonly SeriesSummary[],
   recommendations?: ReadonlyMap<string, NovaPulseRecommendationSignals>,
+  sessionNowMs = Date.now(),
 ): NovaPulseSource {
   return {
     id: 'catalog',
@@ -110,7 +115,7 @@ export function createNovaPulseCatalogSource(
       sourceId: 'catalog',
       fetchedAt: Date.now(),
       items: [
-        ...preferPresentable(movies.filter(Boolean).slice(0, 32), (movie) => presentationScore(movie)).map((movie) => stableMovie(movie, recommendations)),
+        ...preferPresentable(movies.filter(Boolean), (movie) => presentationScore(movie), 56).map((movie) => stableMovie(movie, recommendations, sessionNowMs)),
         ...preferPresentable(series.filter(Boolean).slice(0, 32), (seriesItem) => presentationScore({
           ...seriesItem,
           year: seriesItem.year ? Number.parseInt(seriesItem.year, 10) || undefined : undefined,

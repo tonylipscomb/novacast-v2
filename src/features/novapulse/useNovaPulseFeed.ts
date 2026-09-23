@@ -135,7 +135,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
     void fetchNovaPulseSportsItems().then((items) => { if (active && items) setRealSports(items); }).catch(() => undefined);
     return () => { active = false; };
   }, []);
-  const boundedMovies = useMemo(() => movies.slice(0, 32), [movies]);
+  const boundedMovies = useMemo(() => movies.slice(0, 56), [movies]);
   const boundedSeries = useMemo(() => series.slice(0, 32), [series]);
   const recommendationSeeds = useMemo(
     () => buildNovaPulsePersonalSeeds(recommendationContext ?? {
@@ -260,7 +260,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const composed = useMemo(() => {
     const includeMockCatalogFallback = { movie: boundedMovies.length === 0, series: boundedSeries.length === 0 };
     const result = composeNovaPulseFeedV2([
-      createNovaPulseCatalogSource(languageFilteredCatalog.movies, languageFilteredCatalog.series, recommendationSignals),
+      createNovaPulseCatalogSource(languageFilteredCatalog.movies, languageFilteredCatalog.series, recommendationSignals, compositionSession.startedAt),
       ...(realSports ? [createNovaPulseSportsSource(realSports)] : []),
       ...(liveEpgItems.length ? [createNovaPulseLiveEpgSource(liveEpgItems)] : []),
       createNovaPulseMockSource(realSports ? NOVA_PULSE_MOCK_FEED.filter((item) => item.type !== 'sports') : NOVA_PULSE_MOCK_FEED, includeMockCatalogFallback),

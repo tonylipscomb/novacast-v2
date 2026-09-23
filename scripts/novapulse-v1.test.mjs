@@ -227,9 +227,9 @@ test('provider changes rebind NovaPulse indexes and restart bounded hydration fo
   assert.match(homeSource, /getMovieCatalogIndex\(activeProviderId\)/);
   assert.match(homeSource, /getSeriesCatalogIndex\(activeProviderId\)/);
   assert.match(homeSource, /setNovaPulseCatalogRevision\(0\)/);
-  assert.match(homeSource, /inFlight\?\.providerId === providerId/);
+  assert.match(homeSource, /inFlight\?\.key === hydrationKey/);
   assert.match(homeSource, /novaPulsePreviousProviderIdRef/);
-  assert.match(localSource, /loadNovaPulseLocalCatalog\(providerId: string\)/);
+  assert.match(localSource, /loadNovaPulseLocalCatalog\(providerId: string(?:, nowMs = Date\.now\(\))?\)/);
 });
 
 test('bounded catalog signatures ignore total index-size churn', () => {

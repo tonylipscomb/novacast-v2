@@ -72,7 +72,7 @@ import { NovaPulseRail } from '@/features/novapulse/NovaPulseRail';
 import { useNovaPulseFeed } from '@/features/novapulse/useNovaPulseFeed';
 import type { NovaPulseItem } from '@/features/novapulse/novaPulseTypes';
 import type { NovaPulseArtworkDiagnostics, NovaPulseArtworkStatus } from '@/features/novapulse/NovaPulseCard';
-import { loadNovaPulseLocalCatalog } from '@/features/novapulse/novaPulseLocalCatalog';
+import { loadNovaPulseLocalCatalog, mergeNovaPulseMoviePools } from '@/features/novapulse/novaPulseLocalCatalog';
 import { buildNovaPulseCandidateSignature, describeNovaPulseArtwork } from '@/features/novapulse/novaPulseLogic';
 import { recordDiagnostic } from '@/features/diagnostics/diagnosticsClient';
 import { subscribeCatalogSyncPhase } from '@/features/providers/providerCatalogSync';
@@ -142,7 +142,8 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
   const homeRefreshInFlightRef = useRef<Promise<void> | null>(null);
   const homeRefreshQueuedRef = useRef(false);
   const homeRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const novaPulseLocalCatalogInFlightRef = useRef<{ providerId: string; promise: Promise<void> } | null>(null);
+  const novaPulseLocalCatalogInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
+  const novaPulseLocalCatalogCompletedKeyRef = useRef<string | null>(null);
   const novaPulsePreviousProviderIdRef = useRef(activeProviderId);
   const novaPulseCandidateCacheRef = useRef<{ providerId: string; movies: MovieSummary[]; series: SeriesSummary[] }>({ providerId: activeProviderId, movies: [], series: [] });
   const novaPulseCandidateSignaturesRef = useRef({ providerId: activeProviderId, movie: '', series: '' });
@@ -165,6 +166,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     seriesArtworkLoadSuccess: 0,
     seriesArtworkLoadError: 0,
   });
+  const [novaPulseRecentMovies, setNovaPulseRecentMovies] = useState<MovieSummary[]>([]);
   const handleNovaPulseArtworkStatus = useCallback((item: NovaPulseItem, status: NovaPulseArtworkStatus, diagnostics?: NovaPulseArtworkDiagnostics) => {
     if (item.type !== 'movie' && item.type !== 'series') return;
     const key = `${activeProviderId}:${item.id}:${status}:${diagnostics?.layoutNonZero ?? 'unknown'}`;
@@ -251,9 +253,13 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
   }));
   const hydrateNovaPulseLocalCatalog = useCallback(() => {
     const providerId = activeProviderIdRef.current;
+    const hydrationKey = `${providerId}:${providerBundleGeneration}`;
     const inFlight = novaPulseLocalCatalogInFlightRef.current;
-    if (inFlight?.providerId === providerId) {
+    if (inFlight?.key === hydrationKey) {
       return inFlight.promise;
+    }
+    if (novaPulseLocalCatalogCompletedKeyRef.current === hydrationKey) {
+      return Promise.resolve();
     }
     const movieIndex = getMovieCatalogIndex(providerId);
     const seriesIndex = getSeriesCatalogIndex(providerId);
@@ -264,8 +270,8 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
       movieLocalHydrationCount: 0,
       seriesLocalHydrationCount: 0,
     }));
-    const hydration = loadNovaPulseLocalCatalog(providerId)
-      .then(({ movies, series }) => {
+    const hydration = loadNovaPulseLocalCatalog(providerId, Date.now())
+      .then(({ movies, recentMovies, series }) => {
         if (activeProviderIdRef.current !== providerId) {
           return;
         }
@@ -277,10 +283,11 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
         if (movies.length > 0) {
           movieIndex.ingest(movies);
         }
+        setNovaPulseRecentMovies(recentMovies);
         if (series.length > 0) {
           seriesIndex.ingest(series);
         }
-        const hydrationSignature = `${buildNovaPulseCandidateSignature(movies)}||${buildNovaPulseCandidateSignature(series)}`;
+        const hydrationSignature = `${buildNovaPulseCandidateSignature(movies)}||${buildNovaPulseCandidateSignature(recentMovies)}||${buildNovaPulseCandidateSignature(series)}`;
         if (hydrationSignature !== novaPulseLocalHydrationSignatureRef.current) {
           novaPulseLocalHydrationSignatureRef.current = hydrationSignature;
           setNovaPulseCatalogRevision((revision) => revision + 1);
@@ -290,13 +297,14 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
         // The release fallback remains valid when no readable local generation exists.
       })
       .finally(() => {
-        if (novaPulseLocalCatalogInFlightRef.current?.providerId === providerId) {
+        novaPulseLocalCatalogCompletedKeyRef.current = hydrationKey;
+        if (novaPulseLocalCatalogInFlightRef.current?.key === hydrationKey) {
           novaPulseLocalCatalogInFlightRef.current = null;
         }
       });
-    novaPulseLocalCatalogInFlightRef.current = { providerId, promise: hydration };
+    novaPulseLocalCatalogInFlightRef.current = { key: hydrationKey, promise: hydration };
     return hydration;
-  }, []);
+  }, [providerBundleGeneration]);
   const refreshHomePersonalization = useCallback(() => {
     const providerId = activeProviderIdRef.current;
     if (!providerId) {
@@ -390,10 +398,10 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     return novaPulseCandidateCacheRef.current.series;
   }, [seriesRecentCandidates, seriesIndexCandidates]);
   const novaPulseMovies = useMemo(() => [
-    ...movieCandidatePool,
+    ...mergeNovaPulseMoviePools(movieCandidatePool, novaPulseRecentMovies),
     ...personalization.watchlistMovies,
     ...personalization.favoriteMovies,
-  ], [movieCandidatePool, personalization.watchlistMovies, personalization.favoriteMovies, providerBundleGeneration, novaPulseCatalogRevision]);
+  ], [movieCandidatePool, novaPulseRecentMovies, personalization.watchlistMovies, personalization.favoriteMovies, providerBundleGeneration, novaPulseCatalogRevision]);
   const novaPulseSeries = useMemo(() => [
     ...seriesCandidatePool,
     ...personalization.watchlistSeries,
@@ -753,6 +761,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     novaPulsePreviousProviderIdRef.current = activeProviderId;
     if (providerChanged) {
       setNovaPulseCatalogRevision(0);
+      setNovaPulseRecentMovies([]);
       novaPulseCandidateSignaturesRef.current = { providerId: activeProviderId, movie: '', series: '' };
       novaPulseLocalHydrationSignatureRef.current = '';
       setNovaPulseLocalHydration({
@@ -774,6 +783,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
   useEffect(() => {
     return subscribeCatalogSyncPhase(activeProviderId, (phase) => {
       if (phase === 'ready') {
+        novaPulseLocalCatalogCompletedKeyRef.current = null;
         void hydrateNovaPulseLocalCatalog();
       }
     });

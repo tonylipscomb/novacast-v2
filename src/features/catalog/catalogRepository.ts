@@ -4006,6 +4006,41 @@ export async function getCatalogItemsPage(query: CatalogItemsPageQuery): Promise
 }
 
 /**
+ * Bounded local-only source for NovaPulse's Recently Added movie candidates.
+ * This intentionally returns rows directly from the readable SQLite generation
+ * and never materializes the full provider catalog.
+ */
+export async function getRecentlyAddedCatalogMovies(
+  providerId: string,
+  options: { nowMs: number; limit: number },
+): Promise<CatalogItemRecord[]> {
+  const releaseForegroundRead = beginCatalogForegroundRead();
+  try {
+    const db = await getCatalogReadDatabase();
+    const generation = await resolveReadableCatalogGeneration(providerId, 'movie');
+    const limit = Math.min(Math.max(Math.floor(options.limit), 1), 24);
+    const now = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+    const cutoff = now - 30 * 24 * 60 * 60 * 1000;
+    const futureLimit = now + 24 * 60 * 60 * 1000;
+    if (generation <= 0) return [];
+    const rows = await db.getAll(
+      `SELECT * FROM ${catalogItemsTable('movie')}
+       WHERE provider_id = ?
+         AND media_type = 'movie'
+         AND sync_generation = ?
+         AND added_at >= ?
+         AND added_at <= ?
+       ORDER BY added_at DESC, normalized_title ASC, content_id ASC
+       LIMIT ?`,
+      [providerId, generation, cutoff, futureLimit, limit],
+    );
+    return rows.map(mapItem);
+  } finally {
+    releaseForegroundRead?.();
+  }
+}
+
+/**
  * Canonical single-movie catalog row for Detail enrichment.
  * Reads catalog_items_v2 at the readable sync generation (content_id / stream_id).
  */

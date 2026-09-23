@@ -8,6 +8,7 @@ import {
   getCatalogDiagnosticSnapshot,
   getCatalogGenerationRowCount,
   getCatalogItemsPage,
+  getRecentlyAddedCatalogMovies,
   getCatalogMovieItem,
   getCatalogProvider,
   getCatalogSyncState,
@@ -127,6 +128,15 @@ function mapCatalogItemToMovie(item: CatalogItemRecord): MovieSummary {
     providerSortOrder: item.providerSortOrder ?? undefined,
     regionRank: item.regionRank ?? undefined,
   };
+}
+
+export async function getRecentlyAddedMovies(
+  providerId: string,
+  nowMs: number,
+  limit = 24,
+): Promise<MovieSummary[]> {
+  const items = await getRecentlyAddedCatalogMovies(providerId, { nowMs, limit });
+  return items.map(mapCatalogItemToMovie);
 }
 
 export async function isSqliteMovieCatalogReady(providerId: string): Promise<boolean> {

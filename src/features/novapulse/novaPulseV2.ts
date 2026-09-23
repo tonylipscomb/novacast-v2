@@ -2,6 +2,7 @@ import type { NovaPulseItem } from './novaPulseTypes';
 import type { NovaPulseSource } from './novaPulseSources';
 import type { NovaPulseHistoryEntry } from './novaPulseHistory.ts';
 import { novaPulseHistoryPenalty } from './novaPulseHistory.ts';
+import { getNovaPulseMovieFreshness } from './novaPulseLogic.ts';
 
 export const NOVA_PULSE_V2_MIN_ITEMS = 5;
 export const NOVA_PULSE_V2_MAX_ITEMS = 12;
@@ -98,6 +99,11 @@ function qualityScore(item: NovaPulseItem, recentHistory: readonly NovaPulseHist
       (item.recommendation.trendScore ? Math.min(10, item.recommendation.trendScore / 25) : 0) +
       Math.max(-2, Math.min(2, item.recommendation.velocity ?? 0)) + score * 0.01;
   }
+  if (item.type === 'movie') {
+    const freshness = getNovaPulseMovieFreshness(item.addedAt, nowMs);
+    if (freshness === 'strong') score += 2;
+    else if (freshness === 'moderate') score += 1;
+  }
   if ((item.type === 'movie' || item.type === 'series') && item.sourceItemId) {
     const historyEntry = recentHistory.find((entry) => entry.mediaType === item.type && entry.contentId === item.sourceItemId);
     if (historyEntry && score >= 3) score += Math.max(novaPulseHistoryPenalty(historyEntry, nowMs), 2 - score);
@@ -126,6 +132,10 @@ function candidateSignature(items: readonly NovaPulseItem[]) {
     item.runtimeMinutes != null ? 1 : 0,
   ].join('~')).join('|');
   return hash(aggregate).toString(16);
+}
+
+function isRecentlyAddedMovie(item: NovaPulseItem, nowMs: number) {
+  return item.type === 'movie' && getNovaPulseMovieFreshness(item.addedAt, nowMs) !== null;
 }
 
 function isCriticalAnnouncement(item: NovaPulseItem) {
@@ -190,6 +200,10 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
     const last = selected.at(-1)?.type;
     const previous = selected.at(-2)?.type;
     const recentReasons = selected.slice(-4).map((item) => item.recommendation?.reason).filter(Boolean);
+    const recentMovieCount = selected.filter((item) => isRecentlyAddedMovie(item, nowMs)).length;
+    const hasQualityNonRecentMovieAlternative = ranked.filter((item) =>
+      item.type === 'movie' && !isRecentlyAddedMovie(item, nowMs) && qualityScore(item, [], nowMs) >= 3);
+    const enforceRecentMovieTarget = hasQualityNonRecentMovieAlternative.length >= 2;
     const movieNeeded = ranked.some((item) => item.type === 'movie') && !selected.some((item) => item.type === 'movie');
     const seriesNeeded = ranked.some((item) => item.type === 'series') && !selected.some((item) => item.type === 'series');
     const forcedType = movieNeeded ? 'movie' : seriesNeeded ? 'series' : null;
@@ -201,6 +215,7 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
       if (item.type === 'sports' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'announcement' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'sports' && selectedSports >= 2) return false;
+      if (isRecentlyAddedMovie(item, nowMs) && recentMovieCount >= 2 && enforceRecentMovieTarget) return false;
       if (item.type === 'announcement' && !isCriticalAnnouncement(item) && selected.some((selectedItem) => selectedItem.type === 'announcement' && !isCriticalAnnouncement(selectedItem))) return false;
       if (item.type === last && item.type === previous) return false;
       const reason = item.recommendation?.reason;
@@ -209,11 +224,15 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
     const fallbackIndex = pool.findIndex((item) => {
       if (item.type === 'sports' && selectedSports >= 2) return false;
       if (item.type === 'sports' && !reserved.has(stableKey(item))) return false;
+      if (isRecentlyAddedMovie(item, nowMs) && recentMovieCount >= 2 && enforceRecentMovieTarget) return false;
       if (item.type === 'announcement' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'announcement' && !isCriticalAnnouncement(item) && selected.some((selectedItem) => selectedItem.type === 'announcement' && !isCriticalAnnouncement(selectedItem))) return false;
       return !(item.type === last && item.type === previous);
     });
-    const index = candidateIndex >= 0 ? candidateIndex : fallbackIndex >= 0 ? fallbackIndex : mixedCatalog ? -1 : 0;
+    const diversityFallbackIndex = enforceRecentMovieTarget && recentMovieCount >= 2
+      ? pool.findIndex((item) => !isRecentlyAddedMovie(item, nowMs) && item.type !== 'sports' && item.type !== 'announcement')
+      : -1;
+    const index = candidateIndex >= 0 ? candidateIndex : fallbackIndex >= 0 ? fallbackIndex : diversityFallbackIndex >= 0 ? diversityFallbackIndex : enforceRecentMovieTarget && recentMovieCount >= 2 ? -1 : mixedCatalog ? -1 : 0;
     if (index < 0) break;
     const chosen = pool[index];
     selected.push(chosen);

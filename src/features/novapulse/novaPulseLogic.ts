@@ -273,6 +273,21 @@ export function getNovaPulseDisplayRuntimeMinutes(value?: number) {
   return value >= 5 && value <= 600 ? value : undefined;
 }
 
+export const NOVA_PULSE_RECENTLY_ADDED_FLOOR_MS = Date.UTC(2000, 0, 1);
+export const NOVA_PULSE_RECENTLY_ADDED_WINDOW_MS = 30 * 24 * 60 * 60_000;
+export const NOVA_PULSE_RECENTLY_ADDED_FUTURE_TOLERANCE_MS = 24 * 60 * 60_000;
+export const NOVA_PULSE_RECENTLY_ADDED_STRONG_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+export type NovaPulseMovieFreshness = 'strong' | 'moderate' | null;
+
+/** Validates only the provider `added` lineage against the mounted session clock. */
+export function getNovaPulseMovieFreshness(addedAt: number | undefined, sessionNowMs: number): NovaPulseMovieFreshness {
+  if (!Number.isFinite(addedAt) || !Number.isFinite(sessionNowMs) || (addedAt ?? 0) < NOVA_PULSE_RECENTLY_ADDED_FLOOR_MS) return null;
+  const age = sessionNowMs - (addedAt ?? 0);
+  if (age < -NOVA_PULSE_RECENTLY_ADDED_FUTURE_TOLERANCE_MS || age > NOVA_PULSE_RECENTLY_ADDED_WINDOW_MS) return null;
+  return age <= NOVA_PULSE_RECENTLY_ADDED_STRONG_WINDOW_MS ? 'strong' : 'moderate';
+}
+
 export function formatNovaPulseCatalogMeta(item: NovaPulseItem) {
   const genres = normalizeNovaPulseGenres(item.genres);
   const validYear = getNovaPulseDisplayYear(item.year);

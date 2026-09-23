@@ -1,5 +1,7 @@
 import type { NovaPulseItem } from './novaPulseTypes';
 import type { NovaPulseSource } from './novaPulseSources';
+import type { NovaPulseHistoryEntry } from './novaPulseHistory.ts';
+import { novaPulseHistoryPenalty } from './novaPulseHistory.ts';
 
 export const NOVA_PULSE_V2_MIN_ITEMS = 5;
 export const NOVA_PULSE_V2_MAX_ITEMS = 12;
@@ -26,6 +28,7 @@ export type NovaPulseV2Diagnostics = {
   sportsSelected: number;
   announcementsSelected: number;
   sportsGuardApplied: boolean;
+  recentItemsPenalized: number;
   signature: string;
 };
 
@@ -37,6 +40,7 @@ export type NovaPulseV2Result = {
 export type NovaPulseComposeOptions = {
   seed?: string | number;
   nowMs?: number;
+  recentHistory?: readonly NovaPulseHistoryEntry[];
 };
 
 export type NovaPulseCompositionSession = {
@@ -76,7 +80,7 @@ function unique(items: readonly NovaPulseItem[]) {
   });
 }
 
-function qualityScore(item: NovaPulseItem) {
+function qualityScore(item: NovaPulseItem, recentHistory: readonly NovaPulseHistoryEntry[], nowMs: number) {
   const year = Number(item.year);
   let score = 0;
   if (item.title.trim()) score += 1;
@@ -93,6 +97,10 @@ function qualityScore(item: NovaPulseItem) {
       (item.recommendation.affinityScore ? Math.min(20, item.recommendation.affinityScore / 20) : 0) +
       (item.recommendation.trendScore ? Math.min(10, item.recommendation.trendScore / 25) : 0) +
       Math.max(-2, Math.min(2, item.recommendation.velocity ?? 0)) + score * 0.01;
+  }
+  if ((item.type === 'movie' || item.type === 'series') && item.sourceItemId) {
+    const historyEntry = recentHistory.find((entry) => entry.mediaType === item.type && entry.contentId === item.sourceItemId);
+    if (historyEntry && score >= 3) score += Math.max(novaPulseHistoryPenalty(historyEntry, nowMs), 2 - score);
   }
   return score;
 }
@@ -218,6 +226,7 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
 export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[], options: NovaPulseComposeOptions = {}): NovaPulseV2Result {
   const nowMs = options.nowMs ?? Date.now();
   const seed = options.seed ?? 0;
+  const recentHistory = options.recentHistory ?? [];
   const all = unique(sources.flatMap((source) => {
     try {
       return source.getItems().items ?? [];
@@ -225,8 +234,13 @@ export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[], opti
       return [];
     }
   })).slice(0, CANDIDATE_WINDOW * 4);
+  const recentItemsPenalized = all.filter((item) => {
+    if ((item.type !== 'movie' && item.type !== 'series') || !item.sourceItemId) return false;
+    const entry = recentHistory.find((candidate) => candidate.mediaType === item.type && candidate.contentId === item.sourceItemId);
+    return Boolean(entry && novaPulseHistoryPenalty(entry, nowMs) < 0);
+  }).length;
   const ranked = all
-    .map((item, index) => ({ item, score: qualityScore(item), index }))
+    .map((item, index) => ({ item, score: qualityScore(item, recentHistory, nowMs), index }))
     .filter(({ item, score }) => isUseful(item, score))
     .sort((left, right) => right.score - left.score || seededTie(right.item, seed) - seededTie(left.item, seed) || left.index - right.index)
     .map(({ item }) => item);
@@ -256,6 +270,7 @@ export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[], opti
     sportsSelected: typeCount(items, 'sports'),
     announcementsSelected: typeCount(items, 'announcement'),
     sportsGuardApplied: typeCount(ranked, 'sports') > 0 && typeCount(items, 'sports') > 0,
+    recentItemsPenalized,
     signature: candidateSignature(items),
   };
   return { items, diagnostics };

@@ -80,3 +80,13 @@ entrypoint = "./functions/novapulse-sports-feed/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/novapulse-sports-feed/*.html" ]
+
+[functions.admin-novapulse-announcements]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/admin-novapulse-announcements/index.ts"
+
+[functions.novapulse-announcements-feed]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/novapulse-announcements-feed/index.ts"

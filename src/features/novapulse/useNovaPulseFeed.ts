@@ -17,6 +17,7 @@ import { getSeriesMetadataCacheEntry, type SeriesMetadataCacheEntry } from '@/fe
 import { enrichNovaPulsePresentation } from './novaPulsePresentation';
 import { runNovaPulseEnrichmentCycle, type NovaPulseEnrichmentDiagnostics, type NovaPulseMovieEnrichment } from './novaPulseEnrichment';
 import { runNovaPulseLiveEpgCycle, type NovaPulseLiveEpgDiagnostics } from './novaPulseLiveEpg';
+import { getCachedNovaPulseAnnouncements, loadNovaPulseAnnouncements, NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED, type NovaPulseAnnouncementsResult } from './novaPulseAnnouncements';
 import type { HomeFavoriteChannel } from '@/features/personalization/personalizationHome';
 import type { RecentItemRecord } from '@/features/personalization/personalizationModel';
 import type { ProviderGuideProgram } from '@/features/providers/providerRepositories';
@@ -93,6 +94,8 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const [enrichmentState, setEnrichmentState] = useState<{ providerId: string; movies: ReadonlyMap<string, NovaPulseMovieEnrichment>; series: ReadonlyMap<string, SeriesMetadataCacheEntry>; seriesDetails: ReadonlyMap<string, import('@/features/media-browser/mediaTypes').SeriesDetail>; translations: ReadonlyMap<string, string>; diagnostics: NovaPulseEnrichmentDiagnostics | null }>({ providerId: '', movies: new Map(), series: new Map(), seriesDetails: new Map(), translations: new Map(), diagnostics: null });
   const [liveEpgState, setLiveEpgState] = useState<{ providerId: string; items: readonly NovaPulseItem[]; diagnostics: NovaPulseLiveEpgDiagnostics | null }>({ providerId: '', items: [], diagnostics: null });
   const [compositionSession] = useState(() => createNovaPulseCompositionSession());
+  const [announcementSession, setAnnouncementSession] = useState<{ providerId: string; result: NovaPulseAnnouncementsResult | null }>(() => ({ providerId, result: getCachedNovaPulseAnnouncements() }));
+  const announcementFrozenRef = useRef(false);
   const [, setHistoryRevision] = useState(0);
   const historySessionRef = useRef<{ providerId: string; entries: ReturnType<typeof getCachedNovaPulseHistory> | null; compositionStarted: boolean } | null>(null);
   if (!historySessionRef.current || historySessionRef.current.providerId !== providerId) {
@@ -125,6 +128,20 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       console.info('[NOVAPULSE_HISTORY]', JSON.stringify(metadata));
       recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_history_load', ...metadata } });
     }).catch(() => undefined);
+  }, [providerId]);
+  useEffect(() => {
+    if (!NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED) return;
+    announcementFrozenRef.current = false;
+    let active = true;
+    const controller = new AbortController();
+    void loadNovaPulseAnnouncements(controller.signal).then((result) => {
+      if (!active || announcementFrozenRef.current) return;
+      setAnnouncementSession((current) => current.providerId === providerId ? { providerId, result } : current);
+    }).catch(() => undefined);
+    return () => { active = false; controller.abort(); };
+  }, [providerId]);
+  useEffect(() => {
+    announcementFrozenRef.current = true;
   }, [providerId]);
   useEffect(() => {
     if (!NOVA_PULSE_SPORTS_ENABLED) {
@@ -259,14 +276,20 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const realSportsSignature = useMemo(() => (realSports ?? []).slice(0, 32).map((item) => [item.id, item.title, item.subtype, item.updatedAt ?? ''].join('~')).join('|'), [realSports]);
   const composed = useMemo(() => {
     const includeMockCatalogFallback = { movie: boundedMovies.length === 0, series: boundedSeries.length === 0 };
+    const announcementResult = announcementSession.providerId === providerId ? announcementSession.result : null;
+    const announcementItems = !NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED || !announcementResult
+      ? NOVA_PULSE_MOCK_FEED
+      : announcementResult.source === 'static'
+        ? NOVA_PULSE_MOCK_FEED
+        : announcementResult.items;
     const result = composeNovaPulseFeedV2([
       createNovaPulseCatalogSource(languageFilteredCatalog.movies, languageFilteredCatalog.series, recommendationSignals, compositionSession.startedAt),
       ...(realSports ? [createNovaPulseSportsSource(realSports)] : []),
       ...(liveEpgItems.length ? [createNovaPulseLiveEpgSource(liveEpgItems)] : []),
-      createNovaPulseMockSource(realSports ? NOVA_PULSE_MOCK_FEED.filter((item) => item.type !== 'sports') : NOVA_PULSE_MOCK_FEED, includeMockCatalogFallback),
+      createNovaPulseMockSource(realSports ? announcementItems.filter((item) => item.type !== 'sports') : announcementItems, includeMockCatalogFallback),
     ], { seed: compositionSession.seed, nowMs: compositionSession.startedAt, recentHistory: historySnapshot });
     return result.items.length ? result : { ...result, items: [NOVA_PULSE_BRANDED_FALLBACK] };
-  }, [compositionSession, historySnapshot, languageFilteredCatalog, liveEpgItems, realSportsSignature, recommendationSignalSignature]);
+  }, [announcementSession, compositionSession, historySnapshot, languageFilteredCatalog, liveEpgItems, providerId, realSportsSignature, recommendationSignalSignature]);
   const catalogReadyForHistory = boundedMovies.length > 0 || boundedSeries.length > 0;
   useEffect(() => {
     if (catalogReadyForHistory && historySessionRef.current?.providerId === providerId) {

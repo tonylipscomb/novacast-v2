@@ -5,6 +5,7 @@ export type NovaPulseItemType = 'movie' | 'series' | 'sports' | 'live_event' | '
 export type NovaPulseSubtype = 'featured' | 'upcoming' | 'starting_soon' | 'live' | 'final';
 export type NovaPulseAnnouncementType = 'feature' | 'update' | 'beta' | 'maintenance' | 'service_alert' | 'notice' | 'promotion' | 'general';
 export type NovaPulseAnnouncementPriority = 'low' | 'normal' | 'high' | 'critical';
+export type NovaPulseAnnouncementImportance = 'normal' | 'important' | 'critical';
 
 export type NovaPulseAction = {
   type: 'play' | 'details' | 'channel' | 'none';

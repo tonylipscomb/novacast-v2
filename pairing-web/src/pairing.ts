@@ -28,7 +28,12 @@ export async function adminLogin(email: string, password: string) {
 }
 
 export async function adminRequest(path: string, token: string, init: RequestInit = {}) {
-  const response = await fetch(`${API_URL}/${path}`, { ...init, headers: { apikey: ANON_KEY, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } });
+  const headers = new Headers(init.headers ?? {});
+  headers.set('apikey', ANON_KEY);
+  headers.set('Authorization', `Bearer ${token}`);
+  if (init.body instanceof FormData) headers.delete('Content-Type');
+  else headers.set('Content-Type', 'application/json');
+  const response = await fetch(`${API_URL}/${path}`, { ...init, headers });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const category = response.status === 546 ? 'WORKER_RESOURCE_LIMIT' : typeof payload.errorCategory === 'string' ? payload.errorCategory : 'admin_request_failed';

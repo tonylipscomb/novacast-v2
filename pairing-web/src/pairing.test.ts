@@ -31,3 +31,22 @@ test('pairing form uses sanitized failure messages', () => {
   assert.match(failureMessage('authentication_failed'), /credentials/);
   assert.match(failureMessage('password=secret'), /temporarily unavailable/);
 });
+
+test('adminRequest leaves FormData content type for the browser boundary', async () => {
+  const originalFetch = globalThis.fetch;
+  let captured: RequestInit | undefined;
+  globalThis.fetch = async (_input, init) => {
+    captured = init;
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const { adminRequest } = await import('./pairing.ts');
+    const form = new FormData();
+    form.append('file', new File(['x'], 'x.png', { type: 'image/png' }));
+    await adminRequest('admin-novapulse-announcements?action=upload_artwork', 'token', { method: 'POST', body: form });
+    assert.equal(new Headers(captured?.headers).get('Content-Type'), null);
+    assert.equal(new Headers(captured?.headers).get('Authorization'), 'Bearer token');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

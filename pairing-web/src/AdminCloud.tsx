@@ -6,6 +6,7 @@ import { AdminInvitations } from './AdminInvitations';
 import { AdminProviders } from './AdminProviders';
 import { AdminDiagnostics } from './AdminDiagnostics';
 import { AdminGoldPanel } from './AdminGoldPanel';
+import { AdminAnnouncements } from './AdminAnnouncements';
 import {
   formatProviderAssignmentMessage,
   resolveProviderAssignmentAckState,
@@ -13,7 +14,7 @@ import {
 import { adminLogin, adminRequest } from './pairing';
 
 type Row = Record<string, unknown>;
-type AdminTab = 'dashboard' | 'devices' | 'providers' | 'gold' | 'invitations' | 'analytics' | 'settings';
+type AdminTab = 'dashboard' | 'devices' | 'providers' | 'gold' | 'invitations' | 'announcements' | 'analytics' | 'settings';
 
 type InvitationInput = {
   label: string;
@@ -26,7 +27,7 @@ export function AdminCloud() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [token, setToken] = useState(() => sessionStorage.getItem('novacast-admin-token') ?? '');
-  const [tab, setTab] = useState<AdminTab>(() => window.location.pathname === '/admin/diagnostics' ? 'analytics' : 'dashboard');
+  const [tab, setTab] = useState<AdminTab>(() => window.location.pathname === '/admin/diagnostics' ? 'analytics' : window.location.pathname === '/admin/announcements' ? 'announcements' : 'dashboard');
   const [devices, setDevices] = useState<Row[]>([]);
   const [invitations, setInvitations] = useState<Row[]>([]);
   const [providers, setProviders] = useState<Row[]>([]);
@@ -77,6 +78,8 @@ export function AdminCloud() {
   }, []);
 
   useEffect(() => {
+    // Admin dashboard hydration is an external request lifecycle.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (token && tab !== 'analytics') void load(token);
   }, [load, tab, token]);
 
@@ -269,6 +272,7 @@ export function AdminCloud() {
           <NavButton active={tab === 'providers'} icon="P" label="Providers" onClick={() => setTab('providers')} />
           <NavButton active={tab === 'gold'} icon="G" label="Gold Panel" onClick={() => setTab('gold')} />
           <NavButton active={tab === 'invitations'} icon="I" label="Invitations" onClick={() => setTab('invitations')} />
+          <NavButton active={tab === 'announcements'} icon="N" label="NovaPulse" onClick={() => setTab('announcements')} />
           <NavButton active={tab === 'analytics'} icon="A" label="Analytics" onClick={() => setTab('analytics')} />
           <NavButton active={tab === 'settings'} icon="S" label="Settings" onClick={() => setTab('settings')} />
         </nav>
@@ -297,9 +301,9 @@ export function AdminCloud() {
         </header>
 
         {message ? (
-          <div className="cloudAdminNotice">
+          <div className="cloudAdminNotice" role="status" aria-live="polite">
             <span>{message}</span>
-            <button onClick={() => setMessage('')}></button>
+            <button aria-label="Dismiss message" onClick={() => setMessage('')}></button>
           </div>
         ) : null}
 
@@ -358,6 +362,7 @@ export function AdminCloud() {
         {!loading && tab === 'analytics' ? (
           <AdminDiagnostics token={token} onMessage={setMessage} />
         ) : null}
+        {!loading && tab === 'announcements' ? <AdminAnnouncements token={token} onMessage={setMessage} /> : null}
         {!loading && tab === 'gold' ? <AdminGoldPanel token={token} devices={devices} providers={providers} openCreate={openAddGold} onOpenCreateHandled={() => setOpenAddGold(false)} onAssignProvider={(id, providerId) => void assignProvider(id, providerId)} onMessage={setMessage} /> : null}
         {!loading && tab === 'settings' ? (
           <ComingSoon title="Cloud Admin settings" text="Administrator preferences and platform controls will appear here." />
@@ -403,6 +408,7 @@ function titleFor(tab: AdminTab) {
     providers: 'Providers',
     gold: 'Gold Panel',
     invitations: 'Invitations',
+    announcements: 'NovaPulse Announcements',
     analytics: 'Analytics',
     settings: 'Settings',
   }[tab];
@@ -415,6 +421,7 @@ function subtitleFor(tab: AdminTab) {
     providers: 'Add, validate, and activate managed IPTV providers before testers see them.',
     gold: 'Provision and monitor Gold reseller accounts linked to NovaCast providers.',
     invitations: 'Create and track controlled beta access.',
+    announcements: 'Create, schedule, and preview safe NovaPulse TV announcements.',
     analytics: 'Review device and playback performance.',
     settings: 'Configure NovaCast Cloud Admin.',
   }[tab];

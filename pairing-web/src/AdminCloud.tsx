@@ -12,6 +12,7 @@ import {
   resolveProviderAssignmentAckState,
 } from './adminAssignmentCopy';
 import { adminLogin, adminRequest } from './pairing';
+import { shouldShowGlobalAdminHeaderAction } from './adminHeaderActions';
 
 type Row = Record<string, unknown>;
 type AdminTab = 'dashboard' | 'devices' | 'providers' | 'gold' | 'invitations' | 'announcements' | 'analytics' | 'settings';
@@ -291,12 +292,16 @@ export function AdminCloud() {
             <p>{subtitleFor(tab)}</p>
           </div>
           <div className="cloudTopActions">
-            <button onClick={() => { if (tab !== 'analytics') void load(token, true); }} disabled={refreshing || tab === 'analytics'}>
-              {refreshing ? 'Refreshing' : ' Refresh'}
-            </button>
-            <button className="cloudPrimary" onClick={() => { setTab('invitations'); setOpenCreateInvite(true); }}>
-               New invitation
-            </button>
+            {shouldShowGlobalAdminHeaderAction(tab, 'refresh') ? (
+              <button onClick={() => { if (tab !== 'analytics') void load(token, true); }} disabled={refreshing || tab === 'analytics'}>
+                {refreshing ? 'Refreshing' : ' Refresh'}
+              </button>
+            ) : null}
+            {shouldShowGlobalAdminHeaderAction(tab, 'new_invitation') ? (
+              <button className="cloudPrimary" onClick={() => { setTab('invitations'); setOpenCreateInvite(true); }}>
+                 New invitation
+              </button>
+            ) : null}
           </div>
         </header>
 

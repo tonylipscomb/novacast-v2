@@ -1,5 +1,6 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { adminRequest } from './pairing';
+import { announcementListRequestInit, createAnnouncementRefreshGate, normalizeAnnouncementItems } from './adminAnnouncementRefresh';
 import {
   ANNOUNCEMENT_IMPORTANCES,
   announcementActionPath,
@@ -48,17 +49,20 @@ export function AdminAnnouncements({ token, onMessage }: Props) {
   const [busy, setBusy] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const refreshGate = useRef(createAnnouncementRefreshGate());
 
   const load = useCallback(async (quiet = false) => {
+    if (!refreshGate.current.tryStart()) return;
     if (quiet) setRefreshing(true); else setLoading(true);
     setError('');
     try {
-      const result = await adminRequest(`${announcementActionPath('list')}&limit=100`, token);
-      setItems(Array.isArray(result.items) ? result.items as AnnouncementRecord[] : []);
+      const result = await adminRequest(`${announcementActionPath('list')}&limit=100`, token, announcementListRequestInit());
+      setItems(normalizeAnnouncementItems<AnnouncementRecord>(result));
     } catch (requestError) {
       setError(actionError(requestError));
     } finally {
       if (quiet) setRefreshing(false); else setLoading(false);
+      refreshGate.current.finish();
     }
   }, [token]);
 

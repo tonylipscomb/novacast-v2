@@ -11,6 +11,8 @@ import {
   type AnnouncementRecord,
   emptyAnnouncementDraft,
 } from './novaPulseAnnouncements.ts';
+import { shouldShowGlobalAdminHeaderAction } from './adminHeaderActions.ts';
+import { announcementListRequestInit, createAnnouncementRefreshGate, normalizeAnnouncementItems } from './adminAnnouncementRefresh.ts';
 
 test('uses the B4.1 action contract', () => {
   assert.equal(announcementActionPath('list'), 'admin-novapulse-announcements?action=list');
@@ -57,4 +59,50 @@ test('client artwork convenience validation accepts supported images and rejects
   assert.equal(validateArtworkFile(new File(['x'], 'a.webp', { type: 'image/webp' })), null);
   assert.match(validateArtworkFile(new File(['x'], 'a.svg', { type: 'image/svg+xml' })) ?? '', /JPEG/);
   assert.match(validateArtworkFile(new File([new Uint8Array(5 * 1024 * 1024 + 1)], 'a.png', { type: 'image/png' })) ?? '', /5 MB/);
+});
+
+test('NovaPulse contextual header keeps only its local actions', () => {
+  assert.equal(shouldShowGlobalAdminHeaderAction('announcements', 'refresh'), false);
+  assert.equal(shouldShowGlobalAdminHeaderAction('announcements', 'new_invitation'), false);
+  assert.equal(shouldShowGlobalAdminHeaderAction('invitations', 'refresh'), true);
+  assert.equal(shouldShowGlobalAdminHeaderAction('invitations', 'new_invitation'), true);
+  assert.equal(shouldShowGlobalAdminHeaderAction('dashboard', 'refresh'), true);
+});
+
+test('direct announcements route and local refresh contract remain valid', () => {
+  assert.equal(announcementActionPath('list'), 'admin-novapulse-announcements?action=list');
+  assert.equal(announcementListRequestInit().cache, 'no-store');
+  assert.equal(normalizeAnnouncementItems<{ id: string }>({ items: [{ id: 'fresh' }] })[0]?.id, 'fresh');
+  assert.deepEqual(normalizeAnnouncementItems({ items: [] }), []);
+});
+
+test('refresh gate allows one request, replaces stale data, and accepts empty success', async () => {
+  const gate = createAnnouncementRefreshGate();
+  let requests = 0;
+  let items = [{ id: 'stale' }];
+  const refresh = async (next: typeof items) => {
+    if (!gate.tryStart()) return;
+    requests += 1;
+    await Promise.resolve();
+    items = next;
+    gate.finish();
+  };
+  const first = refresh([{ id: 'fresh' }]);
+  const second = refresh([]);
+  await Promise.all([first, second]);
+  assert.equal(requests, 1);
+  assert.deepEqual(items, [{ id: 'fresh' }]);
+  await refresh([]);
+  assert.deepEqual(items, []);
+});
+
+test('failed refresh retains the visible list while the gate recovers', () => {
+  const gate = createAnnouncementRefreshGate();
+  const previous = [{ id: 'visible' }];
+  assert.equal(gate.tryStart(), true);
+  assert.equal(gate.tryStart(), false);
+  gate.finish();
+  assert.deepEqual(previous, [{ id: 'visible' }]);
+  assert.equal(gate.tryStart(), true);
+  gate.finish();
 });

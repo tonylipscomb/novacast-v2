@@ -349,7 +349,7 @@ export function formatNovaPulseResultSummary(sports?: NovaPulseSportsData) {
   if (sports.isDraw || sports.resultStatus === 'DRAW') return sports.format === 'fight' ? 'Fight ends in a draw' : 'Draw';
   const winner = getNovaPulseWinner(sports);
   if (sports.format === 'fight') {
-    if (!winner) return 'Result unavailable';
+    if (!winner) return sports.resultMethod ?? sports.decisionType ?? sports.statusText ?? 'Result unavailable';
     const method = sports.resultMethod ?? sports.decisionType;
     const round = sports.resultRound != null ? ` in Round ${sports.resultRound}` : '';
     const time = sports.resultTime ? ` at ${sports.resultTime}` : '';

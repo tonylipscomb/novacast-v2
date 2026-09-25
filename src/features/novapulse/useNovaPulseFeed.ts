@@ -456,7 +456,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   }, [backendCandidates, composed, curatedCatalog.diagnostics, displayPrefixesRemoved, enrichmentState.diagnostics, languageFilteredCatalog.diagnostics, liveEpgState.diagnostics, presentation.diagnostics, recommendationCacheHit, recommendationRequestAttempted, recommendationSeeds.confidence, recommendationSeeds.seeds.length, recommendationSeeds.signature, recommendationSignalSignature]);
 
   useEffect(() => {
-    const upcoming = (realSports ?? []).filter((item) => item.subtype === 'upcoming' || item.subtype === 'live').length;
+    const upcoming = (realSports ?? []).filter((item) => item.subtype === 'upcoming' || item.subtype === 'starting_soon' || item.subtype === 'live').length;
     const finals = (realSports ?? []).filter((item) => item.subtype === 'final').length;
         const announcements = composed.items.filter((item) => item.type === 'announcement').length;
     const movieDuplicateIds = movies.length - new Set(movies.map((item) => String(item.id ?? ''))).size;

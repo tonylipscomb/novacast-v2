@@ -2,7 +2,7 @@ import type { ImageRef } from 'expo-image';
 
 export type NovaPulseItemType = 'movie' | 'series' | 'sports' | 'live_event' | 'live_epg' | 'announcement';
 
-export type NovaPulseSubtype = 'featured' | 'upcoming' | 'starting_soon' | 'live' | 'final';
+export type NovaPulseSubtype = 'featured' | 'upcoming' | 'starting_soon' | 'live' | 'final' | 'postponed' | 'cancelled';
 export type NovaPulseAnnouncementType = 'feature' | 'update' | 'beta' | 'maintenance' | 'service_alert' | 'notice' | 'promotion' | 'general';
 export type NovaPulseAnnouncementPriority = 'low' | 'normal' | 'high' | 'critical';
 export type NovaPulseAnnouncementImportance = 'normal' | 'important' | 'critical';
@@ -36,9 +36,10 @@ export type NovaPulseRecommendationSignals = {
 export type NovaPulseSportsData = {
   format?: 'team' | 'fight';
   sport?: string;
+  leagueId?: string;
   league?: string;
   eventStage?: string;
-  eventStatus?: 'TONIGHT' | 'TOMORROW' | 'UPCOMING' | 'LIVE' | 'FINAL';
+  eventStatus?: 'TONIGHT' | 'TOMORROW' | 'UPCOMING' | 'LIVE' | 'FINAL' | 'POSTPONED' | 'CANCELLED';
   eventTitle?: string;
   competitorA?: string;
   competitorB?: string;

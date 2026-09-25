@@ -86,10 +86,51 @@ Deno.test('combat result fields stay separate from team result fields', () => {
   assertEquals(event.home_score, null);
 });
 
+Deno.test('soccer draws preserve the sport and draw score state', () => {
+  const event = normalizeTheSportsDbEvent({ ...base, strSport: 'Soccer', strLeague: 'MLS', strStatus: 'Final', intHomeScore: '1', intAwayScore: '1' }, now, '4346');
+  assert(event);
+  assertEquals(event.sport, 'Soccer');
+  assertEquals(event.is_draw, true);
+  assertEquals(event.home_score, '1');
+  assertEquals(event.away_score, '1');
+});
+
+Deno.test('fighting events preserve structured participants and event-title fallback', () => {
+  const structured = normalizeTheSportsDbEvent({ idEvent: 'fight-structured', strSport: 'Fighting', strEvent: 'Structured bout', dateEvent: '2026-09-20', strTime: '18:00:00', strStatus: 'Final', strHomeTeam: 'Fighter A', strAwayTeam: 'Fighter B', strResultMethod: 'Decision', strDecision: 'Split Decision' }, now, '4443');
+  const titleOnly = normalizeTheSportsDbEvent({ idEvent: 'fight-title', strSport: 'Boxing', strEvent: 'Provider event title', dateEvent: '2026-09-21', strTime: '18:00:00', strStatus: 'Scheduled' }, now, '4445');
+  assert(structured && titleOnly);
+  assertEquals(structured.competitor_a, 'Fighter A');
+  assertEquals(structured.competitor_b, 'Fighter B');
+  assertEquals(structured.result_method, 'Decision');
+  assertEquals(structured.decision_type, 'Split Decision');
+  assertEquals(titleOnly.competitor_a, null);
+  assertEquals(titleOnly.competitor_b, null);
+  assertEquals(titleOnly.event_name, 'Provider event title');
+});
+
+Deno.test('final fighting results do not fabricate scores or a winner', () => {
+  const event = normalizeTheSportsDbEvent({ idEvent: 'fight-final', strSport: 'UFC', strEvent: 'Final bout', dateEvent: '2026-09-19', strTime: '18:00:00', strStatus: 'Final', strDecision: 'Unanimous Decision' }, now, '4443');
+  assert(event);
+  assertEquals(event.status, 'final');
+  assertEquals(event.home_score, null);
+  assertEquals(event.away_score, null);
+  assertEquals(event.winner_name, null);
+  assertEquals(event.decision_type, 'Unanimous Decision');
+});
+
 Deno.test('league configuration is canonical and rejects unknown ids', () => {
-  assertEquals(NOVA_PULSE_SUPPORTED_LEAGUES.length, 6);
+  assertEquals(NOVA_PULSE_SUPPORTED_LEAGUES.length, 10);
+  assertEquals(NOVA_PULSE_SUPPORTED_LEAGUES.map((league) => league.id), ['4391', '4479', '4387', '4607', '4424', '4380', '4346', '4328', '4445', '4443']);
   assertEquals(configuredLeagueIds(env as unknown as Deno.Env), ['4391', '4387']);
   assertEquals(configuredLeagueIds({ get: () => '999999' } as unknown as Deno.Env), []);
+});
+
+Deno.test('league overrides are canonical, deduplicated, bounded, and deterministic', () => {
+  const configured = configuredLeagueIds({ get: () => '4443,4346,4443,unknown,4328,999999' } as unknown as Deno.Env);
+  assertEquals(configured, ['4346', '4328', '4443']);
+  const originalSix = configuredLeagueIds({ get: () => '4391,4479,4387,4607,4424,4380' } as unknown as Deno.Env);
+  assertEquals(originalSix, ['4391', '4479', '4387', '4607', '4424', '4380']);
+  assertEquals(configuredLeagueIds({ get: () => 'malformed,unknown' } as unknown as Deno.Env), []);
 });
 
 Deno.test('adapter applies configured league windows and isolates one league failure', async () => {

@@ -50,6 +50,10 @@ export const NOVA_PULSE_SUPPORTED_LEAGUES = [
   { id: '4607', name: "NCAA Men's Basketball", sport: 'Basketball' },
   { id: '4424', name: 'MLB', sport: 'Baseball' },
   { id: '4380', name: 'NHL', sport: 'Ice Hockey' },
+  { id: '4346', name: 'American Major League Soccer', sport: 'Soccer' },
+  { id: '4328', name: 'English Premier League', sport: 'Soccer' },
+  { id: '4445', name: 'Boxing', sport: 'Fighting' },
+  { id: '4443', name: 'UFC', sport: 'Fighting' },
 ] as const;
 
 type TheSportsDbEvent = Record<string, unknown>;

@@ -10,12 +10,14 @@ export function NovaPulseSportsCard({ item }: { item: NovaPulseItem }) {
   const sports = item.sports;
   const isFinal = item.subtype === 'final' || sports?.eventStatus === 'FINAL';
   const isLive = item.subtype === 'live' || sports?.eventStatus === 'LIVE';
+  const lifecycleLabel = item.subtype === 'postponed' || sports?.eventStatus === 'POSTPONED' ? 'POSTPONED' : item.subtype === 'cancelled' || sports?.eventStatus === 'CANCELLED' ? 'CANCELLED' : null;
   const isFight = sports?.format === 'fight';
   const styles = createStyles(theme);
   const firstCompetitor = isFight ? sports?.competitorA : sports?.awayName;
   const secondCompetitor = isFight ? sports?.competitorB : sports?.homeName;
   const firstDisplayName = isFight ? firstCompetitor : formatNovaPulseTeamLabel(firstCompetitor);
   const secondDisplayName = isFight ? secondCompetitor : formatNovaPulseTeamLabel(secondCompetitor);
+  const hasFightParticipants = Boolean(firstCompetitor && secondCompetitor);
   const winner = isFinal ? getNovaPulseWinner(sports) : null;
   const firstScore = sports?.finalScoreA ?? sports?.awayScore;
   const secondScore = sports?.finalScoreB ?? sports?.homeScore;
@@ -25,8 +27,8 @@ export function NovaPulseSportsCard({ item }: { item: NovaPulseItem }) {
 
   return (
     <View style={styles.wrap}>
-      {stage || isLive ? <View style={styles.contextRow}><Text style={styles.context}>{isLive ? 'LIVE NOW' : stage}</Text>{isLive && sports?.periodDetail ? <Text style={styles.contextDetail}>{sports.periodDetail}</Text> : null}</View> : null}
-      <View style={styles.matchup}>
+      {stage || isLive || lifecycleLabel ? <View style={styles.contextRow}><Text style={styles.context}>{isLive ? 'LIVE NOW' : lifecycleLabel ?? stage}</Text>{isLive && sports?.periodDetail ? <Text style={styles.contextDetail}>{sports.periodDetail}</Text> : null}</View> : null}
+      {isFight && !hasFightParticipants ? null : <View style={styles.matchup}>
         <View style={[styles.competitor, winner === firstCompetitor ? styles.winnerCompetitor : null]}>
           <View style={[styles.identity, winner === firstCompetitor ? styles.winnerIdentity : null]}>{sports?.awayTeamLogoUrl && !isFight ? <Image source={{ uri: sports.awayTeamLogoUrl }} contentFit="contain" style={styles.identityLogo} /> : <Text style={styles.identityText}>{getNovaPulseTeamInitials(firstCompetitor)}</Text>}</View>
           <Text numberOfLines={2} ellipsizeMode="tail" style={[styles.teamName, winner === firstCompetitor ? styles.winnerText : null]}>{firstDisplayName ?? 'Competitor A'}</Text>
@@ -40,10 +42,10 @@ export function NovaPulseSportsCard({ item }: { item: NovaPulseItem }) {
           <Text numberOfLines={2} ellipsizeMode="tail" style={[styles.teamName, styles.teamNameRight, winner === secondCompetitor ? styles.winnerText : null]}>{secondDisplayName ?? 'Competitor B'}</Text>
           {isLive || isFinal ? (!isFight ? <Text style={[styles.teamScore, styles.teamScoreRight]}>{secondScore ?? '—'}</Text> : null) : null}
         </View>
-      </View>
+      </View>}
       {isFinal && isFight ? <View style={styles.fightResult}><Text style={styles.resultLabel}>{winner ? 'WINNER' : sports?.isNoContest ? 'NO CONTEST' : sports?.isDraw ? 'DRAW' : 'RESULT'}</Text><Text numberOfLines={2} style={styles.resultText}>{winner ?? formatNovaPulseResultSummary(sports)}</Text></View> : null}
       {isFinal && !isFight ? <Text numberOfLines={1} style={styles.summary}>{formatNovaPulseResultSummary(sports)}</Text> : null}
-      <View style={styles.footer}><Text numberOfLines={1} ellipsizeMode="tail" style={styles.footerText}>{isLive ? footer || 'Live event' : isFinal ? [sports?.wentOvertime ? 'OVERTIME' : null, sports?.shootout ? 'SHOOTOUT' : null, footer].filter(Boolean).join(' • ') || 'Final result' : footer || 'Date TBD'}</Text>{!isFinal && !isLive ? <Text numberOfLines={1} style={styles.countdown}>{formatNovaPulseCountdown(item.startsAt)}</Text> : null}</View>
+      <View style={styles.footer}><Text numberOfLines={1} ellipsizeMode="tail" style={styles.footerText}>{isLive ? footer || 'Live event' : isFinal ? [sports?.wentOvertime ? 'OVERTIME' : null, sports?.shootout ? 'SHOOTOUT' : null, footer].filter(Boolean).join(' • ') || 'Final result' : footer || 'Date TBD'}</Text>{!isFinal && !isLive && (item.subtype === 'upcoming' || item.subtype === 'starting_soon') ? <Text numberOfLines={1} style={styles.countdown}>{formatNovaPulseCountdown(item.startsAt)}</Text> : null}</View>
     </View>
   );
 }

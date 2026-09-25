@@ -39,9 +39,9 @@ test('overlap skips before adapter creation and normal refresh remains bounded',
 
 test('request budget math remains below the free-tier rolling-minute limit', () => {
   const supportedLeagueCount = (fs.readFileSync('supabase/functions/_shared/novapulseSports.ts', 'utf8').match(/id: '\d+'/g) ?? []).length;
-  assert.equal(supportedLeagueCount, 6);
-  assert.equal(supportedLeagueCount * 2, 12);
-  assert.ok(12 < 30);
+  assert.equal(supportedLeagueCount, 10);
+  assert.equal(supportedLeagueCount * 2, 20);
+  assert.ok(20 < 30);
   assert.match(lease, /2 \* 60 \* 1000/);
 });
 

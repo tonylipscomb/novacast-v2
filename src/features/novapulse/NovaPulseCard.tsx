@@ -52,7 +52,7 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
   const liveEpg = item.type === 'live_epg';
   const liveLogoMode = liveEpg && item.artworkKind === 'channel_logo';
   const [focused, setFocused] = useState(false);
-  const badge = announcement ? getNovaPulseAnnouncementBadge(item) : sports ? item.subtype === 'final' || item.sports?.eventStatus === 'FINAL' ? 'FINAL' : item.subtype === 'live' || item.sports?.eventStatus === 'LIVE' ? 'LIVE NOW' : formatNovaPulseUpcomingStatus(item.startsAt) : liveEpg ? item.badge ?? item.timingReason?.replace('_', ' ').toUpperCase() ?? 'LIVE' : getNovaPulseCatalogBadge(item);
+  const badge = announcement ? getNovaPulseAnnouncementBadge(item) : sports ? item.subtype === 'final' || item.sports?.eventStatus === 'FINAL' ? 'FINAL' : item.subtype === 'live' || item.sports?.eventStatus === 'LIVE' ? 'LIVE NOW' : item.subtype === 'starting_soon' ? 'STARTING SOON' : item.subtype === 'postponed' || item.sports?.eventStatus === 'POSTPONED' ? 'POSTPONED' : item.subtype === 'cancelled' || item.sports?.eventStatus === 'CANCELLED' ? 'CANCELLED' : formatNovaPulseUpcomingStatus(item.startsAt) : liveEpg ? item.badge ?? item.timingReason?.replace('_', ' ').toUpperCase() ?? 'LIVE' : getNovaPulseCatalogBadge(item);
   const catalogMeta = !sports && !liveEpg ? formatNovaPulseCatalogMeta(item) : null;
   const episodeMeta = item.type === 'series' ? formatNovaPulseEpisodeMeta(item) : null;
   const rating = !sports ? formatNovaPulseRating(item) : null;

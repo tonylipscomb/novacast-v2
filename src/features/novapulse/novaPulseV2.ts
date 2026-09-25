@@ -144,6 +144,7 @@ function isCriticalAnnouncement(item: NovaPulseItem) {
 
 function isValidSportsItem(item: NovaPulseItem, nowMs: number) {
   if (item.type !== 'sports') return true;
+  if (item.subtype === 'postponed' || item.subtype === 'cancelled') return false;
   if (item.expiresAt && Number.isFinite(Date.parse(item.expiresAt)) && Date.parse(item.expiresAt) <= nowMs) return false;
   if ((item.subtype === 'upcoming' || item.subtype === 'starting_soon') && (!item.startsAt || !Number.isFinite(Date.parse(item.startsAt)))) return false;
   return true;
@@ -151,7 +152,7 @@ function isValidSportsItem(item: NovaPulseItem, nowMs: number) {
 
 function selectSports(ranked: readonly NovaPulseItem[], nowMs: number) {
   const sports = ranked.filter((item) => item.type === 'sports' && isValidSportsItem(item, nowMs));
-  const statusRank = (item: NovaPulseItem) => item.subtype === 'live' ? 0 : item.subtype === 'starting_soon' ? 1 : item.subtype === 'final' ? 2 : 3;
+  const statusRank = (item: NovaPulseItem) => item.subtype === 'live' ? 0 : item.subtype === 'starting_soon' ? 1 : item.subtype === 'final' ? 2 : item.subtype === 'postponed' || item.subtype === 'cancelled' ? 4 : 3;
   const timestamp = (item: NovaPulseItem) => {
     if (item.subtype === 'final') {
       const completed = item.sports?.completedAt ? Date.parse(item.sports.completedAt) : Number.NaN;
@@ -173,7 +174,27 @@ function selectSports(ranked: readonly NovaPulseItem[], nowMs: number) {
   });
   const primary = ordered[0];
   const leagueKey = (item: NovaPulseItem | undefined) => item?.sports?.league?.trim().toLowerCase() || null;
-  const second = ordered.find((item) => stableKey(item) !== (primary ? stableKey(primary) : null) && leagueKey(item) !== leagueKey(primary))
+  const sportFamily = (item: NovaPulseItem | undefined) => {
+    const leagueId = item?.sports?.leagueId?.trim();
+    if (leagueId === '4391' || leagueId === '4479') return 'football';
+    if (leagueId === '4387' || leagueId === '4607') return 'basketball';
+    if (leagueId === '4424') return 'baseball';
+    if (leagueId === '4380') return 'hockey';
+    if (leagueId === '4346' || leagueId === '4328') return 'soccer';
+    if (leagueId === '4445' || leagueId === '4443') return 'fighting';
+    const league = item?.sports?.league?.trim().toLowerCase();
+    if (league === 'nfl' || league === 'ncaa division 1 football') return 'football';
+    if (league === 'nba' || league === "ncaa men's basketball") return 'basketball';
+    if (league === 'mlb') return 'baseball';
+    if (league === 'nhl') return 'hockey';
+    if (league === 'american major league soccer' || league === 'english premier league') return 'soccer';
+    if (league === 'boxing' || league === 'ufc') return 'fighting';
+    return 'other';
+  };
+  const comparable = primary ? ordered.filter((item) =>
+    item !== primary && statusRank(item) === statusRank(primary) && timestamp(item) === timestamp(primary)) : [];
+  const second = comparable.find((item) => sportFamily(item) !== sportFamily(primary))
+    ?? ordered.find((item) => stableKey(item) !== (primary ? stableKey(primary) : null) && leagueKey(item) !== leagueKey(primary))
     ?? ordered.find((item) => stableKey(item) !== (primary ? stableKey(primary) : null));
   return [...new Set([primary, second, ...ordered].filter((item): item is NovaPulseItem => Boolean(item)))].slice(0, 2);
 }

@@ -154,7 +154,7 @@ test('stale sports promos cannot create a TONIGHT card without a verified kickof
     source: 'test', source_event_id: 'verified', event_name: 'Verified game', status: 'starting_soon',
     starts_at: '2026-09-22T00:00:00.000Z', away_name: 'Away', home_name: 'Home',
   });
-  assert.equal(verified?.subtype, 'upcoming');
+  assert.equal(verified?.subtype, 'starting_soon');
   assert.equal(verified?.sports?.eventStatus, undefined);
   assert.equal(verified?.startsAt, '2026-09-22T00:00:00.000Z');
 });

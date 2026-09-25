@@ -1,7 +1,7 @@
 import type { NovaPulseItem, NovaPulseSportsData } from './novaPulseTypes';
 
 export type NovaPulseSportsRow = {
-  source: string; source_event_id: string; sport?: string | null; league_name?: string | null; event_name: string;
+  source: string; source_event_id: string; sport?: string | null; league_id?: string | null; league_name?: string | null; event_name: string;
   event_stage?: string | null; status: 'scheduled' | 'starting_soon' | 'live' | 'final' | 'postponed' | 'cancelled';
   status_detail?: string | null; competitor_a?: string | null; competitor_b?: string | null; home_name?: string | null; away_name?: string | null;
   home_team_id?: string | null; away_team_id?: string | null; home_team_logo_url?: string | null; away_team_logo_url?: string | null;
@@ -43,7 +43,7 @@ export function mapNovaPulseSportsRow(row: NovaPulseSportsRow): NovaPulseItem | 
   const first = isFight ? row.competitor_a : row.away_name;
   const second = isFight ? row.competitor_b : row.home_name;
   const sports: NovaPulseSportsData = {
-    format: isFight ? 'fight' : 'team', sport: row.sport ?? undefined, league: row.league_name ?? undefined, eventStage: row.event_stage ?? undefined,
+    format: isFight ? 'fight' : 'team', sport: row.sport ?? undefined, leagueId: row.league_id ?? undefined, league: row.league_name ?? undefined, eventStage: row.event_stage ?? undefined,
     eventStatus: isLive ? 'LIVE' : isFinal ? 'FINAL' : undefined, eventTitle: row.event_name,
     competitorA: row.competitor_a ?? undefined, competitorB: row.competitor_b ?? undefined, awayName: row.away_name ?? undefined, homeName: row.home_name ?? undefined,
     awayScore: row.away_score ?? undefined, homeScore: row.home_score ?? undefined, awayTeamLogoUrl: row.away_team_logo_url ?? undefined, homeTeamLogoUrl: row.home_team_logo_url ?? undefined,
@@ -58,7 +58,7 @@ export function mapNovaPulseSportsRow(row: NovaPulseSportsRow): NovaPulseItem | 
     isNoContest: isFinal ? row.is_no_contest : false, completedAt: isFinal ? row.completed_at ?? undefined : undefined,
   };
   return {
-    id: `sports-${row.source}-${row.source_event_id}`, type: 'sports', subtype: isFinal ? 'final' : isLive ? 'live' : 'upcoming',
+    id: `sports-${row.source}-${row.source_event_id}`, type: 'sports', subtype: isFinal ? 'final' : isLive ? 'live' : row.status === 'starting_soon' ? 'starting_soon' : 'upcoming',
     title: first && second ? `${first} vs ${second}` : row.event_name, subtitle: [row.sport, row.league_name].filter(Boolean).join(' • ') || undefined,
     startsAt: row.starts_at ?? undefined, expiresAt: row.completed_at ? new Date(Date.parse(row.completed_at) + 18 * 60 * 60_000).toISOString() : undefined,
     priority: priorityFor(row), artworkUrl: row.event_artwork_url ?? undefined, sports, sourceId: `sports-${row.source}`, sourceItemId: row.source_event_id,

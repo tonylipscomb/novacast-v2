@@ -14,8 +14,8 @@ while a non-overlapping invocation inside the cooldown returns
 recorded at acquisition time and survives release, upstream failure, and
 worker termination.
 
-The six configured leagues use one sequential upcoming request and one
-sequential recent request each: 12 requests per run. A two-minute minimum
+The ten configured leagues use one sequential upcoming request and one
+sequential recent request each: 20 requests per run. A two-minute minimum
 start interval keeps scheduled and manual invocations below TheSportsDB's
 30-requests-per-minute free-tier limit; the intended 15-minute schedule is
 therefore unaffected.

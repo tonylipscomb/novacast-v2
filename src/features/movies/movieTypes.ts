@@ -25,6 +25,7 @@ export type MovieCategory = {
 export type MovieSummary = {
   id: string;
   categoryId: string;
+  categoryName?: string;
   title: string;
   rawTitle?: string;
   countryCode?: string;

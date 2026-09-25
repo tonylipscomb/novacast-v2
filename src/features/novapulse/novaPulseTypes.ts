@@ -125,6 +125,7 @@ export type NovaPulseItem = {
   recommendation?: NovaPulseRecommendationSignals;
   channelId?: string;
   channelCategoryId?: string;
+  channelCategoryName?: string;
   channelName?: string;
   channelLogoUrl?: string;
   programTitle?: string;

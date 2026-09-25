@@ -5,6 +5,7 @@ import type { RecentItemRecord } from '../personalization/personalizationModel.t
 import { isNovaPulseEnglishDescription } from './novaPulseLogic.ts';
 import type { NovaPulseItem } from './novaPulseTypes.ts';
 import { normalizeGuideProgram, type NormalizedGuideProgram } from '../guide/guideTimeline.ts';
+import { curateNovaPulseLiveCategory } from './novaPulseCuration.ts';
 
 export const NOVA_PULSE_LIVE_CANDIDATE_LIMIT = 6;
 export const NOVA_PULSE_LIVE_EPG_LIMIT = 3;
@@ -56,6 +57,8 @@ export type NovaPulseLiveEpgDiagnostics = {
   resolutionMisses: number;
   providerMismatches: number;
   indexNotReady: number;
+  adultRejected: number;
+  regionForeignRejected: number;
 };
 
 export type NovaPulseLiveEpgResult = {
@@ -76,6 +79,7 @@ function channelFromIndexEntry(entry: NonNullable<ReturnType<typeof getLiveChann
   return {
     id: entry.id,
     categoryId: entry.categoryId,
+    categoryName: entry.categoryName,
     number: entry.number,
     name: entry.name,
     shortName: entry.name.slice(0, 2) || 'TV',
@@ -144,6 +148,7 @@ function buildCandidates(input: {
   favoriteChannels: readonly HomeFavoriteChannel[];
   recentItems: readonly RecentItemRecord[];
   getIndexEntry: (channelId: string) => ReturnType<typeof getLiveChannelIndexEntry>;
+  contentPolicy?: import('../content-policy/ContentPolicyService.ts').ContentPolicyId;
 }) {
   let providerMismatches = 0;
   const favorites = new Map<string, HomeFavoriteChannel>();
@@ -170,6 +175,8 @@ function buildCandidates(input: {
   }
   const ids = [...new Set([...favorites.keys(), ...recentById.keys()])];
   const candidates: Candidate[] = [];
+  let adultRejected = 0;
+  let regionForeignRejected = 0;
   let resolvedFromIndex = 0;
   let resolvedFromPersonalization = 0;
   let resolutionMisses = 0;
@@ -193,6 +200,12 @@ function buildCandidates(input: {
       resolutionMisses += 1;
       continue;
     }
+    const curation = curateNovaPulseLiveCategory({ categoryName: channel.categoryName, contentPolicy: input.contentPolicy });
+    if (!curation.allowed) {
+      if (curation.adult) adultRejected += 1;
+      if (curation.reason === 'foreign-region') regionForeignRejected += 1;
+      continue;
+    }
     if (entry) resolvedFromIndex += 1;
     else resolvedFromPersonalization += 1;
     candidates.push({
@@ -209,6 +222,7 @@ function buildCandidates(input: {
       .sort((left, right) => right.priorityRank - left.priorityRank || right.recentAt - left.recentAt || left.channel.id.localeCompare(right.channel.id))
       .slice(0, NOVA_PULSE_LIVE_CANDIDATE_LIMIT),
     resolution: { resolvedFromIndex, resolvedFromPersonalization, resolutionMisses, providerMismatches },
+    curation: { adultRejected, regionForeignRejected },
   };
 }
 
@@ -286,6 +300,7 @@ export async function runNovaPulseLiveEpgCycle(input: {
   getIndexEntry?: (channelId: string) => ReturnType<typeof getLiveChannelIndexEntry>;
   getIndexSize?: () => number;
   getShortEpg?: (channelId: string, limit?: number, signal?: AbortSignal, epgChannelId?: string) => Promise<ProviderGuideProgram[]>;
+  contentPolicy?: import('../content-policy/ContentPolicyService.ts').ContentPolicyId;
   isCurrent?: () => boolean;
   nowMs?: number;
 }): Promise<NovaPulseLiveEpgResult> {
@@ -294,6 +309,7 @@ export async function runNovaPulseLiveEpgCycle(input: {
     favoriteChannels: input.favoriteChannels,
     recentItems: input.recentItems,
     getIndexEntry: input.getIndexEntry ?? ((channelId) => getLiveChannelIndexEntry(input.providerId, channelId)),
+    contentPolicy: input.contentPolicy,
   });
   const candidates = candidateResult.candidates;
   const liveIndexSize = input.getIndexSize?.() ?? 0;
@@ -336,6 +352,8 @@ export async function runNovaPulseLiveEpgCycle(input: {
     resolutionMisses: candidateResult.resolution.resolutionMisses,
     providerMismatches: candidateResult.resolution.providerMismatches,
     indexNotReady: liveIndexSize === 0 ? 1 : 0,
+    adultRejected: candidateResult.curation.adultRejected,
+    regionForeignRejected: candidateResult.curation.regionForeignRejected,
   };
   if (!input.getShortEpg || !candidates.length) return { items: [], diagnostics };
   const nowMs = input.nowMs ?? Date.now();
@@ -414,6 +432,7 @@ export async function runNovaPulseLiveEpgCycle(input: {
       sourceItemId: candidate.channel.id,
       channelId: candidate.channel.id,
       channelCategoryId: candidate.channel.categoryId,
+      channelCategoryName: candidate.channel.categoryName,
       channelName: candidate.channel.name,
       channelLogoUrl: candidate.channel.logoUrl,
       programTitle: program.title,

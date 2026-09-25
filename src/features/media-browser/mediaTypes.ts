@@ -48,6 +48,7 @@ export type SeriesSummary = {
   id: string;
   seriesId: string;
   categoryId: string;
+  categoryName?: string;
   title: string;
   countryCode?: string;
   rawTitle?: string;

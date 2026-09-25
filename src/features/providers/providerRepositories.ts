@@ -141,6 +141,7 @@ export type ProviderLiveCategory = {
 export type ProviderLiveChannel = {
   id: string;
   categoryId: string;
+  categoryName?: string;
   number: number;
   name: string;
   /** Temporary release-audit provenance; never contains URLs or credentials. */

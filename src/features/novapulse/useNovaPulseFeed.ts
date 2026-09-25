@@ -18,6 +18,8 @@ import { enrichNovaPulsePresentation } from './novaPulsePresentation';
 import { runNovaPulseEnrichmentCycle, type NovaPulseEnrichmentDiagnostics, type NovaPulseMovieEnrichment } from './novaPulseEnrichment';
 import { runNovaPulseLiveEpgCycle, type NovaPulseLiveEpgDiagnostics } from './novaPulseLiveEpg';
 import { getCachedNovaPulseAnnouncements, loadNovaPulseAnnouncements, NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED, type NovaPulseAnnouncementsResult } from './novaPulseAnnouncements';
+import { curateNovaPulseCatalog } from './novaPulseCuration';
+import { getActiveContentPolicy as getContentPolicy } from '@/features/content-policy/ContentPolicyService';
 import type { HomeFavoriteChannel } from '@/features/personalization/personalizationHome';
 import type { RecentItemRecord } from '@/features/personalization/personalizationModel';
 import type { ProviderGuideProgram } from '@/features/providers/providerRepositories';
@@ -94,6 +96,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const [enrichmentState, setEnrichmentState] = useState<{ providerId: string; movies: ReadonlyMap<string, NovaPulseMovieEnrichment>; series: ReadonlyMap<string, SeriesMetadataCacheEntry>; seriesDetails: ReadonlyMap<string, import('@/features/media-browser/mediaTypes').SeriesDetail>; translations: ReadonlyMap<string, string>; diagnostics: NovaPulseEnrichmentDiagnostics | null }>({ providerId: '', movies: new Map(), series: new Map(), seriesDetails: new Map(), translations: new Map(), diagnostics: null });
   const [liveEpgState, setLiveEpgState] = useState<{ providerId: string; items: readonly NovaPulseItem[]; diagnostics: NovaPulseLiveEpgDiagnostics | null }>({ providerId: '', items: [], diagnostics: null });
   const [compositionSession] = useState(() => createNovaPulseCompositionSession());
+  const [compositionContentPolicy] = useState(() => getContentPolicy());
   const [announcementSession, setAnnouncementSession] = useState<{ providerId: string; result: NovaPulseAnnouncementsResult | null }>(() => ({ providerId, result: getCachedNovaPulseAnnouncements() }));
   const announcementFrozenRef = useRef(false);
   const [, setHistoryRevision] = useState(0);
@@ -227,12 +230,16 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
     [recommendationSignals],
   );
   const candidateInputSignature = useMemo(() => [
-    boundedMovies.map((movie) => [movie.id, movie.title, movie.rawTitle ?? '', movie.countryCode ?? '', movie.description ?? '', movie.posterUrl ?? '', movie.rating ?? movie.score ?? '', movie.year ?? '', movie.addedAt ?? '', movie.popularity ?? '', movie.providerSortOrder ?? ''].join('~')).join('|'),
-    boundedSeries.map((seriesItem) => [seriesItem.id, seriesItem.title, seriesItem.rawTitle ?? '', seriesItem.countryCode ?? '', seriesItem.description ?? '', seriesItem.backdropUrl ?? seriesItem.posterUrl ?? '', seriesItem.rating ?? '', seriesItem.year ?? '', seriesItem.addedAt ?? '', seriesItem.popularity ?? '', seriesItem.providerSortOrder ?? ''].join('~')).join('|'),
+    boundedMovies.map((movie) => [movie.id, movie.title, movie.rawTitle ?? '', movie.categoryName ?? '', movie.countryCode ?? '', movie.description ?? '', movie.posterUrl ?? '', movie.rating ?? movie.score ?? '', movie.year ?? '', movie.addedAt ?? '', movie.popularity ?? '', movie.providerSortOrder ?? ''].join('~')).join('|'),
+    boundedSeries.map((seriesItem) => [seriesItem.id, seriesItem.title, seriesItem.rawTitle ?? '', seriesItem.categoryName ?? '', seriesItem.countryCode ?? '', seriesItem.description ?? '', seriesItem.backdropUrl ?? seriesItem.posterUrl ?? '', seriesItem.rating ?? '', seriesItem.year ?? '', seriesItem.addedAt ?? '', seriesItem.popularity ?? '', seriesItem.providerSortOrder ?? ''].join('~')).join('|'),
   ].join('||'), [boundedMovies, boundedSeries]);
+  const curatedCatalog = useMemo(
+    () => curateNovaPulseCatalog(boundedMovies, boundedSeries, compositionContentPolicy),
+    [boundedMovies, boundedSeries, candidateInputSignature, compositionContentPolicy],
+  );
   const languageFilteredCatalog = useMemo(() => {
-    const movies = preferNovaPulseEnglishVariants(boundedMovies, 'movie');
-    const series = preferNovaPulseEnglishVariants(boundedSeries, 'series');
+    const movies = preferNovaPulseEnglishVariants(curatedCatalog.movies, 'movie');
+    const series = preferNovaPulseEnglishVariants(curatedCatalog.series, 'series');
     return {
       movies: movies.items,
       series: series.items,
@@ -242,7 +249,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
         duplicateVariantsCollapsed: movies.diagnostics.duplicateVariantsCollapsed + series.diagnostics.duplicateVariantsCollapsed,
       } satisfies NovaPulseVariantDiagnostics,
     };
-  }, [candidateInputSignature]);
+  }, [curatedCatalog]);
   const liveEpgSignature = useMemo(() => {
     const favorites = (liveEpg?.favoriteChannels ?? []).map((item) => item.id).sort().join(',');
     const recents = (liveEpg?.recentItems ?? []).filter((item) => item.mediaType === 'live').map((item) => `${item.contentId}:${item.lastOpenedAt}`).sort().join(',');
@@ -259,6 +266,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       getIndexEntry: liveEpgIndexEntryRef.current,
       getIndexSize: liveEpg?.getIndexSize,
       getShortEpg: liveEpgFetcherRef.current,
+      contentPolicy: compositionContentPolicy,
       isCurrent: () => active,
     }).then((result) => {
       if (!active) return;
@@ -269,7 +277,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       if (active) setLiveEpgState({ providerId, items: [], diagnostics: null });
     });
     return () => { active = false; };
-  }, [liveEpgFetcherAvailable, liveEpgSignature, providerId]);
+  }, [compositionContentPolicy, liveEpgFetcherAvailable, liveEpgSignature, providerId]);
   const liveEpgItems = liveEpgState.providerId === providerId ? liveEpgState.items : [];
   const realSportsSignature = useMemo(() => (realSports ?? []).slice(0, 32).map((item) => [item.id, item.title, item.subtype, item.updatedAt ?? ''].join('~')).join('|'), [realSports]);
   const composed = useMemo(() => {
@@ -429,6 +437,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       displayPrefixesRemoved,
       ...presentation.diagnostics,
       ...languageFilteredCatalog.diagnostics,
+      ...curatedCatalog.diagnostics,
       ...(enrichmentState.diagnostics ?? {}),
       ...(liveEpgState.diagnostics ?? {}),
       finalCount: composed.items.length,
@@ -444,7 +453,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
     };
     console.info('[NOVAPULSE_RECS_FEED]', JSON.stringify(payload));
     recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_recs_feed', ...payload } });
-  }, [backendCandidates, composed, displayPrefixesRemoved, liveEpgState.diagnostics, presentation.diagnostics, recommendationCacheHit, recommendationRequestAttempted, recommendationSeeds.confidence, recommendationSeeds.seeds.length, recommendationSeeds.signature, recommendationSignalSignature]);
+  }, [backendCandidates, composed, curatedCatalog.diagnostics, displayPrefixesRemoved, enrichmentState.diagnostics, languageFilteredCatalog.diagnostics, liveEpgState.diagnostics, presentation.diagnostics, recommendationCacheHit, recommendationRequestAttempted, recommendationSeeds.confidence, recommendationSeeds.seeds.length, recommendationSeeds.signature, recommendationSignalSignature]);
 
   useEffect(() => {
     const upcoming = (realSports ?? []).filter((item) => item.subtype === 'upcoming' || item.subtype === 'live').length;

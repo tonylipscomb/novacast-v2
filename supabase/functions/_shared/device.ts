@@ -8,12 +8,45 @@ export function hasDeviceAuthHeaders(request: Request) {
   return Boolean(publicCode && secret);
 }
 
-export async function authenticateDevice(request: Request, client: ReturnType<typeof getAdminClient>) {
+async function lookupDevice(request: Request, client: ReturnType<typeof getAdminClient>) {
   const publicCode = normalizePublicDeviceCode(request.headers.get('x-novacast-device-id'));
   const secret = request.headers.get('x-novacast-device-secret') ?? '';
   const secretHash = await hashDeviceSecret(secret);
   const { data: device, error } = await client.from('devices').select('id,public_device_code,status,activation_status').eq('public_device_code', publicCode).eq('device_secret_hash', secretHash).maybeSingle();
-  if (error || !device || ['revoked', 'blocked'].includes(device.status)) throw new Error('invalid_device');
+  if (error || !device) throw new Error('invalid_device');
+  return device;
+}
+
+export async function authenticateDevice(request: Request, client: ReturnType<typeof getAdminClient>) {
+  const device = await lookupDevice(request, client);
+  if (['revoked', 'blocked'].includes(device.status)) throw new Error('invalid_device');
+  return device;
+}
+
+export function isDeviceAuthorizationActive(
+  device: { status?: string | null; activation_status?: string | null },
+  activation: { status?: string | null; expires_at?: string | null } | null,
+  nowMs = Date.now(),
+) {
+  if (!device.status || !['registered', 'active'].includes(device.status)) return false;
+  if (device.activation_status !== 'active' || activation?.status !== 'active') return false;
+  if (activation.expires_at) {
+    const expiresAtMs = new Date(activation.expires_at).getTime();
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) return false;
+  }
+  return true;
+}
+
+export async function authenticateActiveDevice(request: Request, client: ReturnType<typeof getAdminClient>) {
+  const device = await lookupDevice(request, client);
+  const { data: activation, error } = await client
+    .from('device_activations')
+    .select('status,expires_at')
+    .eq('device_id', device.id)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (error) throw new Error('device_authorization_unavailable');
+  if (!isDeviceAuthorizationActive(device, activation)) throw new Error('device_not_authorized');
   return device;
 }
 

@@ -1,4 +1,4 @@
-import { authenticateDevice } from '../_shared/device.ts';
+import { authenticateActiveDevice } from '../_shared/device.ts';
 import { getAdminClient } from '../_shared/supabase.ts';
 import { jsonResponse, optionsResponse } from '../_shared/http.ts';
 import {
@@ -12,16 +12,19 @@ import {
 
 const ACTIVE_IMPORTANCE = ['critical', 'important', 'normal'] as const;
 
+function feedResponse(body: Record<string, unknown>, status = 200) {
+  const response = jsonResponse(body, status);
+  response.headers.set('Cache-Control', 'no-store, max-age=0');
+  return response;
+}
+
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return optionsResponse();
-  if (request.method !== 'GET') return jsonResponse({ errorCategory: 'method_not_allowed' }, 405);
+  if (request.method !== 'GET') return feedResponse({ errorCategory: 'method_not_allowed' }, 405);
 
   try {
     const client = getAdminClient();
-    const device = await authenticateDevice(request, client);
-    if (device.activation_status !== 'active' || device.status !== 'active') {
-      return jsonResponse({ errorCategory: 'device_not_authorized' }, 403);
-    }
+    await authenticateActiveDevice(request, client);
     const now = new Date();
     const nowIso = now.toISOString();
     const queries = await Promise.all(ACTIVE_IMPORTANCE.map((importance) => client
@@ -43,9 +46,15 @@ Deno.serve(async (request) => {
     const rows = queries.flatMap((result) => result.data ?? []) as unknown as AnnouncementRow[];
     const items = rows.filter((row) => announcementIsEligible(row, now)).sort(compareAnnouncements).slice(0, NOVAPULSE_ANNOUNCEMENT_MAX_ITEMS);
     const url = Deno.env.get('SUPABASE_URL') ?? '';
-    return jsonResponse({ ok: true, items: items.map((row) => toTvAnnouncement(row, url)) });
+    return feedResponse({ ok: true, items: items.map((row) => toTvAnnouncement(row, url)) });
   } catch (error) {
-    const category = error instanceof Error && error.message === 'invalid_device' ? 'invalid_device' : 'announcement_feed_unavailable';
-    return jsonResponse({ errorCategory: category }, category === 'invalid_device' ? 401 : 503);
+    const category = error instanceof Error
+      ? error.message === 'invalid_device'
+        ? 'invalid_device'
+        : error.message === 'device_not_authorized'
+          ? 'device_not_authorized'
+          : 'announcement_feed_unavailable'
+      : 'announcement_feed_unavailable';
+    return feedResponse({ errorCategory: category }, category === 'invalid_device' ? 401 : category === 'device_not_authorized' ? 403 : 503);
   }
 });

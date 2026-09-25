@@ -40,7 +40,7 @@ export type AnnouncementRow = {
 
 export const ANNOUNCEMENT_INTERNAL_SELECT = 'id,title,description,secondary_text,badge,kind,importance,artwork_path,status,priority,starts_at,ends_at,published_at,disabled_at,deleted_at,created_by,updated_by,created_at,updated_at,revision';
 export const ANNOUNCEMENT_ADMIN_SELECT = 'id,title,description,secondary_text,badge,kind,importance,status,priority,starts_at,ends_at,published_at,disabled_at,deleted_at,created_at,updated_at,revision,artwork_path';
-export const ANNOUNCEMENT_FEED_SELECT = 'id,revision,title,description,secondary_text,badge,kind,importance,priority,starts_at,ends_at,artwork_path,published_at,created_at';
+export const ANNOUNCEMENT_FEED_SELECT = 'id,revision,title,description,secondary_text,badge,kind,importance,priority,starts_at,ends_at,artwork_path,status,disabled_at,deleted_at,published_at,created_at';
 
 export type AnnouncementInput = {
   title: string;

@@ -121,9 +121,11 @@ test('remote announcements are disabled by default and use the committed endpoin
   assert.match(client, /NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED = process\.env\.EXPO_PUBLIC_NOVAPULSE_REMOTE_ANNOUNCEMENTS_ENABLED === 'true'/);
   assert.match(client, /novapulse-announcements-feed/);
   assert.match(client, /method: 'GET'/);
+  assert.match(client, /cache: 'no-store'/);
+  assert.match(client, /'Cache-Control': 'no-cache'/);
   assert.match(client, /deviceAuthHeaders\(\)/); // shared device-auth header convention
   assert.doesNotMatch(client, /service_role|sports.*secret|provider.*password/i);
-  assert.match(feed, /authenticateDevice\(request, client\)/);
+  assert.match(feed, /authenticateActiveDevice\(request, client\)/);
 });
 
 test('runtime validation is bounded, scheduled, deduplicated, and artwork-scoped', () => {
@@ -154,6 +156,8 @@ test('cache and fallback semantics preserve authoritative empty results', () => 
   assert.match(hook, /announcementResult\.source === 'static'/);
   assert.match(hook, /announcementResult\.items/);
   assert.match(hook, /announcementFrozenRef\.current/);
+  assert.match(hook, /if \(!active \|\| announcementFrozenRef\.current\) return;\s*announcementFrozenRef\.current = true;\s*setAnnouncementSession/);
+  assert.doesNotMatch(hook, /useEffect\(\(\) => \{\s*announcementFrozenRef\.current = true;/);
   assert.match(hook, /controller\.abort\(\)/);
 });
 
@@ -162,4 +166,9 @@ test('remote announcements remain non-actionable and use stable UUID identity', 
   assert.match(client, /action: \{ type: 'none' \}/);
   assert.match(client, /NOVA_PULSE_ANNOUNCEMENTS_MAX_ITEMS/);
   assert.doesNotMatch(client, /console\.(log|info).*title/);
+});
+
+test('announcement feed responses disable intermediary caching', () => {
+  assert.match(feed, /Cache-Control/);
+  assert.match(feed, /no-store/);
 });

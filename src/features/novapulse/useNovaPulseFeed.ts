@@ -136,12 +136,10 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
     const controller = new AbortController();
     void loadNovaPulseAnnouncements(controller.signal).then((result) => {
       if (!active || announcementFrozenRef.current) return;
+      announcementFrozenRef.current = true;
       setAnnouncementSession((current) => current.providerId === providerId ? { providerId, result } : current);
     }).catch(() => undefined);
     return () => { active = false; controller.abort(); };
-  }, [providerId]);
-  useEffect(() => {
-    announcementFrozenRef.current = true;
   }, [providerId]);
   useEffect(() => {
     if (!NOVA_PULSE_SPORTS_ENABLED) {

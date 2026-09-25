@@ -5,6 +5,7 @@ import {
   validateAnnouncementInput,
   validateArtworkBytes,
   AnnouncementValidationError,
+  ANNOUNCEMENT_FEED_SELECT,
   NOVAPULSE_ANNOUNCEMENT_MAX_ITEMS,
 } from './novapulseAnnouncements.ts';
 
@@ -68,6 +69,14 @@ Deno.test('future, active, expired, disabled, archived, deleted, and draft rows 
   assert(!announcementIsEligible(row({ deleted_at: '2026-09-23T17:00:00.000Z' }), now), 'deleted excluded');
 });
 
+Deno.test('feed projection includes every field required by server eligibility filtering', () => {
+  for (const field of ['status', 'disabled_at', 'deleted_at', 'starts_at', 'ends_at', 'title', 'description']) {
+    assert(ANNOUNCEMENT_FEED_SELECT.split(',').includes(field), `feed projection includes ${field}`);
+  }
+  assert(announcementIsEligible(row(), now), 'one eligible published row remains eligible after projection');
+  assert(!announcementIsEligible(row({ status: 'draft' }), now), 'draft projection is excluded');
+});
+
 Deno.test('importance, priority, schedule, and id ordering is deterministic and feed is capped at two', () => {
   const rows = [
     row({ id: '00000000-0000-4000-8000-000000000003', importance: 'normal', priority: 100 }),
@@ -112,7 +121,7 @@ Deno.test('migration and handlers keep direct access closed and use explicit aut
   assert(migration.includes('enable row level security') && migration.includes('revoke all on table public.novapulse_announcements from anon, authenticated'), 'table access closed');
   assert(migration.includes("'novapulse-announcement-artwork'") && migration.includes('5242880') && migration.includes("array['image/jpeg', 'image/png', 'image/webp']"), 'bucket limits');
   assert(admin.includes('requireAdmin(request, { distinguishForbidden: true })'), 'admin auth');
-  assert(feed.includes('authenticateDevice(request, client)') && feed.includes('device_not_authorized'), 'device auth');
+  assert(feed.includes('authenticateActiveDevice(request, client)') && feed.includes('device_not_authorized'), 'device auth');
   assert(admin.includes('declared <= 0 || declared > MAX_MULTIPART_BYTES'), 'bounded multipart upload');
   assert(!migration.includes('SECURITY DEFINER'), 'no security definer');
 });

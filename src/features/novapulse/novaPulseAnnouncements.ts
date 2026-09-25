@@ -205,7 +205,7 @@ async function readCache(nowMs = Date.now(), artworkOrigin = ''): Promise<Cached
 }
 
 async function writeCache(payload: CachedPayload) {
-  try { await AsyncStorage.setItem(NOVA_PULSE_ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(payload)); } catch { /* cache is optional */ }
+  try { await AsyncStorage.setItem(NOVA_PULSE_ANNOUNCEMENTS_STORAGE_KEY, JSON.stringify(payload)); } catch { /* cache failure is non-fatal */ }
 }
 
 function usableCached(cache: CachedPayload | null, nowMs: number) {
@@ -229,7 +229,7 @@ async function fetchRemote(signal?: AbortSignal): Promise<NovaPulseAnnouncements
   const abort = () => { callerAborted = true; controller.abort(); };
   signal?.addEventListener('abort', abort, { once: true });
   try {
-    const response = await fetch(`${api.apiUrl}/novapulse-announcements-feed`, { method: 'GET', headers: { apikey: api.anonKey, Authorization: `Bearer ${api.anonKey}`, ...(await deviceAuthHeaders()) }, signal: controller.signal });
+    const response = await fetch(`${api.apiUrl}/novapulse-announcements-feed`, { method: 'GET', cache: 'no-store', headers: { apikey: api.anonKey, Authorization: `Bearer ${api.anonKey}`, 'Cache-Control': 'no-cache', ...(await deviceAuthHeaders()) }, signal: controller.signal });
     const transient = response.status === 408 || response.status === 429 || response.status >= 500;
     if (!response.ok) {
           const cached = transient ? usableCached(await readCache(Date.now(), api.origin), Date.now()) : null;

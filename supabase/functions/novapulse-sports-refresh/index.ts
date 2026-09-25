@@ -2,6 +2,7 @@ import { getAdminClient } from '../_shared/supabase.ts';
 import { jsonResponse, optionsResponse } from '../_shared/http.ts';
 import { configuredLeagueIds, createTheSportsDbAdapter, type NormalizedSportsEvent } from '../_shared/novapulseSports.ts';
 import { isNovaPulseSportsRefreshAuthorized } from '../_shared/novapulseSportsAuth.ts';
+import { acquireSportsRefreshLease, releaseSportsRefreshLease, NOVA_PULSE_SPORTS_REFRESH_LEASE_TTL_MS } from '../_shared/novapulseSportsRefreshLease.ts';
 
 const UPCOMING_DAYS = 7;
 const RECENT_HOURS = 18;
@@ -20,33 +21,48 @@ function row(event: NormalizedSportsEvent) {
 }
 
 async function refresh() {
-  const adapter = createTheSportsDbAdapter();
-  if (!adapter.configured) {
-    return { ok: false, reason: 'source_unconfigured', provider: 'thesportsdb', configuredLeagueCount: configuredLeagueIds().length };
-  }
   const client = getAdminClient();
-  const now = new Date();
-  const upcoming = await adapter.upcoming(now, UPCOMING_DAYS);
-  const recent = await adapter.recent(now, RECENT_HOURS);
-  const events = Array.from(new Map([...upcoming.events, ...recent.events].map((event) => [`${event.source}:${event.source_event_id}`, event])).values()).map(row);
-  const keys = events.map((event) => event.source_event_id);
-  const { data: existing, error: existingError } = keys.length
-    ? await client.from('novapulse_sports_events').select('source_event_id').eq('source', 'thesportsdb').in('source_event_id', keys)
-    : { data: [], error: null };
-  if (existingError) throw new Error('sports_existing_lookup_failed');
-  const existingIds = new Set((existing ?? []).map((event) => String(event.source_event_id)));
-  const { error } = events.length ? await client.from('novapulse_sports_events').upsert(events, { onConflict: 'source,source_event_id' }) : { error: null };
-  if (error) throw new Error('sports_upsert_failed');
-  const { count: expiredCount, error: expireError } = await client.from('novapulse_sports_events').delete({ count: 'exact' }).lt('expires_at', now.toISOString());
-  if (expireError) throw new Error('sports_expire_failed');
-  return {
-    ok: true, provider: 'thesportsdb', configuredLeagueCount: configuredLeagueIds().length,
-    eventsSeen: events.length, eventsUpserted: events.length,
-    inserted: events.filter((event) => !existingIds.has(event.source_event_id)).length,
-    updated: events.filter((event) => existingIds.has(event.source_event_id)).length,
-    failedLeagues: [...new Set([...upcoming.failedLeagues, ...recent.failedLeagues])], expiredCount: expiredCount ?? 0,
-    upcomingDays: UPCOMING_DAYS, recentHours: RECENT_HOURS,
-  };
+  const lease = await acquireSportsRefreshLease(client);
+  if (lease.status !== 'acquired') {
+    return {
+      ok: true,
+      skipped: true,
+      reason: lease.status,
+      retryAfterSeconds: lease.retryAfterSeconds,
+      leaseTtlMs: NOVA_PULSE_SPORTS_REFRESH_LEASE_TTL_MS,
+    };
+  }
+
+  try {
+    const adapter = createTheSportsDbAdapter();
+    if (!adapter.configured) {
+      return { ok: false, reason: 'source_unconfigured', provider: 'thesportsdb', configuredLeagueCount: configuredLeagueIds().length };
+    }
+    const now = new Date();
+    const upcoming = await adapter.upcoming(now, UPCOMING_DAYS);
+    const recent = await adapter.recent(now, RECENT_HOURS);
+    const events = Array.from(new Map([...upcoming.events, ...recent.events].map((event) => [`${event.source}:${event.source_event_id}`, event])).values()).map(row);
+    const keys = events.map((event) => event.source_event_id);
+    const { data: existing, error: existingError } = keys.length
+      ? await client.from('novapulse_sports_events').select('source_event_id').eq('source', 'thesportsdb').in('source_event_id', keys)
+      : { data: [], error: null };
+    if (existingError) throw new Error('sports_existing_lookup_failed');
+    const existingIds = new Set((existing ?? []).map((event) => String(event.source_event_id)));
+    const { error } = events.length ? await client.from('novapulse_sports_events').upsert(events, { onConflict: 'source,source_event_id' }) : { error: null };
+    if (error) throw new Error('sports_upsert_failed');
+    const { count: expiredCount, error: expireError } = await client.from('novapulse_sports_events').delete({ count: 'exact' }).lt('expires_at', now.toISOString());
+    if (expireError) throw new Error('sports_expire_failed');
+    return {
+      ok: true, provider: 'thesportsdb', configuredLeagueCount: configuredLeagueIds().length,
+      eventsSeen: events.length, eventsUpserted: events.length,
+      inserted: events.filter((event) => !existingIds.has(event.source_event_id)).length,
+      updated: events.filter((event) => existingIds.has(event.source_event_id)).length,
+      failedLeagues: [...new Set([...upcoming.failedLeagues, ...recent.failedLeagues])], expiredCount: expiredCount ?? 0,
+      upcomingDays: UPCOMING_DAYS, recentHours: RECENT_HOURS,
+    };
+  } finally {
+    await releaseSportsRefreshLease(client, lease);
+  }
 }
 
 Deno.serve(async (request) => {
@@ -56,6 +72,11 @@ Deno.serve(async (request) => {
   try {
     return jsonResponse(await refresh());
   } catch (error) {
-    return jsonResponse({ ok: false, error: error instanceof Error ? error.message : 'sports_refresh_failed' }, 502);
+    const code = error instanceof Error ? error.message : '';
+    const category = ['sports_lease_unavailable', 'sports_lease_release_failed', 'sports_existing_lookup_failed', 'sports_upsert_failed', 'sports_expire_failed'].includes(code)
+      ? code
+      : 'sports_refresh_failed';
+    const status = category.startsWith('sports_lease_') ? 503 : 502;
+    return jsonResponse({ ok: false, error: category }, status);
   }
 });

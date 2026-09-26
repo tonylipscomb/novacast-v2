@@ -8,6 +8,7 @@ const shared = fs.readFileSync('supabase/functions/_shared/novapulseAnnouncement
 const feed = fs.readFileSync('supabase/functions/novapulse-announcements-feed/index.ts', 'utf8');
 const admin = fs.readFileSync('supabase/functions/admin-novapulse-announcements/index.ts', 'utf8');
 const mobile = fs.readFileSync('src/features/novapulse/novaPulseAnnouncements.ts', 'utf8');
+const logic = fs.readFileSync('src/features/novapulse/novaPulseLogic.ts', 'utf8');
 const card = fs.readFileSync('src/features/novapulse/NovaPulseCard.tsx', 'utf8');
 const adminUi = fs.readFileSync('pairing-web/src/AdminAnnouncements.tsx', 'utf8');
 const mock = fs.readFileSync('src/features/novapulse/novaPulseMockFeed.ts', 'utf8');
@@ -78,6 +79,19 @@ test('B5.1 keeps bounded cache, non-actionable TV identity, and production caps 
   const composition = fs.readFileSync('src/features/novapulse/novaPulseV2.ts', 'utf8');
   assert.match(composition, /type === 'announcement'/);
   assert.match(composition, /NOVA_PULSE_V2_MAX_ITEMS = 12/);
+});
+
+test('B5.1 uses kind fallbacks for blank announcement badges', () => {
+  assert.match(logic, /const ANNOUNCEMENT_BADGES = \{/);
+  assert.match(logic, /service_alert: 'SERVICE ALERT'/);
+  assert.match(logic, /update: 'UPDATE'/);
+  assert.match(logic, /general: 'ANNOUNCEMENT'/);
+  assert.match(logic, /const customBadge = typeof item\.badgeOverride === 'string'/);
+  assert.match(logic, /announcementType === 'service_alert' && customBadge\?\.toLocaleLowerCase\(\) === 'alert'/);
+  assert.match(logic, /return customBadge \?\? ANNOUNCEMENT_BADGES\[item\.announcementType \?\? 'general'\]/);
+  assert.match(mobile, /item\.kind !== 'provider_alert'/);
+  assert.match(mobile, /action: \{ type: 'none' \}/);
+  assert.match(fs.readFileSync('src/features/novapulse/novaPulseV2.ts', 'utf8'), /NOVA_PULSE_V2_MAX_ITEMS = 12/);
 });
 
 test('B5.1 applies five-minute critical LKG and sixty-minute noncritical LKG limits', async () => {

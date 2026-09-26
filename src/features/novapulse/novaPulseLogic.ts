@@ -322,7 +322,9 @@ const ANNOUNCEMENT_BADGES = {
 } as const;
 
 export function getNovaPulseAnnouncementBadge(item: NovaPulseItem) {
-  return item.badgeOverride ?? item.badge ?? ANNOUNCEMENT_BADGES[item.announcementType ?? 'general'];
+  const customBadge = typeof item.badgeOverride === 'string' && item.badgeOverride.trim() ? item.badgeOverride.trim() : null;
+  if (item.announcementType === 'service_alert' && customBadge?.toLocaleLowerCase() === 'alert') return 'SERVICE ALERT';
+  return customBadge ?? ANNOUNCEMENT_BADGES[item.announcementType ?? 'general'];
 }
 
 export function formatNovaPulseAnnouncementTiming(effectiveAt?: string, expiresAt?: string, now = Date.now()) {

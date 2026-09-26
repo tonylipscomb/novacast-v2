@@ -7,6 +7,7 @@ import {
   isoToLocalInput,
   localInputToIso,
   validateAnnouncementDraft,
+  announcementKindLabel,
   validateArtworkFile,
   type AnnouncementRecord,
   emptyAnnouncementDraft,
@@ -35,6 +36,9 @@ test('schedule validation preserves open values and rejects reversed or equal ti
   assert.equal(validateAnnouncementDraft({ ...emptyAnnouncementDraft, title: 'x', description: 'y', startsAt: '', endsAt: '' }, false), null);
   assert.match(validateAnnouncementDraft({ ...emptyAnnouncementDraft, title: 'x', description: 'y', startsAt: '2026-01-02T10:00', endsAt: '2026-01-02T09:00' }, false) ?? '', /later/);
   assert.match(validateAnnouncementDraft({ ...emptyAnnouncementDraft, title: 'x', description: 'y', startsAt: '2026-01-02T10:00', endsAt: '2026-01-02T10:00' }, false) ?? '', /later/);
+  assert.match(validateAnnouncementDraft({ ...emptyAnnouncementDraft, title: 'x', description: 'y', kind: 'provider_alert' }, false) ?? '', /not available/);
+  assert.match(validateAnnouncementDraft({ ...emptyAnnouncementDraft, title: 'x', description: 'y', importance: 'critical', endsAt: '' }, true) ?? '', /future end/);
+  assert.equal(announcementKindLabel('service_alert'), 'Service Alert');
 });
 
 test('status derivation distinguishes draft, scheduled, live, expired, disabled, and archived', () => {

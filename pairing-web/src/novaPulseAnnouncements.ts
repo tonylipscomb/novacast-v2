@@ -85,6 +85,7 @@ export function announcementStatusLabel(status: AnnouncementStatus) {
 }
 
 export function validateAnnouncementDraft(draft: AnnouncementDraft, publish: boolean): string | null {
+  if (draft.kind === 'provider_alert') return 'Provider-targeted alerts are not available yet.';
   if (draft.title.length > MAX_TITLE_LENGTH) return `Title must be ${MAX_TITLE_LENGTH} characters or fewer.`;
   if (draft.description.length > MAX_DESCRIPTION_LENGTH) return `Description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer.`;
   if (draft.secondaryText.length > MAX_SECONDARY_LENGTH) return `Subtitle must be ${MAX_SECONDARY_LENGTH} characters or fewer.`;
@@ -93,8 +94,16 @@ export function validateAnnouncementDraft(draft: AnnouncementDraft, publish: boo
   if (!Number.isInteger(priority) || priority < MIN_PRIORITY || priority > MAX_PRIORITY) return `Priority must be between ${MIN_PRIORITY} and ${MAX_PRIORITY}.`;
   const scheduleError = validateSchedule(draft.startsAt, draft.endsAt);
   if (scheduleError) return scheduleError;
+  if (publish && draft.importance === 'critical' && (!draft.endsAt || Date.parse(localInputToIso(draft.endsAt) ?? '') <= Date.now())) return 'Critical alerts require a future end time.';
   if (publish && (!draft.title.trim() || !draft.description.trim())) return 'Published announcements need a title and description.';
   return null;
+}
+
+export function announcementKindLabel(kind: string) {
+  if (kind === 'update') return 'Update';
+  if (kind === 'service_alert') return 'Service Alert';
+  if (kind === 'provider_alert') return 'Provider Alert (unsupported)';
+  return 'Announcement';
 }
 
 export function validateArtworkFile(file: File): string | null {

@@ -1,6 +1,7 @@
 import {
   announcementIsEligible,
   compareAnnouncements,
+  selectAnnouncementRows,
   toTvAnnouncement,
   validateAnnouncementInput,
   validateArtworkBytes,
@@ -59,6 +60,10 @@ Deno.test('announcement input enforces bounded fields, kinds, priority, and sche
   try { validateAnnouncementInput({ title: 'x', description: 'y', priority: 101 }, { published: false }); throw new Error('expected priority rejection'); } catch (error) { assert(error instanceof AnnouncementValidationError && error.code === 'invalid_priority', 'priority limit'); }
   try { validateAnnouncementInput({ title: 'x', description: 'y', startsAt: '2026-10-02T00:00:00Z', endsAt: '2026-10-01T00:00:00Z' }, { published: false }); throw new Error('expected schedule rejection'); } catch (error) { assert(error instanceof AnnouncementValidationError && error.code === 'ends_at_must_follow_starts_at', 'schedule order'); }
   try { validateAnnouncementInput({ title: 'x', description: '' }, { published: true }); throw new Error('expected content rejection'); } catch (error) { assert(error instanceof AnnouncementValidationError && error.code === 'invalid_description', 'published content'); }
+  try { validateAnnouncementInput({ title: 'x', description: 'y', kind: 'provider_alert' }, { published: false }); throw new Error('expected provider targeting rejection'); } catch (error) { assert(error instanceof AnnouncementValidationError && error.code === 'provider_targeting_unavailable', 'provider targeting disabled'); }
+  try { validateAnnouncementInput({ title: 'x', description: 'y', importance: 'critical' }, { published: true }); throw new Error('expected critical expiry rejection'); } catch (error) { assert(error instanceof AnnouncementValidationError && error.code === 'critical_requires_future_end', 'critical expiry required'); }
+  const critical = validateAnnouncementInput({ title: 'x', description: 'y', importance: 'critical', endsAt: '2099-01-01T00:00:00Z' }, { published: true });
+  equal(critical.importance, 'critical', 'future critical accepted');
 });
 
 Deno.test('future, active, expired, disabled, archived, deleted, and draft rows are filtered safely', () => {
@@ -67,6 +72,8 @@ Deno.test('future, active, expired, disabled, archived, deleted, and draft rows 
   assert(!announcementIsEligible(row({ ends_at: '2026-09-23T17:59:59.000Z' }), now), 'expired excluded');
   for (const status of ['disabled', 'archived', 'draft']) assert(!announcementIsEligible(row({ status }), now), `${status} excluded`);
   assert(!announcementIsEligible(row({ deleted_at: '2026-09-23T17:00:00.000Z' }), now), 'deleted excluded');
+  assert(!announcementIsEligible(row({ kind: 'provider_alert' }), now), 'provider alert excluded');
+  assert(!announcementIsEligible(row({ importance: 'critical', ends_at: null }), now), 'critical without expiry excluded');
 });
 
 Deno.test('feed projection includes every field required by server eligibility filtering', () => {
@@ -87,6 +94,18 @@ Deno.test('importance, priority, schedule, and id ordering is deterministic and 
   equal(ordered[0].importance, 'critical', 'critical first');
   equal(ordered[1].importance, 'important', 'important second');
   equal(ordered.slice(0, NOVAPULSE_ANNOUNCEMENT_MAX_ITEMS).length, 2, 'two item cap');
+});
+
+Deno.test('information selection ranks service alerts ahead of updates and general notices', () => {
+  const rows = [
+    row({ id: '00000000-0000-4000-8000-000000000003', kind: 'general', importance: 'important', priority: 100 }),
+    row({ id: '00000000-0000-4000-8000-000000000002', kind: 'update', importance: 'important', priority: 0 }),
+    row({ id: '00000000-0000-4000-8000-000000000001', kind: 'service_alert', importance: 'important', priority: 0 }),
+  ];
+  const selected = selectAnnouncementRows(rows, now);
+  equal(selected.length, 2, 'selection cap');
+  equal(selected[0].kind, 'service_alert', 'service alert precedence');
+  equal(selected[1].kind, 'update', 'update precedence');
 });
 
 Deno.test('TV response contains only public announcement fields and supports artwork fallback', () => {

@@ -3,9 +3,7 @@ import { getAdminClient } from '../_shared/supabase.ts';
 import { jsonResponse, optionsResponse } from '../_shared/http.ts';
 import {
   ANNOUNCEMENT_FEED_SELECT,
-  NOVAPULSE_ANNOUNCEMENT_MAX_ITEMS,
-  announcementIsEligible,
-  compareAnnouncements,
+  selectAnnouncementRows,
   toTvAnnouncement,
   type AnnouncementRow,
 } from '../_shared/novapulseAnnouncements.ts';
@@ -32,6 +30,7 @@ Deno.serve(async (request) => {
       .select(ANNOUNCEMENT_FEED_SELECT)
       .eq('status', 'published')
       .eq('importance', importance)
+      .neq('kind', 'provider_alert')
       .is('deleted_at', null)
       .is('disabled_at', null)
       .or(`starts_at.is.null,starts_at.lte.${nowIso}`)
@@ -44,7 +43,7 @@ Deno.serve(async (request) => {
       return jsonResponse({ errorCategory: 'announcement_feed_unavailable' }, 503);
     }
     const rows = queries.flatMap((result) => result.data ?? []) as unknown as AnnouncementRow[];
-    const items = rows.filter((row) => announcementIsEligible(row, now)).sort(compareAnnouncements).slice(0, NOVAPULSE_ANNOUNCEMENT_MAX_ITEMS);
+    const items = selectAnnouncementRows(rows, now);
     const url = Deno.env.get('SUPABASE_URL') ?? '';
     return feedResponse({ ok: true, items: items.map((row) => toTvAnnouncement(row, url)) });
   } catch (error) {

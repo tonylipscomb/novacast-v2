@@ -17,6 +17,7 @@ const MAX_DESCRIPTION = 500;
 const MAX_SECONDARY = 80;
 const MAX_BADGE = 32;
 const IMPORTANCE = new Set<NovaPulseAnnouncementImportance>(['normal', 'important', 'critical']);
+const SUPPORTED_KINDS = new Set(['general', 'update', 'service_alert']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type NovaPulseRemoteAnnouncement = {
@@ -31,6 +32,7 @@ export type NovaPulseRemoteAnnouncement = {
   priority: number;
   startsAt?: string;
   endsAt?: string;
+  publishedAt?: string;
   artworkUrl?: string;
 };
 
@@ -41,6 +43,23 @@ export type NovaPulseAnnouncementsResult = {
   rejectedCount: number;
   cacheAgeBucket?: 'fresh' | 'under_5m' | 'under_60m' | 'expired';
 };
+
+const announcementImportanceRank: Record<NovaPulseAnnouncementImportance, number> = { critical: 3, important: 2, normal: 1 };
+const announcementKindRank: Record<string, number> = { service_alert: 3, update: 2, general: 1 };
+
+function selectNovaPulseAnnouncements(items: NovaPulseRemoteAnnouncement[]) {
+  return [...items].sort((a, b) => {
+    const importance = announcementImportanceRank[b.importance] - announcementImportanceRank[a.importance];
+    if (importance) return importance;
+    const kind = (announcementKindRank[b.kind] ?? 0) - (announcementKindRank[a.kind] ?? 0);
+    if (kind) return kind;
+    if (b.priority !== a.priority) return b.priority - a.priority;
+    const aTime = Date.parse(a.startsAt ?? a.publishedAt ?? '') || 0;
+    const bTime = Date.parse(b.startsAt ?? b.publishedAt ?? '') || 0;
+    if (bTime !== aTime) return bTime - aTime;
+    return a.id.localeCompare(b.id);
+  });
+}
 
 type CachedPayload = {
   schemaVersion: 1;
@@ -108,16 +127,20 @@ export function validateNovaPulseAnnouncement(value: unknown, nowMs = Date.now()
   const priority = row.priority;
   const startsAt = validSchedule(row.startsAt, nowMs, true);
   const endsAt = validSchedule(row.endsAt, nowMs, false);
-  if (!UUID.test(id) || !Number.isInteger(revision) || Number(revision) <= 0 || !title || !description || typeof importance !== 'string' || !IMPORTANCE.has(importance as NovaPulseAnnouncementImportance) || !Number.isInteger(priority) || Number(priority) < 0 || Number(priority) > 100 || startsAt === null || endsAt === null) return null;
+  const publishedAt = typeof row.publishedAt === 'string' && Number.isFinite(Date.parse(row.publishedAt)) ? new Date(row.publishedAt).toISOString() : undefined;
+  const kind = normalizeText(row.kind, 32) ?? 'general';
+  if (!UUID.test(id) || !Number.isInteger(revision) || Number(revision) <= 0 || !title || !description || typeof importance !== 'string' || !IMPORTANCE.has(importance as NovaPulseAnnouncementImportance) || !SUPPORTED_KINDS.has(kind) || !Number.isInteger(priority) || Number(priority) < 0 || Number(priority) > 100 || startsAt === null || endsAt === null) return null;
   if (startsAt && endsAt && Date.parse(endsAt) <= Date.parse(startsAt)) return null;
+  if (importance === 'critical' && (!endsAt || Date.parse(endsAt) <= nowMs)) return null;
   const item: NovaPulseRemoteAnnouncement = {
     id,
     revision: Number(revision),
     title,
     description,
-    kind: normalizeText(row.kind, 32) ?? 'general',
+    kind,
     importance: importance as NovaPulseAnnouncementImportance,
     priority: Number(priority),
+    publishedAt,
   };
   const secondaryText = normalizeText(row.secondaryText, MAX_SECONDARY);
   const badge = normalizeText(row.badge, MAX_BADGE);
@@ -134,19 +157,20 @@ export function normalizeNovaPulseAnnouncements(payload: unknown, nowMs = Date.n
   const rawItems = Array.isArray(payload) ? payload : payload && typeof payload === 'object' && (payload as { ok?: unknown }).ok === true && Array.isArray((payload as { items?: unknown }).items) ? (payload as { items: unknown[] }).items : null;
   if (!rawItems) return { items: [] as NovaPulseRemoteAnnouncement[], rejectedCount: 0, validPayload: false };
   const seen = new Set<string>();
-  const items: NovaPulseRemoteAnnouncement[] = [];
+  const validatedItems: NovaPulseRemoteAnnouncement[] = [];
   let rejectedCount = 0;
   for (const raw of rawItems) {
     const item = validateNovaPulseAnnouncement(raw, nowMs, artworkOrigin);
     if (!item || seen.has(item.id)) { rejectedCount += 1; continue; }
     seen.add(item.id);
-    items.push(item);
+    validatedItems.push(item);
   }
+  const items = selectNovaPulseAnnouncements(validatedItems);
   return { items: items.slice(0, NOVA_PULSE_ANNOUNCEMENTS_MAX_ITEMS), rejectedCount, validPayload: rawItems.length === 0 || items.length > 0 };
 }
 
 function isUsable(item: NovaPulseRemoteAnnouncement, nowMs: number) {
-  return (!item.startsAt || Date.parse(item.startsAt) <= nowMs) && (!item.endsAt || Date.parse(item.endsAt) > nowMs);
+  return item.kind !== 'provider_alert' && !(item.importance === 'critical' && (!item.endsAt || Date.parse(item.endsAt) <= nowMs)) && (!item.startsAt || Date.parse(item.startsAt) <= nowMs) && (!item.endsAt || Date.parse(item.endsAt) > nowMs);
 }
 
 function cacheAgeBucket(age: number): NovaPulseAnnouncementsResult['cacheAgeBucket'] {
@@ -209,9 +233,15 @@ async function writeCache(payload: CachedPayload) {
 }
 
 function usableCached(cache: CachedPayload | null, nowMs: number) {
-  if (!cache || Date.now() - cache.fetchedAt >= NOVA_PULSE_ANNOUNCEMENTS_LKG_MAX_AGE_MS) return null;
-  const items = cache.items.filter((item) => isUsable(item, nowMs));
-  return { cache, items };
+  if (!cache) return null;
+  const age = Date.now() - cache.fetchedAt;
+  if (age < 0 || age >= NOVA_PULSE_ANNOUNCEMENTS_LKG_MAX_AGE_MS) return null;
+  if (cache.kind === 'empty') return { cache, items: [] };
+  const items = cache.items.filter((item) => {
+    const maxAge = item.importance === 'critical' ? 5 * 60_000 : NOVA_PULSE_ANNOUNCEMENTS_LKG_MAX_AGE_MS;
+    return age < maxAge && isUsable(item, nowMs);
+  });
+  return items.length ? { cache, items } : null;
 }
 
 export function getCachedNovaPulseAnnouncements(nowMs = Date.now()): NovaPulseAnnouncementsResult | null {

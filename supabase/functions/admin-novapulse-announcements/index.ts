@@ -201,7 +201,17 @@ Deno.serve(async (request) => {
     }
     if (action === 'publish') {
       const current = await requireRevision(client, id, revision);
-      validateAnnouncementInput(current, { published: true });
+      validateAnnouncementInput({
+        title: current.title,
+        description: current.description,
+        secondaryText: current.secondary_text,
+        badge: current.badge,
+        kind: current.kind,
+        importance: current.importance,
+        priority: current.priority,
+        startsAt: current.starts_at,
+        endsAt: current.ends_at,
+      }, { published: true });
       const result = await updateWithRevision(client, id, revision, { status: 'published', published_at: current.published_at ?? new Date().toISOString(), disabled_at: null, deleted_at: null, updated_by: user.id });
       return adminJsonResponse(request, { item: publicAdminRow(result.after, url) });
     }

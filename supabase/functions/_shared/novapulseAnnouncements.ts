@@ -85,6 +85,7 @@ export function validateAnnouncementInput(input: AnnouncementInput, options: { p
   const kind = (input.kind ?? 'general') as AnnouncementKind;
   const importance = (input.importance ?? 'normal') as AnnouncementImportance;
   if (!ANNOUNCEMENT_KINDS.includes(kind)) throw new AnnouncementValidationError('invalid_kind');
+  if (kind === 'provider_alert') throw new AnnouncementValidationError('provider_targeting_unavailable');
   if (!ANNOUNCEMENT_IMPORTANCE.includes(importance)) throw new AnnouncementValidationError('invalid_importance');
   const priority = input.priority == null ? 0 : Number(input.priority);
   if (!Number.isInteger(priority) || priority < 0 || priority > 100) throw new AnnouncementValidationError('invalid_priority');
@@ -93,25 +94,36 @@ export function validateAnnouncementInput(input: AnnouncementInput, options: { p
   if (startsAt && endsAt && Date.parse(endsAt) <= Date.parse(startsAt)) {
     throw new AnnouncementValidationError('ends_at_must_follow_starts_at');
   }
+  if (options.published && importance === 'critical' && (!endsAt || Date.parse(endsAt) <= Date.now())) {
+    throw new AnnouncementValidationError('critical_requires_future_end');
+  }
   return { title: title ?? '', description: description ?? '', secondary_text: secondaryText, badge, kind, importance, priority, starts_at: startsAt, ends_at: endsAt };
 }
 
-export function announcementIsEligible(row: Pick<AnnouncementRow, 'status' | 'deleted_at' | 'disabled_at' | 'title' | 'description' | 'starts_at' | 'ends_at'>, now = new Date()) {
-  if (row.status !== 'published' || row.deleted_at || row.disabled_at || !row.title.trim() || !row.description.trim()) return false;
+export function announcementIsEligible(row: Pick<AnnouncementRow, 'status' | 'deleted_at' | 'disabled_at' | 'title' | 'description' | 'starts_at' | 'ends_at' | 'kind' | 'importance'>, now = new Date()) {
+  if (row.status !== 'published' || row.deleted_at || row.disabled_at || row.kind === 'provider_alert' || !row.title.trim() || !row.description.trim()) return false;
   const nowMs = now.getTime();
+  if (row.importance === 'critical' && (!row.ends_at || !Number.isFinite(Date.parse(row.ends_at)) || Date.parse(row.ends_at) <= nowMs)) return false;
   return (!row.starts_at || Date.parse(row.starts_at) <= nowMs) && (!row.ends_at || Date.parse(row.ends_at) > nowMs);
 }
 
 const importanceRank: Record<AnnouncementImportance, number> = { critical: 3, important: 2, normal: 1 };
 
-export function compareAnnouncements(a: Pick<AnnouncementRow, 'importance' | 'priority' | 'starts_at' | 'published_at' | 'created_at' | 'id'>, b: Pick<AnnouncementRow, 'importance' | 'priority' | 'starts_at' | 'published_at' | 'created_at' | 'id'>) {
+export function compareAnnouncements(a: Pick<AnnouncementRow, 'kind' | 'importance' | 'priority' | 'starts_at' | 'published_at' | 'created_at' | 'id'>, b: Pick<AnnouncementRow, 'kind' | 'importance' | 'priority' | 'starts_at' | 'published_at' | 'created_at' | 'id'>) {
   const importance = importanceRank[b.importance] - importanceRank[a.importance];
   if (importance) return importance;
+  const kindRank: Record<AnnouncementKind, number> = { service_alert: 3, update: 2, general: 1, provider_alert: 0 };
+  const kind = kindRank[b.kind] - kindRank[a.kind];
+  if (kind) return kind;
   if (b.priority !== a.priority) return b.priority - a.priority;
   const aTime = Date.parse(a.starts_at ?? a.published_at ?? a.created_at);
   const bTime = Date.parse(b.starts_at ?? b.published_at ?? b.created_at);
   if (bTime !== aTime) return bTime - aTime;
   return a.id.localeCompare(b.id);
+}
+
+export function selectAnnouncementRows(rows: AnnouncementRow[], now = new Date()) {
+  return rows.filter((row) => announcementIsEligible(row, now)).sort(compareAnnouncements).slice(0, NOVAPULSE_ANNOUNCEMENT_MAX_ITEMS);
 }
 
 export function publicArtworkUrl(supabaseUrl: string, path: string | null) {
@@ -131,6 +143,7 @@ export function toTvAnnouncement(row: AnnouncementRow, supabaseUrl: string) {
     priority: row.priority,
     startsAt: row.starts_at,
     endsAt: row.ends_at,
+    publishedAt: row.published_at,
     artworkUrl: publicArtworkUrl(supabaseUrl, row.artwork_path),
   };
 }

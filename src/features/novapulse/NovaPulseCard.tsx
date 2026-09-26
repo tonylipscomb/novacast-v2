@@ -128,7 +128,7 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
   }, [hasRemoteArtwork, mediaKey]);
   const artworkFit = item.artworkFit ?? 'cover';
   const fallbackArtwork = item.type === 'movie' || item.type === 'series' ? NOVACAST_FALLBACK_CARD : null;
-  const fallbackIcon = item.type === 'announcement' ? 'bullhorn-outline' : item.type === 'series' ? 'television-classic' : item.type === 'movie' ? 'movie-open-outline' : item.type === 'live_epg' ? 'television' : 'trophy-outline';
+  const fallbackIcon = item.type === 'announcement' ? item.announcementType === 'service_alert' ? 'alert-circle-outline' : item.announcementType === 'update' ? 'update' : 'bullhorn-outline' : item.type === 'series' ? 'television-classic' : item.type === 'movie' ? 'movie-open-outline' : item.type === 'live_epg' ? 'television' : 'trophy-outline';
   return (
     <Pressable
       ref={(node) => onFocusHandle?.(node ? findNodeHandle(node) : null)}
@@ -148,7 +148,7 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
       onBlur={() => { setFocused(false); onBlur(); }}
       onPress={onPress}
       onLayout={(event) => { const { width, height } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ cardWidth: width, height })); }}
-      style={[styles.card, item.announcementPriority === 'high' ? styles.announcementHigh : null, item.announcementPriority === 'critical' ? styles.announcementCritical : null, novaTvFocus.base, focused ? styles.cardFocused : null, item.type === 'sports' ? styles.sportsCard : null]}>
+      style={[styles.card, item.announcementType === 'service_alert' ? styles.announcementService : null, item.announcementType === 'update' ? styles.announcementUpdate : null, item.announcementPriority === 'high' ? styles.announcementHigh : null, item.announcementPriority === 'critical' ? styles.announcementCritical : null, novaTvFocus.base, focused ? styles.cardFocused : null, item.type === 'sports' ? styles.sportsCard : null]}>
       <View style={styles.contentRow} onLayout={(event) => { const { width, height } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ rowWidth: width, height })); }}>
       <View style={[styles.copy, sports ? styles.sportsCopy : null]} onLayout={(event) => { const { width } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ leftWidth: width })); }}>
         <View style={styles.badge}><Text style={styles.badgeText}>{badge}</Text></View>
@@ -176,6 +176,8 @@ function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {
     card: { width: '100%', height: 272, overflow: 'hidden', borderRadius: NOVA_GLASS.radius.base, borderWidth: 1, borderColor: NOVA_GLASS.subtle.borderColor, backgroundColor: 'rgba(8, 13, 42, 0.84)', position: 'relative', shadowColor: '#291b72', shadowOpacity: 0.42, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 5 },
     cardFocused: { borderColor: NOVA_FOCUS.poster.borderColor, backgroundColor: 'rgba(22, 17, 62, 0.88)', shadowColor: '#875dff', shadowOpacity: 0.58, shadowRadius: 15, elevation: 7 },
     announcementHigh: { borderColor: 'rgba(145, 119, 255, 0.34)' },
+    announcementService: { borderColor: 'rgba(255, 150, 120, 0.38)' },
+    announcementUpdate: { borderColor: 'rgba(95, 190, 255, 0.34)' },
     announcementCritical: { borderColor: 'rgba(255, 184, 112, 0.48)', backgroundColor: 'rgba(45, 24, 52, 0.88)' },
     sportsCard: {},
     contentRow: { width: '100%', height: '100%', minWidth: 0, flexDirection: 'row' },

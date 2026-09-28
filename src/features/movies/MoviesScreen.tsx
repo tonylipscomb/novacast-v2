@@ -1,5 +1,5 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import type { ElementRef } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import ReactNative, {
@@ -2234,6 +2234,22 @@ export function MoviesScreen() {
       visibleMovies,
       width,
     ],
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      const pending = getMoviesScreenMemory(activeProviderId).pendingMovieDetail;
+      if (!pending?.id) {
+        return;
+      }
+      rememberMoviesScreenMemory(activeProviderId, {
+        pendingMovieDetail: null,
+        openDiscoverZone: false,
+        selectedMovieId: pending.id,
+        focusedMovieId: pending.id,
+      });
+      handleSelectMovie(pending, 'browse');
+    }, [activeProviderId, handleSelectMovie]),
   );
 
   const handleViewportChange = useCallback(

@@ -871,8 +871,53 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
 
   const handleNovaPulseAction = useCallback((item: NovaPulseItem) => {
     if (item.action?.type === 'details') {
-      if (item.action.target === '/movies') router.push('/movies');
-      if (item.action.target === '/series') router.push('/series');
+      const contentId = item.action.contentId?.trim();
+      if (!contentId) return;
+      if (item.action.target === '/movies') {
+        rememberMoviesScreenMemory(activeProviderId, {
+          pendingMovieDetail: {
+            id: contentId,
+            categoryId: item.channelCategoryId ?? '',
+            title: item.title,
+            year: item.year,
+            releaseDate: item.releaseDate,
+            rating: item.rating == null ? undefined : String(item.rating),
+            description: item.description,
+            genres: item.genres ?? [],
+            posterStyleKey: 'ember',
+            posterUrl: item.posterUrl,
+            backdropUrl: item.backdropUrl,
+          },
+          selectedMovieId: contentId,
+          focusedMovieId: contentId,
+          openDiscoverZone: false,
+        });
+        router.push('/movies');
+        return;
+      }
+      if (item.action.target === '/series') {
+        const seriesId = item.action.seriesId?.trim() || contentId;
+        rememberSeriesScreenMemory(activeProviderId, {
+          pendingSeriesDetail: {
+            id: seriesId,
+            seriesId,
+            categoryId: item.channelCategoryId ?? '',
+            title: item.title,
+            year: item.year == null ? undefined : String(item.year),
+            releaseDate: item.releaseDate == null ? undefined : String(item.releaseDate),
+            rating: item.rating == null ? undefined : String(item.rating),
+            description: item.description,
+            genres: item.genres ?? [],
+            posterStyleKey: 'ember',
+            posterUrl: item.posterUrl,
+            backdropUrl: item.backdropUrl,
+          },
+          selectedSeriesId: seriesId,
+          focusedSeriesId: seriesId,
+          openDiscoverZone: false,
+        });
+        router.push('/series');
+      }
       return;
     }
     if (item.action?.type !== 'channel' || item.action.target !== '/live') return;

@@ -1,10 +1,12 @@
 import { DEFAULT_BROWSE_CATEGORY_ID } from '../media-browser/mediaCategoryUtils.ts';
+import type { MovieSummary } from './movieTypes.ts';
 
 export type MoviesScreenMemory = {
   selectedCategoryId: string;
   focusedMovieId: string | null;
   selectedMovieId: string | null;
   openDiscoverZone?: boolean;
+  pendingMovieDetail?: MovieSummary | null;
 };
 
 const DEFAULT_MEMORY: MoviesScreenMemory = {

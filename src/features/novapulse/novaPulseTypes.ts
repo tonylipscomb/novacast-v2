@@ -1,6 +1,6 @@
 import type { ImageRef } from 'expo-image';
 
-export type NovaPulseItemType = 'movie' | 'series' | 'sports' | 'live_event' | 'live_epg' | 'announcement' | 'provider_alert';
+export type NovaPulseItemType = 'movie' | 'series' | 'sports' | 'live_event' | 'live_epg' | 'announcement' | 'provider_alert' | 'weather';
 export type NovaPulseProviderHealthState = 'degraded' | 'unavailable' | 'authentication_required' | 'subscription_expired' | 'recovered';
 
 export type NovaPulseSubtype = 'featured' | 'upcoming' | 'starting_soon' | 'live' | 'final' | 'postponed' | 'cancelled';
@@ -114,6 +114,7 @@ export type NovaPulseItem = {
   featureName?: string;
   ctaLabel?: string;
   badgeOverride?: string;
+  weatherArtKey?: string;
   sports?: NovaPulseSportsData;
   action?: NovaPulseAction;
   providerHealthState?: NovaPulseProviderHealthState;

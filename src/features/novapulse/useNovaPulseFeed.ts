@@ -5,7 +5,7 @@ import { Image } from 'expo-image';
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { NOVA_PULSE_MOCK_FEED } from './novaPulseMockFeed';
-import { createNovaPulseCatalogSource, createNovaPulseLiveEpgSource, createNovaPulseMockSource, createNovaPulseProviderHealthSource, createNovaPulseSportsSource } from './novaPulseSources';
+import { createNovaPulseCatalogSource, createNovaPulseLiveEpgSource, createNovaPulseMockSource, createNovaPulseProviderHealthSource, createNovaPulseSportsSource, createNovaPulseWeatherSource } from './novaPulseSources';
 import { fetchNovaPulseSportsItems, NOVA_PULSE_SPORTS_ENABLED } from './novaPulseSportsSource';
 import type { NovaPulseItem } from './novaPulseTypes';
 import { createNovaPulseArtworkPrefetchPlan, inspectNovaPulseArtworkPrefetch } from './novaPulseArtworkPrefetch';
@@ -33,6 +33,7 @@ import {
 } from './recommendationFeed';
 import { getRepositoryBundleGeneration } from '@/features/providers/providerBundle';
 import { NOVA_PULSE_PROVIDER_HEALTH_ENABLED, useNovaPulseProviderHealth } from '@/features/providers/providerHealth';
+import { loadNovaPulseWeather, NOVA_PULSE_WEATHER_ENABLED, type NovaPulseWeatherResult } from './novaPulseWeather';
 
 const EMPTY_NOVA_PULSE_HISTORY = [] as const;
 
@@ -100,6 +101,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const [compositionSession] = useState(() => createNovaPulseCompositionSession());
   const [compositionContentPolicy] = useState(() => getContentPolicy());
   const [announcementSession, setAnnouncementSession] = useState<{ providerId: string; result: NovaPulseAnnouncementsResult | null }>(() => ({ providerId, result: getCachedNovaPulseAnnouncements() }));
+  const [weatherSession, setWeatherSession] = useState<{ providerId: string; result: NovaPulseWeatherResult | null }>({ providerId, result: null });
   const providerBundleGeneration = getRepositoryBundleGeneration();
   const providerHealthLiveSnapshot = useNovaPulseProviderHealth(providerId, providerBundleGeneration);
   const [providerHealthSnapshot, setProviderHealthSnapshot] = useState(providerHealthLiveSnapshot);
@@ -141,6 +143,18 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       console.info('[NOVAPULSE_HISTORY]', JSON.stringify(metadata));
       recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_history_load', ...metadata } });
     }).catch(() => undefined);
+  }, [providerId]);
+  useEffect(() => {
+    if (!NOVA_PULSE_WEATHER_ENABLED) {
+      setWeatherSession({ providerId, result: null });
+      return;
+    }
+    let active = true;
+    setWeatherSession({ providerId, result: null });
+    void loadNovaPulseWeather().then((result) => {
+      if (active) setWeatherSession({ providerId, result });
+    }).catch(() => undefined);
+    return () => { active = false; };
   }, [providerId]);
   useEffect(() => {
     if (!NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED) return;
@@ -315,15 +329,17 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       : announcementResult.source === 'static'
         ? NOVA_PULSE_MOCK_FEED
         : announcementResult.items;
+    const weatherResult = weatherSession.providerId === providerId ? weatherSession.result : null;
     const result = composeNovaPulseFeedV2([
       createNovaPulseCatalogSource(languageFilteredCatalog.movies, languageFilteredCatalog.series, recommendationSignals, compositionSession.startedAt),
       ...(realSports ? [createNovaPulseSportsSource(realSports)] : []),
       ...(liveEpgItems.length ? [createNovaPulseLiveEpgSource(liveEpgItems)] : []),
       ...(providerHealthSnapshot.enabled ? [createNovaPulseProviderHealthSource(providerHealthSnapshot)] : []),
+      ...(NOVA_PULSE_WEATHER_ENABLED && weatherResult ? [createNovaPulseWeatherSource(weatherResult)] : []),
       createNovaPulseMockSource(realSports ? announcementItems.filter((item) => item.type !== 'sports') : announcementItems, includeMockCatalogFallback),
     ], { seed: compositionSession.seed, nowMs: compositionSession.startedAt, recentHistory: historySnapshot });
     return result.items.length ? result : { ...result, items: [NOVA_PULSE_BRANDED_FALLBACK] };
-  }, [announcementSession, compositionSession, historySnapshot, languageFilteredCatalog, liveEpgItems, providerHealthSnapshot, providerId, realSportsSignature, recommendationSignalSignature]);
+  }, [announcementSession, compositionSession, historySnapshot, languageFilteredCatalog, liveEpgItems, providerHealthSnapshot, providerId, realSportsSignature, recommendationSignalSignature, weatherSession]);
   const catalogReadyForHistory = boundedMovies.length > 0 || boundedSeries.length > 0;
   useEffect(() => {
     if (catalogReadyForHistory && historySessionRef.current?.providerId === providerId) {

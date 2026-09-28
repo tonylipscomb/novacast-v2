@@ -3,6 +3,7 @@ import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import type { NovaPulseItem, NovaPulseRecommendationSignals, NovaPulseSourceResult } from './novaPulseTypes';
 import { getNovaPulseDisplayCountry, getNovaPulseDisplayRuntimeMinutes, getNovaPulseDisplayYear, getNovaPulseMovieFreshness, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
 import type { ProviderHealthSnapshot } from '@/features/providers/providerHealth.ts';
+import type { NovaPulseWeatherResult } from './novaPulseWeather';
 
 export type NovaPulseSource = {
   id: string;
@@ -190,4 +191,11 @@ export function createNovaPulseProviderHealthSource(snapshot: ProviderHealthSnap
     dedupeKey: `provider-health:${alertStatus}`,
   } : null;
   return { id: 'provider-health', getItems: () => ({ sourceId: 'provider-health', items: item ? [item] : [] }) };
+}
+
+export function createNovaPulseWeatherSource(result: NovaPulseWeatherResult): NovaPulseSource {
+  return {
+    id: 'weather',
+    getItems: () => ({ sourceId: 'weather', fetchedAt: Date.now(), items: result.item ? [result.item] : [] }),
+  };
 }

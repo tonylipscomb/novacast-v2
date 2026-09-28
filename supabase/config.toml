@@ -90,3 +90,8 @@ entrypoint = "./functions/admin-novapulse-announcements/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/novapulse-announcements-feed/index.ts"
+
+[functions.novapulse-weather-feed]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/novapulse-weather-feed/index.ts"

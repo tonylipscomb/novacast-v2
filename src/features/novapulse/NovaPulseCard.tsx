@@ -9,7 +9,7 @@ import { TvRemoteImage, normalizeTvRemoteImageUri } from '@/components/media/TvR
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaPulseItem } from './novaPulseTypes';
 import { NovaPulseSportsCard } from './NovaPulseSportsCard';
-import { formatNovaPulseAnnouncementTiming, formatNovaPulseCatalogMeta, formatNovaPulseEpisodeMeta, formatNovaPulseRating, formatNovaPulseUpcomingStatus, getNovaPulseAnnouncementBadge, getNovaPulseCatalogBadge, resolveNovaPulseAction } from './novaPulseLogic';
+import { formatNovaPulseAnnouncementTiming, formatNovaPulseCatalogMeta, formatNovaPulseEpisodeMeta, formatNovaPulseRating, formatNovaPulseUpcomingStatus, getNovaPulseAnnouncementBadge, getNovaPulseCatalogBadge, getNovaPulseProviderHealthBadge, resolveNovaPulseAction } from './novaPulseLogic';
 
 const NOVACAST_FALLBACK_CARD = require('../../../assets/images/novacastnewcard.png') as number;
 const NOVA_PULSE_ARTWORK_TIMEOUT_MS = 15_000;
@@ -49,16 +49,18 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
   const styles = createStyles(theme);
   const sports = item.type === 'sports';
   const announcement = item.type === 'announcement';
+  const providerAlert = item.type === 'provider_alert';
+  const informationCard = announcement || providerAlert;
   const liveEpg = item.type === 'live_epg';
   const liveLogoMode = liveEpg && item.artworkKind === 'channel_logo';
   const [focused, setFocused] = useState(false);
-  const badge = announcement ? getNovaPulseAnnouncementBadge(item) : sports ? item.subtype === 'final' || item.sports?.eventStatus === 'FINAL' ? 'FINAL' : item.subtype === 'live' || item.sports?.eventStatus === 'LIVE' ? 'LIVE NOW' : item.subtype === 'starting_soon' ? 'STARTING SOON' : item.subtype === 'postponed' || item.sports?.eventStatus === 'POSTPONED' ? 'POSTPONED' : item.subtype === 'cancelled' || item.sports?.eventStatus === 'CANCELLED' ? 'CANCELLED' : formatNovaPulseUpcomingStatus(item.startsAt) : liveEpg ? item.badge ?? item.timingReason?.replace('_', ' ').toUpperCase() ?? 'LIVE' : getNovaPulseCatalogBadge(item);
+  const badge = informationCard ? (providerAlert ? getNovaPulseProviderHealthBadge(item) : getNovaPulseAnnouncementBadge(item)) : sports ? item.subtype === 'final' || item.sports?.eventStatus === 'FINAL' ? 'FINAL' : item.subtype === 'live' || item.sports?.eventStatus === 'LIVE' ? 'LIVE NOW' : item.subtype === 'starting_soon' ? 'STARTING SOON' : item.subtype === 'postponed' || item.sports?.eventStatus === 'POSTPONED' ? 'POSTPONED' : item.subtype === 'cancelled' || item.sports?.eventStatus === 'CANCELLED' ? 'CANCELLED' : formatNovaPulseUpcomingStatus(item.startsAt) : liveEpg ? item.badge ?? item.timingReason?.replace('_', ' ').toUpperCase() ?? 'LIVE' : getNovaPulseCatalogBadge(item);
   const catalogMeta = !sports && !liveEpg ? formatNovaPulseCatalogMeta(item) : null;
   const episodeMeta = item.type === 'series' ? formatNovaPulseEpisodeMeta(item) : null;
   const rating = !sports ? formatNovaPulseRating(item) : null;
   const announcementSecondary = item.secondaryText ?? (item.version ? `Version ${item.version}` : null);
   const announcementTiming = announcement ? formatNovaPulseAnnouncementTiming(item.effectiveAt, item.expiresAt) : null;
-  const action = resolveNovaPulseAction(item);
+  const action = providerAlert ? null : resolveNovaPulseAction(item);
   const [artworkFailed, setArtworkFailed] = useState(false);
   const [artworkLoaded, setArtworkLoaded] = useState(false);
   const [artworkTimedOut, setArtworkTimedOut] = useState(false);
@@ -128,7 +130,7 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
   }, [hasRemoteArtwork, mediaKey]);
   const artworkFit = item.artworkFit ?? 'cover';
   const fallbackArtwork = item.type === 'movie' || item.type === 'series' ? NOVACAST_FALLBACK_CARD : null;
-  const fallbackIcon = item.type === 'announcement' ? item.announcementType === 'service_alert' ? 'alert-circle-outline' : item.announcementType === 'update' ? 'update' : 'bullhorn-outline' : item.type === 'series' ? 'television-classic' : item.type === 'movie' ? 'movie-open-outline' : item.type === 'live_epg' ? 'television' : 'trophy-outline';
+  const fallbackIcon = item.type === 'announcement' || providerAlert ? providerAlert ? 'alert-circle-outline' : item.announcementType === 'service_alert' ? 'alert-circle-outline' : item.announcementType === 'update' ? 'update' : 'bullhorn-outline' : item.type === 'series' ? 'television-classic' : item.type === 'movie' ? 'movie-open-outline' : item.type === 'live_epg' ? 'television' : 'trophy-outline';
   return (
     <Pressable
       ref={(node) => onFocusHandle?.(node ? findNodeHandle(node) : null)}
@@ -148,16 +150,16 @@ export function NovaPulseCard({ item, onFocus, onBlur, onPress, onFocusHandle, n
       onBlur={() => { setFocused(false); onBlur(); }}
       onPress={onPress}
       onLayout={(event) => { const { width, height } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ cardWidth: width, height })); }}
-      style={[styles.card, item.announcementType === 'service_alert' ? styles.announcementService : null, item.announcementType === 'update' ? styles.announcementUpdate : null, item.announcementPriority === 'high' ? styles.announcementHigh : null, item.announcementPriority === 'critical' ? styles.announcementCritical : null, novaTvFocus.base, focused ? styles.cardFocused : null, item.type === 'sports' ? styles.sportsCard : null]}>
+      style={[styles.card, item.announcementType === 'service_alert' || providerAlert ? styles.announcementService : null, item.announcementType === 'update' ? styles.announcementUpdate : null, item.announcementPriority === 'high' ? styles.announcementHigh : null, item.announcementPriority === 'critical' ? styles.announcementCritical : null, novaTvFocus.base, focused ? styles.cardFocused : null, item.type === 'sports' ? styles.sportsCard : null]}>
       <View style={styles.contentRow} onLayout={(event) => { const { width, height } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ rowWidth: width, height })); }}>
       <View style={[styles.copy, sports ? styles.sportsCopy : null]} onLayout={(event) => { const { width } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ leftWidth: width })); }}>
         <View style={styles.badge}><Text style={styles.badgeText}>{badge}</Text></View>
         <Text numberOfLines={2} style={[styles.title, sports ? styles.sportsTitle : null]}>{item.title}</Text>
-        {announcement ? <Text numberOfLines={3} style={styles.announcementMessage}>{item.message ?? item.description ?? item.subtitle}</Text> : catalogMeta ? <Text numberOfLines={1} style={styles.catalogMeta}>{catalogMeta}</Text> : item.subtitle ? <Text numberOfLines={1} style={styles.subtitle}>{item.subtitle}</Text> : null}
+        {informationCard ? <Text numberOfLines={3} style={styles.announcementMessage}>{item.message ?? item.description ?? item.subtitle}</Text> : catalogMeta ? <Text numberOfLines={1} style={styles.catalogMeta}>{catalogMeta}</Text> : item.subtitle ? <Text numberOfLines={1} style={styles.subtitle}>{item.subtitle}</Text> : null}
         {episodeMeta ? <Text numberOfLines={1} style={styles.episodeMeta}>{episodeMeta}</Text> : null}
         {!announcement && item.description ? <Text numberOfLines={3} style={styles.description}>{item.description}</Text> : null}
         {rating ? <Text numberOfLines={1} style={styles.rating}>{rating}</Text> : null}
-        {announcement ? <>{announcementSecondary || announcementTiming ? <View style={styles.announcementMeta}>{announcementSecondary ? <Text numberOfLines={1} style={styles.announcementSecondary}>{announcementSecondary}</Text> : null}{announcementTiming ? <Text numberOfLines={1} style={styles.announcementTiming}>{announcementTiming}</Text> : null}</View> : null}{item.ctaLabel ? <Text numberOfLines={1} style={styles.announcementCta}>{item.ctaLabel}</Text> : null}</> : sports ? <NovaPulseSportsCard item={item} /> : liveEpg && item.secondaryText ? <Text numberOfLines={1} style={styles.liveEpgSecondary}>{item.secondaryText}</Text> : action ? <View style={styles.actionHint}><MaterialCommunityIcons name="play-circle-outline" size={17} color={theme.colors.accent} /><Text style={styles.actionText}>Press OK</Text></View> : null}
+        {informationCard ? announcement ? <>{announcementSecondary || announcementTiming ? <View style={styles.announcementMeta}>{announcementSecondary ? <Text numberOfLines={1} style={styles.announcementSecondary}>{announcementSecondary}</Text> : null}{announcementTiming ? <Text numberOfLines={1} style={styles.announcementTiming}>{announcementTiming}</Text> : null}</View> : null}{item.ctaLabel ? <Text numberOfLines={1} style={styles.announcementCta}>{item.ctaLabel}</Text> : null}</> : null : sports ? <NovaPulseSportsCard item={item} /> : liveEpg && item.secondaryText ? <Text numberOfLines={1} style={styles.liveEpgSecondary}>{item.secondaryText}</Text> : action ? <View style={styles.actionHint}><MaterialCommunityIcons name="play-circle-outline" size={17} color={theme.colors.accent} /><Text style={styles.actionText}>Press OK</Text></View> : null}
       </View>
       <View style={[styles.media, liveLogoMode ? styles.liveLogoMedia : null]} onLayout={(event) => { const { width, height } = event.nativeEvent.layout; onArtworkStatusRef.current?.('loading', reportLayout({ mediaWidth: width, height })); }}>
         {(!remoteArtworkUrl && !item.artworkSource || artworkFailed || artworkTimedOut || (!remoteArtworkUrl && !artworkLoaded)) ? <View style={[styles.backdropFallback, liveEpg ? styles.liveFallback : null]}>{liveEpg ? <><MaterialCommunityIcons name="television" size={46} color="rgba(154, 139, 255, 0.78)" style={styles.fallbackIcon} /><Text style={styles.liveFallbackLabel}>LIVE TV</Text>{item.channelName ? <Text numberOfLines={1} style={styles.liveFallbackChannel}>{item.channelName}</Text> : null}</> : fallbackArtwork ? <><Image source={fallbackArtwork} style={styles.fallbackArtwork} contentFit="cover" /><View pointerEvents="none" style={styles.fallbackGlow} /><MaterialCommunityIcons name={fallbackIcon} size={30} color="rgba(211, 205, 255, 0.78)" style={styles.fallbackIcon} /></> : <MaterialCommunityIcons name={fallbackIcon} size={46} color="rgba(154, 139, 255, 0.62)" style={styles.fallbackIcon} />}</View> : null}

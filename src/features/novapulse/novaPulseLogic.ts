@@ -317,6 +317,10 @@ export function getNovaPulseCatalogBadge(item: NovaPulseItem) {
   return item.catalogStatus ?? item.badge ?? (item.type === 'series' ? 'SERIES' : 'MOVIE');
 }
 
+export function getNovaPulseProviderHealthBadge(item: NovaPulseItem) {
+  return item.type === 'provider_alert' ? 'PROVIDER ALERT' : null;
+}
+
 const ANNOUNCEMENT_BADGES = {
   feature: 'NEW FEATURE', update: 'UPDATE', beta: 'BETA', maintenance: 'MAINTENANCE', service_alert: 'SERVICE ALERT', notice: 'NOTICE', promotion: 'PROMOTION', general: 'ANNOUNCEMENT',
 } as const;

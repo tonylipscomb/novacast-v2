@@ -132,6 +132,7 @@ import {
 import type { MovieSummary } from '../movies/movieTypes.ts';
 import type { SeriesSummary } from '../media-browser/mediaTypes.ts';
 import { queueInventoryReport, type InventoryMediaType } from '../device/inventoryTelemetry';
+import { setProviderHealthGeneration } from './providerHealth.ts';
 import { emitSeriesSqliteEvent } from '../series/seriesDiagnostics.ts';
 import {
   classifyCatalogMediaJobResults,
@@ -1854,6 +1855,7 @@ export async function refreshProviderLiveChannelCount(providerId: string, live: 
 
 export type ProviderCatalogSyncInput = {
   providerId: string;
+  healthGeneration?: number;
   providerType?: string;
   displayName?: string;
   requestSource?: string;
@@ -5114,6 +5116,7 @@ function startProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: num
 }
 
 export function scheduleProviderCatalogSync(input: ProviderCatalogSyncInput) {
+  if (input.healthGeneration != null) setProviderHealthGeneration(input.providerId, input.healthGeneration);
   const requestId = `request-${++syncAuditSequence}`;
   logSyncLifecycle(input.providerId, 'coordinator-enter', {
     requestId,

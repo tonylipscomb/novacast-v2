@@ -5,7 +5,7 @@ import { Image } from 'expo-image';
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { NOVA_PULSE_MOCK_FEED } from './novaPulseMockFeed';
-import { createNovaPulseCatalogSource, createNovaPulseLiveEpgSource, createNovaPulseMockSource, createNovaPulseSportsSource } from './novaPulseSources';
+import { createNovaPulseCatalogSource, createNovaPulseLiveEpgSource, createNovaPulseMockSource, createNovaPulseProviderHealthSource, createNovaPulseSportsSource } from './novaPulseSources';
 import { fetchNovaPulseSportsItems, NOVA_PULSE_SPORTS_ENABLED } from './novaPulseSportsSource';
 import type { NovaPulseItem } from './novaPulseTypes';
 import { createNovaPulseArtworkPrefetchPlan, inspectNovaPulseArtworkPrefetch } from './novaPulseArtworkPrefetch';
@@ -31,6 +31,8 @@ import {
   recommendationSignalForCandidate,
   type NovaPulseLocalRecommendationContext,
 } from './recommendationFeed';
+import { getRepositoryBundleGeneration } from '@/features/providers/providerBundle';
+import { NOVA_PULSE_PROVIDER_HEALTH_ENABLED, useNovaPulseProviderHealth } from '@/features/providers/providerHealth';
 
 const EMPTY_NOVA_PULSE_HISTORY = [] as const;
 
@@ -98,6 +100,14 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const [compositionSession] = useState(() => createNovaPulseCompositionSession());
   const [compositionContentPolicy] = useState(() => getContentPolicy());
   const [announcementSession, setAnnouncementSession] = useState<{ providerId: string; result: NovaPulseAnnouncementsResult | null }>(() => ({ providerId, result: getCachedNovaPulseAnnouncements() }));
+  const providerBundleGeneration = getRepositoryBundleGeneration();
+  const providerHealthLiveSnapshot = useNovaPulseProviderHealth(providerId, providerBundleGeneration);
+  const [providerHealthSnapshot, setProviderHealthSnapshot] = useState(providerHealthLiveSnapshot);
+  const providerHealthSessionRef = useRef<{ providerId: string; generation: number; compositionStarted: boolean }>({
+    providerId,
+    generation: providerBundleGeneration,
+    compositionStarted: false,
+  });
   const announcementFrozenRef = useRef(false);
   const [, setHistoryRevision] = useState(0);
   const historySessionRef = useRef<{ providerId: string; entries: ReturnType<typeof getCachedNovaPulseHistory> | null; compositionStarted: boolean } | null>(null);
@@ -144,6 +154,23 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
     }).catch(() => undefined);
     return () => { active = false; controller.abort(); };
   }, [providerId]);
+  useEffect(() => {
+    const session = providerHealthSessionRef.current;
+    let active = true;
+    if (session.providerId !== providerId || session.generation !== providerBundleGeneration) {
+      providerHealthSessionRef.current = { providerId, generation: providerBundleGeneration, compositionStarted: false };
+      void Promise.resolve().then(() => {
+        if (active) setProviderHealthSnapshot(providerHealthLiveSnapshot);
+      });
+      return () => { active = false; };
+    }
+    if (session.compositionStarted || !NOVA_PULSE_PROVIDER_HEALTH_ENABLED) return () => { active = false; };
+    if (providerHealthSnapshot.status === providerHealthLiveSnapshot.status && providerHealthSnapshot.changedAt === providerHealthLiveSnapshot.changedAt) return () => { active = false; };
+    void Promise.resolve().then(() => {
+      if (active) setProviderHealthSnapshot(providerHealthLiveSnapshot);
+    });
+    return () => { active = false; };
+  }, [providerBundleGeneration, providerHealthLiveSnapshot, providerId, providerHealthSnapshot.changedAt, providerHealthSnapshot.status]);
   useEffect(() => {
     if (!NOVA_PULSE_SPORTS_ENABLED) {
       setRealSports(null);
@@ -292,14 +319,18 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       createNovaPulseCatalogSource(languageFilteredCatalog.movies, languageFilteredCatalog.series, recommendationSignals, compositionSession.startedAt),
       ...(realSports ? [createNovaPulseSportsSource(realSports)] : []),
       ...(liveEpgItems.length ? [createNovaPulseLiveEpgSource(liveEpgItems)] : []),
+      ...(providerHealthSnapshot.enabled ? [createNovaPulseProviderHealthSource(providerHealthSnapshot)] : []),
       createNovaPulseMockSource(realSports ? announcementItems.filter((item) => item.type !== 'sports') : announcementItems, includeMockCatalogFallback),
     ], { seed: compositionSession.seed, nowMs: compositionSession.startedAt, recentHistory: historySnapshot });
     return result.items.length ? result : { ...result, items: [NOVA_PULSE_BRANDED_FALLBACK] };
-  }, [announcementSession, compositionSession, historySnapshot, languageFilteredCatalog, liveEpgItems, providerId, realSportsSignature, recommendationSignalSignature]);
+  }, [announcementSession, compositionSession, historySnapshot, languageFilteredCatalog, liveEpgItems, providerHealthSnapshot, providerId, realSportsSignature, recommendationSignalSignature]);
   const catalogReadyForHistory = boundedMovies.length > 0 || boundedSeries.length > 0;
   useEffect(() => {
     if (catalogReadyForHistory && historySessionRef.current?.providerId === providerId) {
       historySessionRef.current.compositionStarted = true;
+    }
+    if (catalogReadyForHistory && providerHealthSessionRef.current?.providerId === providerId) {
+      providerHealthSessionRef.current.compositionStarted = true;
     }
   }, [catalogReadyForHistory, providerId]);
   useEffect(() => {

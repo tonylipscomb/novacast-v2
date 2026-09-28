@@ -27,6 +27,7 @@ import { logProviderBoundary, safeProviderRuntimeFlags } from './providerBoundar
 import { summarizeXtreamAccountEntitlements } from './providerEntitlementAudit.ts';
 import { novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import { CATALOG_FRESHNESS_MS, decideCatalogFreshness } from '../catalog/catalogFreshness.ts';
+import { recordProviderHealthFailure, recordProviderHealthSuccess } from './providerHealthSignals.ts';
 
 /** Stage 4.2O.2 — Series SQLite Parity. Mirrors Movies' build-time kill switch. */
 const SERIES_SQLITE_READS_ENABLED = process.env.EXPO_PUBLIC_SERIES_SQLITE_READS === 'true';
@@ -221,7 +222,11 @@ function notify() {
   listeners.forEach((listener) => listener());
 }
 
-function buildRepositories(provider: ProviderRecord, credentials?: ProviderCredentialRecord): ProviderRepositories & {
+function buildRepositories(
+  provider: ProviderRecord,
+  healthGeneration: number,
+  credentials?: ProviderCredentialRecord,
+): ProviderRepositories & {
   seriesDataSource: SeriesDataSource;
   syncCatalog: (requestSource?: string) => Promise<void>;
 } {
@@ -282,6 +287,7 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
         const { scheduleProviderCatalogSync } = await import('./providerCatalogSync.ts');
         logCatalogBootstrapDispatch('coordinator-enter', {
           providerId: provider.id,
+          healthGeneration,
           requestSource,
           coordinatorState: 'module-ready',
           pendingInputPresent: false,
@@ -295,7 +301,7 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
           series: base.series,
           live: base.live,
         });
-        logCatalogBootstrapDispatch('bundle-syncCatalog-return', {
+            logCatalogBootstrapDispatch('bundle-syncCatalog-return', {
           providerId: provider.id,
           requestSource,
           coordinatorState: 'resolved',
@@ -303,6 +309,7 @@ function buildRepositories(provider: ProviderRecord, credentials?: ProviderCrede
           timestamp: Date.now(),
         });
       } catch (error) {
+        void recordProviderHealthFailure({ providerId: provider.id, generation: healthGeneration, operationId: `catalog:${requestSource}:${Date.now()}`, error });
         logCatalogBootstrapDispatch('dispatch-failed', {
           providerId: provider.id,
           requestSource,
@@ -331,7 +338,8 @@ export function createRepositoryBundle(provider: ProviderRecord, credentials?: P
     throw new Error(`Provider "${provider.name}" is missing secure credentials.`);
   }
 
-  const repositories = buildRepositories(provider, credentials);
+  const nextGeneration = bundleGeneration + 1;
+  const repositories = buildRepositories(provider, nextGeneration, credentials);
   logProviderBoundary('[NovaCast Provider Runtime]', safeProviderRuntimeFlags({
     managedProviderId: provider.id,
     providerRecord: provider,
@@ -339,7 +347,6 @@ export function createRepositoryBundle(provider: ProviderRecord, credentials?: P
     providerBase: provider.connection?.type === 'xtream' ? credentials?.baseUrl : provider.connection?.serverId,
     assignmentSource: 'active-provider-bundle',
   }));
-  const nextGeneration = bundleGeneration + 1;
   let cancelled = false;
   let accountMetadata: ProviderAccountMetadata | null =
     mergeAccountOutputFormats(provider.account, getRememberedAccountOutputFormats(provider.id)) ??
@@ -359,8 +366,9 @@ export function createRepositoryBundle(provider: ProviderRecord, credentials?: P
         return;
       }
 
-      const client = new XtreamClient(credentials!, { providerId: provider.id });
-      const response = await client.getAccountInfo();
+      try {
+        const client = new XtreamClient(credentials!, { providerId: provider.id });
+        const response = await client.getAccountInfo();
       if (cancelled) {
         throw new Error('Provider initialization was cancelled.');
       }
@@ -369,13 +377,18 @@ export function createRepositoryBundle(provider: ProviderRecord, credentials?: P
       bundle.accountMetadata = accountMetadata;
       rememberAccountOutputFormats(provider.id, accountMetadata);
       const entitlement = summarizeXtreamAccountEntitlements(response, credentials?.baseUrl);
-      logProviderBoundary('[NovaCast Provider Runtime]', {
+        logProviderBoundary('[NovaCast Provider Runtime]', {
         event: 'account-state',
         accountStatus: entitlement.status,
         activeConnections: entitlement.activeConnections,
         maxConnections: entitlement.maxConnections,
         allowedOutputFormats: entitlement.allowedOutputFormats,
-      });
+        });
+        void recordProviderHealthSuccess({ providerId: provider.id, generation: nextGeneration, operationId: `account:${nextGeneration}` });
+      } catch (error) {
+        void recordProviderHealthFailure({ providerId: provider.id, generation: nextGeneration, operationId: `account:${nextGeneration}`, error });
+        throw error;
+      }
     }),
     invalidate() {
       cancelled = true;

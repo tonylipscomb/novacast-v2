@@ -2,6 +2,7 @@ import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import type { NovaPulseItem, NovaPulseRecommendationSignals, NovaPulseSourceResult } from './novaPulseTypes';
 import { getNovaPulseDisplayCountry, getNovaPulseDisplayRuntimeMinutes, getNovaPulseDisplayYear, getNovaPulseMovieFreshness, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
+import type { ProviderHealthSnapshot } from '@/features/providers/providerHealth.ts';
 
 export type NovaPulseSource = {
   id: string;
@@ -163,4 +164,30 @@ export function createNovaPulseLiveEpgSource(items: readonly NovaPulseItem[]): N
     id: 'live-epg',
     getItems: () => ({ sourceId: 'live-epg', fetchedAt: Date.now(), items: items.filter((item) => item.type === 'live_epg') }),
   };
+}
+
+export function createNovaPulseProviderHealthSource(snapshot: ProviderHealthSnapshot): NovaPulseSource {
+  const copy: Record<string, { title: string; body: string; priority: number }> = {
+    degraded: { title: 'Provider Service Issue', body: 'Some provider services are having trouble.', priority: 55 },
+    unavailable: { title: 'Provider Temporarily Unavailable', body: 'Your TV provider is not responding right now.', priority: 88 },
+    authentication_required: { title: 'Provider Sign-In Needed', body: 'Your TV provider needs you to sign in again.', priority: 96 },
+    subscription_expired: { title: 'Provider Subscription Expired', body: 'Your provider subscription may have expired.', priority: 95 },
+    recovered: { title: 'Provider Service Restored', body: 'Your provider is responding normally again.', priority: 45 },
+  };
+  const alertStatuses = ['degraded', 'unavailable', 'authentication_required', 'subscription_expired', 'recovered'] as const;
+  const alertStatus = alertStatuses.includes(snapshot.status as (typeof alertStatuses)[number])
+    ? snapshot.status as (typeof alertStatuses)[number]
+    : null;
+  if (!alertStatus) {
+    return { id: 'provider-health', getItems: () => ({ sourceId: 'provider-health', items: [] }) };
+  }
+  const value = alertStatus ? copy[alertStatus] : undefined;
+  const item: NovaPulseItem | null = value ? {
+    id: `provider-health-${alertStatus}`,
+    type: 'provider_alert', title: value.title, message: value.body, description: value.body,
+    badge: 'PROVIDER ALERT', priority: value.priority, providerHealthState: alertStatus,
+    action: { type: 'none' }, sourceId: 'provider-health', sourceItemId: alertStatus,
+    dedupeKey: `provider-health:${alertStatus}`,
+  } : null;
+  return { id: 'provider-health', getItems: () => ({ sourceId: 'provider-health', items: item ? [item] : [] }) };
 }

@@ -51,6 +51,7 @@ import {
   setProviderCredentials,
 } from './providerCredentialStore.ts';
 import { cancelProviderCatalogSync } from './providerCatalogSync.ts';
+import { clearProviderHealth, setProviderHealthGeneration } from './providerHealth.ts';
 
 const STORAGE_KEY = '@novacast/provider-state';
 
@@ -876,6 +877,7 @@ export async function clearProvidersForPairing() {
   }, 'reset');
   const result = await writeState(createEmptyProviderState());
   await Promise.all(current.providers.map((provider) => removeProviderCredentials(provider.id).catch(() => undefined)));
+  await Promise.all(current.providers.map((provider) => clearProviderHealth(provider.id).catch(() => undefined)));
   return result;
 }
 
@@ -892,6 +894,7 @@ export async function resetProviderState() {
   }, 'reset');
   const result = await writeState(createDefaultProviderState());
   await Promise.all(current.providers.map((provider) => removeProviderCredentials(provider.id).catch(() => undefined)));
+  await Promise.all(current.providers.map((provider) => clearProviderHealth(provider.id).catch(() => undefined)));
   return result;
 }
 
@@ -1009,6 +1012,12 @@ export function useProviderStore() {
   }, []);
 
   const selectedProvider = getSelectedProvider(state);
+  useEffect(() => {
+    if (selectedProvider?.id && bundleGeneration > 0) {
+      setProviderHealthGeneration(selectedProvider.id, bundleGeneration);
+    }
+  }, [bundleGeneration, selectedProvider?.id]);
+
   const expirationLabel = formatProviderExpirationLabel(
     selectedProvider,
     getActiveRepositoryBundle()?.accountMetadata ?? selectedProvider?.account ?? null,

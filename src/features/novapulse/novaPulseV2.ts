@@ -112,7 +112,7 @@ function qualityScore(item: NovaPulseItem, recentHistory: readonly NovaPulseHist
 }
 
 function isUseful(item: NovaPulseItem, score: number) {
-  if (item.type === 'sports' || item.type === 'announcement') return true;
+  if (item.type === 'sports' || item.type === 'announcement' || item.type === 'provider_alert') return true;
   if (score >= 3) return true;
   return Boolean(item.sourceItemId);
 }
@@ -201,15 +201,17 @@ function selectSports(ranked: readonly NovaPulseItem[], nowMs: number) {
 
 function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[], nowMs: number) {
   const critical = ranked.find(isCriticalAnnouncement);
+  const urgentProviderAlert = ranked.find((item) => item.type === 'provider_alert' && (item.providerHealthState === 'authentication_required' || item.providerHealthState === 'subscription_expired' || item.providerHealthState === 'unavailable'));
+  const recoveredProviderAlert = ranked.find((item) => item.type === 'provider_alert' && ![urgentProviderAlert?.id].includes(item.id));
   const sports = selectSports(ranked, nowMs);
   const normalAnnouncement = ranked.find((item) => item.type === 'announcement' && !isCriticalAnnouncement(item));
-  return [critical, ...sports, normalAnnouncement, ...liveCandidates.slice(0, 2)].filter((item): item is NovaPulseItem => Boolean(item));
+  return [critical, urgentProviderAlert, normalAnnouncement, recoveredProviderAlert, ...sports, ...liveCandidates.slice(0, 2)].filter((item): item is NovaPulseItem => Boolean(item));
 }
 
 function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[], nowMs: number) {
   const protectedItems = selectProtected(ranked, liveCandidates, nowMs);
   const selected: NovaPulseItem[] = [];
-  const remaining = ranked.filter((item) => item.type !== 'sports' && item.type !== 'announcement' && !protectedItems.some((protectedItem) => stableKey(protectedItem) === stableKey(item)));
+  const remaining = ranked.filter((item) => item.type !== 'sports' && item.type !== 'announcement' && item.type !== 'provider_alert' && !protectedItems.some((protectedItem) => stableKey(protectedItem) === stableKey(item)));
   const mixedCatalog = new Set(remaining.filter((item) => item.type === 'movie' || item.type === 'series').map((item) => item.type)).size > 1;
   const reserved = new Set(protectedItems.map(stableKey));
   while ((remaining.length || protectedItems.some((item) => !selected.some((selectedItem) => stableKey(selectedItem) === stableKey(item)))) && selected.length < NOVA_PULSE_V2_MAX_ITEMS) {
@@ -235,6 +237,7 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
       if (forcedType && !forceSports && !forceProtected && item.type !== forcedType) return false;
       if (item.type === 'sports' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'announcement' && !reserved.has(stableKey(item))) return false;
+      if (item.type === 'provider_alert' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'sports' && selectedSports >= 2) return false;
       if (isRecentlyAddedMovie(item, nowMs) && recentMovieCount >= 2 && enforceRecentMovieTarget) return false;
       if (item.type === 'announcement' && !isCriticalAnnouncement(item) && selected.some((selectedItem) => selectedItem.type === 'announcement' && !isCriticalAnnouncement(selectedItem))) return false;
@@ -247,6 +250,7 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
       if (item.type === 'sports' && !reserved.has(stableKey(item))) return false;
       if (isRecentlyAddedMovie(item, nowMs) && recentMovieCount >= 2 && enforceRecentMovieTarget) return false;
       if (item.type === 'announcement' && !reserved.has(stableKey(item))) return false;
+      if (item.type === 'provider_alert' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'announcement' && !isCriticalAnnouncement(item) && selected.some((selectedItem) => selectedItem.type === 'announcement' && !isCriticalAnnouncement(selectedItem))) return false;
       return !(item.type === last && item.type === previous);
     });

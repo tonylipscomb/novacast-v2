@@ -68,6 +68,11 @@ export const ONBOARDING_GUIDES: Record<
         body: 'Select a channel once to preview it, then choose Watch Full Screen when you are ready.',
       },
       {
+        icon: 'heart-plus-outline',
+        title: 'Save a favorite',
+        body: 'While a channel is focused, hold the remote select button to add or remove it from your favorites.',
+      },
+      {
         icon: 'arrow-left',
         title: 'Back one layer at a time',
         body: 'Back leaves fullscreen, then the overlay, and finally returns to the Content Hub.',

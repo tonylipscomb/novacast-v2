@@ -15,7 +15,7 @@ import {
   View,
 } from 'react-native';
 
-import { NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova';
+import { NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaCategoryChrome, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
@@ -54,7 +54,7 @@ import {
   getProgramOffset,
   getProgramStatus,
   getProgramWidth,
-  GUIDE_CHANNEL_COLUMN_WIDTH,
+  GUIDE_ROW_HEIGHT,
   GUIDE_MIN_PROGRAM_WIDTH,
   GUIDE_PIXELS_PER_MINUTE,
   GUIDE_TIME_SLOT_MINUTES,
@@ -305,7 +305,6 @@ export function GuideScreen() {
   useEffect(() => {
     if (status !== 'ready' || !rows.length) return;
     const frame = requestAnimationFrame(() => {
-      rowsRef.current?.scrollToOffset({ offset: guideMemory.verticalOffset, animated: false });
       timelineHeaderRef.current?.scrollTo({ x: guideMemory.horizontalOffset, animated: false });
       Object.values(rowScrollRefs.current).forEach((rowScrollRef) => {
         rowScrollRef?.scrollTo({ x: guideMemory.horizontalOffset, animated: false });
@@ -313,7 +312,7 @@ export function GuideScreen() {
       horizontalOffsetRef.current = guideMemory.horizontalOffset;
     });
     return () => cancelAnimationFrame(frame);
-  }, [activeProviderId, guideMemory.horizontalOffset, guideMemory.verticalOffset, rows.length, status]);
+  }, [activeProviderId, guideMemory.horizontalOffset, rows.length, status]);
 
   useEffect(() => {
     return () => {
@@ -459,8 +458,10 @@ export function GuideScreen() {
     });
   };
 
-  const scrollToProgram = (rowIndex: number, channelId: string, timestamp: number) => {
-    rowsRef.current?.scrollToIndex({ index: rowIndex, animated: true, viewPosition: 0.5 });
+  const scrollToProgram = (rowIndex: number, channelId: string, timestamp: number, allowInitial = false) => {
+    if (allowInitial || initialFocusProviderRef.current === activeProviderId) {
+      rowsRef.current?.scrollToIndex({ index: rowIndex, animated: true, viewPosition: 0 });
+    }
     const x = Math.max(0, ((timestamp - timeline.startAt) / 60_000) * GUIDE_PIXELS_PER_MINUTE - 110);
     syncHorizontalOffset(x, channelId);
     rowScrollRefs.current[channelId]?.scrollTo({ x, animated: true });
@@ -505,7 +506,9 @@ export function GuideScreen() {
   const focusProgram = (rowIndex: number, row: NormalizedGuideRow, program: NormalizedGuideProgram, programIndex: number) => {
     const timestamp = getProgramTimestamp(program, programIndex);
     publishGuideFocus(row.channel.id, program.id, timestamp, false);
-    scrollToProgram(rowIndex, row.channel.id, timestamp);
+    if (initialFocusProviderRef.current === activeProviderId) {
+      scrollToProgram(rowIndex, row.channel.id, timestamp);
+    }
   };
 
   const focusJumpTarget = (rowIndex: number, row: NormalizedGuideRow, program: NormalizedGuideProgram | null) => {
@@ -516,7 +519,7 @@ export function GuideScreen() {
 
     const key = programKey(row.channel.id, program.id);
     publishGuideFocus(row.channel.id, program.id, program.startAt ?? Date.now(), true);
-    scrollToProgram(rowIndex, row.channel.id, program.startAt ?? Date.now());
+    scrollToProgram(rowIndex, row.channel.id, program.startAt ?? Date.now(), true);
     focusNativeViewWhenReady(() => programRefs.current[key] ?? null, () => undefined);
   };
 
@@ -620,8 +623,6 @@ export function GuideScreen() {
   return (
     <NovaTvShell
       activeId="guide"
-      title="Guide"
-      subtitle="Browse channels. Press OK to watch."
       providerLabel={selectedProviderLabel}
       preferActiveNavigationFocus={false}>
       <View style={styles.screen}>
@@ -686,7 +687,7 @@ export function GuideScreen() {
               onFocus={() => setFocusedAction('filter')}
               onBlur={() => setFocusedAction(null)}
               onPress={() => setFilter((current) => (current === 'all' ? 'favorites' : 'all'))}
-              style={[styles.actionButton, novaTvFocus.base, filter === 'favorites' && styles.actionSelected, focusedAction === 'filter' && styles.textFocusActive]}>
+              style={[styles.actionButton, novaTvFocus.base, filter === 'favorites' ? styles.filterActive : styles.filterDefault, focusedAction === 'filter' && (filter === 'favorites' ? styles.filterActiveFocused : styles.filterFocused)]}>
               <MaterialCommunityIcons name={filter === 'favorites' ? 'star' : 'star-outline'} size={18} color={theme.colors.accentHover} />
               <Text style={[styles.actionText, filter === 'favorites' && styles.actionTextSelected, focusedAction === 'filter' && styles.actionTextFocused]}>
                 {filter === 'favorites' ? 'Favorites' : 'All channels'}
@@ -707,42 +708,46 @@ export function GuideScreen() {
           </View>
         </View>
 
-        <GuideCategoryRail
-          categories={categories}
-          selectedCategoryId={selectedCategoryId}
-          onSelect={handleSelectCategory}
-          onFocusChange={(focused) => {
-            categoryRailFocusedRef.current = focused;
-          }}
-          registerItemRef={registerCategoryRailItemRef}
-        />
-
-        <View style={styles.guideFrame}>
-          <View style={styles.channelHeader}>
-            <Text style={styles.headerLabel}>Channels</Text>
-            <Text style={styles.headerHint}>
-              {selectedCategoryTotalCount != null && selectedCategoryTotalCount > rows.length
-                ? `${rows.length} of ${selectedCategoryTotalCount}`
-                : filteredRows.length}
-            </Text>
-          </View>
-          <ScrollView
-            ref={timelineHeaderRef}
-            horizontal
-            focusable={false}
-            scrollEnabled={false}
-            showsHorizontalScrollIndicator={false}
-            showsVerticalScrollIndicator={false}
-            persistentScrollbar={false}
-            style={styles.timeHeader}
-            contentContainerStyle={[styles.timeHeaderContent, { width: timelineWidth }]}>
-            {timeSlots.map((time) => (
-              <View key={time} style={styles.timeSlot}>
-                <Text style={styles.timeText}>{formatGuideTime(time)}</Text>
-                <Text style={styles.timeDate}>{formatGuideDate(time)}</Text>
-              </View>
-            ))}
-          </ScrollView>
+         <View style={styles.guideFrame}>
+           <View style={styles.guideHeaderRow}>
+             <View style={styles.categoryHeader}>
+               <Text style={styles.headerLabel}>Categories</Text>
+               <GuideCategoryRail
+                 categories={categories}
+                 selectedCategoryId={selectedCategoryId}
+                 onSelect={handleSelectCategory}
+                 onFocusChange={(focused) => {
+                   categoryRailFocusedRef.current = focused;
+                 }}
+                 registerItemRef={registerCategoryRailItemRef}
+               />
+             </View>
+             <View style={styles.channelHeader}>
+               <Text style={styles.headerLabel}>Channels</Text>
+               <Text style={styles.headerHint}>
+                 {selectedCategoryTotalCount != null && selectedCategoryTotalCount > rows.length
+                   ? `${rows.length} of ${selectedCategoryTotalCount}`
+                   : filteredRows.length}
+               </Text>
+             </View>
+             <ScrollView
+               ref={timelineHeaderRef}
+               horizontal
+               focusable={false}
+               scrollEnabled={false}
+               showsHorizontalScrollIndicator={false}
+               showsVerticalScrollIndicator={false}
+               persistentScrollbar={false}
+               style={styles.timeHeader}
+               contentContainerStyle={[styles.timeHeaderContent, { width: timelineWidth }]}>
+               {timeSlots.map((time) => (
+                 <View key={time} style={styles.timeSlot}>
+                   <Text numberOfLines={1} style={styles.timeText}>{formatGuideTime(time)}</Text>
+                   <Text numberOfLines={1} style={styles.timeDate}>{formatGuideDate(time)}</Text>
+                 </View>
+               ))}
+             </ScrollView>
+           </View>
 
           {categoriesStatus === 'loading' && !rows.length ? (
             <GuideLoadingPanel label="Loading guide categories…" />
@@ -866,7 +871,7 @@ export function GuideScreen() {
               initialNumToRender={10}
               maxToRenderPerBatch={8}
               updateCellsBatchingPeriod={40}
-              getItemLayout={(_, index) => ({ length: 48, offset: 48 * index, index })}
+               getItemLayout={(_, index) => ({ length: GUIDE_ROW_HEIGHT, offset: GUIDE_ROW_HEIGHT * index, index })}
               onEndReached={() => {
                 if (hasMore) void loadMore();
               }}
@@ -902,6 +907,9 @@ export function GuideScreen() {
                     : favoriteHandle ?? ownChannelHandle);
                 return (
                   <View style={styles.guideRow}>
+                    <View style={styles.categoryCell}>
+                      <Text numberOfLines={1} style={styles.categoryCellText}>{item.channel.categoryId || 'All Channels'}</Text>
+                    </View>
                     <GuideLocalFocusPressable
                       pressableRef={getChannelRefCallback(item.channel.id)}
                       focusable
@@ -1026,33 +1034,6 @@ export function GuideScreen() {
           )}
         </View>
 
-        <View style={styles.detailsPanel}>
-          <View style={styles.detailsCopy}>
-            <Text style={styles.detailsEyebrow}>{focusedProgram ? getProgramStatus(focusedProgram).toUpperCase() : 'PROGRAM DETAILS'}</Text>
-            <Text numberOfLines={1} style={styles.detailsTitle}>{focusedProgram?.title ?? focusedRow?.channel.name ?? 'Select a channel'}</Text>
-            <Text numberOfLines={1} style={styles.detailsMeta}>
-              {focusedRow?.channel.name ?? 'Choose a channel'}
-              {focusedProgramTime ? `  •  ${focusedProgramTime}` : ''}
-              {focusedProgram ? `  •  ${formatRelativeGuideTime(focusedProgram) ?? 'EPG timing unavailable'}` : ''}
-            </Text>
-            {focusedProgram?.description ? <Text numberOfLines={1} style={styles.detailsDescription}>{focusedProgram.description}</Text> : null}
-          </View>
-          <Pressable
-            ref={favoriteRef}
-            focusable
-            accessibilityRole="button"
-            accessibilityLabel={focusedIsFavorite ? 'Remove channel from favorites' : 'Add channel to favorites'}
-            onFocus={() => setFocusedAction('favorite')}
-            onBlur={() => setFocusedAction(null)}
-            onPress={() => void toggleFocusedFavorite()}
-            style={[styles.favoriteButton, novaTvFocus.base, focusedAction === 'favorite' && styles.textFocusActive]}>
-            <MaterialCommunityIcons name={focusedIsFavorite ? 'star' : 'star-outline'} size={20} color={theme.colors.accentHover} />
-            <Text style={[styles.actionText, focusedAction === 'favorite' && styles.actionTextFocused]}>
-              {focusedIsFavorite ? 'Favorited' : 'Favorite channel'}
-            </Text>
-          </Pressable>
-        </View>
-
         <WalkthroughOverlay
           key={guide.visible ? 'guide-guide-open' : 'guide-guide-closed'}
           visible={guide.visible}
@@ -1072,10 +1053,11 @@ function createStyles(theme: NovaTheme) {
   const light = theme.scheme === 'light';
   const focusText = createNovaTvFocusTextStyles(theme);
   const focusChrome = createNovaTvFocusChrome(theme);
+  const categoryChrome = createNovaCategoryChrome();
 
   return StyleSheet.create({
-    screen: { flex: 1, minHeight: 0, gap: 6 },
-    toolbar: { minHeight: 42, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+    screen: { flex: 1, minHeight: 0, position: 'relative' },
+    toolbar: { position: 'absolute', top: 0, right: 0, zIndex: 5, minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 10 },
     dateBlock: { gap: 2, flex: 1 },
     dateEyebrow: { color: theme.colors.accentHover, fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
     dateText: { color: theme.colors.textPrimary, fontSize: 15, fontWeight: '800' },
@@ -1085,17 +1067,16 @@ function createStyles(theme: NovaTheme) {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 7,
-      borderRadius: 0,
-      borderWidth: 0,
-      borderBottomWidth: 2,
-      borderBottomColor: 'transparent',
+      borderRadius: 13,
+      borderWidth: 2,
       backgroundColor: 'transparent',
       paddingHorizontal: 8,
       paddingVertical: 6,
     },
-    actionSelected: {
-      borderBottomColor: theme.colors.success,
-    },
+    filterDefault: categoryChrome.default,
+    filterActive: categoryChrome.active,
+    filterFocused: categoryChrome.focused,
+    filterActiveFocused: categoryChrome.activeFocused,
     actionText: { color: theme.colors.textPrimary, fontSize: 12, fontWeight: '800' },
     actionTextSelected: { color: theme.colors.accentHover },
     actionTextFocused: focusText.title,
@@ -1132,12 +1113,21 @@ function createStyles(theme: NovaTheme) {
       backgroundColor: 'transparent',
       overflow: 'hidden',
     },
+    guideHeaderRow: { height: 42, flexDirection: 'row', alignItems: 'stretch' },
+    categoryHeader: {
+      width: '16%',
+      height: 42,
+      flexDirection: 'row',
+      alignItems: 'center',
+      borderRightWidth: 1,
+      borderBottomWidth: 1,
+      borderColor: theme.colors.borderSubtle,
+      paddingHorizontal: 6,
+      overflow: 'hidden',
+    },
     channelHeader: {
-      position: 'absolute',
-      left: 0,
-      top: 0,
-      width: GUIDE_CHANNEL_COLUMN_WIDTH,
-      height: 38,
+      width: '20%',
+      height: 42,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
@@ -1151,8 +1141,8 @@ function createStyles(theme: NovaTheme) {
     headerLabel: { color: theme.colors.textSecondary, fontSize: 13, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1 },
     headerHint: { color: theme.colors.textMuted, fontSize: 11, fontWeight: '700' },
     timeHeader: {
-      marginLeft: GUIDE_CHANNEL_COLUMN_WIDTH,
-      height: 38,
+      flex: 1,
+      height: 42,
       borderBottomWidth: 1,
       borderBottomColor: theme.colors.borderSubtle,
       backgroundColor: 'transparent',
@@ -1181,10 +1171,12 @@ function createStyles(theme: NovaTheme) {
       paddingVertical: 4,
       backgroundColor: light ? 'rgba(243, 238, 228, 0.92)' : 'rgba(6, 12, 24, 0.82)',
     },
-    guideRow: { height: 48, flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: theme.colors.borderSubtle },
+    guideRow: { height: GUIDE_ROW_HEIGHT, flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: theme.colors.borderSubtle },
+    categoryCell: { width: '16%', height: GUIDE_ROW_HEIGHT, justifyContent: 'center', borderRightWidth: 1, borderRightColor: theme.colors.borderSubtle, paddingHorizontal: 8, overflow: 'hidden' },
+    categoryCellText: { color: theme.colors.textMuted, fontSize: 10, fontWeight: '700' },
     channelCell: {
-      width: GUIDE_CHANNEL_COLUMN_WIDTH,
-      height: 48,
+      width: '20%',
+      height: GUIDE_ROW_HEIGHT,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
@@ -1211,10 +1203,10 @@ function createStyles(theme: NovaTheme) {
     channelMeta: { marginTop: 1, color: theme.colors.textMuted, fontSize: 8 },
     channelMetaFocused: focusText.secondary,
     programScroller: { flex: 1, minWidth: 0 },
-    programRow: { height: 48, minHeight: 48, paddingRight: 6 },
+    programRow: { height: GUIDE_ROW_HEIGHT, minHeight: GUIDE_ROW_HEIGHT, paddingRight: 6 },
     programCell: {
-      height: 48,
-      minHeight: 48,
+      height: GUIDE_ROW_HEIGHT,
+      minHeight: GUIDE_ROW_HEIGHT,
       justifyContent: 'center',
       borderRightWidth: 1,
       borderRightColor: theme.colors.borderSubtle,
@@ -1235,20 +1227,6 @@ function createStyles(theme: NovaTheme) {
     programSelected: { backgroundColor: 'rgba(59,130,246,0.08)' },
     noProgramCell: { height: 48, justifyContent: 'center', paddingHorizontal: 10 },
     noProgramText: { color: theme.colors.textMuted, fontSize: 12, fontStyle: 'italic' },
-    detailsPanel: {
-      minHeight: 54,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: 12,
-      borderRadius: 0,
-      borderWidth: 0,
-      borderTopWidth: 1,
-      borderTopColor: theme.colors.borderSubtle,
-      backgroundColor: 'transparent',
-      paddingHorizontal: 12,
-      paddingVertical: 6,
-    },
     detailsCopy: { flex: 1, minWidth: 0 },
     detailsEyebrow: { color: theme.colors.accentHover, fontSize: 9, fontWeight: '900', letterSpacing: 1 },
     detailsTitle: { marginTop: 2, color: theme.colors.textPrimary, fontSize: 14, fontWeight: '900' },

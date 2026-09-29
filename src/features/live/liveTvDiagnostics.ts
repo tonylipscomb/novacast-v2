@@ -1,4 +1,4 @@
-import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
+import { isNovaCastTraceLoggingEnabled, novacastTrace } from '../diagnostics/novacastLogPolicy.ts';
 import { isSyntheticLiveFavoritesCategoryId } from '../providers/liveCategoryIdSafety.ts';
 
 export type LiveStartupEvent =
@@ -30,9 +30,10 @@ export function logLiveStartup(
     channelCount?: number;
     selectedCategoryId?: string | null;
     providerIdPresent?: boolean;
+    source?: string;
   } = { elapsedMs: 0 },
 ) {
-  console.info('[NovaCast Live Startup]', {
+  novacastTrace('[NovaCast Live Startup]', {
     event,
     elapsedMs: fields.elapsedMs,
     categoryCount: fields.categoryCount ?? null,
@@ -50,13 +51,14 @@ export function logLiveCategory(
     channelCount?: number;
     elapsedMs?: number;
     reason?: string;
+    source?: string;
   } = {},
 ) {
   if (event !== 'selection-rejected' && !isNovaCastTraceLoggingEnabled()) {
     return;
   }
   const categoryId = safeCategoryId(fields.categoryId);
-  console.info('[NovaCast Live Category]', {
+  novacastTrace('[NovaCast Live Category]', {
     event,
     categoryId,
     isSynthetic: isSyntheticLiveFavoritesCategoryId(categoryId),
@@ -75,7 +77,7 @@ export function logLiveFavorites(fields: {
   scannedLoadedCount?: number;
   indexLookupCount?: number;
 }) {
-  console.info('[NovaCast Live Favorites]', {
+  novacastTrace('[NovaCast Live Favorites]', {
     savedFavoriteCount: fields.savedFavoriteCount,
     canonicalResolvedCount: fields.canonicalResolvedCount,
     unresolvedCount: fields.unresolvedCount,
@@ -95,7 +97,7 @@ export function logLiveEpgTrigger(fields: {
   if (!isNovaCastTraceLoggingEnabled()) {
     return;
   }
-  console.info('[NovaCast Live EPG Trigger]', {
+  novacastTrace('[NovaCast Live EPG Trigger]', {
     caller: fields.caller,
     reason: fields.reason,
     categoryId: safeCategoryId(fields.categoryId),
@@ -117,7 +119,7 @@ export function logLivePerformance(fields: {
   if (!isNovaCastTraceLoggingEnabled()) {
     return;
   }
-  console.info('[NovaCast Live Performance]', {
+  novacastTrace('[NovaCast Live Performance]', {
     event: fields.event,
     elapsedMs: fields.elapsedMs,
     providerIdPresent: fields.providerIdPresent ?? null,
@@ -140,7 +142,7 @@ export function logLiveStallAudit(operation: string, inputCount: number, started
   if (elapsedMs < 1000 && !isNovaCastTraceLoggingEnabled()) {
     return elapsedMs;
   }
-  console.info('[NovaCast Live Stall Audit]', {
+  novacastTrace('[NovaCast Live Stall Audit]', {
     operation,
     inputCount,
     elapsedMs,

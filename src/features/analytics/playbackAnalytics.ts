@@ -2,6 +2,7 @@ import type { PlaybackItem, PlaybackLaunchSource, UnifiedPlayerMachineState } fr
 
 import { enqueueAnalyticsEvent } from './novaAnalytics';
 import { recordDiagnostic } from '@/features/diagnostics/diagnosticsClient';
+import type { PlaybackErrorDiagnostics } from '@/features/playback/playbackErrorDiagnostics';
 
 export type AnalyticsPlaybackType = 'live' | 'movie' | 'series';
 export type PlaybackFailureCategory = 'network' | 'provider' | 'timeout' | 'decoder' | 'unsupported' | 'user_cancelled' | 'unknown';
@@ -252,7 +253,7 @@ export function createPlaybackAnalyticsTracker(
     return true;
   }
 
-  function failure(error: unknown) {
+  function failure(error: unknown, diagnostics?: PlaybackErrorDiagnostics) {
     if (!attempt || attempt.stopped || attempt.failed) return false;
     attempt.failed = true;
     attempt.recoveryPending = true;
@@ -260,7 +261,7 @@ export function createPlaybackAnalyticsTracker(
     send('playback_failed', {
       ...eventInput(attempt),
       outcome: category,
-      metadata: { error_classification: category, retry_count: attempt.retryCount },
+      metadata: { error_classification: diagnostics?.errorClassification ?? category, retry_count: attempt.retryCount, ...(diagnostics ?? {}) },
     });
     const failedStage = category === 'provider' ? 'provider_request_failed'
       : category === 'timeout' ? 'stream_resolution_failed'

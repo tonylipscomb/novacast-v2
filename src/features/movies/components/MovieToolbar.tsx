@@ -2,7 +2,8 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useMemo, useState, type RefObject } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { createNovaTvFocusChrome, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -27,8 +28,14 @@ type MovieToolbarProps = {
   discoverAccessibilityLabel?: string;
   buttonRef?: RefObject<View | null>;
   discoverButtonRef?: RefObject<View | null>;
+  searchNextFocusLeft?: number;
+  searchNextFocusRight?: number;
+  discoverNextFocusLeft?: number;
+  discoverNextFocusRight?: number;
   /** True while Discover Zone overlay owns focus. Must not reuse native-focus chrome. */
   discoverZoneOpen?: boolean;
+  /** Show text beside the icons when embedded beside a sort control. */
+  showLabels?: boolean;
 };
 
 export function MovieToolbar({
@@ -42,7 +49,12 @@ export function MovieToolbar({
   discoverAccessibilityLabel = 'Discover Zone',
   buttonRef,
   discoverButtonRef,
+  searchNextFocusLeft,
+  searchNextFocusRight,
+  discoverNextFocusLeft,
+  discoverNextFocusRight,
   discoverZoneOpen = false,
+  showLabels = false,
 }: MovieToolbarProps) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -54,15 +66,23 @@ export function MovieToolbar({
 
   const searchLabel = (
     <>
-      <MaterialCommunityIcons name="magnify" size={18} color={theme.colors.textPrimary} />
-      <Text style={[styles.actionText, searchFocused && styles.actionTextFocused]}>Search</Text>
+      <MaterialCommunityIcons
+        name="magnify"
+        size={22}
+        color={searchFocused ? theme.colors.focusRing : theme.colors.textPrimary}
+      />
+      {showLabels ? <Text style={[styles.actionText, searchFocused && styles.actionTextFocused]}>Search</Text> : null}
     </>
   );
 
   const discoverLabel = (
     <>
-      <MaterialCommunityIcons name="compass-outline" size={18} color={theme.colors.textPrimary} />
-      <Text style={[styles.actionText, showDiscoverHighlight && styles.actionTextFocused]}>Discover Zone</Text>
+      <MaterialCommunityIcons
+        name="compass-outline"
+        size={22}
+        color={showDiscoverHighlight ? theme.colors.focusRing : theme.colors.textPrimary}
+      />
+      {showLabels ? <Text style={[styles.actionText, showDiscoverHighlight && styles.actionTextFocused]}>Discover Zone</Text> : null}
     </>
   );
 
@@ -83,12 +103,14 @@ export function MovieToolbar({
           onPress={onSearchPress}
           accessibilityRole="button"
           accessibilityLabel={accessibilityLabel}
+          {...(searchNextFocusLeft != null ? { nextFocusLeft: searchNextFocusLeft } : null)}
+          {...(searchNextFocusRight != null ? { nextFocusRight: searchNextFocusRight } : null)}
           {...(Platform.isTV ? ({ onClick: onSearchPress } as object) : null)}
-          style={[styles.actionButton, focusChrome.base, searchFocused && focusChrome.active]}>
+          style={[styles.actionButton, showLabels && styles.actionButtonWithLabel, focusChrome.base, searchFocused && focusChrome.active, searchFocused && styles.actionButtonFocused]}>
           {searchLabel}
         </Pressable>
       ) : (
-        <View focusable={false} accessible={false} pointerEvents="none" style={styles.actionButton}>
+        <View focusable={false} accessible={false} pointerEvents="none" style={[styles.actionButton, showLabels && styles.actionButtonWithLabel]}>
           {searchLabel}
         </View>
       )}
@@ -131,6 +153,8 @@ export function MovieToolbar({
             }}
             accessibilityRole="button"
             accessibilityLabel={discoverAccessibilityLabel}
+            {...(discoverNextFocusLeft != null ? { nextFocusLeft: discoverNextFocusLeft } : null)}
+            {...(discoverNextFocusRight != null ? { nextFocusRight: discoverNextFocusRight } : null)}
             {...(Platform.isTV
               ? ({
                   onClick: () => {
@@ -139,11 +163,11 @@ export function MovieToolbar({
                   },
                 } as object)
               : null)}
-            style={[styles.actionButton, focusChrome.base, showDiscoverHighlight && focusChrome.active]}>
+            style={[styles.actionButton, showLabels && styles.actionButtonWithLabel, focusChrome.base, showDiscoverHighlight && focusChrome.active, showDiscoverHighlight && styles.actionButtonFocused]}>
             {discoverLabel}
           </Pressable>
         ) : (
-          <View focusable={false} accessible={false} pointerEvents="none" style={styles.actionButton}>
+          <View focusable={false} accessible={false} pointerEvents="none" style={[styles.actionButton, showLabels && styles.actionButtonWithLabel]}>
             {discoverLabel}
           </View>
         )
@@ -153,7 +177,6 @@ export function MovieToolbar({
 }
 
 function createStyles(theme: NovaTheme) {
-  const focusText = createNovaTvFocusTextStyles(theme);
   return StyleSheet.create({
     toolbar: {
       flexDirection: 'row',
@@ -161,20 +184,35 @@ function createStyles(theme: NovaTheme) {
       gap: 8,
     },
     actionButton: {
-      minHeight: 38,
-      flexDirection: 'row',
+      width: 44,
+      height: 44,
       alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: NOVA_GLASS.radius.base,
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
+      padding: 0,
+    },
+    actionButtonFocused: {
+      borderColor: NOVA_GLASS.activeFocused.borderColor,
+      backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+    },
+    actionButtonWithLabel: {
+      width: 'auto',
+      minWidth: 88,
+      height: 38,
+      flexDirection: 'row',
       gap: 7,
-      borderRadius: 0,
-      backgroundColor: 'transparent',
       paddingHorizontal: 8,
-      paddingVertical: 6,
     },
     actionText: {
       color: theme.colors.textPrimary,
       fontSize: 12,
       fontWeight: '800',
     },
-    actionTextFocused: focusText.title,
+    actionTextFocused: {
+      color: theme.colors.focusRing,
+    },
   });
 }

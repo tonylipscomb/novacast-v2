@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
+
+import { NovaCastPlanetLoader } from './NovaCastPlanetLoader';
 
 type NovaSpaceLoaderProps = {
   label?: string;
@@ -40,24 +41,16 @@ export function NovaSpaceLoader({ label = 'Loading…', variant = 'panel' }: Nov
     );
 
     pulseLoop.start();
-
     return () => {
       pulseLoop.stop();
     };
   }, [pulse]);
 
-  const rocketScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.12] });
-  const rocketGlow = pulse.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.35, 0.85, 0.35] });
   const energyScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] });
-  const accent = theme.colors.accentHover;
-
   if (variant === 'badge') {
     return (
       <View style={styles.badge} accessibilityRole="progressbar" accessibilityLabel={label}>
-        <Animated.View style={[styles.badgeRocketWrap, { transform: [{ scale: rocketScale }] }]}>
-          <Animated.View style={[styles.badgeGlow, { opacity: rocketGlow }]} />
-          <MaterialCommunityIcons name="rocket-launch" size={28} color={accent} />
-        </Animated.View>
+        <NovaCastPlanetLoader size={40} />
       </View>
     );
   }
@@ -65,10 +58,7 @@ export function NovaSpaceLoader({ label = 'Loading…', variant = 'panel' }: Nov
   if (variant === 'hero') {
     return (
       <View style={styles.hero} accessibilityRole="progressbar" accessibilityLabel={label}>
-        <Animated.View style={[styles.heroRocketWrap, { transform: [{ scale: rocketScale }] }]}>
-          <Animated.View style={[styles.heroGlow, { opacity: rocketGlow }]} />
-          <MaterialCommunityIcons name="rocket-launch" size={64} color={accent} />
-        </Animated.View>
+        <NovaCastPlanetLoader size={72} />
       </View>
     );
   }
@@ -76,9 +66,7 @@ export function NovaSpaceLoader({ label = 'Loading…', variant = 'panel' }: Nov
   if (variant === 'inline') {
     return (
       <View style={styles.inlineRow} accessibilityRole="progressbar" accessibilityLabel={label}>
-        <Animated.View style={{ transform: [{ scale: rocketScale }] }}>
-          <MaterialCommunityIcons name="rocket-launch" size={18} color={accent} />
-        </Animated.View>
+        <NovaCastPlanetLoader size={22} />
         <Text style={styles.inlineLabel}>{label}</Text>
       </View>
     );
@@ -86,10 +74,7 @@ export function NovaSpaceLoader({ label = 'Loading…', variant = 'panel' }: Nov
 
   return (
     <View style={styles.panel} accessibilityRole="progressbar" accessibilityLabel={label}>
-      <Animated.View style={[styles.rocketWrap, { transform: [{ scale: rocketScale }] }]}>
-        <Animated.View style={[styles.rocketGlow, { opacity: rocketGlow }]} />
-        <MaterialCommunityIcons name="rocket-launch" size={42} color={accent} />
-      </Animated.View>
+      <NovaCastPlanetLoader size={56} />
 
       <Text style={styles.label}>{label}</Text>
 
@@ -197,6 +182,10 @@ function createStyles(theme: NovaTheme) {
       gap: 8,
       paddingHorizontal: 4,
       paddingVertical: 8,
+    },
+    inlineRocket: {
+      width: 26,
+      height: 26,
     },
     inlineLabel: {
       color: theme.colors.textPrimary,

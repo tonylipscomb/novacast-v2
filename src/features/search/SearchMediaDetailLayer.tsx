@@ -1,6 +1,7 @@
 import { Linking } from 'react-native';
 
-import { MediaDetailOverlay } from '@/components/media/MediaDetailOverlay';
+import { MovieDetailPopupV2 } from '@/features/movies/components/MovieDetailPopupV2';
+import { SeriesDetailPopupV2 } from '@/features/series/components/SeriesDetailPopupV2';
 
 import type { useSearchMediaDetail } from './useSearchMediaDetail';
 
@@ -40,66 +41,66 @@ export function SearchMediaDetailLayer({ media }: SearchMediaDetailLayerProps) {
   const series = selection?.kind === 'series' ? selection.series : null;
   const playbackUiActive = playbackActive || playbackClosing;
 
-  return (
-    <MediaDetailOverlay
-      visible={detailOpen && !playbackUiActive && Boolean(overlayDetail)}
-      detail={overlayDetail}
-      detailError={detailError}
-      detailLoading={detailLoading}
-      continueWatchingLabel={continueWatchingLabel}
-      isFavorite={
-        movie
-          ? movieLibrary.isFavorite(movie.id)
-          : series
-            ? seriesLibrary.isFavorite(series.seriesId)
-            : false
-      }
-      isWatchlisted={
-        movie
-          ? movieLibrary.isWatchlisted(movie.id)
-          : series
-            ? seriesLibrary.isWatchlisted(series.seriesId)
-            : false
-      }
-      selectedSeasonNumber={Number(selectedSeasonId) || undefined}
-      focusedEpisodeId={focusedEpisodeId}
-      onClose={closeDetail}
-      onRetry={retryDetail}
-      onPlay={
-        movie
-          ? startMoviePlayback
-          : seriesDetail && series && seriesDetail.seasons.length
+  const visible = detailOpen && !playbackUiActive && Boolean(overlayDetail);
+
+  if (movie) {
+    return (
+      <MovieDetailPopupV2
+        visible={visible}
+        movie={movie}
+        detail={overlayDetail}
+        loading={detailLoading}
+        error={detailError}
+        playLabel={continueWatchingLabel}
+        isFavorite={movieLibrary.isFavorite(movie.id)}
+        isWatchlisted={movieLibrary.isWatchlisted(movie.id)}
+        onClose={closeDetail}
+        onRetry={retryDetail}
+        onPlay={startMoviePlayback}
+        onToggleFavorite={() => toggleMovieFavorite(movie.id)}
+        onToggleWatchlist={() => toggleMovieWatchlist(movie.id)}
+        onTrailerPress={
+          overlayDetail?.trailerUrl
+            ? () => {
+                void Linking.openURL(overlayDetail.trailerUrl!);
+              }
+            : undefined
+        }
+      />
+    );
+  }
+
+  if (series) {
+    return (
+      <SeriesDetailPopupV2
+        visible={visible}
+        series={series}
+        detail={overlayDetail}
+        loading={detailLoading}
+        error={detailError}
+        playLabel={continueWatchingLabel}
+        isFavorite={seriesLibrary.isFavorite(series.seriesId)}
+        isWatchlisted={seriesLibrary.isWatchlisted(series.seriesId)}
+        selectedSeasonNumber={Number(selectedSeasonId) || undefined}
+        focusedEpisodeId={focusedEpisodeId}
+        onClose={closeDetail}
+        onRetry={retryDetail}
+        onPlay={
+          seriesDetail && seriesDetail.seasons.length
             ? () => void playFirstEpisode()
             : undefined
-      }
-      onPlayFromBeginning={seriesDetail && series ? () => void playFirstEpisode(true) : undefined}
-      onTrailerPress={
-        overlayDetail?.trailerUrl
-          ? () => {
-              void Linking.openURL(overlayDetail.trailerUrl!);
-            }
-          : undefined
-      }
-      onFavoritePress={
-        movie
-          ? () => toggleMovieFavorite(movie.id)
-          : seriesDetail && series
-            ? () => toggleSeriesFavorite(seriesDetail.seriesId, seriesDetail.title, seriesDetail.posterUrl)
-            : undefined
-      }
-      onWatchlistPress={
-        movie
-          ? () => toggleMovieWatchlist(movie.id)
-          : seriesDetail && series
-            ? () => toggleSeriesWatchlist(seriesDetail.seriesId)
-            : undefined
-      }
-      onSeasonPress={(seasonNumber) => setSelectedSeasonId(String(seasonNumber))}
-      onEpisodeFocus={setFocusedEpisodeId}
-      onEpisodePress={(episode) => {
-        setFocusedEpisodeId(episode.id);
-        void playEpisodeById(episode.id, 'episode');
-      }}
-    />
-  );
+        }
+        onToggleFavorite={() => toggleSeriesFavorite(series.seriesId, series.title, series.posterUrl)}
+        onToggleWatchlist={() => toggleSeriesWatchlist(series.seriesId)}
+        onSeasonPress={(seasonNumber) => setSelectedSeasonId(String(seasonNumber))}
+        onEpisodeFocus={setFocusedEpisodeId}
+        onEpisodePress={(episode) => {
+          setFocusedEpisodeId(episode.id);
+          void playEpisodeById(episode.id, 'episode');
+        }}
+      />
+    );
+  }
+
+  return null;
 }

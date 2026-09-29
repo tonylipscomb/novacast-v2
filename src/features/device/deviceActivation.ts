@@ -12,6 +12,7 @@ import { deviceFeatureFlags, getLocalActivationBypassDecision, isLocalActivation
 import { reportNetworkOutcome } from '../resilience/offlineStatus.ts';
 import { recordSanitizedDiagnostic } from '../resilience/sanitizedDiagnostics.ts';
 import { withTimeout, STARTUP_NETWORK_TIMEOUT_MS } from '../startup/startupTimeouts.ts';
+import { setDiagnosticsEnabled } from '../diagnostics/diagnosticsConfig';
 
 const emptyAuthorization: DeviceAuthorization = {
   backendActivated: false,
@@ -29,6 +30,7 @@ let state: DeviceState = {
   error: null,
 };
 let initPromise: Promise<DeviceState> | null = null;
+let cachedHydrationPromise: Promise<DeviceState> | null = null;
 
 function emit() {
   listeners.forEach((listener) => listener());
@@ -41,6 +43,12 @@ function isHardDeniedStatus(status: DeviceStatusResponse | null | undefined) {
     status?.activationStatus === 'revoked' ||
     status?.activationStatus === 'suspended'
   );
+}
+
+/** Cached active status is trusted for optimistic shell mounting, just as it
+ * is in the existing network-failure/offline authorization path. */
+export function isTrustedPersistedActivation(status: DeviceStatusResponse | null | undefined) {
+  return status?.activationStatus === 'active' && !isHardDeniedStatus(status);
 }
 
 function resolveAuthorization(status: DeviceStatusResponse | null | undefined): DeviceAuthorization {
@@ -175,6 +183,13 @@ export async function checkDeviceStatus() {
       throw new Error(category);
     }
     const status = payload as DeviceStatusResponse;
+    setDiagnosticsEnabled(status.diagnosticsEnabled === true);
+    void import('./deviceAssignmentReconcile.ts').then(({ assignmentFromDeviceStatus, seedAppliedAssignmentIfUnchanged }) =>
+      seedAppliedAssignmentIfUnchanged(
+        assignmentFromDeviceStatus(cached),
+        assignmentFromDeviceStatus(status),
+      ),
+    );
     await writeCachedDeviceStatus(status);
     reportNetworkOutcome(true);
     const authorization = resolveAuthorization(status);
@@ -266,6 +281,8 @@ export function applyHeartbeatAccess(payload: DeviceHeartbeatResponse) {
     remainingBetaHours: payload.remainingBetaHours,
     providerAssigned: payload.providerAssigned,
     managedProviderId: payload.managedProviderId,
+    assignmentId: payload.assignmentId ?? state.status?.assignmentId ?? null,
+    assignedAt: payload.assignedAt ?? state.status?.assignedAt ?? null,
     contentPolicy: payload.contentPolicy,
     requiresProviderDownload:
       payload.providerAssigned || state.status?.requiresProviderDownload,
@@ -317,6 +334,34 @@ export function initializeDevice() {
     initPromise = null;
   });
   return initPromise;
+}
+
+/** Hydrate persisted authorization before the network refresh begins. */
+export function hydrateCachedDeviceState() {
+  if (!cachedHydrationPromise) {
+    cachedHydrationPromise = readCachedDeviceStatus()
+      .then((cached) => {
+        const trustedActive = isTrustedPersistedActivation(cached);
+        if (trustedActive) {
+          setState({
+            ...state,
+            status: cached,
+            authorization: resolveAuthorization(cached),
+            state: 'offline',
+            lastCheckedAt: null,
+            error: null,
+          });
+        }
+        console.info('[NovaCast Startup Gate]', JSON.stringify({
+          event: 'persisted-activation-loaded',
+          timestamp: Date.now(),
+          trustedActive,
+        }));
+        return state;
+      })
+      .catch(() => state);
+  }
+  return cachedHydrationPromise;
 }
 
 export function getDeviceState() {

@@ -35,6 +35,8 @@ type LiveTvFocusRouterProps = {
   onAnchorPress?: () => void;
   onSentinelFocus: (direction: LiveSurfDirection) => void;
   onHandlesChange?: (handles: LiveTvFocusRouterHandles) => void;
+  /** Fullscreen surf can consume LEFT/RIGHT through the TV event layer. */
+  directDirectionalInput?: boolean;
 };
 
 /**
@@ -52,6 +54,7 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
       onAnchorPress,
       onSentinelFocus,
       onHandlesChange,
+      directDirectionalInput = false,
     },
     ref,
   ) {
@@ -356,18 +359,18 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
           hasTVPreferredFocus={!chromeVisible && anchorPreferred}
           onFocus={handleAnchorFocus}
           onPress={() => onAnchorPress?.()}
-          {...(handles.left != null ? { nextFocusLeft: handles.left } : {})}
-          {...(handles.right != null ? { nextFocusRight: handles.right } : {})}
+          {...(!directDirectionalInput && handles.left != null ? { nextFocusLeft: handles.left } : {})}
+          {...(!directDirectionalInput && handles.right != null ? { nextFocusRight: handles.right } : {})}
           style={styles.sentinel}
         />
         <View
           ref={assignLeftRef}
           collapsable={false}
-          focusable
+          focusable={!directDirectionalInput}
           accessible={false}
           importantForAccessibility="no"
           onFocus={() => handleSentinelNativeFocus(-1)}
-          {...(bounce != null
+          {...(!directDirectionalInput && bounce != null
             ? {
                 nextFocusLeft: bounce,
                 nextFocusRight: bounce,
@@ -380,11 +383,11 @@ export const LiveTvFocusRouter = forwardRef<LiveTvFocusRouterHandle, LiveTvFocus
         <View
           ref={assignRightRef}
           collapsable={false}
-          focusable
+          focusable={!directDirectionalInput}
           accessible={false}
           importantForAccessibility="no"
           onFocus={() => handleSentinelNativeFocus(1)}
-          {...(bounce != null
+          {...(!directDirectionalInput && bounce != null
             ? {
                 nextFocusLeft: bounce,
                 nextFocusRight: bounce,

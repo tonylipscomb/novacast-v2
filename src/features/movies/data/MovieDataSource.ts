@@ -1,6 +1,7 @@
 import type { MovieCategory, MovieSummary } from '../movieTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 import type { MediaDetail } from '../../media-browser/mediaTypes.ts';
+import type { XtreamAccountEntitlementSnapshot } from '../../providers/providerEntitlementAudit.ts';
 
 export interface MovieDataSource {
   /** Identifies the active read backend without changing the public data contract. */
@@ -61,4 +62,7 @@ export interface MovieDataSource {
    * Must never be logged. Returns null when native decode cannot be used.
    */
   getCatalogListRequestUrl?(categoryId: string): string | null;
+
+  /** Diagnostic-only Xtream account snapshot. Never includes credentials or URLs. */
+  getAccountEntitlementSnapshot?(): Promise<XtreamAccountEntitlementSnapshot | null>;
 }

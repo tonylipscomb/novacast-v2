@@ -2,6 +2,7 @@ import { Platform, StyleSheet, type TextStyle, type ViewStyle } from 'react-nati
 
 import { novaTheme } from '@/theme';
 import type { NovaTheme } from '@/theme/tokens';
+import { NOVA_FOCUS } from './novaGlassTheme';
 
 /** Fire TV / ONN sticks: skip scale + shadow (layout thrash / focus drops). */
 export const NOVA_TV_LITE_FOCUS = Platform.isTV === true;
@@ -25,8 +26,8 @@ export const novaTvFocus = StyleSheet.create({
     borderRadius: 0,
   },
   active: {
-    borderColor: NOVA_TV_GLASS.border,
-    backgroundColor: NOVA_TV_GLASS.fill,
+    borderColor: NOVA_FOCUS.control.borderColor,
+    backgroundColor: NOVA_FOCUS.control.backgroundColor,
     borderRadius: 0,
   },
 });
@@ -45,12 +46,40 @@ export function createNovaTvFocusChrome(theme: NovaTheme) {
           borderColor: theme.colors.focusRing,
           backgroundColor: theme.colors.surfaceFocused,
           borderRadius: 0,
-        }
+      }
       : {
-          borderColor: NOVA_TV_GLASS.border,
-          backgroundColor: NOVA_TV_GLASS.fill,
+          borderColor: NOVA_FOCUS.control.borderColor,
+          backgroundColor: NOVA_FOCUS.control.backgroundColor,
           borderRadius: 0,
         },
+  });
+}
+
+/** Shared category/filter state chrome. State selection is owned by each caller. */
+export function createNovaCategoryChrome() {
+  return StyleSheet.create({
+    default: {
+      backgroundColor: NOVA_FOCUS.category.default.backgroundColor,
+      borderColor: NOVA_FOCUS.category.default.borderColor,
+      borderRadius: 10,
+    },
+    active: {
+      backgroundColor: NOVA_FOCUS.category.active.backgroundColor,
+      borderColor: NOVA_FOCUS.category.active.borderColor,
+      borderBottomColor: NOVA_FOCUS.category.active.edgeColor,
+      borderRadius: 12,
+    },
+    focused: {
+      backgroundColor: NOVA_FOCUS.category.focused.backgroundColor,
+      borderColor: NOVA_FOCUS.category.focused.borderColor,
+      borderRadius: 12,
+    },
+    activeFocused: {
+      backgroundColor: NOVA_FOCUS.category.activeFocused.backgroundColor,
+      borderColor: NOVA_FOCUS.category.activeFocused.borderColor,
+      borderBottomColor: NOVA_FOCUS.category.activeFocused.cyanEdge,
+      borderRadius: 14,
+    },
   });
 }
 

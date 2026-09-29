@@ -5,6 +5,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { NovaLogo } from '@/components/nova';
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import {
   APPEARANCE_THEMES,
   type AppearanceThemeId,
@@ -203,7 +204,7 @@ export function SettingsDetailPanel({
       onFocus={() => setFocusedControl(id)}
       onBlur={() => setFocusedControl((current) => (current === id ? null : current))}
       onPress={onToggle}
-      style={[styles.toggleRow, novaTvFocus.base, focusedControl === id && styles.rowFocused]}>
+      style={[styles.toggleRow, novaTvFocus.base, focusedControl === id && styles.rowFocused, focusedControl === id && styles.glassFocused]}>
       <View style={styles.toggleCopy}>
         <Text style={[styles.rowTitle, focusedControl === id && styles.rowTitleFocused]}>{label}</Text>
         <Text style={[styles.rowMeta, focusedControl === id && styles.rowMetaFocused]}>{copy}</Text>
@@ -237,7 +238,7 @@ export function SettingsDetailPanel({
         onFocus={() => setFocusedControl(id)}
         onBlur={() => setFocusedControl((current) => (current === id ? null : current))}
         onPress={cycle}
-        style={[styles.toggleRow, novaTvFocus.base, focusedControl === id && styles.rowFocused]}>
+        style={[styles.toggleRow, novaTvFocus.base, focusedControl === id && styles.rowFocused, focusedControl === id && styles.glassFocused]}>
         <View style={styles.toggleCopy}>
           <Text style={[styles.rowTitle, focusedControl === id && styles.rowTitleFocused]}>{label}</Text>
           <Text style={[styles.rowMeta, focusedControl === id && styles.rowMetaFocused]}>{copy}</Text>
@@ -283,6 +284,7 @@ export function SettingsDetailPanel({
                 selected && styles.choiceChipSelected,
                 novaTvFocus.base,
                 focusedControl === id && styles.choiceChipFocused,
+                focusedControl === id && styles.glassFocused,
               ]}>
               <Text
                 style={[
@@ -383,6 +385,7 @@ export function SettingsDetailPanel({
                 selected && styles.themeCardSelected,
                 novaTvFocus.base,
                 focusedControl === id && styles.themeCardFocused,
+                focusedControl === id && styles.glassFocused,
               ]}>
               <View style={styles.themeSwatches}>
                 {item.swatch.map((color) => (
@@ -646,6 +649,11 @@ function createStyles(theme: NovaTheme) {
       minWidth: 0,
       borderTopWidth: 1,
       borderTopColor: theme.colors.borderSubtle,
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
+      paddingHorizontal: 14,
       paddingTop: 10,
     },
     scrollContent: {
@@ -709,8 +717,9 @@ function createStyles(theme: NovaTheme) {
       paddingVertical: 8,
       paddingHorizontal: 10,
       borderWidth: 1,
-      borderColor: theme.colors.borderSubtle,
-      backgroundColor: theme.colors.backgroundRaised,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.subtle,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
       gap: 2,
     },
     statValue: {
@@ -748,6 +757,11 @@ function createStyles(theme: NovaTheme) {
       borderBottomColor: theme.scheme === 'light' ? theme.colors.focusRing : theme.colors.accentHover,
       backgroundColor: 'transparent',
     },
+    glassFocused: {
+      backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+      borderColor: NOVA_GLASS.activeFocused.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
     choiceChipText: {
       color: theme.colors.textSecondary,
       fontSize: 12,
@@ -768,6 +782,7 @@ function createStyles(theme: NovaTheme) {
       borderBottomWidth: 2,
       borderBottomColor: theme.colors.borderSubtle,
       backgroundColor: 'transparent',
+      borderRadius: NOVA_GLASS.radius.base,
     },
     toggleCopy: {
       flex: 1,
@@ -811,10 +826,10 @@ function createStyles(theme: NovaTheme) {
       minHeight: 108,
       paddingVertical: 12,
       paddingHorizontal: 4,
-      borderWidth: 0,
-      borderBottomWidth: 2,
-      borderBottomColor: theme.colors.borderSubtle,
-      backgroundColor: 'transparent',
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
       gap: 6,
     },
     themeCardSelected: {
@@ -851,8 +866,9 @@ function createStyles(theme: NovaTheme) {
       gap: 10,
       padding: 12,
       borderWidth: 1,
-      borderColor: theme.colors.borderSubtle,
-      backgroundColor: theme.colors.backgroundRaised,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
     },
     pinPrompt: {
       color: theme.colors.textPrimary,
@@ -962,9 +978,10 @@ function createStyles(theme: NovaTheme) {
       gap: 6,
       paddingVertical: 10,
       paddingHorizontal: 12,
-      backgroundColor: theme.colors.surfaceMuted,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
       borderWidth: 1,
-      borderColor: theme.colors.borderSubtle,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
     },
     betaLine: {
       color: theme.colors.textPrimary,

@@ -3,6 +3,7 @@ import { resetPairingCompleted } from '@/features/pairing/pairingState';
 import { getPairingService } from '@/features/pairing/pairingService';
 import { clearProvidersForPairing } from '@/features/providers/providerStore';
 import { clearDeviceIdentity } from '@/features/device/deviceStorage';
+import { resetDeviceRegistrationCache } from '@/features/device/deviceRegistration';
 
 /**
  * Reset pairing keeps the permanent device identity and secret.
@@ -44,6 +45,7 @@ export async function factoryResetNovacast() {
   await clearProvidersForPairing();
   await clearPendingPairingSession();
   await clearDeviceIdentity();
+  resetDeviceRegistrationCache();
   resetPairingCompleted();
   resetPairingDeviceForTests();
 }

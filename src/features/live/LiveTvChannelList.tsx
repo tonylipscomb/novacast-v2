@@ -37,6 +37,12 @@ type LiveTvChannelListProps = {
   preferFocusChannelId: string | null;
   listRef: RefObject<FlatList<LiveTvChannelRowShellData> | null>;
   categoryFocusLeftHandle?: number;
+  favoriteChannelIds: ReadonlySet<string>;
+  onFavoriteChannel: (channelId: string) => void;
+  onPlayChannel: (channelId: string) => void;
+  playEnabled: boolean;
+  registerFavoriteActionRef?: (channelId: string, instance: ElementRef<typeof View> | null) => void;
+  registerPlayActionRef?: (channelId: string, instance: ElementRef<typeof View> | null) => void;
   /** When true, allow one programmatic scroll for restore / category jump. */
   allowRestoreScroll?: boolean;
   onTuneChannel: (channelId: string) => void;
@@ -51,6 +57,12 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   preferFocusChannelId,
   listRef,
   categoryFocusLeftHandle,
+  favoriteChannelIds,
+  onFavoriteChannel,
+  onPlayChannel,
+  playEnabled,
+  registerFavoriteActionRef,
+  registerPlayActionRef,
   allowRestoreScroll = false,
   onTuneChannel,
   onChannelFocus,
@@ -99,8 +111,9 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
 
   // Do not include a full-list EPG signature — per-row EPG props drive memoized updates.
   const listExtraData = useMemo(
-    () => `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}`,
-    [categoryFocusLeftHandle, previewChannelId, selectedChannelId],
+    () =>
+      `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}:${favoriteChannelIds.size}`,
+    [categoryFocusLeftHandle, favoriteChannelIds.size, previewChannelId, selectedChannelId],
   );
 
   const scrollToFocusedIndex = useCallback(
@@ -167,9 +180,16 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
           selected={item.id === selectedChannelId}
           previewing={item.id === previewChannelId}
           preferFocus={preferFocusChannelId === item.id}
-          trapFocusUp={index === 0}
+          trapFocusUp={false}
           trapFocusDown={index === rowShells.length - 1}
-          nextFocusLeft={categoryFocusLeftHandle}
+        nextFocusLeft={categoryFocusLeftHandle}
+        nextFocusRight={undefined}
+          isFavorite={favoriteChannelIds.has(item.id)}
+          onFavorite={onFavoriteChannel}
+          onPlay={onPlayChannel}
+          playEnabled={playEnabled}
+          registerFavoriteActionRef={registerFavoriteActionRef}
+          registerPlayActionRef={registerPlayActionRef}
           onFocus={handleChannelFocus}
           onTune={onTune}
           registerRef={onRegister}
@@ -178,10 +198,16 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
     },
     [
       categoryFocusLeftHandle,
+      favoriteChannelIds,
       epgByChannelId,
       handleChannelFocus,
       onRegister,
       onTune,
+      onFavoriteChannel,
+      onPlayChannel,
+      playEnabled,
+      registerFavoriteActionRef,
+      registerPlayActionRef,
       preferFocusChannelId,
       previewChannelId,
       rowShells.length,

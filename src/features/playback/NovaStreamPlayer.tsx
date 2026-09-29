@@ -17,10 +17,11 @@ import {
   subscribeVodHeapProfile,
 } from './vodPlayerMemory.ts';
 import { isNovaCastTraceLoggingEnabled } from '../diagnostics/novacastLogPolicy.ts';
-import { type ComponentProps, useCallback, useEffect, useRef } from 'react';
+import { type ComponentProps, useCallback, useEffect, useMemo, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { useEventListener } from 'expo';
 import { isVideoDecoderInitFailure, UNSUPPORTED_VIDEO_FORMAT_CATEGORY } from './unified/moviePlaybackCompatibility.ts';
+import { extractPlaybackErrorDiagnostics, type PlaybackErrorDiagnostics } from './playbackErrorDiagnostics';
 
 let nextPlayerGenerationId = 1;
 const playerGenerationIds = new WeakMap<object, number>();
@@ -62,7 +63,7 @@ function normalizedNativeErrorCategory(message: unknown) {
 type NovaStreamPlayerOptions = {
   autoPlay?: boolean;
   muted?: boolean;
-  onError?: (message: string) => void;
+  onError?: (message: string, diagnostics?: PlaybackErrorDiagnostics) => void;
   onReady?: () => void;
   /**
    * Live keeps expo-video defaults. VOD applies a bounded Media3 LoadControl
@@ -111,7 +112,7 @@ function replacePlayerSource(player: VideoPlayer, source: VideoSource) {
   }
 }
 
-export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStreamPlayerOptions = {}) {
+export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamPlayerOptions = {}) {
   const { autoPlay = true, muted = false, onError, onReady, bufferPolicy = 'live' } = options;
   const lastUrlRef = useRef(streamUrl);
   const lastPlayerRef = useRef<VideoPlayer | null>(null);
@@ -132,11 +133,14 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
     void primeVodHeapLimit();
   }, [bufferPolicy]);
 
-  const player = useVideoPlayer(streamUrl, (nextPlayer) => {
+  const stableSource = useMemo(() => streamUrl, [streamUrl]);
+  const player = useVideoPlayer(stableSource, (nextPlayer) => {
     if (bufferPolicyRef.current === 'vod') {
       applyVodBufferProfile(nextPlayer);
     }
     nextPlayer.muted = muted;
+    // Keep expo-video's native view-level protection explicit for every surface.
+    nextPlayer.keepScreenOnWhilePlaying = true;
     if (autoPlay && streamUrl) {
       nextPlayer.play();
     }
@@ -198,7 +202,15 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
       logVodPlayerMemory('playback-error', { playerGenerationId, errorCategory });
     }
     if (status === 'error' && lastUrlRef.current) {
-      onErrorRef.current?.(errorText.trim() || 'Unable to play this stream right now.');
+      onErrorRef.current?.(
+        errorText.trim() || 'Unable to play this stream right now.',
+        extractPlaybackErrorDiagnostics(error, {
+          playerState: status,
+          isPlaying: player.playing,
+          positionSeconds: player.currentTime,
+          streamUrl: typeof lastUrlRef.current === 'string' ? lastUrlRef.current : undefined,
+        }),
+      );
     }
   });
 
@@ -257,6 +269,7 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
         }
 
         player.muted = muted;
+        player.keepScreenOnWhilePlaying = true;
         if (autoPlay) {
           player.play();
         }
@@ -305,6 +318,7 @@ export function useNovaStreamPlayer(streamUrl: string | null, options: NovaStrea
         }
 
         player.muted = muted;
+        player.keepScreenOnWhilePlaying = true;
         if (autoPlay) {
           player.play();
         }

@@ -17,9 +17,17 @@ import {
 } from '../../media-browser/contentSorting.ts';
 
 import type { SeriesDataSource } from './SeriesDataSource';
+import { logSeriesDataSourceAudit } from '../seriesDataSourceAudit';
 
 const POSTER_STYLE_KEYS = ['ember', 'signal', 'glacier', 'orbit', 'midnight', 'onyx', 'aurora', 'dune'] as const;
 const MAX_CACHED_CATEGORY_ITEMS = 100_000;
+
+// TEMPORARY: remove after The Chi provider response is diagnosed. This is
+// deliberately limited to shape/count metadata and never logs credentials or
+// the provider URL.
+function logSeriesInfoAudit(payload: Record<string, unknown>) {
+  console.info('[NovaCast Series Info Audit]', JSON.stringify(payload));
+}
 
 function posterStyleKeyForIndex(index: number) {
   return POSTER_STYLE_KEYS[index % POSTER_STYLE_KEYS.length];
@@ -35,6 +43,7 @@ function mapPosterToSummary(poster: ProviderSeriesPoster, categoryId: string, in
     rawTitle: poster.rawTitle,
     year: poster.year,
     rating: poster.rating,
+    releaseDate: poster.releaseDate,
     genres: inferGenreTags(poster.title, []),
     posterStyleKey: posterStyleKeyForIndex(index),
     posterUrl: poster.posterUrl,
@@ -174,9 +183,33 @@ export function createProviderSeriesDataSource(
 ): SeriesDataSource {
   const categoryCache = new Map<string, SeriesSummary[]>();
 
+  logSeriesDataSourceAudit({
+    event: 'repository-source-created',
+    providerId: null,
+    selectedSource: 'repository',
+    sourceClass: 'ProviderSeriesDataSource',
+    sqliteEnabled: false,
+  });
+
   return {
     async getCategories() {
-      return repository.getCategories();
+      logSeriesDataSourceAudit({
+        event: 'source-getCategories-enter',
+        selectedSource: 'repository',
+        sourceClass: 'ProviderSeriesDataSource',
+        sqliteEnabled: false,
+        fallbackReason: 'repository.getCategories',
+      });
+      const categories = await repository.getCategories();
+      logSeriesDataSourceAudit({
+        event: 'source-getCategories-result',
+        selectedSource: 'repository',
+        sourceClass: 'ProviderSeriesDataSource',
+        sqliteEnabled: false,
+        categoryCount: categories.length,
+        fallbackReason: 'get_series_categories',
+      });
+      return categories;
     },
 
     async getSeriesPage({ categoryId, offset, limit, sort = 'newest' }: { categoryId: string; offset: number; limit: number; sort?: ContentSortOption }) {
@@ -217,8 +250,73 @@ export function createProviderSeriesDataSource(
     },
 
     async getSeriesInfo(seriesId) {
-      const info = await repository.getSeriesInfo(seriesId);
-      return mapSeriesInfo(seriesId, info, mediaBaseUrl);
+      const startedAt = Date.now();
+      try {
+        const info = await repository.getSeriesInfo(seriesId);
+        const rawEpisodes = info?.episodes;
+        const episodeSeasonKeys = rawEpisodes && typeof rawEpisodes === 'object'
+          ? Object.keys(rawEpisodes)
+          : [];
+        const rawEpisodeCounts = Object.fromEntries(
+          episodeSeasonKeys.map((key) => {
+            const value = rawEpisodes?.[key];
+            return [key, Array.isArray(value) ? value.length : value && typeof value === 'object' ? Object.keys(value).length : 0];
+          }),
+        );
+        const detail = mapSeriesInfo(seriesId, info, mediaBaseUrl);
+        logSeriesInfoAudit({
+          origin: 'series-detail',
+          title: typeof info?.info?.name === 'string' ? info.info.name : null,
+          canonicalSeriesId: detail?.seriesId ?? null,
+          providerSeriesId: String(seriesId),
+          datasource: 'ProviderSeriesDataSource',
+          responseSource: 'provider',
+          httpStatus: 'ok',
+          durationMs: Date.now() - startedAt,
+          responseShape: info == null ? 'null' : Array.isArray(info) ? 'array' : typeof info,
+          responseTopLevelKeys: info && typeof info === 'object' ? Object.keys(info) : [],
+          metadataSeasonCount: Array.isArray(info?.seasons) ? info.seasons.length : 0,
+          metadataSeasonNumbers: Array.isArray(info?.seasons)
+            ? info.seasons.map((season) => String(season.season_number ?? season.season_num ?? season.season ?? ''))
+            : [],
+          episodeContainerType: rawEpisodes == null ? String(rawEpisodes) : Array.isArray(rawEpisodes) ? 'array' : typeof rawEpisodes,
+          episodeSeasonKeys,
+          episodeCountBySeason: rawEpisodeCounts,
+          totalEpisodeCount: Object.values(rawEpisodeCounts).reduce((sum, count) => sum + Number(count), 0),
+          parsedSeasonNumbers: detail?.seasons.map((season) => season.seasonNumber) ?? [],
+          parsedEpisodeCountBySeason: detail ? Object.fromEntries(Object.entries(detail.episodesBySeason).map(([key, value]) => [key, value.length])) : {},
+          selectedSeason: null,
+          selectedSeasonEpisodeCount: null,
+          errorCategory: null,
+        });
+        return detail;
+      } catch (error) {
+        const safeError = error as { httpStatus?: number; classification?: string; name?: string; message?: string };
+        logSeriesInfoAudit({
+          origin: 'series-detail',
+          title: null,
+          canonicalSeriesId: null,
+          providerSeriesId: String(seriesId),
+          datasource: 'ProviderSeriesDataSource',
+          responseSource: 'provider',
+          httpStatus: safeError.httpStatus ?? null,
+          durationMs: Date.now() - startedAt,
+          responseShape: 'error',
+          responseTopLevelKeys: [],
+          metadataSeasonCount: 0,
+          metadataSeasonNumbers: [],
+          episodeContainerType: null,
+          episodeSeasonKeys: [],
+          episodeCountBySeason: {},
+          totalEpisodeCount: 0,
+          parsedSeasonNumbers: [],
+          parsedEpisodeCountBySeason: {},
+          selectedSeason: null,
+          selectedSeasonEpisodeCount: null,
+          errorCategory: safeError.classification ?? safeError.name ?? 'request-failed',
+        });
+        throw error;
+      }
     },
 
     async getCategoryCount(categoryId) {

@@ -86,7 +86,7 @@ export function shouldKeepPendingMoviesSearchScroll(
   pending: PendingMoviesSearchScroll | null,
   activeRequestId: number | null,
   activeQueryRevision: number,
-): pending is PendingMoviesSearchScroll {
+): boolean {
   if (!pending) {
     return false;
   }

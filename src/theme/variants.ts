@@ -49,7 +49,7 @@ export function resolveNovaTheme(themeId: AppearanceThemeId): NovaTheme {
     return {
       ...baseTheme,
       scheme: 'dark',
-      colors: { ...baseTheme.colors, ...blackoutColors },
+      colors: { ...baseTheme.colors, ...blackoutColors } as unknown as NovaTheme['colors'],
     };
   }
 
@@ -57,7 +57,7 @@ export function resolveNovaTheme(themeId: AppearanceThemeId): NovaTheme {
     return {
       ...baseTheme,
       scheme: 'light',
-      colors: { ...baseTheme.colors, ...iceColors },
+      colors: { ...baseTheme.colors, ...iceColors } as unknown as NovaTheme['colors'],
     };
   }
 

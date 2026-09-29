@@ -9,7 +9,9 @@ export type DiagnosticEventType =
   | 'app_launch' | 'app_resumed' | 'app_backgrounded' | 'route_changed'
   | 'catalog_sync_started' | 'catalog_sync_completed' | 'catalog_sync_failed'
   | 'provider_assignment_changed' | 'connectivity_changed' | 'retry_started'
-  | 'playback_recovered';
+  | 'playback_recovered'
+  | 'screen_awake_acquired' | 'screen_awake_released' | 'app_state_changed' | 'player_state_changed' | 'playback_interrupted'
+  | 'favorite_hold_started' | 'favorite_hold_triggered' | 'favorite_hold_cancelled';
 
 export type DiagnosticEvent = {
   eventType: DiagnosticEventType;

@@ -6,7 +6,19 @@ export {
   getCatalogSchemaVersion,
   resetCatalogDatabaseForTests,
   getCatalogMutexStatsForTests,
+  beginCatalogForegroundRead,
+  getCachedCatalogJournalMode,
+  isCatalogWalActive,
+  isCatalogWriteTransactionActive,
+  setCatalogUiSurface,
+  waitForForegroundCatalogReadsToDrain,
 } from './catalogDatabase.ts';
+export {
+  getCatalogBackgroundWriteYield,
+  getCatalogUiSurface,
+  hasActiveCatalogForegroundRead,
+  resetCatalogForegroundPriorityForTests,
+} from './catalogForegroundPriority.ts';
 
 export {
   setCatalogDatabaseOpenerForTests,
@@ -38,6 +50,8 @@ export {
   clearProviderCatalog,
   listCatalogItemsForGeneration,
   listCatalogCategoriesForGeneration,
+  listKnownSeriesCategoryNames,
+  updatePublishedSeriesCategoryNames,
   listCatalogSeasonsForGeneration,
   recomputeCategoryCounts,
   getCatalogGenerationItemStats,
@@ -71,6 +85,7 @@ export {
 
 export type {
   CatalogMediaType,
+  CatalogSyncMediaType,
   CatalogSyncStatus,
   CatalogItemSort,
   CatalogProviderRecord,
@@ -112,6 +127,18 @@ export {
 
 export { clearMoviesReadableGenerationCacheForTests } from './moviesReadableGenerationCache.ts';
 
+export {
+  reconcileOrphanedCatalogSyncs,
+  shouldAbandonOrphanedCatalogSync,
+} from './catalogOrphanedSyncRecovery.ts';
+
+export {
+  clearActiveCatalogSqliteWritersForTests,
+  hasActiveCatalogSqliteWriter,
+  registerActiveCatalogSqliteWriter,
+  unregisterActiveCatalogSqliteWriter,
+} from './catalogSyncWriterRegistry.ts';
+
 export type { MovieFragmentRecoveryResult } from './catalogFragmentRecovery.ts';
 
 export {
@@ -142,6 +169,7 @@ export {
   isCatalogSyncRunning,
   invalidateCatalogSyncForProvider,
   getCatalogSyncCancelToken,
+  getCatalogSyncEpoch,
   clearCatalogSyncCoordinatorForTests,
 } from './catalogSyncCoordinator.ts';
 

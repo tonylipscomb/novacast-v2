@@ -8,6 +8,7 @@ import { setSeriesSortOption, subscribeMediaSettings, useMediaSettingsStore } fr
 import type { ContentSortOption } from '@/features/media-browser/contentSorting';
 import { buildContentSortRequestKey } from '@/features/media-browser/contentSortRequest';
 import {
+  createSmartSeriesDataSource,
   refreshSmartSeriesCategoryCounts,
 } from '@/features/series/smart/SmartSeriesDataSource';
 import { subscribeCategoryCountIndex } from '@/features/providers/categoryCountIndexStore';
@@ -15,6 +16,14 @@ import { subscribeCatalogSyncPhase } from '@/features/providers/providerCatalogS
 import { subscribeSmartCategoryCache } from '@/features/providers/smartCategoryCacheStore';
 import { findDefaultBrowseCategoryId, isSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
 import type { SeriesDataSource } from './data/SeriesDataSource';
+import { createProviderSeriesDataSource } from './data/ProviderSeriesDataSource';
+import { createSqliteFirstSeriesDataSource } from './data/SqliteSeriesDataSource';
+import { logSeriesDataSourceAudit } from './seriesDataSourceAudit';
+import {
+  getCatalogSyncState,
+  getCatalogTotalCount,
+  resolveReadableCatalogGeneration,
+} from '@/features/catalog/catalogRepository';
 import { getSeriesScreenMemory, rememberSeriesScreenMemory } from './seriesScreenMemory';
 import { matchSeriesMetadata } from './metadata/seriesMetadataMatcher';
 import { emitSeriesStartup, logSeriesPerf } from './seriesDiagnostics';
@@ -72,16 +81,48 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
   const initialSeriesCategoryId =
     rememberedInitialCategoryId === 'all' ? undefined : rememberedInitialCategoryId;
 
-  // Stage 4.2O.2: `bundle.seriesDataSource` is now SQLite-first internally
-  // (see providerBundle.ts) — this hook's data-fetching call sites and
-  // startup fast-path branching are unchanged; only the underlying reads
-  // the "network" fallback step performs have moved to prefer SQLite.
+  const seriesSqliteFlagEnabled = process.env.EXPO_PUBLIC_SERIES_SQLITE_READS === 'true';
+
+  // Series screen owns browse reads. Always instantiate SqliteSeriesDataSource
+  // (sqlite-first composite) so a published generation cannot be skipped when
+  // the bundle was built with EXPO_PUBLIC_SERIES_SQLITE_READS !== 'true'.
   const resolvedDataSource = useMemo(() => {
     if (options.dataSource) {
+      logSeriesDataSourceAudit({
+        event: 'data-source-selection',
+        providerId: selectedProvider?.id ?? null,
+        selectedSource: 'injected',
+        sourceClass: 'options.dataSource',
+        sqliteEnabled: seriesSqliteFlagEnabled,
+        fallbackReason: null,
+      });
       return options.dataSource;
     }
-    return bundle?.seriesDataSource ?? null;
-  }, [bundle?.seriesDataSource, options.dataSource]);
+    if (!selectedProvider?.id || !bundle?.series) {
+      logSeriesDataSourceAudit({
+        event: 'data-source-selection',
+        providerId: selectedProvider?.id ?? null,
+        selectedSource: bundle?.seriesDataSource ? 'bundle-seriesDataSource' : 'none',
+        sourceClass: bundle?.seriesDataSource ? 'bundle.seriesDataSource' : 'none',
+        sqliteEnabled: seriesSqliteFlagEnabled,
+        fallbackReason: !selectedProvider?.id ? 'no-provider' : 'no-bundle-series-repository',
+      });
+      return bundle?.seriesDataSource ?? null;
+    }
+    const network = createProviderSeriesDataSource(bundle.series, bundle.mediaBaseUrl);
+    const sqliteFirst = createSqliteFirstSeriesDataSource(selectedProvider.id, network);
+    logSeriesDataSourceAudit({
+      event: 'data-source-selection',
+      providerId: selectedProvider.id,
+      selectedSource: 'sqlite',
+      sourceClass: 'SqliteSeriesDataSource',
+      sqliteEnabled: seriesSqliteFlagEnabled,
+      fallbackReason: seriesSqliteFlagEnabled
+        ? null
+        : 'bundle-flag-off-screen-still-selects-published-sqlite',
+    });
+    return createSmartSeriesDataSource(sqliteFirst, selectedProvider.id);
+  }, [bundle, options.dataSource, selectedProvider?.id, seriesSqliteFlagEnabled]);
 
   // ── Browse state (Stage 4.2O bespoke model — replaces shared useMediaBrowserModel) ──
   const [categories, setCategories] = useState<MediaCategory[]>([]);
@@ -213,6 +254,13 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       budgetEmitted: false,
     };
     setStartupInteractive(false);
+    logSeriesDataSourceAudit({
+      event: 'screen-enter',
+      providerId: activeProviderId,
+      selectedSource: resolvedDataSource ? 'pending-selection' : 'none',
+      sourceClass: 'SeriesRoute/SeriesScreen/useSeriesScreenModel',
+      sqliteEnabled: seriesSqliteFlagEnabled,
+    });
     emitStartup('series_startup_shell_mounted', {
       level: 'shell',
       startupSessionId: session.sessionId,
@@ -263,10 +311,61 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
   // ── Stage 4.2O: durable-snapshot-first category load ──
   useEffect(() => {
     if (!resolvedDataSource) {
+      logSeriesDataSourceAudit({
+        event: 'source-error',
+        providerId: activeProviderId,
+        selectedSource: 'none',
+        sourceClass: 'none',
+        sqliteEnabled: seriesSqliteFlagEnabled,
+        fallbackReason: 'resolved-data-source-missing',
+        errorName: 'SeriesDataSourceMissing',
+        errorMessage: 'Series screen has no data source yet',
+      });
       return;
     }
 
     let mounted = true;
+    void (async () => {
+      try {
+        const [readableGeneration, syncState] = await Promise.all([
+          resolveReadableCatalogGeneration(activeProviderId, 'series').catch(() => 0),
+          getCatalogSyncState(activeProviderId, 'series').catch(() => null),
+        ]);
+        const publishedTotal =
+          readableGeneration > 0
+            ? await getCatalogTotalCount(activeProviderId, 'series', { generation: readableGeneration }).catch(
+                () => 0,
+              )
+            : 0;
+        if (!mounted) {
+          return;
+        }
+        logSeriesDataSourceAudit({
+          event: 'data-source-selection',
+          providerId: activeProviderId,
+          selectedSource: 'sqlite',
+          sourceClass: 'SqliteSeriesDataSource',
+          sqliteEnabled: seriesSqliteFlagEnabled,
+          readableGeneration,
+          generationStatus: syncState
+            ? `${syncState.status}:${syncState.generation}`
+            : 'sync-state-missing',
+          itemCount: publishedTotal,
+        });
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+        logSeriesDataSourceAudit({
+          event: 'source-error',
+          providerId: activeProviderId,
+          sourceClass: 'SqliteSeriesDataSource',
+          sqliteEnabled: seriesSqliteFlagEnabled,
+          errorName: error instanceof Error ? error.name : typeof error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
     let indexDebounceTimer: ReturnType<typeof setTimeout> | null = null;
     let deferredCountsRequested = false;
 
@@ -605,7 +704,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
         // SQLite browse pages deliberately skip COUNT(*), so 49/97/145...
         // are lower bounds, not real category totals. Authoritative counts
         // still arrive through getCategoryCount/prefetchAllCategoryCounts.
-        if (page.totalCountIsExact !== false) {
+        if (!('totalCountIsExact' in page) || page.totalCountIsExact !== false) {
           syncCategoryCount(selectedCategoryId, page.totalCount);
         }
 
@@ -786,7 +885,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       // SQLite browse pages deliberately skip COUNT(*), so 49/97/145...
       // are lower bounds, not real category totals. Authoritative counts
       // still arrive through getCategoryCount/prefetchAllCategoryCounts.
-      if (page.totalCountIsExact !== false) {
+      if (!('totalCountIsExact' in page) || page.totalCountIsExact !== false) {
         syncCategoryCount(selectedCategoryId, page.totalCount);
       }
       setBrowseLoadStatus((current) => (current === 'error' ? current : 'ready'));

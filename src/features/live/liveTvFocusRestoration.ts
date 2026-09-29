@@ -4,7 +4,7 @@ import type { LiveTvState } from './liveTvLogic';
  * Which control launched the fullscreen player, so focus can be restored to
  * that exact control (not a guessed default) once fullscreen closes.
  */
-export type FullscreenLaunchSource = 'channel' | 'button' | null;
+export type FullscreenLaunchSource = 'channel' | 'button' | 'discover' | null;
 
 /**
  * Mirrors the "second OK on the already-previewing, ready channel enters

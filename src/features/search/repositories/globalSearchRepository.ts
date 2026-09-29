@@ -5,6 +5,7 @@ import { createSearchTimer, logSearchTiming } from '../searchTiming.ts';
 import type { GroupedSearchResults, SearchPageRequest, SearchPageResult, SearchResult, SearchScope } from '../searchTypes.ts';
 import { resolveMoviesSearchDatasource } from '../moviesSearchDatasource.ts';
 import { resolveSeriesSearchDatasource } from '../seriesSearchDatasource.ts';
+import { novacastTrace } from '../../diagnostics/novacastLogPolicy.ts';
 import { searchGuidePrograms } from './guideSearchRepository.ts';
 import { searchLiveChannels } from './liveSearchRepository.ts';
 import { searchMovies } from './movieSearchRepository.ts';
@@ -159,15 +160,29 @@ export async function searchByScope(
     }
     case 'series': {
       // search-s4-authoritative-sqlite
+      const startedAt = Date.now();
       const selection = await resolveSeriesSearchDatasource({
         providerId: bundle.providerId,
         query: request.query,
+        offset: request.offset,
+        limit: request.limit,
         bundleSeriesDataSource: bundle.seriesDataSource,
       });
+      let result: SearchPageResult<SearchResult>;
       if (selection.selectedDatasource === 'sqlite-v2') {
-        return searchSeriesDataSourceDirect(bundle.providerId, selection.dataSource, request);
+        result = await searchSeriesDataSourceDirect(bundle.providerId, selection.dataSource, request);
+      } else {
+        result = await searchSeries(bundle.providerId, selection.dataSource, request);
       }
-      return searchSeries(bundle.providerId, selection.dataSource, request);
+      novacastTrace(
+        '[NovaCast Series Search Complete] ' +
+          JSON.stringify({
+            selectedDatasource: selection.selectedDatasource,
+            elapsedMs: Date.now() - startedAt,
+            returnedCount: result.items.length,
+          }),
+      );
+      return result;
     }
     case 'guide':
       return searchGuidePrograms(bundle.providerId, request);

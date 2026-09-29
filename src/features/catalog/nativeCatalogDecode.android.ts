@@ -10,6 +10,14 @@ import type {
   StreamXtreamCategoryDecodeInput,
   StreamXtreamCategoryDecodeResult,
 } from './nativeCatalogDecodeTypes.ts';
+import { logCatalogDecodeFailure, createCatalogDecodeThrownError } from './nativeCatalogDecodeShared.ts';
+import { runXtreamCategoryDecodeWithCatalogNetworkGate } from '../providers/providerCatalogNetworkGate.ts';
+import {
+  noteSeriesCancelRequested,
+  noteSeriesNativeJobCancelCalled,
+  noteSeriesNativeJobReturned,
+  noteSeriesNativeJobStarted,
+} from '../providers/seriesCancellationAudit.ts';
 
 export type {
   CatalogDecodeBatchStats,
@@ -25,6 +33,8 @@ export {
   isCatalogSqliteWriterOnlyDiagnosticEnabled,
   nativeRecordToMovieSummary,
   nativeRecordToSeriesSummary,
+  logCatalogDecodeFailure,
+  createCatalogDecodeThrownError,
 } from './nativeCatalogDecodeShared.ts';
 
 const LOG_TAG = '[NovaCast NativeCatalogDecode]';
@@ -77,6 +87,15 @@ export async function streamXtreamCategoryDecode(
     throw new Error('native_catalog_decode_unavailable');
   }
 
+  return runXtreamCategoryDecodeWithCatalogNetworkGate(input, () =>
+    streamXtreamCategoryDecodeUnlocked(mod, input),
+  );
+}
+
+async function streamXtreamCategoryDecodeUnlocked(
+  mod: NativeModuleShape,
+  input: StreamXtreamCategoryDecodeInput,
+): Promise<StreamXtreamCategoryDecodeResult> {
   const start = await mod.startDecodeJob({
     requestUrl: input.requestUrl,
     mediaType: input.mediaType,
@@ -91,6 +110,12 @@ export async function streamXtreamCategoryDecode(
     totalCategoryCount: input.totalCategoryCount,
     requestAttempt: input.requestAttempt ?? 1,
   });
+  const seriesFullDump =
+    input.mediaType === 'series' &&
+    (!input.filterCategoryId || input.filterCategoryId === 'all');
+  if (seriesFullDump) {
+    noteSeriesNativeJobStarted(start.jobId);
+  }
 
   let matched = 0;
   let batches = 0;
@@ -98,13 +123,65 @@ export async function streamXtreamCategoryDecode(
   let lastStats: CatalogDecodeBatchStats = {};
   let cancelled = false;
   const startedAt = Date.now();
+  let decodeFailureLogged = false;
+
+  const logFailure = (error: unknown, extra: Record<string, unknown> = {}) => {
+    if (decodeFailureLogged) {
+      return;
+    }
+    decodeFailureLogged = true;
+    const err = error instanceof Error ? error : null;
+    logCatalogDecodeFailure({
+      providerId: input.providerId,
+      mediaType: input.mediaType,
+      categoryId: input.filterCategoryId,
+      categoryIndex: input.categoryIndex ?? null,
+      categoryPosition: input.categoryPosition ?? null,
+      totalCategoryCount: input.totalCategoryCount ?? null,
+      generation: input.generation ?? null,
+      requestAttempt: input.requestAttempt ?? 1,
+      httpStatus: lastStats.httpStatus ?? null,
+      contentLengthHeader: lastStats.contentLengthHeader ?? null,
+      responseBytes: lastStats.responseBytes ?? null,
+      bytesRead: lastStats.bytesRead ?? null,
+      rawSeen: lastStats.rawSeen ?? null,
+      matched: lastStats.matched ?? matched,
+      decoderStage: lastStats.decoderStage ?? null,
+      errorReason: lastStats.errorReason ?? null,
+      sanitizerRepairCount: lastStats.sanitizerRepairCount ?? 0,
+      errorName: err?.name ?? typeof error,
+      errorMessage: err?.message ?? String(error),
+      durationMs: Date.now() - startedAt,
+      ...extra,
+    });
+  };
 
   try {
     while (true) {
       if (input.isCancelled?.()) {
-        await mod.cancelDecodeJob(start.jobId);
-        cancelled = true;
-        break;
+        const cancelDecision = seriesFullDump
+          ? noteSeriesCancelRequested({
+              providerId: input.providerId,
+              generation: input.generation ?? null,
+              nativeJobId: start.jobId,
+              cancelSource: 'js-isCancelled',
+              cancelCaller: 'streamXtreamCategoryDecodeUnlocked.pull-loop',
+              abortReason: 'js-isCancelled-before-pull',
+            })
+          : { ignored: false };
+        if (!(seriesFullDump && cancelDecision.ignored)) {
+          if (seriesFullDump) {
+            noteSeriesNativeJobCancelCalled({
+              nativeJobId: start.jobId,
+              cancelSource: 'js-isCancelled',
+              cancelCaller: 'streamXtreamCategoryDecodeUnlocked.pull-loop',
+              abortReason: 'js-isCancelled-before-pull',
+            });
+          }
+          await mod.cancelDecodeJob(start.jobId);
+          cancelled = true;
+          break;
+        }
       }
 
       const batch = await mod.pullDecodeBatch(start.jobId);
@@ -136,7 +213,7 @@ export async function streamXtreamCategoryDecode(
             categoryPosition: input.categoryPosition ?? null,
             totalCategoryCount: input.totalCategoryCount ?? null,
             requestAttempt: input.requestAttempt ?? 1,
-            decoderStage: 'native-pull-batch',
+            decoderStage: batch.stats?.decoderStage ?? 'native-pull-batch',
             exceptionClass: 'NativeCatalogDecodeError',
             exceptionMessage: batch.error,
             sanitizerRepairCount: batch.stats?.sanitizerRepairCount ?? 0,
@@ -146,11 +223,22 @@ export async function streamXtreamCategoryDecode(
             durationMs: Date.now() - startedAt,
           });
         }
+        logFailure(new Error(batch.error), { decoderResult: batch.error });
         await mod.cancelDecodeJob(start.jobId).catch(() => undefined);
-        throw new Error(batch.error);
+        throw createCatalogDecodeThrownError(batch.error, batch.stats ?? lastStats);
       }
 
       if (batch.cancelled) {
+        if (seriesFullDump) {
+          noteSeriesCancelRequested({
+            providerId: input.providerId,
+            generation: input.generation ?? null,
+            nativeJobId: start.jobId,
+            cancelSource: batch.error === 'job_missing' ? 'native-job-missing' : 'native-batch-cancelled',
+            cancelCaller: 'streamXtreamCategoryDecodeUnlocked.pullDecodeBatch',
+            abortReason: batch.error === 'job_missing' ? 'native-job-missing' : 'native-batch-cancelled',
+          });
+        }
         cancelled = true;
       }
 
@@ -167,8 +255,15 @@ export async function streamXtreamCategoryDecode(
       }
     }
   } catch (error) {
+    logFailure(error);
     await mod.cancelDecodeJob(start.jobId).catch(() => undefined);
-    throw error;
+    if (error && typeof error === 'object' && 'errorReason' in error) {
+      throw error;
+    }
+    throw createCatalogDecodeThrownError(
+      error instanceof Error ? error.message : String(error),
+      lastStats,
+    );
   }
 
   if (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_CATALOG_AUDIT === '1') {
@@ -182,6 +277,14 @@ export async function streamXtreamCategoryDecode(
       downloadParseMs: lastStats.downloadParseMs,
       rawSeen: lastStats.rawSeen,
       responseBytes: lastStats.responseBytes,
+    });
+  }
+
+  if (seriesFullDump) {
+    noteSeriesNativeJobReturned({
+      cancelled,
+      nativeJobId: start.jobId,
+      abortReason: cancelled ? lastStats.errorReason ?? 'native-decode-cancelled' : null,
     });
   }
 
@@ -200,6 +303,17 @@ export async function cancelNativeDecodeJobsForProvider(providerId: string): Pro
   if (!mod?.cancelDecodeJobsForProvider) {
     return 0;
   }
+  noteSeriesCancelRequested({
+    providerId,
+    cancelSource: 'native-decoder-cleanup',
+    cancelCaller: 'cancelNativeDecodeJobsForProvider',
+    abortReason: 'cancel-native-decode-jobs-for-provider',
+  });
+  noteSeriesNativeJobCancelCalled({
+    cancelSource: 'native-decoder-cleanup',
+    cancelCaller: 'cancelNativeDecodeJobsForProvider',
+    abortReason: 'cancel-native-decode-jobs-for-provider',
+  });
   const result = await mod.cancelDecodeJobsForProvider(providerId);
   if (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_NOVACAST_CATALOG_AUDIT === '1') {
     console.info(LOG_TAG, 'provider-jobs-cancelled', {

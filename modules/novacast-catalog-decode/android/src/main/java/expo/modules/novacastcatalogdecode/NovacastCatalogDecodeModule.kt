@@ -15,7 +15,9 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedInputStream
+import java.io.FilterInputStream
 import java.io.IOException
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.Reader
 import java.util.ArrayDeque
@@ -165,6 +167,13 @@ class NovacastCatalogDecodeModule : Module() {
       val job = jobs.remove(jobId)
       if (job != null) {
         cancellationCount += 1
+        if (job.mediaTypePublic == "series") {
+          Log.w(
+            SERIES_DECODER_AUDIT_TAG,
+            "event=cancel-decode-job jobId=$jobId mediaType=series providerId=${job.providerIdPublic} " +
+              "ageMs=${System.currentTimeMillis() - job.startedAtMs} source=js-cancelDecodeJob",
+          )
+        }
         job.cancel()
         completedCleanupCount += 1
       }
@@ -177,6 +186,14 @@ class NovacastCatalogDecodeModule : Module() {
       while (iterator.hasNext()) {
         val entry = iterator.next()
         if (entry.value.providerIdPublic == providerId) {
+          if (entry.value.mediaTypePublic == "series") {
+            Log.w(
+              SERIES_DECODER_AUDIT_TAG,
+              "event=cancel-decode-jobs-for-provider jobId=${entry.key} mediaType=series " +
+                "providerId=$providerId ageMs=${System.currentTimeMillis() - entry.value.startedAtMs} " +
+                "source=js-cancelDecodeJobsForProvider",
+            )
+          }
           iterator.remove()
           entry.value.cancel()
           cancellationCount += 1
@@ -188,6 +205,14 @@ class NovacastCatalogDecodeModule : Module() {
     }
 
     OnDestroy {
+      val seriesJobs = jobs.values.count { it.mediaTypePublic == "series" }
+      if (jobs.isNotEmpty()) {
+        Log.w(
+          SERIES_DECODER_AUDIT_TAG,
+          "event=native-module-ondestroy activeJobCount=${jobs.size} seriesJobCount=$seriesJobs " +
+            "source=native-module-ondestroy",
+        )
+      }
       jobs.values.forEach { it.cancel() }
       cancellationCount += jobs.size
       jobs.clear()
@@ -197,6 +222,24 @@ class NovacastCatalogDecodeModule : Module() {
 
 private const val MAX_SERIES_SANITIZER_REPAIRS_PER_CATEGORY = 8
 private const val SERIES_DECODER_AUDIT_TAG = "NovaCast Series Decoder Audit"
+private const val DECODE_PROBE_TAG = "NovaCast Catalog Decode Probe"
+
+private class CountingInputStream(source: InputStream) : FilterInputStream(source) {
+  var bytesRead: Long = 0L
+    private set
+
+  override fun read(): Int {
+    val value = super.read()
+    if (value >= 0) bytesRead += 1
+    return value
+  }
+
+  override fun read(b: ByteArray, off: Int, len: Int): Int {
+    val n = super.read(b, off, len)
+    if (n > 0) bytesRead += n.toLong()
+    return n
+  }
+}
 
 private data class SeriesEscapeRepair(
   val count: Int,
@@ -389,7 +432,13 @@ private class DecodeJob(
   private var arrayLength: Int? = null
   private var errorReason: String? = null
   private var sanitizerRepairCount = 0
+  private var firstItemKeys: List<String> = emptyList()
+  private var firstItemPlaybackHint: Map<String, Any?> = emptyMap()
+  private var seriesCategoryNameFieldPresentCount = 0
   private var decoderStage = "queued"
+  private var httpStatus: Int? = null
+  private var contentLengthHeader: Long? = null
+  private var bytesRead = 0L
 
   fun queuedBatchEstimate(): Int = if (channel.isEmpty) 0 else 1
 
@@ -413,6 +462,13 @@ private class DecodeJob(
           DecodeBatch(jobId = jobId, items = emptyList(), done = true, cancelled = true),
         )
       } catch (error: Throwable) {
+        if (errorReason.isNullOrEmpty() && error.message?.contains("End of input", ignoreCase = true) == true) {
+          errorReason = if (rawSeen <= 0) {
+            "empty_or_truncated_json_before_first_item"
+          } else {
+            "truncated_or_incomplete_json"
+          }
+        }
         if (mediaType == "series") {
           Log.w(
             SERIES_DECODER_AUDIT_TAG,
@@ -423,6 +479,17 @@ private class DecodeJob(
               "exceptionClass=${error::class.java.simpleName} exceptionMessage=${error.message ?: "null"}",
           )
         }
+        Log.w(
+          DECODE_PROBE_TAG,
+          "event=category-decode-failed mediaType=$mediaType providerId=$providerId " +
+            "categoryId=${filterCategoryId ?: "null"} categoryIndex=${categoryIndex ?: "null"} " +
+            "categoryPosition=${categoryPosition ?: "null"} totalCategoryCount=${totalCategoryCount ?: "null"} " +
+            "generation=${generation ?: "null"} requestAttempt=$requestAttempt " +
+            "httpStatus=${httpStatus ?: "null"} contentLengthHeader=${contentLengthHeader ?: "null"} " +
+            "bytesRead=$bytesRead rawSeen=$rawSeen decoderStage=$decoderStage " +
+            "errorReason=${errorReason ?: "null"} exceptionClass=${error::class.java.simpleName} " +
+            "exceptionMessage=${error.message ?: "null"}",
+        )
         channel.trySend(
           DecodeBatch(
             jobId = jobId,
@@ -464,9 +531,12 @@ private class DecodeJob(
       setRequestProperty("Accept", "application/json")
     }
 
+    var countingStream: CountingInputStream? = null
     try {
       decoderStage = "read-response-headers"
       val code = connection.responseCode
+      httpStatus = code
+      contentLengthHeader = connection.contentLengthLong
       headersMs = System.currentTimeMillis() - started
       if (code !in 200..299) {
         throw IllegalStateException("http_$code")
@@ -474,8 +544,9 @@ private class DecodeJob(
 
       val parseStarted = System.currentTimeMillis()
       decoderStage = "stream-json"
-      val input = BufferedInputStream(connection.inputStream)
-      val inputReader = InputStreamReader(input, Charsets.UTF_8)
+      val counting = CountingInputStream(BufferedInputStream(connection.inputStream))
+      countingStream = counting
+      val inputReader = InputStreamReader(counting, Charsets.UTF_8)
       val sanitizedReader = if (mediaType == "series") {
         SeriesJsonEscapeSanitizingReader(
           inputReader,
@@ -519,6 +590,16 @@ private class DecodeJob(
               rawSeen += 1
               val item = readObject(reader)
               item ?: continue
+              if (firstItemKeys.isEmpty()) {
+                firstItemKeys = item.keys.map { it }.sorted()
+                captureFirstItemPlaybackHint(item)
+              }
+              if (mediaType == "series") {
+                val rowCategoryName = firstString(item, "category_name", "categoryName", "group_title", "group")
+                if (!rowCategoryName.isNullOrEmpty()) {
+                  seriesCategoryNameFieldPresentCount += 1
+                }
+              }
               val itemCategory = stringField(item, "category_id")
               if (itemCategory.isNullOrEmpty()) {
                 emptyCategoryIdCount += 1
@@ -570,10 +651,17 @@ private class DecodeJob(
         }
       }
       downloadParseMs = System.currentTimeMillis() - parseStarted
-      responseBytes = connection.contentLengthLong.coerceAtLeast(0L)
+      bytesRead = counting.bytesRead
+      responseBytes = counting.bytesRead.takeIf { it > 0 } ?: contentLengthHeader?.coerceAtLeast(0L) ?: 0L
 
       emitBatch(emptyList(), done = true)
     } finally {
+      countingStream?.let { stream ->
+        bytesRead = stream.bytesRead
+        if (responseBytes <= 0L) {
+          responseBytes = stream.bytesRead
+        }
+      }
       connection.disconnect()
     }
   }
@@ -618,6 +706,13 @@ private class DecodeJob(
     "totalCategoryCount" to totalCategoryCount,
     "requestAttempt" to requestAttempt,
     "sanitizerRepairCount" to sanitizerRepairCount,
+    "firstItemKeys" to firstItemKeys,
+    "firstItemPlaybackHint" to firstItemPlaybackHint,
+    "seriesCategoryNameFieldPresentCount" to seriesCategoryNameFieldPresentCount,
+    "httpStatus" to httpStatus,
+    "contentLengthHeader" to contentLengthHeader,
+    "bytesRead" to bytesRead,
+    "decoderStage" to decoderStage,
   )
 
   private fun normalize(raw: Map<String, Any?>, index: Int): Map<String, Any?> {
@@ -632,6 +727,7 @@ private class DecodeJob(
         "contentId" to seriesId,
         "seriesId" to seriesId,
         "categoryId" to streamCategoryId,
+        "categoryName" to firstString(raw, "category_name", "categoryName", "group_title", "group"),
         "title" to title.ifEmpty { "Series ${index + 1}" },
         "artworkUrl" to firstString(raw, "cover", "stream_icon"),
         "backdropUrl" to firstString(raw, "backdrop_path"),
@@ -658,6 +754,7 @@ private class DecodeJob(
         "addedAt" to unixTimestampMs(raw["added"]),
         "popularity" to finitePositiveNumber(raw["popularity"]),
         "streamExtension" to stringField(raw, "container_extension"),
+        "directSource" to stringField(raw, "direct_source"),
         "providerSortOrder" to index,
         "seriesId" to null,
       )
@@ -688,6 +785,32 @@ private class DecodeJob(
     }
     reader.endObject()
     return out
+  }
+
+  private fun captureFirstItemPlaybackHint(raw: Map<String, Any?>) {
+    if (firstItemPlaybackHint.isNotEmpty()) {
+      return
+    }
+    val keys = raw.keys.map { it.lowercase() }.toSet()
+    firstItemPlaybackHint = mapOf(
+      "fieldNames" to raw.keys.map { it }.sorted(),
+      "directSourcePresent" to !stringField(raw, "direct_source").isNullOrEmpty(),
+      "containerExtensionKeyPresent" to keys.contains("container_extension"),
+      "containerExtension" to stringField(raw, "container_extension"),
+      "streamType" to stringField(raw, "stream_type"),
+      "customSidPresent" to !stringField(raw, "custom_sid").isNullOrEmpty(),
+      "urlLikeFieldPresent" to urlLikeFieldPresent(raw),
+      "streamId" to stringField(raw, "stream_id"),
+      "categoryId" to stringField(raw, "category_id"),
+    )
+  }
+
+  private fun urlLikeFieldPresent(raw: Map<String, Any?>): Boolean {
+    val names = listOf("direct_source", "url", "source", "stream_url", "playback_url")
+    return names.any { key ->
+      val value = stringField(raw, key) ?: return@any false
+      value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true)
+    }
   }
 
   private fun stringField(map: Map<String, Any?>, key: String): String? {

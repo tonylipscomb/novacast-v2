@@ -1,7 +1,8 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { TvRemoteImage } from '@/components/media/TvRemoteImage';
+import { NovaPosterFocusOverlay } from '@/components/nova/NovaPosterFocusOverlay';
 import { createMoviePosterFocusChrome } from '@/features/movies/moviePosterFocusChrome';
 import { displayStreamTitle, formatMediaMetaLabel } from '@/features/series/metadata/titleNormalization';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -33,6 +34,7 @@ type SearchPosterCardProps = {
   nextFocusUp?: number;
   nextFocusLeft?: number;
   searchQuery?: string;
+  restoreTargetRef?: MutableRefObject<View | null>;
 };
 
 function makeInitials(title: string) {
@@ -53,6 +55,7 @@ function searchPosterCardPropsAreEqual(previous: SearchPosterCardProps, next: Se
     previous.onFocus === next.onFocus &&
     previous.onPress === next.onPress &&
     previous.searchQuery === next.searchQuery
+    && previous.restoreTargetRef === next.restoreTargetRef
   );
 }
 
@@ -64,14 +67,22 @@ export const SearchPosterCard = memo(function SearchPosterCard({
   nextFocusUp,
   nextFocusLeft,
   searchQuery = '',
+  restoreTargetRef,
 }: SearchPosterCardProps) {
   const { theme } = useAppTheme();
   const focusChrome = useMemo(() => createMoviePosterFocusChrome(theme), [theme]);
+  const cardFocused = focusChrome.posterFocused;
   const cardRef = useRef<View>(null);
   const [posterFailed, setPosterFailed] = useState(false);
   const [nativeFocused, setNativeFocused] = useState(false);
   const showPosterArt = Boolean(result.posterUrl) && !posterFailed;
   const showFocused = focused || nativeFocused;
+  const setCardRef = useCallback((node: View | null) => {
+    cardRef.current = node;
+    if (restoreTargetRef) {
+      restoreTargetRef.current = node;
+    }
+  }, [restoreTargetRef]);
   const metaPrimary = formatMediaMetaLabel({
     year: result.year,
     rating: result.rating,
@@ -105,7 +116,7 @@ export const SearchPosterCard = memo(function SearchPosterCard({
 
   return (
     <Pressable
-      ref={cardRef}
+      ref={setCardRef}
       focusable
       accessibilityRole="button"
       accessibilityLabel={`Open ${result.type} ${result.title}`}
@@ -134,13 +145,13 @@ export const SearchPosterCard = memo(function SearchPosterCard({
       onPress={onPress}
       {...(nextFocusUp ? { nextFocusUp } : null)}
       {...(nextFocusLeft ? { nextFocusLeft } : null)}
-      style={focusChrome.card}>
+      style={[focusChrome.card, styles.searchCard]}>
       <View style={[focusChrome.posterShell, showFocused && focusChrome.posterShellFocused]}>
         <View
           style={[
             focusChrome.poster,
             showPosterArt ? focusChrome.posterWithArt : styles.posterFallback,
-            showFocused && focusChrome.posterFocused,
+                showFocused && cardFocused,
           ]}>
           {showPosterArt ? (
             <TvRemoteImage
@@ -164,13 +175,14 @@ export const SearchPosterCard = memo(function SearchPosterCard({
               <Text style={styles.initials}>{makeInitials(result.title)}</Text>
             </View>
           )}
+          {showFocused ? <NovaPosterFocusOverlay /> : null}
         </View>
       </View>
       <Text numberOfLines={1} style={[focusChrome.title, showFocused && focusChrome.titleFocused]}>
         {displayStreamTitle(result.title)}
       </Text>
-      {metaPrimary ? (
-        <Text numberOfLines={1} style={focusChrome.meta}>
+          {metaPrimary ? (
+        <Text numberOfLines={1} style={[focusChrome.meta, showFocused && styles.metaFocused]}>
           {metaPrimary}
         </Text>
       ) : null}
@@ -179,6 +191,9 @@ export const SearchPosterCard = memo(function SearchPosterCard({
 }, searchPosterCardPropsAreEqual);
 
 const styles = StyleSheet.create({
+  searchCard: {
+    padding: 4,
+  },
   posterFallback: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -195,5 +210,9 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '900',
     letterSpacing: 1.2,
+  },
+  metaFocused: {
+    color: '#E9E8FF',
+    fontWeight: '800',
   },
 });

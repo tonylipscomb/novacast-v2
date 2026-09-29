@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { buildLiveChannelPlaybackUrl } from '@/features/providers/providerPlayback';
+import { buildLiveChannelPlaybackSource, buildLiveChannelPlaybackUrl, warmLivePlaybackUrlContract } from '@/features/providers/providerPlayback';
 import { mergeCategoryCountIndex, readCategoryCountIndex } from '@/features/providers/categoryCountIndexStore';
 import {
   isRealProviderLiveCategoryId,
@@ -8,6 +8,7 @@ import {
   providerLiveCategoriesOnly,
   resolveInitialLiveBrowseCategoryId,
 } from '@/features/providers/liveCategoryIdSafety';
+import { logLivePublicationTrace } from '@/features/providers/liveCatalogCompletion';
 import type { ProviderLiveCategory, ProviderLiveChannel } from '@/features/providers/providerRepositories';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
 
@@ -21,9 +22,15 @@ import {
   shouldIssueFocusedEpgRequest,
 } from './liveTvChannelEpg';
 import { getLiveTvWorkload, shouldSuspendLiveListEpg } from './liveTvWorkload';
+import {
+  getPublishedLiveCatalogState,
+  getPublishedLiveCategories,
+  getPublishedLiveChannels,
+} from '@/features/search/liveSearchSqliteCatalog';
 import { ingestLiveChannels, ingestLiveSearchCategories } from '@/features/search/repositories/liveSearchRepository';
 import { resetLiveTvFocusIdle } from './liveTvFocusIdle';
 import { clearLiveTvChannelRowDataPool, mergeLiveTvChannelEpg } from './liveTvChannelRowData';
+import { logLiveScreenReadTrace, logLiveScreenSource, type LiveTvScreenSource } from './liveTvScreenSource';
 import {
   logLiveCategory,
   logLiveEpgTrigger,
@@ -54,6 +61,8 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
   const channelsBaselineRef = useRef<ProviderLiveChannel[]>([]);
   const mountStartedAtRef = useRef(0);
   const interactiveLoggedRef = useRef(false);
+  const catalogSourceRef = useRef<LiveTvScreenSource | null>(null);
+  const publishedSnapshotRef = useRef<{ generation: number; channelCount: number }>({ generation: 0, channelCount: 0 });
 
   const categories = useMemo(() => providerLiveCategoriesOnly(baseCategories), [baseCategories]);
 
@@ -75,12 +84,79 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
 
       const startedAt = Date.now();
       logLiveCategory('load-started', { categoryId });
+      logLiveScreenReadTrace('channel-read-start', {
+        providerId: bundle.providerId,
+        selectedCategoryId: categoryId,
+        source: catalogSourceRef.current,
+      });
+      if (publishedSnapshotRef.current.generation > 0) {
+        const next = await getPublishedLiveChannels(bundle.providerId, categoryId);
+        catalogSourceRef.current = 'published-sqlite';
+        logLiveStallAudit('live.getPublishedLiveChannels', next.length, startedAt);
+        logLiveCategory('load-completed', {
+          categoryId,
+          channelCount: next.length,
+          elapsedMs: Date.now() - startedAt,
+          source: 'published-sqlite',
+        });
+        logLiveScreenReadTrace('channel-read-result', {
+          providerId: bundle.providerId,
+          readableGeneration: publishedSnapshotRef.current.generation,
+          publishedGeneration: publishedSnapshotRef.current.generation,
+          publishedTotal: publishedSnapshotRef.current.channelCount,
+          channelCount: next.length,
+          selectedCategoryId: categoryId,
+          source: 'published-sqlite',
+        });
+        return next;
+      }
+      const publishedState = await getPublishedLiveCatalogState(bundle.providerId);
+      if (publishedState.ready) {
+        const next = await getPublishedLiveChannels(bundle.providerId, categoryId);
+        catalogSourceRef.current = 'published-sqlite';
+        logLiveStallAudit('live.getPublishedLiveChannels', next.length, startedAt);
+        logLiveCategory('load-completed', {
+          categoryId,
+          channelCount: next.length,
+          elapsedMs: Date.now() - startedAt,
+          source: 'published-sqlite',
+        });
+        logLiveScreenReadTrace('channel-read-result', {
+          providerId: bundle.providerId,
+          readableGeneration: publishedState.generation,
+          publishedGeneration: publishedState.generation,
+          publishedTotal: publishedState.channelCount,
+          channelCount: next.length,
+          selectedCategoryId: categoryId,
+          source: 'published-sqlite',
+        });
+        return next;
+      }
+
       const next = await bundle.live.getChannels(categoryId, signal);
+      catalogSourceRef.current = 'provider-fallback';
+      logLivePublicationTrace('live-publication-skipped', {
+        providerId: bundle.providerId,
+        requestSource: 'live-tv-screen',
+        publishedCount: next.length,
+        skipReason: 'live-tv-direct-repository-getChannels',
+      });
       logLiveStallAudit('live.getChannels', next.length, startedAt);
       logLiveCategory('load-completed', {
         categoryId,
         channelCount: next.length,
         elapsedMs: Date.now() - startedAt,
+        source: 'provider-fallback',
+      });
+      logLiveScreenReadTrace('channel-read-result', {
+        providerId: bundle.providerId,
+        readableGeneration: publishedState.generation || null,
+        publishedGeneration: publishedState.generation || null,
+        publishedTotal: publishedState.channelCount || null,
+        channelCount: next.length,
+        selectedCategoryId: categoryId,
+        source: 'provider-fallback',
+        returnReason: publishedState.unreadinessReason ?? 'no-published-generation',
       });
       return next;
     },
@@ -171,6 +247,19 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
 
   const loadCategories = useCallback(async () => {
     if (!bundle) {
+      logLiveScreenReadTrace('model-enter', { source: 'none', returnReason: 'provider-not-connected' });
+      logLiveScreenReadTrace('early-return', { source: 'none', returnReason: 'provider-not-connected' });
+      logLiveScreenSource({
+        providerId: null,
+        source: 'none',
+        readableGeneration: null,
+        publishedTotal: null,
+        categoryCount: null,
+        selectedCategoryId: null,
+        loadedChannelCount: 0,
+        fallbackReason: null,
+        errorReason: 'Provider is not connected.',
+      });
       setChannelListPending(false);
       setStatus('error');
       setErrorMessage('Provider is not connected.');
@@ -189,11 +278,109 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
       setChannelListPending(true);
     }
     setErrorMessage(null);
+    let publishedState: Awaited<ReturnType<typeof getPublishedLiveCatalogState>> = {
+      ready: false,
+      generation: 0,
+      channelCount: 0,
+      counts: {},
+      status: null,
+      stateRowPresent: false,
+      buildingGeneration: 0,
+      stateChannelCount: 0,
+      unreadinessReason: null,
+    };
+    let source: LiveTvScreenSource | null = null;
+    let fallbackReason: string | null = null;
+    logLiveScreenReadTrace('model-enter', {
+      providerId: bundle.providerId,
+      selectedCategoryId: initialCategoryId ?? null,
+    });
     try {
       const categoriesStartedAt = Date.now();
-      const nextCategories = await bundle.live.getCategories(signal);
-      logLiveStallAudit('live.getCategories', nextCategories.length, categoriesStartedAt);
+      logLiveScreenReadTrace('published-state-read-start', {
+        providerId: bundle.providerId,
+      });
+      publishedState = await getPublishedLiveCatalogState(bundle.providerId);
+      publishedSnapshotRef.current = {
+        generation: publishedState.ready ? publishedState.generation : 0,
+        channelCount: publishedState.ready ? publishedState.channelCount : 0,
+      };
+      logLiveScreenReadTrace('published-state-read-result', {
+        providerId: bundle.providerId,
+        readableGeneration: publishedState.ready ? publishedState.generation : null,
+        publishedGeneration: publishedState.generation || null,
+        publishedTotal: publishedSnapshotRef.current.channelCount,
+        categoryCount: Object.keys(publishedState.counts).length,
+        channelCount: publishedState.channelCount,
+        source: publishedState.ready ? 'published-sqlite' : 'none',
+        returnReason: publishedState.unreadinessReason,
+      });
+      let nextCategories: ProviderLiveCategory[] = [];
+
+      if (publishedState.ready) {
+        logLiveScreenReadTrace('published-category-read-start', {
+          providerId: bundle.providerId,
+          readableGeneration: publishedState.generation,
+          publishedGeneration: publishedState.generation,
+          publishedTotal: publishedSnapshotRef.current.channelCount,
+          source: 'published-sqlite',
+        });
+        nextCategories = await getPublishedLiveCategories(bundle.providerId, { state: publishedState });
+        source = 'published-sqlite';
+        catalogSourceRef.current = 'published-sqlite';
+        logLiveStallAudit('live.getPublishedLiveCategories', nextCategories.length, categoriesStartedAt);
+        logLiveScreenReadTrace('published-category-read-result', {
+          providerId: bundle.providerId,
+          readableGeneration: publishedState.generation,
+          publishedGeneration: publishedState.generation,
+          publishedTotal: publishedSnapshotRef.current.channelCount,
+          categoryCount: nextCategories.length,
+          source: 'published-sqlite',
+          returnReason: nextCategories.length ? null : 'published-categories-empty',
+        });
+      } else {
+        fallbackReason = publishedState.unreadinessReason ?? 'no-published-generation';
+        nextCategories = await bundle.live.getCategories(signal);
+        source = 'provider-fallback';
+        catalogSourceRef.current = 'provider-fallback';
+        logLivePublicationTrace('live-publication-skipped', {
+          providerId: bundle.providerId,
+          requestSource: 'live-tv-screen',
+          publishedCount: nextCategories.length,
+          skipReason: 'live-tv-direct-repository-getCategories',
+        });
+        logLiveStallAudit('live.getCategories', nextCategories.length, categoriesStartedAt);
+      }
+      logLiveScreenReadTrace('source-selection', {
+        providerId: bundle.providerId,
+        readableGeneration: publishedState.ready ? publishedState.generation : null,
+        publishedGeneration: publishedState.generation || null,
+        publishedTotal: publishedSnapshotRef.current.channelCount,
+        categoryCount: nextCategories.length,
+        source,
+        returnReason: fallbackReason,
+      });
       if (requestId !== requestRef.current) {
+        logLiveScreenReadTrace('early-return', {
+          providerId: bundle.providerId,
+          readableGeneration: publishedState.ready ? publishedState.generation : null,
+          publishedGeneration: publishedState.generation || null,
+          publishedTotal: publishedSnapshotRef.current.channelCount,
+          categoryCount: nextCategories.length,
+          source: source ?? 'none',
+          returnReason: 'stale-request-after-categories',
+        });
+        logLiveScreenSource({
+          providerId: bundle.providerId,
+          source: source ?? 'none',
+          readableGeneration: publishedState.generation || null,
+          publishedTotal: publishedSnapshotRef.current.channelCount || null,
+          categoryCount: nextCategories.length,
+          selectedCategoryId: null,
+          loadedChannelCount: 0,
+          fallbackReason,
+          errorReason: 'stale-request-after-categories',
+        });
         return;
       }
 
@@ -207,6 +394,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         elapsedMs: Date.now() - mountStartedAtRef.current,
         categoryCount: providerCategories.length,
         providerIdPresent: Boolean(bundle.providerId),
+        source,
       });
       logLivePerformance({
         event: 'categories-ready',
@@ -214,7 +402,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         providerIdPresent: Boolean(bundle.providerId),
         categoryCount: providerCategories.length,
         selectedCategoryIdPresent: false,
-        source: 'repository',
+        source: source === 'published-sqlite' ? 'sqlite' : source === 'provider-fallback' ? 'network' : 'repository',
         epgPending: false,
         discoverPending: false,
       });
@@ -225,11 +413,38 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         setSelectedCategoryId('');
         setChannelListPending(false);
         setStatus('empty');
+        logLiveScreenSource({
+          providerId: bundle.providerId,
+          source,
+          readableGeneration: publishedState.generation || null,
+          publishedTotal: publishedState.channelCount || null,
+          categoryCount: 0,
+          selectedCategoryId: null,
+          loadedChannelCount: 0,
+          fallbackReason,
+          errorReason: source === 'published-sqlite' ? 'published-generation-had-no-categories' : 'provider-categories-empty',
+        });
         return;
       }
 
-      const resolvedCategoryId = resolveInitialLiveBrowseCategoryId(initialCategoryId, providerCategories);
+      let resolvedCategoryId = resolveInitialLiveBrowseCategoryId(initialCategoryId, providerCategories);
+      if (!isRealProviderLiveCategoryId(resolvedCategoryId)) {
+        resolvedCategoryId =
+          providerCategories.find((category) => isRealProviderLiveCategoryId(category.id))?.id ??
+          providerCategories[0]?.id ??
+          '';
+      }
       setSelectedCategoryId(resolvedCategoryId);
+      logLiveScreenReadTrace('selected-category-resolved', {
+        providerId: bundle.providerId,
+        readableGeneration: publishedState.ready ? publishedState.generation : null,
+        publishedGeneration: publishedState.generation || null,
+        publishedTotal: publishedSnapshotRef.current.channelCount,
+        categoryCount: providerCategories.length,
+        selectedCategoryId: resolvedCategoryId || null,
+        source,
+        returnReason: resolvedCategoryId ? null : 'no-valid-category-id',
+      });
       logLiveStartup('initial-category-selected', {
         elapsedMs: Date.now() - mountStartedAtRef.current,
         categoryCount: providerCategories.length,
@@ -256,8 +471,67 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         })
         .catch(() => undefined);
 
+      if (source === 'published-sqlite' && bundle.live.getCategoryAccentHints) {
+        void bundle.live.getCategoryAccentHints(signal)
+          .then((hints) => {
+            if (requestId !== requestRef.current || !hints.length) {
+              return;
+            }
+            const names = new Map<string, string>();
+            for (const hint of hints) {
+              const id = hint.id?.trim();
+              const name = hint.name?.trim();
+              if (id && name) {
+                names.set(id, name);
+              }
+            }
+            if (!names.size) {
+              return;
+            }
+            ingestLiveSearchCategories(
+              bundle.providerId,
+              [...names.entries()].map(([id, name]) => ({ id, name })),
+            );
+            setBaseCategories((current) => {
+              let changed = false;
+              const next = current.map((category) => {
+                const overlay = names.get(category.id);
+                if (!overlay || overlay === category.name) {
+                  return category;
+                }
+                changed = true;
+                return { ...category, name: overlay, rawName: overlay };
+              });
+              return changed ? next : current;
+            });
+          })
+          .catch(() => undefined);
+      }
+
       const nextChannels = await loadChannelsForCategory(resolvedCategoryId, signal);
       if (requestId !== requestRef.current) {
+        logLiveScreenReadTrace('early-return', {
+          providerId: bundle.providerId,
+          readableGeneration: publishedState.ready ? publishedState.generation : null,
+          publishedGeneration: publishedState.generation || null,
+          publishedTotal: publishedSnapshotRef.current.channelCount,
+          categoryCount: providerCategories.length,
+          channelCount: nextChannels.length,
+          selectedCategoryId: resolvedCategoryId || null,
+          source: source ?? 'none',
+          returnReason: 'stale-request-after-channels',
+        });
+        logLiveScreenSource({
+          providerId: bundle.providerId,
+          source: source ?? 'none',
+          readableGeneration: publishedState.generation || null,
+          publishedTotal: publishedSnapshotRef.current.channelCount || null,
+          categoryCount: providerCategories.length,
+          selectedCategoryId: resolvedCategoryId || null,
+          loadedChannelCount: nextChannels.length,
+          fallbackReason,
+          errorReason: 'stale-request-after-channels',
+        });
         return;
       }
 
@@ -270,12 +544,34 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         }
         setChannelListPending(false);
         setStatus(keepExistingList ? 'ready' : 'empty');
+        logLiveScreenSource({
+          providerId: bundle.providerId,
+          source,
+          readableGeneration: publishedState.generation || null,
+          publishedTotal: publishedState.channelCount || null,
+          categoryCount: providerCategories.length,
+          selectedCategoryId: resolvedCategoryId,
+          loadedChannelCount: 0,
+          fallbackReason,
+          errorReason: null,
+        });
         return;
       }
 
       commitChannels(mapChannelsWithoutEpg(nextChannels));
       setChannelListPending(false);
       setStatus('ready');
+      logLiveScreenSource({
+        providerId: bundle.providerId,
+        source,
+        readableGeneration: publishedState.generation || null,
+        publishedTotal: publishedState.channelCount || null,
+        categoryCount: providerCategories.length,
+        selectedCategoryId: resolvedCategoryId,
+        loadedChannelCount: nextChannels.length,
+        fallbackReason,
+        errorReason: null,
+      });
       logLiveStartup('first-channel-list-ready', {
         elapsedMs: Date.now() - mountStartedAtRef.current,
         categoryCount: providerCategories.length,
@@ -290,7 +586,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         categoryCount: providerCategories.length,
         channelCount: nextChannels.length,
         selectedCategoryIdPresent: Boolean(resolvedCategoryId),
-        source: 'repository',
+        source: source === 'published-sqlite' ? 'sqlite' : source === 'provider-fallback' ? 'network' : 'repository',
         epgPending: true,
         discoverPending: false,
       });
@@ -310,15 +606,43 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
           categoryCount: providerCategories.length,
           channelCount: nextChannels.length,
           selectedCategoryIdPresent: Boolean(resolvedCategoryId),
-          source: 'repository',
+          source: source === 'published-sqlite' ? 'sqlite' : source === 'provider-fallback' ? 'network' : 'repository',
           epgPending: true,
           discoverPending: false,
         });
       }
 
       prefetchChannelEpg(requestId, nextChannels, resolvedCategoryId);
-    } catch {
-      if (requestId !== requestRef.current || signal.aborted) {
+    } catch (error) {
+      const errorName = error instanceof Error ? error.name : 'Error';
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const aborted = requestId !== requestRef.current || signal.aborted;
+      logLiveScreenReadTrace('error', {
+        providerId: bundle.providerId,
+        readableGeneration: publishedState.ready ? publishedState.generation : null,
+        publishedGeneration: publishedState.generation || null,
+        publishedTotal: publishedSnapshotRef.current.channelCount || publishedState.channelCount || null,
+        source: source ?? (publishedState.ready ? 'published-sqlite' : 'none'),
+        returnReason: aborted ? (signal.aborted ? 'aborted' : 'stale-request-in-catch') : 'load-failed',
+        errorName,
+        errorMessage,
+      });
+      logLiveScreenSource({
+        providerId: bundle.providerId,
+        source: source ?? (publishedState.ready ? 'published-sqlite' : 'none'),
+        readableGeneration: publishedState.generation || null,
+        publishedTotal: publishedSnapshotRef.current.channelCount || publishedState.channelCount || null,
+        categoryCount: null,
+        selectedCategoryId: null,
+        loadedChannelCount: 0,
+        fallbackReason,
+        errorReason: aborted
+          ? signal.aborted
+            ? 'aborted'
+            : 'stale-request-in-catch'
+          : 'Unable to load live channels from your provider.',
+      });
+      if (aborted) {
         return;
       }
 
@@ -408,13 +732,24 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         commitChannels(immediate);
         setChannelListPending(false);
         setStatus(immediate.length ? 'ready' : 'empty');
+        logLiveScreenSource({
+          providerId: bundle.providerId,
+          source: catalogSourceRef.current,
+          readableGeneration: publishedSnapshotRef.current.generation || null,
+          publishedTotal: publishedSnapshotRef.current.channelCount || null,
+          categoryCount: null,
+          selectedCategoryId: categoryId,
+          loadedChannelCount: immediate.length,
+          fallbackReason: catalogSourceRef.current === 'provider-fallback' ? 'no-published-generation' : null,
+          errorReason: null,
+        });
         logLivePerformance({
           event: 'category-switch-first-channels',
           elapsedMs: Date.now() - startedAt,
           providerIdPresent: Boolean(bundle.providerId),
           channelCount: immediate.length,
           selectedCategoryIdPresent: true,
-          source: 'repository',
+          source: catalogSourceRef.current === 'published-sqlite' ? 'sqlite' : catalogSourceRef.current === 'provider-fallback' ? 'network' : 'repository',
           epgPending: true,
           discoverPending: false,
         });
@@ -430,6 +765,17 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
         setChannelListPending(false);
         setStatus(channelsBaselineRef.current.length ? 'ready' : 'error');
         setErrorMessage('Unable to load channels for this category.');
+        logLiveScreenSource({
+          providerId: bundle.providerId,
+          source: catalogSourceRef.current ?? 'none',
+          readableGeneration: publishedSnapshotRef.current.generation || null,
+          publishedTotal: publishedSnapshotRef.current.channelCount || null,
+          categoryCount: null,
+          selectedCategoryId: categoryId,
+          loadedChannelCount: 0,
+          fallbackReason: catalogSourceRef.current === 'provider-fallback' ? 'no-published-generation' : null,
+          errorReason: 'Unable to load channels for this category.',
+        });
         return channelsBaselineRef.current;
       }
     },
@@ -496,6 +842,13 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     [bundle, selectedCategoryId],
   );
 
+  useEffect(() => {
+    if (!bundle || !channels[0]) {
+      return;
+    }
+    warmLivePlaybackUrlContract(bundle, channels[0]);
+  }, [bundle, channels]);
+
   const resolvePlaybackUrl = useCallback(
     (channel: ProviderLiveChannel | null) => {
       if (!bundle || !channel) {
@@ -503,6 +856,17 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
       }
 
       return buildLiveChannelPlaybackUrl(bundle, channel);
+    },
+    [bundle],
+  );
+
+  const resolvePlaybackSource = useCallback(
+    (channel: ProviderLiveChannel | null) => {
+      if (!bundle || !channel) {
+        return null;
+      }
+
+      return buildLiveChannelPlaybackSource(bundle, channel);
     },
     [bundle],
   );
@@ -540,6 +904,7 @@ export function useLiveTvScreenModel(initialCategoryId?: string, initialChannelI
     selectCategory,
     enrichFocusedChannelEpg,
     resolvePlaybackUrl,
+    resolvePlaybackSource,
     reload: loadCategories,
     initialChannel,
   };

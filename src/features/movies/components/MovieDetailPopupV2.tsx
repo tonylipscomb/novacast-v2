@@ -22,6 +22,7 @@ import { MediaArtworkFallback } from '@/features/media-browser/MediaArtworkFallb
 import type { MediaDetail } from '@/features/media-browser/mediaTypes';
 import { isValidTvFocusableTarget, requestTvFocus } from '@/features/navigation/tvFocusDiagnostics';
 import { novaTheme } from '@/theme';
+import { NOVA_FOCUS } from '@/components/nova/novaGlassTheme';
 import {
   computeMovieDetailPopupV2Layout,
   logMovieDetailPopupV2Event,
@@ -182,6 +183,7 @@ function ActionButton({
       {...(Platform.isTV ? { onClick: activate } : {})}
       style={[
         styles.action,
+        action.primary && styles.actionPrimarySize,
         action.primary && styles.actionPrimary,
         action.disabled && styles.actionDisabled,
         focused && styles.actionFocused,
@@ -189,17 +191,26 @@ function ActionButton({
       ]}>
       <MaterialCommunityIcons
         name={action.icon}
-        size={20}
-        color={action.disabled ? novaTheme.colors.textMuted : '#FFFFFF'}
-      />
-      <Text
-        style={[
-          styles.actionLabel,
-          action.disabled && styles.actionLabelDisabled,
-          focused && styles.actionLabelFocused,
-        ]}>
-        {action.label}
-      </Text>
+        size={focused ? 27 : 22}
+        color={
+          action.disabled
+            ? novaTheme.colors.textMuted
+            : focused
+              ? '#FFFFFF'
+              : '#FFFFFF'
+        }
+        />
+      {focused ? (
+        <Text
+          style={[
+            styles.actionLabel,
+            action.disabled && styles.actionLabelDisabled,
+            styles.actionLabelFocused,
+          ]}
+          numberOfLines={1}>
+          {action.label}
+        </Text>
+      ) : null}
     </Pressable>
   );
 }
@@ -628,6 +639,7 @@ export function MovieDetailPopupV2({
            * and stably without a backdrop in the mix.
            */}
           <View style={styles.card}>
+            <View pointerEvents="none" style={styles.cardTopHighlight} />
             <Pressable
               focusable
               hasTVPreferredFocus={false}
@@ -658,16 +670,16 @@ export function MovieDetailPopupV2({
               </View>
 
               <View style={styles.copyPanel}>
-                <Text style={styles.title} numberOfLines={2}>
+                <Text style={styles.title} numberOfLines={3}>
                   {title}
                 </Text>
                 {metaLine ? (
-                  <Text style={styles.meta} numberOfLines={1}>
+                  <Text style={styles.meta} numberOfLines={2}>
                     {metaLine}
                   </Text>
                 ) : null}
                 {description ? (
-                  <Text style={styles.description} numberOfLines={5}>
+                  <Text style={styles.description} numberOfLines={6}>
                     {description}
                   </Text>
                 ) : null}
@@ -778,9 +790,17 @@ const styles = StyleSheet.create({
   card: {
     flex: 1,
     borderRadius: 20,
-    backgroundColor: 'rgba(14, 18, 26, 0.88)',
+    backgroundColor: 'rgba(8, 13, 25, 0.72)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    borderColor: 'rgba(205,190,255,0.28)',
+  },
+  cardTopHighlight: {
+    position: 'absolute',
+    top: 0,
+    left: 28,
+    right: 28,
+    height: 2,
+    backgroundColor: NOVA_FOCUS.poster.innerHighlight,
   },
   closeButton: {
     position: 'absolute',
@@ -804,9 +824,9 @@ const styles = StyleSheet.create({
   contentRow: {
     flex: 1,
     flexDirection: 'row',
-    paddingHorizontal: 30,
-    paddingVertical: 30,
-    gap: 26,
+    paddingHorizontal: 28,
+    paddingVertical: 26,
+    gap: 24,
     zIndex: 2,
   },
   posterPanel: {
@@ -825,25 +845,25 @@ const styles = StyleSheet.create({
   copyPanel: {
     flex: 1,
     minWidth: 0,
-    paddingRight: 24,
+    paddingRight: 36,
     justifyContent: 'center',
-    gap: 12,
+    gap: 9,
   },
   title: {
     color: novaTheme.colors.textPrimary,
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: '700',
     letterSpacing: 0.2,
   },
   meta: {
     color: novaTheme.colors.textSecondary,
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '600',
   },
   description: {
     color: 'rgba(255,255,255,0.86)',
-    fontSize: 15,
-    lineHeight: 22,
+    fontSize: 14,
+    lineHeight: 20,
   },
   statusLine: {
     color: novaTheme.colors.textMuted,
@@ -856,43 +876,55 @@ const styles = StyleSheet.create({
   actionsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
-    marginTop: 8,
+    gap: 9,
+    marginTop: 10,
+    maxWidth: '100%',
   },
   action: {
-    flexDirection: 'row',
+    justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
-    minHeight: 46,
-    paddingHorizontal: 18,
-    borderRadius: 10,
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+    width: 50,
+    height: 44,
+    minWidth: 50,
+    paddingHorizontal: 0,
+    backgroundColor: 'transparent',
+  },
+  actionPrimarySize: {
+    width: 56,
+    minWidth: 56,
   },
   actionPrimary: {
-    backgroundColor: novaTheme.colors.accent,
-    borderColor: novaTheme.colors.accentHover,
+    backgroundColor: 'transparent',
   },
   actionDisabled: {
     opacity: 0.4,
   },
   actionFocused: {
-    borderColor: novaTheme.colors.focusRing,
-    backgroundColor: 'rgba(131, 180, 255, 0.28)',
-    transform: [{ scale: 1.06 }],
-    shadowColor: novaTheme.colors.focusRing,
+    flexDirection: 'row',
+    gap: 7,
+    width: 96,
+    minWidth: 96,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(105, 70, 235, 0.30)',
+    borderWidth: 1,
+    borderColor: 'rgba(225, 210, 255, 0.78)',
+    borderRadius: 14,
+    shadowColor: '#8B5CFF',
+    shadowOpacity: 0.52,
+    shadowRadius: 12,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 10,
-    elevation: 10,
+    elevation: 8,
+    transform: [{ scale: 1.06 }],
   },
   actionPrimaryFocused: {
-    backgroundColor: novaTheme.colors.accentHover,
+    backgroundColor: 'rgba(125, 80, 245, 0.38)',
+    borderColor: 'rgba(245, 240, 255, 0.92)',
+    width: 104,
+    minWidth: 104,
   },
   actionLabel: {
     color: novaTheme.colors.textPrimary,
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '700',
   },
   actionLabelDisabled: {

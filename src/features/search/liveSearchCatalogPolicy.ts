@@ -5,7 +5,8 @@ import {
 
 /** Low-end Fire TV: never crawl Live categories concurrently. */
 export const LIVE_SEARCH_BUILD_CONCURRENCY = 1;
-export const LIVE_SEARCH_WRITE_BATCH_SIZE = 16;
+// 64 rows x 14 bind parameters stays below SQLite's conservative 999-variable limit.
+export const LIVE_SEARCH_WRITE_BATCH_SIZE = 64;
 export const LIVE_SEARCH_INDEX_YIELD_MS = 16;
 export const LIVE_SEARCH_INDEX_PAUSE_POLL_MS = 150;
 

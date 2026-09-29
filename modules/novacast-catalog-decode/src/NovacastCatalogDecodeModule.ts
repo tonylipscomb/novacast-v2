@@ -6,10 +6,7 @@ import type {
   StartCatalogDecodeOptions,
 } from './NovacastCatalogDecode.types';
 
-declare class NovacastCatalogDecodeModuleType extends NativeModule<{
-  isAvailable?: boolean;
-  marker?: string;
-}> {
+declare class NovacastCatalogDecodeModuleType extends NativeModule {
   isNativeDecodeAvailable(): Promise<boolean>;
   startDecodeJob(options: StartCatalogDecodeOptions): Promise<CatalogDecodeJobStart>;
   pullDecodeBatch(jobId: string): Promise<CatalogDecodeBatch>;

@@ -1,8 +1,10 @@
+const path = require('path');
 const {
   getSentryExpoConfig
 } = require("@sentry/react-native/metro");
 
 const config = getSentryExpoConfig(__dirname);
+const NATIVE_WEBSOCKET_SHIM = path.join(__dirname, 'metro', 'native-websocket.js');
 
 // The project root accumulates loose debug artifacts from manual device/emulator
 // testing sessions (screenshots, UI-dump XML, adb/gradle/metro logs, sideloaded
@@ -24,10 +26,18 @@ config.resolver.blockList = [
   /^[^\\/]+\.(?:png|jpe?g|gif|apk|xml|log|txt)$/,
 ];
 
-// Stage 2.9: Node unit tests import `nativeCatalogDecode.ts` (stub). Android
-// release builds must use the Expo-native implementation instead.
+// @supabase/realtime-js always contains `import('ws')` as a Node fallback.
+// Metro treats that as an ESM import, so the `ws` package `exports.import`
+// field wins (`wrapper.mjs`) over `browser` / `react-native`. That Node
+// entrypoint requires `stream` and breaks the Android TV bundle.
+// React Native already has a native global WebSocket; remap `ws` to it.
 const upstreamResolveRequest = config.resolver.resolveRequest;
 config.resolver.resolveRequest = (context, moduleName, platform) => {
+  if (typeof moduleName === 'string' && (moduleName === 'ws' || moduleName.startsWith('ws/'))) {
+    return { type: 'sourceFile', filePath: NATIVE_WEBSOCKET_SHIM };
+  }
+  // Stage 2.9: Node unit tests import `nativeCatalogDecode.ts` (stub). Android
+  // release builds must use the Expo-native implementation instead.
   if (
     platform === 'android' &&
     typeof moduleName === 'string' &&

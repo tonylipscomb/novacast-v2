@@ -102,5 +102,8 @@ export function createMovieFirstRunPresentationBridge(
     getCatalogListRequestUrl: providerMovies.getCatalogListRequestUrl
       ? (categoryId) => providerMovies.getCatalogListRequestUrl!(categoryId)
       : undefined,
+    getAccountEntitlementSnapshot: providerMovies.getAccountEntitlementSnapshot
+      ? () => providerMovies.getAccountEntitlementSnapshot!()
+      : undefined,
   };
 }

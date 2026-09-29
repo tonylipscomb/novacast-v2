@@ -2,10 +2,11 @@ import type { RefObject } from 'react';
 import { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 
-import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { createNovaCategoryChrome, createNovaTvFocusTextStyles, novaTvFocus } from '@/components/nova/novaTvFocus';
 import { novaTheme } from '@/theme';
 
 const focusText = createNovaTvFocusTextStyles(novaTheme);
+const categoryChrome = createNovaCategoryChrome();
 
 type NovaScopeTabsProps<T extends string> = {
   options: readonly T[];
@@ -64,11 +65,10 @@ export function NovaScopeTabs<T extends string>({
             {...(focusUpHandle ? { nextFocusUp: focusUpHandle } : null)}
             {...(focusDownHandle ? { nextFocusDown: focusDownHandle } : null)}
             {...(option === options[0] && focusLeftHandle ? { nextFocusLeft: focusLeftHandle } : null)}
-            style={[styles.tab, novaTvFocus.base, focused && novaTvFocus.active]}>
+            style={[styles.tab, novaTvFocus.base, categoryChrome.default, active && categoryChrome.active, focused && (active ? categoryChrome.activeFocused : categoryChrome.focused)]}>
             <Text style={[styles.tabText, active && !focused && styles.tabTextActive, focused && styles.tabTextFocused]}>
               {label}
             </Text>
-            {active ? <View style={styles.activeIndicator} /> : null}
           </Pressable>
         );
       })}
@@ -81,15 +81,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: novaTheme.colors.borderSubtle,
     paddingBottom: 2,
   },
   tab: {
     minHeight: novaTheme.density.scopeTabHeight,
     justifyContent: 'center',
-    borderRadius: 0,
-    paddingHorizontal: 6,
+    borderRadius: 13,
+    paddingHorizontal: 18,
     paddingTop: 2,
     paddingBottom: 8,
   },
@@ -103,12 +101,4 @@ const styles = StyleSheet.create({
     color: novaTheme.colors.textPrimary,
   },
   tabTextFocused: focusText.title,
-  activeIndicator: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    height: 2,
-    backgroundColor: novaTheme.colors.success,
-  },
 });

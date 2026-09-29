@@ -41,11 +41,7 @@ export async function flushDiagnostics() {
       headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}`, 'Content-Type': 'application/json', ...(await deviceAuthHeaders()) },
       body: JSON.stringify({
         events: batch,
-        device: {
-          ...deviceMetadata(),
-          // Observed diagnostics reachability only; never collect network identity.
-          network: { networkConnected: true, connectionType: 'unknown', internetReachable: true },
-        },
+        device: deviceMetadata(),
       }),
     });
     if (!response.ok) queue.unshift(...batch.slice(-25));

@@ -157,7 +157,7 @@ jobs:
           NOVACAST_KEY_PASSWORD: ${{ secrets.NOVACAST_KEY_PASSWORD }}
         run: ./gradlew app:assembleRelease --no-daemon
 
-      - name: Verify Beta23 production APK
+      - name: Verify Beta24 production APK
         shell: bash
         env:
           NOVACAST_RELEASE_CERT_SHA256: ${{ secrets.NOVACAST_RELEASE_CERT_SHA256 }}
@@ -173,7 +173,7 @@ jobs:
           EXPECTED_CERT="$(printf '%s' "$NOVACAST_RELEASE_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
           [[ -n "$ACTUAL_CERT" && "$ACTUAL_CERT" == "$EXPECTED_CERT" ]] || { echo "::error::APK certificate mismatch"; exit 1; }
           BADGING="$("$AAPT" dump badging "$APK_PATH")"
-          printf '%s\n' "$BADGING" | grep -Fq "package: name='com.novacast.novacastv2' versionCode='23' versionName='1.0.5-beta23'" || {
+          printf '%s\n' "$BADGING" | grep -Fq "package: name='com.novacast.novacastv2' versionCode='24' versionName='1.0.5-beta24'" || {
             echo "::error::APK package/version metadata mismatch"
             exit 1
           }
@@ -181,7 +181,7 @@ jobs:
             echo "::error::APK is debuggable"
             exit 1
           }
-          echo "Beta23 production APK signature and metadata verified."
+          echo "Beta24 production APK signature and metadata verified."
 
       - name: Package novacast.apk artifacts
         id: apk

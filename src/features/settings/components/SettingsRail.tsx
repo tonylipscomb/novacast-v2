@@ -3,6 +3,7 @@ import { findNodeHandle, Pressable, StyleSheet, Text, View } from 'react-native'
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
 import { createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
@@ -89,7 +90,7 @@ export function SettingsRail({
               }}
               onBlur={() => setFocusedId((current) => (current === item.id ? null : current))}
               onPress={() => onSelect(item.id)}
-              style={[styles.row, focusChrome.base, selected && styles.rowSelected, focused && focusChrome.active]}>
+              style={[styles.row, focusChrome.base, selected && styles.rowSelected, focused && focusChrome.active, focused && styles.rowFocusedGlass]}>
               <MaterialCommunityIcons
                 name={item.icon}
                 size={16}
@@ -115,6 +116,11 @@ function createRailStyles(theme: NovaTheme) {
       maxWidth: 260,
       borderTopWidth: 1,
       borderTopColor: theme.colors.borderSubtle,
+      borderWidth: 1,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
+      paddingHorizontal: 8,
       paddingTop: 10,
     },
     header: {
@@ -139,12 +145,18 @@ function createRailStyles(theme: NovaTheme) {
       gap: 10,
       paddingHorizontal: 8,
       paddingVertical: 8,
-      backgroundColor: 'transparent',
+      borderRadius: NOVA_GLASS.radius.base,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
     },
     rowSelected: {
       borderBottomWidth: 2,
       borderBottomColor: theme.colors.success,
-      backgroundColor: 'transparent',
+      backgroundColor: NOVA_GLASS.active.backgroundColor,
+      borderColor: NOVA_GLASS.active.borderColor,
+    },
+    rowFocusedGlass: {
+      backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+      borderColor: NOVA_GLASS.activeFocused.borderColor,
     },
     title: {
       flex: 1,

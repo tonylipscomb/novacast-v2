@@ -4,6 +4,10 @@ import type { MovieSummary } from '../movies/movieTypes.ts';
 
 export type DiscoverZoneItem = {
   id: string;
+  /** Canonical provider identity; UI ids must not be used for playback resolution. */
+  contentId?: string;
+  providerId?: string;
+  streamId?: string;
   title: string;
   artworkUrl?: string;
   subtitle?: string;

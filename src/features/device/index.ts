@@ -1,4 +1,6 @@
 export * from './deviceActivation';
+export * from './deviceAssignmentRealtime';
+export * from './deviceAssignmentReconcile';
 export * from './deviceDiagnostics';
 export * from './deviceFeatureFlags';
 export * from './deviceHeartbeat';

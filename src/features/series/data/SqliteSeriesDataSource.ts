@@ -11,6 +11,7 @@
  * value changes.
  */
 
+import { getCatalogReadDatabase } from '../../catalog/catalogDatabase.ts';
 import {
   getCatalogCategoryCounts,
   getCatalogCategoryMetadataOnly,
@@ -19,6 +20,17 @@ import {
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
 } from '../../catalog/catalogRepository.ts';
+import { catalogItemsTable } from '../../catalog/catalogTableRouting.ts';
+import {
+  assignSeriesStreamCategoryId,
+  derivedSeriesCategoryName,
+  mergeSeriesMetadataWithDumpCategories,
+  SERIES_UNKNOWN_CATEGORY_ID,
+} from '../../providers/seriesCatalogCompletion.ts';
+import { enrichAndPersistSeriesCategoryNames } from '../seriesCategoryNameEnrichment.ts';
+import { isTrustworthySeriesCategoryName } from '../seriesCategoryNameResolution.ts';
+import { logSeriesScreenSource } from '../seriesScreenSource.ts';
+import { logSeriesDataSourceAudit } from '../seriesDataSourceAudit.ts';
 import type { CatalogItemRecord } from '../../catalog/catalogTypes.ts';
 import type { ContentSortOption } from '../../media-browser/contentSorting.ts';
 import { mapContentSortToCatalogSort } from '../../media-browser/contentSortMapping.ts';
@@ -29,6 +41,27 @@ import { repairDegradedSeriesCatalogIfNeeded } from '../seriesSparseCatalogRepai
 import type { SeriesDataSource } from './SeriesDataSource.ts';
 
 const SQLITE_SERIES_DISCOVER_ID = 'all';
+
+async function getPublishedSeriesItemCategoryIds(
+  providerId: string,
+  generation: number,
+): Promise<Array<{ categoryId: string; itemCount: number }>> {
+  if (generation <= 0) {
+    return [];
+  }
+  const db = await getCatalogReadDatabase();
+  const rows = await db.getAll<{ category_id: string | null; item_count: number | string }>(
+    `SELECT category_id, COUNT(*) AS item_count
+       FROM ${catalogItemsTable('series')}
+      WHERE provider_id = ? AND media_type = ? AND sync_generation = ?
+      GROUP BY category_id`,
+    [providerId, 'series', generation],
+  );
+  return rows.map((row) => ({
+    categoryId: String(row.category_id ?? '').trim(),
+    itemCount: Number(row.item_count) || 0,
+  }));
+}
 
 /** Thrown internally to signal "no readable local generation" ΓÇö callers fall back to network. */
 export class SeriesCatalogNotReadyError extends Error {
@@ -102,6 +135,14 @@ export function createSqliteSeriesDataSource(
   providerId: string,
   options?: SqliteSeriesDataSourceOptions,
 ): SeriesDataSource {
+  logSeriesDataSourceAudit({
+    event: 'sqlite-source-created',
+    providerId,
+    selectedSource: 'sqlite',
+    sourceClass: 'SqliteSeriesDataSource',
+    sqliteEnabled: true,
+  });
+
   async function requireReadableGeneration(requestPurpose: string): Promise<number> {
     // search-s7-pinned-readable-generation
     const pinnedSearchGeneration =
@@ -111,6 +152,18 @@ export function createSqliteSeriesDataSource(
         ? pinnedSearchGeneration
         : await resolveReadableCatalogGeneration(providerId, 'series');
     if (generation <= 0) {
+      logSeriesDataSourceAudit({
+        event: 'source-error',
+        providerId,
+        selectedSource: 'sqlite',
+        sourceClass: 'SqliteSeriesDataSource',
+        sqliteEnabled: true,
+        readableGeneration: generation,
+        generationStatus: 'not-readable',
+        fallbackReason: `no-readable-generation:${requestPurpose}`,
+        errorName: 'SeriesCatalogNotReadyError',
+        errorMessage: `Series SQLite catalog not ready for provider ${providerId} (generation ${generation})`,
+      });
       throw new SeriesCatalogNotReadyError(providerId, generation);
     }
     emitSeriesSqliteEvent('series_sqlite_generation_pinned', {
@@ -123,6 +176,14 @@ export function createSqliteSeriesDataSource(
 
   async function getCategoriesImpl(): Promise<MediaCategory[]> {
     const startedAt = Date.now();
+    logSeriesDataSourceAudit({
+      event: 'source-getCategories-enter',
+      providerId,
+      selectedSource: 'sqlite',
+      sourceClass: 'SqliteSeriesDataSource',
+      sqliteEnabled: true,
+    });
+    try {
     const generation = await requireReadableGeneration('categories');
 
     // Backport of Stage 4.2Q's bounded sparse-Series repair.
@@ -143,15 +204,99 @@ export function createSqliteSeriesDataSource(
     // no provider calls. Counts are backfilled lazily via getCategoryCount /
     // prefetchAllCategoryCounts (mirrors Movies' getCatalogCategoryCounts
     // deferred pattern) ΓÇö called on demand by useSeriesScreenModel.
-    const metadata = await getCatalogCategoryMetadataOnly(providerId, 'series', { generation });
+    const [metadata, itemCategories, publishedTotal] = await Promise.all([
+      getCatalogCategoryMetadataOnly(providerId, 'series', { generation }),
+      getPublishedSeriesItemCategoryIds(providerId, generation),
+      getCatalogTotalCount(providerId, 'series', { generation }),
+    ]);
+    const itemCategoryIds = itemCategories.map((row) => assignSeriesStreamCategoryId(row.categoryId));
+    const missingCategoryIdCount = itemCategories.filter(
+      (row) => !String(row.categoryId ?? '').trim() || row.categoryId === SERIES_UNKNOWN_CATEGORY_ID,
+    ).length;
 
-    if (metadata.length === 0) {
-      // No readable category rows yet at this generation ΓÇö let the caller
-      // fall back to network rather than showing an empty rail.
+    if (publishedTotal <= 0 && metadata.length === 0 && itemCategoryIds.length === 0) {
+      logSeriesDataSourceAudit({
+        event: 'source-error',
+        providerId,
+        selectedSource: 'sqlite',
+        sourceClass: 'SqliteSeriesDataSource',
+        sqliteEnabled: true,
+        readableGeneration: generation,
+        generationStatus: 'readable-but-empty',
+        categoryCount: 0,
+        itemCount: 0,
+        fallbackReason: 'published-generation-empty',
+        errorName: 'SeriesCatalogNotReadyError',
+        errorMessage: 'published generation has no categories or items',
+      });
+      logSeriesScreenSource({
+        providerId,
+        source: 'published-sqlite',
+        readableGeneration: generation,
+        publishedTotal: 0,
+        metadataCategoryCount: 0,
+        publishedCategoryCount: 0,
+        selectedCategoryId: null,
+        loadedSeriesCount: 0,
+        fallbackReason: null,
+        errorReason: 'published-generation-empty',
+      });
       throw new SeriesCatalogNotReadyError(providerId, generation);
     }
 
-    const categories = buildSeriesCategoriesFromMetadata(metadata);
+    const merged = mergeSeriesMetadataWithDumpCategories({
+      metadata: metadata.map((category) => ({ id: category.categoryId, name: category.categoryName })),
+      streamCategoryIds: itemCategoryIds,
+      missingCategoryIdCount,
+    });
+    const metadataNames = new Map(
+      merged.categories
+        .filter((category) => !category.derived && isTrustworthySeriesCategoryName(category.name, category.id))
+        .map((category) => [category.id, category.name]),
+    );
+    const enriched = await enrichAndPersistSeriesCategoryNames({
+      providerId,
+      generation,
+      categories: merged.categories,
+      metadataNames,
+      persistToGeneration: generation,
+    });
+    const countById = new Map(
+      itemCategories.map((row) => [assignSeriesStreamCategoryId(row.categoryId), row.itemCount]),
+    );
+    const categories = buildSeriesCategoriesFromMetadata(
+      enriched.categories.map((category) => ({
+        categoryId: category.id,
+        categoryName: category.name || derivedSeriesCategoryName(category.id),
+      })),
+    ).map((category) => ({
+      ...category,
+      count: countById.get(category.id) ?? 0,
+      countKnown: countById.has(category.id),
+    }));
+    logSeriesDataSourceAudit({
+      event: 'source-getCategories-result',
+      providerId,
+      selectedSource: 'sqlite',
+      sourceClass: 'SqliteSeriesDataSource',
+      sqliteEnabled: true,
+      readableGeneration: generation,
+      generationStatus: 'readable',
+      categoryCount: categories.length,
+      itemCount: publishedTotal,
+    });
+    logSeriesScreenSource({
+      providerId,
+      source: 'published-sqlite',
+      readableGeneration: generation,
+      publishedTotal,
+      metadataCategoryCount: metadata.length,
+      publishedCategoryCount: categories.length,
+      selectedCategoryId: null,
+      loadedSeriesCount: null,
+      fallbackReason: null,
+      errorReason: null,
+    });
     emitSeriesSqliteEvent('series_sqlite_categories_ready', {
       providerId,
       generation,
@@ -166,6 +311,21 @@ export function createSqliteSeriesDataSource(
       });
     }
     return categories;
+    } catch (error) {
+      if (!(error instanceof SeriesCatalogNotReadyError)) {
+        logSeriesDataSourceAudit({
+          event: 'source-error',
+          providerId,
+          selectedSource: 'sqlite',
+          sourceClass: 'SqliteSeriesDataSource',
+          sqliteEnabled: true,
+          fallbackReason: 'getCategoriesImpl',
+          errorName: error instanceof Error ? error.name : typeof error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+      }
+      throw error;
+    }
   }
 
   async function getSeriesPageImpl(input: {
@@ -175,6 +335,14 @@ export function createSqliteSeriesDataSource(
     sort?: ContentSortOption;
   }) {
     const startedAt = Date.now();
+    logSeriesDataSourceAudit({
+      event: 'source-getItems-enter',
+      providerId,
+      selectedSource: 'sqlite',
+      sourceClass: 'SqliteSeriesDataSource',
+      sqliteEnabled: true,
+      selectedCategoryId: input.categoryId,
+    });
     const requestId = `series-sqlite-${providerId}-${startedAt}-${Math.round(Math.random() * 1e6)}`;
     const isFirstPage = input.offset === 0;
     const queryPurpose = isFirstPage ? 'startup-viewport' : 'runtime';
@@ -196,6 +364,29 @@ export function createSqliteSeriesDataSource(
 
     let effectiveGeneration = generation;
     let page = await runQuery(generation);
+    logSeriesDataSourceAudit({
+      event: 'source-getItems-result',
+      providerId,
+      selectedSource: 'sqlite',
+      sourceClass: 'SqliteSeriesDataSource',
+      sqliteEnabled: true,
+      readableGeneration: effectiveGeneration,
+      generationStatus: 'readable',
+      itemCount: page.items.length,
+      selectedCategoryId: categoryId ?? null,
+    });
+    logSeriesScreenSource({
+      providerId,
+      source: 'published-sqlite',
+      readableGeneration: effectiveGeneration,
+      publishedTotal: null,
+      metadataCategoryCount: null,
+      publishedCategoryCount: null,
+      selectedCategoryId: categoryId ?? null,
+      loadedSeriesCount: page.items.length,
+      fallbackReason: null,
+      errorReason: null,
+    });
 
     // Stage 4.2O.2 spec #14/#15: detect a mid-flight generation promotion
     // and drop the stale-generation page rather than mixing generations ΓÇö
@@ -368,13 +559,50 @@ export function createSqliteFirstSeriesDataSource(
   async function withSqliteOrNetwork<T>(
     sqliteCall: () => Promise<T>,
     networkCall: () => Promise<T>,
+    requestName: string,
   ): Promise<T> {
     try {
       return await sqliteCall();
     } catch (error) {
       if (!(error instanceof SeriesCatalogNotReadyError)) {
+        logSeriesDataSourceAudit({
+          event: 'source-error',
+          providerId,
+          selectedSource: 'sqlite',
+          sourceClass: 'SqliteFirstSeriesDataSource',
+          sqliteEnabled: true,
+          fallbackReason: `${requestName}:non-not-ready-error`,
+          errorName: error instanceof Error ? error.name : typeof error,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
         throw error;
       }
+      const readableGeneration = await resolveReadableCatalogGeneration(providerId, 'series').catch(() => 0);
+      if (readableGeneration > 0) {
+        logSeriesDataSourceAudit({
+          event: 'fallback-triggered',
+          providerId,
+          selectedSource: 'sqlite',
+          sourceClass: 'SqliteSeriesDataSource',
+          sqliteEnabled: true,
+          readableGeneration,
+          generationStatus: 'readable',
+          fallbackReason: `${requestName}:blocked-repository-fallback-readable-generation-exists`,
+          errorName: error.name,
+          errorMessage: error.message,
+        });
+        throw error;
+      }
+      logSeriesDataSourceAudit({
+        event: 'fallback-triggered',
+        providerId,
+        selectedSource: 'repository',
+        sourceClass: 'ProviderSeriesDataSource',
+        sqliteEnabled: true,
+        readableGeneration,
+        generationStatus: 'not-readable',
+        fallbackReason: `${requestName}:no-readable-series-generation`,
+      });
       return networkCall();
     }
   }
@@ -383,14 +611,44 @@ export function createSqliteFirstSeriesDataSource(
     getCategories() {
       return withSqliteOrNetwork(
         () => sqlite.getCategories(),
-        () => network.getCategories(),
+        () => {
+          logSeriesScreenSource({
+            providerId,
+            source: 'provider-fallback',
+            readableGeneration: null,
+            publishedTotal: null,
+            metadataCategoryCount: null,
+            publishedCategoryCount: null,
+            selectedCategoryId: null,
+            loadedSeriesCount: null,
+            fallbackReason: 'no-readable-series-generation',
+            errorReason: null,
+          });
+          return network.getCategories();
+        },
+        'getCategories',
       );
     },
 
     getSeriesPage(input) {
       return withSqliteOrNetwork(
         () => sqlite.getSeriesPage(input),
-        () => network.getSeriesPage(input),
+        () => {
+          logSeriesScreenSource({
+            providerId,
+            source: 'provider-fallback',
+            readableGeneration: null,
+            publishedTotal: null,
+            metadataCategoryCount: null,
+            publishedCategoryCount: null,
+            selectedCategoryId: input.categoryId,
+            loadedSeriesCount: null,
+            fallbackReason: 'no-readable-series-generation',
+            errorReason: null,
+          });
+          return network.getSeriesPage(input);
+        },
+        'getSeriesPage',
       );
     },
 
@@ -398,6 +656,7 @@ export function createSqliteFirstSeriesDataSource(
       return withSqliteOrNetwork(
         () => sqlite.searchSeries!(input),
         () => (network.searchSeries ? network.searchSeries(input) : Promise.resolve({ items: [], totalCount: 0, hasMore: false })),
+        'searchSeries',
       );
     },
 
@@ -418,6 +677,7 @@ export function createSqliteFirstSeriesDataSource(
       return withSqliteOrNetwork(
         () => sqlite.getCategoryCount!(categoryId),
         () => (network.getCategoryCount ? network.getCategoryCount(categoryId) : Promise.resolve(0)),
+        'getCategoryCount',
       );
     },
 
@@ -428,6 +688,7 @@ export function createSqliteFirstSeriesDataSource(
           network.prefetchAllCategoryCounts
             ? network.prefetchAllCategoryCounts(categoryIds, onCategoryCount)
             : Promise.resolve(),
+        'prefetchAllCategoryCounts',
       );
     },
 

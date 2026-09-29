@@ -1,6 +1,12 @@
 /**
  * Default / Node / web stub — native decode unavailable.
  */
+import type {
+  StreamXtreamCategoryDecodeInput,
+  StreamXtreamCategoryDecodeResult,
+} from './nativeCatalogDecodeTypes.ts';
+import { runXtreamCategoryDecodeWithCatalogNetworkGate } from '../providers/providerCatalogNetworkGate.ts';
+
 export type {
   CatalogDecodeBatchStats,
   CatalogDecodeMediaType,
@@ -15,13 +21,21 @@ export {
   isCatalogSqliteWriterOnlyDiagnosticEnabled,
   nativeRecordToMovieSummary,
   nativeRecordToSeriesSummary,
+  logCatalogDecodeFailure,
 } from './nativeCatalogDecodeShared.ts';
 
 export function isNativeCatalogDecodeAvailable(): boolean {
   return false;
 }
 
-export async function streamXtreamCategoryDecode(): Promise<never> {
+export async function streamXtreamCategoryDecode(
+  input?: StreamXtreamCategoryDecodeInput,
+): Promise<StreamXtreamCategoryDecodeResult> {
+  if (input) {
+    await runXtreamCategoryDecodeWithCatalogNetworkGate(input, async () => {
+      throw new Error('native_catalog_decode_unavailable');
+    });
+  }
   throw new Error('native_catalog_decode_unavailable');
 }
 

@@ -30,6 +30,7 @@ import {
 } from '@/features/startup/authScreenLogic';
 import { completeLaunchOverlay, getLaunchOverlayState, requestLaunchOverlayExit } from '@/features/startup/launchOverlay';
 import { novaTheme } from '@/theme';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
 const PAIRING_HOME_ROUTE = '/main-menu';
 
@@ -366,7 +367,7 @@ export function PairingScreen({
         },
       ]}>
       <View style={styles.fitPage}>
-        <View style={[styles.layout, compact && styles.layoutCompact]}>
+        <View style={[styles.layout, compact && styles.layoutCompact, styles.glassPanel]}>
           <View style={[styles.leftColumn, { gap: layout.leftGap }]}>
             <NovaLogo variant="full" size={layout.logoSize} subtitle={compact ? undefined : 'ENTERTAINMENT STARTS HERE'} />
             {!compact ? <View style={styles.rule} /> : null}
@@ -537,6 +538,13 @@ const styles = StyleSheet.create({
     gap: 24,
     maxWidth: 1100,
   },
+  glassPanel: {
+    padding: 24,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: 'rgba(5,10,24,0.46)',
+  },
   leftColumn: {
     flex: 1,
     maxWidth: 520,
@@ -571,8 +579,8 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 20,
     borderWidth: 1,
-    borderColor: 'rgba(97,165,255,0.28)',
-    backgroundColor: 'rgba(59,130,246,0.12)',
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: NOVA_GLASS.focused.backgroundColor,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -605,14 +613,14 @@ const styles = StyleSheet.create({
     padding: 14,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: novaTheme.colors.borderSubtle,
-    backgroundColor: novaTheme.colors.surface,
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: NOVA_GLASS.focused.backgroundColor,
   },
   qrUnavailable: {
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: novaTheme.colors.borderSubtle,
-    backgroundColor: novaTheme.colors.surface,
+    borderColor: NOVA_GLASS.focused.borderColor,
+    backgroundColor: NOVA_GLASS.focused.backgroundColor,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
@@ -647,14 +655,14 @@ const styles = StyleSheet.create({
   codeCard: {
     borderRadius: novaTheme.radius.md,
     borderWidth: 1,
-    borderColor: novaTheme.colors.borderStrong,
-    backgroundColor: novaTheme.colors.surface,
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    backgroundColor: NOVA_GLASS.active.backgroundColor,
     alignItems: 'center',
     justifyContent: 'center',
   },
   codeCardExpired: {
     opacity: 0.55,
-    borderColor: novaTheme.colors.border,
+    borderColor: novaTheme.colors.borderSubtle,
   },
   code: {
     paddingLeft: 6,
@@ -678,10 +686,16 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   primaryButton: {
-    backgroundColor: novaTheme.colors.surfaceMuted,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.active.borderColor,
+    backgroundColor: NOVA_GLASS.active.backgroundColor,
   },
   retryButton: {
-    backgroundColor: novaTheme.colors.accent,
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
   },
   inlineStatus: {
     marginTop: 2,

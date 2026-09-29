@@ -6,6 +6,7 @@ import * as Device from 'expo-device';
 
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
+import { usePlaybackKeepAwake } from '@/features/playback/usePlaybackKeepAwake';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import {
   registerPlaybackActivity,
@@ -100,6 +101,8 @@ import {
   normalizePlaybackFailure,
   playbackAnalyticsTracker,
 } from '@/features/analytics/playbackAnalytics';
+import type { PlaybackErrorDiagnostics } from '../playbackErrorDiagnostics';
+import { getCachedNetworkDiagnostics } from '@/features/diagnostics/runtimeDiagnostics';
 import { buildSanitizedPlaybackSourceSnapshot } from '@/features/movies/moviesStartupRuntimeIsolation';
 import { noteMoviePlaybackFailed, noteMoviePlaybackStarted } from '@/features/movies/moviesPlaybackAudit';
 import { endMoviePlaybackAttemptDiag } from '@/features/providers/playbackSourceDiagnostics';
@@ -138,6 +141,17 @@ function collectDevicePlaybackSignals(): DevicePlaybackSignals {
     apiLevel:
       Device.platformApiLevel ?? (typeof constants.Version === 'number' ? constants.Version : null),
     deviceType: Device.deviceType === Device.DeviceType.TV ? 'tv' : null,
+  };
+}
+
+function networkFailureContext(playerState: string, player: { playing: boolean; currentTime: number }) {
+  const network = getCachedNetworkDiagnostics();
+  return {
+    playerState,
+    isPlaying: player.playing,
+    playbackPositionSeconds: Number.isFinite(player.currentTime) ? Math.max(0, player.currentTime) : 0,
+    networkConnected: network.networkConnected,
+    networkType: network.connectionType,
   };
 }
 
@@ -213,7 +227,7 @@ export function UnifiedPlayerController() {
   const playbackRetryAttemptedRef = useRef(false);
   const lastPlaybackRetryAtRef = useRef(0);
   const streamCallbacksRef = useRef({
-    onError: (_message: string) => {},
+    onError: (_message: string, _diagnostics?: PlaybackErrorDiagnostics) => {},
     onReady: () => {},
   });
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
@@ -247,6 +261,7 @@ export function UnifiedPlayerController() {
   const resumeAppliedRef = useRef<string | null>(null);
   const appliedPlayingRef = useRef<boolean | null>(null);
   const previousAnalyticsSnapshotRef = useRef(snapshot);
+  const analyticsItemKeyRef = useRef<string | null>(null);
   const seekQueueRef = useRef<{
     inFlight: boolean;
     pendingMs: number | null;
@@ -437,7 +452,7 @@ export function UnifiedPlayerController() {
   // Keep native player callbacks pointed at the latest store state without recreating the player.
   // eslint-disable-next-line react-hooks/refs
   streamCallbacksRef.current = {
-    onError: (message) => {
+    onError: (message, diagnostics) => {
       const current = getUnifiedPlayerState();
       if (!current.item) {
         return;
@@ -550,7 +565,7 @@ export function UnifiedPlayerController() {
             errorCategory: UNSUPPORTED_VIDEO_FORMAT_CATEGORY,
             outcome: 'error',
           });
-          playbackAnalyticsTracker.failure(message);
+          playbackAnalyticsTracker.failure(message, { ...diagnostics, ...networkFailureContext(current.machineState, player) });
           setUnifiedPlayerError(UNSUPPORTED_VIDEO_FORMAT_ERROR, UNSUPPORTED_VIDEO_FORMAT_CATEGORY);
           return;
         }
@@ -605,7 +620,7 @@ export function UnifiedPlayerController() {
           });
         }
       }
-      playbackAnalyticsTracker.failure(message);
+      playbackAnalyticsTracker.failure(message, { ...diagnostics, ...networkFailureContext(current.machineState, player) });
       setUnifiedPlayerError(
         sanitizePlaybackErrorMessage(message, current.item.mediaType),
         current.item.mediaType === 'movie' ? failureCategory : null,
@@ -629,11 +644,17 @@ export function UnifiedPlayerController() {
   const vodBufferPolicy = snapshot.item?.mediaType === 'live' ? 'live' : 'vod';
   const { player, retry } = useNovaStreamPlayer(streamUrl, {
     bufferPolicy: vodBufferPolicy,
-    onError: (message) => streamCallbacksRef.current.onError(message),
+    onError: (message, diagnostics) => streamCallbacksRef.current.onError(message, diagnostics),
     onReady: () => streamCallbacksRef.current.onReady(),
   });
 
   const playbackActive = isUnifiedPlaybackActive(snapshot.machineState, snapshot.item);
+  usePlaybackKeepAwake({
+    active: playbackActive && snapshot.machineState !== 'paused' && snapshot.machineState !== 'error',
+    contentType: snapshot.item?.mediaType === 'episode' ? 'series' : snapshot.item?.mediaType ?? 'movie',
+    contentId: snapshot.item?.id,
+    playerState: snapshot.machineState,
+  });
   const applyNativeSeek = useCallback(
     (requestedMs: number, source: 'rewind' | 'forward' | 'scrubber' | 'resume') => {
       const current = getUnifiedPlayerState();
@@ -913,21 +934,69 @@ export function UnifiedPlayerController() {
 
   useEffect(() => {
     const previous = previousAnalyticsSnapshotRef.current;
-    if (!previous.item && snapshot.item && snapshot.machineState === 'loading') {
-      playbackAnalyticsTracker.request(snapshot.item, snapshot.launchSource);
+    const item = snapshot.item;
+
+    const itemKey = item
+      ? `${item.providerId ?? 'none'}:${item.mediaType}:${item.id}`
+      : null;
+
+    const trackedItemKey = analyticsItemKeyRef.current;
+
+    /*
+     * UnifiedPlayerController can mount after the playback item has already
+     * entered the store. Do not require previous.item to be null.
+     *
+     * Start analytics once per actual movie/episode content identity.
+     */
+    if (
+      item &&
+      snapshot.machineState === 'loading' &&
+      itemKey !== trackedItemKey
+    ) {
+      if (trackedItemKey) {
+        playbackAnalyticsTracker.stop('route_change');
+      }
+
+      const accepted = playbackAnalyticsTracker.request(
+        item,
+        snapshot.launchSource,
+      );
+
+      if (accepted) {
+        analyticsItemKeyRef.current = itemKey;
+      }
     }
+
     if (snapshot.machineState !== previous.machineState) {
       playbackAnalyticsTracker.stateChanged(snapshot.machineState);
     }
-    if (snapshot.machineState === 'error' && previous.machineState !== 'error') {
+
+    if (
+      snapshot.machineState === 'error' &&
+      previous.machineState !== 'error'
+    ) {
       playbackAnalyticsTracker.failure(snapshot.errorMessage);
+
       if (snapshot.item?.mediaType === 'movie') {
-        noteMoviePlaybackFailed(snapshot.errorMessage ?? 'player-error', snapshot.item.id);
+        noteMoviePlaybackFailed(
+          snapshot.errorMessage ?? 'player-error',
+          snapshot.item.id,
+        );
       }
     }
-    if (snapshot.machineState === 'closing' && previous.machineState !== 'closing') {
+
+    if (
+      snapshot.machineState === 'closing' &&
+      previous.machineState !== 'closing'
+    ) {
       playbackAnalyticsTracker.stop('user_back');
+      analyticsItemKeyRef.current = null;
     }
+
+    if (!item && snapshot.machineState === 'idle') {
+      analyticsItemKeyRef.current = null;
+    }
+
     previousAnalyticsSnapshotRef.current = snapshot;
   }, [snapshot]);
 

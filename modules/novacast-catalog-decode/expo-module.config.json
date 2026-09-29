@@ -1,6 +1,9 @@
 {
   "platforms": ["android"],
   "android": {
-    "modules": ["expo.modules.novacastcatalogdecode.NovacastCatalogDecodeModule"]
+    "modules": [
+      "expo.modules.novacastcatalogdecode.NovacastCatalogDecodeModule",
+      "expo.modules.novacastcatalogdecode.NovacastFullscreenSurfModule"
+    ]
   }
 }

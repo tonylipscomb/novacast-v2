@@ -7,7 +7,7 @@ import {
   type DiscoverZoneHydrationDeps,
   type DiscoverZoneItem,
 } from './discoverZoneHydration.ts';
-import { getLiveFavoriteEntries } from './personalizationStore.ts';
+import { getLiveFavoriteEntries, getRecentItems } from './personalizationStore.ts';
 
 export type DiscoverZoneScope = 'movies' | 'series' | 'live';
 
@@ -17,21 +17,28 @@ export type DiscoverZoneSnapshot = {
   scope: DiscoverZoneScope;
   watchlist: DiscoverZoneItem[];
   favorites: DiscoverZoneItem[];
+  recentlyWatched: DiscoverZoneItem[];
 };
 
 export type DiscoverZoneSnapshotDeps = DiscoverZoneHydrationDeps & {
   getMovieLibrary?: typeof getMovieLibraryState;
   getMediaLibrary?: typeof getMediaLibraryState;
   getLiveFavorites?: typeof getLiveFavoriteEntries;
+  getRecentItems?: typeof getRecentItems;
 };
 
 export function emptyDiscoverZoneSnapshot(scope: DiscoverZoneScope): DiscoverZoneSnapshot {
-  return { scope, watchlist: [], favorites: [] };
+  return { scope, watchlist: [], favorites: [], recentlyWatched: [] };
 }
 
 export function discoverZoneRails(snapshot: DiscoverZoneSnapshot) {
   if (snapshot.scope === 'live') {
-    return snapshot.favorites.length ? ([['favorites', snapshot.favorites]] as const) : [];
+    return (
+      [
+        ['recent', snapshot.recentlyWatched ?? []],
+        ['favorites', snapshot.favorites],
+      ] as const
+    ).filter(([, items]) => items.length > 0);
   }
 
   return (
@@ -42,7 +49,10 @@ export function discoverZoneRails(snapshot: DiscoverZoneSnapshot) {
   ).filter(([, items]) => items.length > 0);
 }
 
-export function discoverZoneRailTitle(scope: DiscoverZoneScope, rail: 'watchlist' | 'favorites') {
+export function discoverZoneRailTitle(scope: DiscoverZoneScope, rail: 'watchlist' | 'favorites' | 'recent') {
+  if (rail === 'recent') {
+    return 'Recently Watched Channels';
+  }
   if (rail === 'watchlist') {
     return 'My Watchlist';
   }
@@ -98,12 +108,28 @@ export async function loadDiscoverZoneSnapshot(
 
   if (scope === 'live') {
     const getLiveFavorites = deps?.getLiveFavorites ?? getLiveFavoriteEntries;
+    const getRecent = deps?.getRecentItems ?? getRecentItems;
+    const recentItems = (await getRecent(providerId)).filter((item) => item.mediaType === 'live');
     const liveFavorites = await getLiveFavorites(providerId);
     return {
       scope,
       watchlist: [],
+      recentlyWatched: recentItems.map((item) => ({
+        id: item.contentId,
+        contentId: item.contentId,
+        providerId: item.providerId,
+        streamId: undefined,
+        title: item.title,
+        artworkUrl: item.artworkUrl,
+        subtitle: 'Recently watched channel',
+        mediaType: 'live' as const,
+        resolved: true,
+      })),
       favorites: liveFavorites.map((item) => ({
         id: item.contentId,
+        contentId: item.contentId,
+        providerId: item.providerId,
+        streamId: item.streamId,
         title: item.title,
         artworkUrl: item.artworkUrl,
         subtitle: 'Favorite channel',
@@ -123,6 +149,7 @@ export async function loadDiscoverZoneSnapshot(
       scope,
       watchlist: await hydrateMovieItems(providerId, movieLibrary.watchlist, deps, snapshots),
       favorites: await hydrateMovieItems(providerId, movieLibrary.favorites, deps, snapshots),
+      recentlyWatched: [],
     };
   }
 
@@ -151,5 +178,6 @@ export async function loadDiscoverZoneSnapshot(
     scope,
     watchlist: await hydrateSeriesItems(providerId, mediaLibrary.watchlist, deps, snapshots),
     favorites: await hydrateSeriesItems(providerId, favoriteIds, deps, snapshots),
+    recentlyWatched: [],
   };
 }

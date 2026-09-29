@@ -125,7 +125,9 @@ export function WalkthroughOverlay({
         <View style={styles.scrim} pointerEvents="none" />
         <FocusGuide
           style={styles.anchor}
-          autoFocus
+          // Home owns native startup focus. The walkthrough must not compete
+          // with the navbar when it appears as onboarding state hydrates.
+          autoFocus={false}
           {...(Platform.OS === 'android'
             ? {
                 trapFocusLeft: true,
@@ -188,7 +190,6 @@ export function WalkthroughOverlay({
 
               <Pressable
                 focusable
-                hasTVPreferredFocus={focused === 'action' || focused === null}
                 onFocus={() => setFocused('action')}
                 onBlur={() => setFocused((current) => (current === 'action' ? null : current))}
                 onPress={() => {

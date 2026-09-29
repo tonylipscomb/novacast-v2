@@ -34,6 +34,18 @@ export type LiveSurfAdjacentResult =
       queueLength: number;
     };
 
+export type LiveSurfCursorState = {
+  index: number;
+  channelId: string | null;
+  intentGeneration: number;
+};
+
+export type LiveSurfCursorMoveResult = {
+  changed: boolean;
+  cursor: LiveSurfCursorState;
+  adjacent: LiveSurfAdjacentResult;
+};
+
 export function createLiveSurfSessionId(): string {
   return `live-surf-${Date.now().toString(36)}`;
 }
@@ -87,6 +99,31 @@ export function resolveLiveSurfAdjacent(input: {
     fromIndex: fromIndex >= 0 ? fromIndex : 0,
     toIndex: input.channelIds.indexOf(toChannelId),
     queueLength,
+  };
+}
+
+/** Move fullscreen surf selection without consulting or mutating playback state. */
+export function moveLiveSurfCursor(input: {
+  channelIds: string[];
+  cursor: LiveSurfCursorState;
+  direction: LiveSurfDirection;
+}): LiveSurfCursorMoveResult {
+  const adjacent = resolveLiveSurfAdjacent({
+    channelIds: input.channelIds,
+    currentId: input.cursor.channelId,
+    direction: input.direction,
+  });
+  if (adjacent.kind === 'noop') {
+    return { changed: false, cursor: input.cursor, adjacent };
+  }
+  return {
+    changed: true,
+    adjacent,
+    cursor: {
+      index: adjacent.toIndex,
+      channelId: adjacent.toChannelId,
+      intentGeneration: input.cursor.intentGeneration + 1,
+    },
   };
 }
 

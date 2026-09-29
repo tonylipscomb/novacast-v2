@@ -138,7 +138,6 @@ function dateFor(item: SortableContent, kind: 'movie' | 'series') {
 function releaseMetadataFor(item: SortableContent, kind: 'movie' | 'series') {
   if (kind === 'series') {
     return (
-      normalizeReleaseDate(item.latestEpisodeDate) ||
       normalizeReleaseDate(item.releaseDate) ||
       normalizeReleaseDate(item.year)
     );

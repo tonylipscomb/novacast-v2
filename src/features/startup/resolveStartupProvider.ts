@@ -3,7 +3,11 @@ import {
   initializeDevice,
   isClosedBetaManagedFlow,
 } from '@/features/device';
-import { downloadManagedProviderAssignment } from '@/features/device/managedProviderDownload';
+import {
+  assignmentFromDeviceStatus,
+  markDeviceAssignmentApplied,
+  runManagedProviderRefresh,
+} from '@/features/device/deviceAssignmentReconcile';
 import { setContentPolicyOverride } from '@/features/content-policy';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
 import {
@@ -11,7 +15,11 @@ import {
   hasSavedProvider,
   isProviderConnectionReady,
 } from '@/features/providers/providerModel';
-import { getProviderState, retryProviderInitialization } from '@/features/providers/providerStore';
+import {
+  clearProviderSwitchError,
+  getProviderState,
+  retryProviderInitialization,
+} from '@/features/providers/providerStore';
 import {
   STARTUP_BOOTSTRAP_TIMEOUT_MS,
   STARTUP_NETWORK_TIMEOUT_MS,
@@ -135,12 +143,14 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
 
   const providerState = await getProviderState();
   const selected = getSelectedProvider(providerState);
+  const activeBundle = getActiveRepositoryBundle();
   const alreadyActive =
     hasSavedProvider(providerState) &&
-    Boolean(getActiveRepositoryBundle()) &&
+    Boolean(activeBundle && selected && activeBundle.providerId === selected.id) &&
     Boolean(selected && isProviderConnectionReady(selected));
 
   if (alreadyActive) {
+    clearProviderSwitchError();
     logAssignmentResolved(current, flags, false);
     if (isRetry) {
       logRetry('retry-assignment-resolved', { ...retryBase, providerBootstrapRequested: false });
@@ -181,10 +191,11 @@ async function runResolveStartupProvider(source: StartupProviderSource): Promise
 
   try {
     await withTimeout(
-      downloadManagedProviderAssignment(),
+      runManagedProviderRefresh(),
       STARTUP_BOOTSTRAP_TIMEOUT_MS,
       'managed_provider_timeout',
     );
+    await markDeviceAssignmentApplied(assignmentFromDeviceStatus(getDeviceState().status));
   } catch (error) {
     const errorCode = safeErrorCode(error, 'managed_provider_unavailable');
     logProviderPhase('provider-download-failed', {

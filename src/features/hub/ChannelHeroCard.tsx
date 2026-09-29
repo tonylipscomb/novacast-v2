@@ -8,6 +8,7 @@ import { categoryTypeAccentColor, categoryTypeLabel, type ProviderCategoryType }
 import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 
 type ChannelHeroCardProps = {
   title: string;
@@ -17,6 +18,7 @@ type ChannelHeroCardProps = {
   isLive?: boolean;
   preferredFocus?: boolean;
   onFocusHandle?: (handle: number | null) => void;
+  nextFocusUp?: number;
   onPress: () => void;
 };
 
@@ -37,6 +39,7 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
   isLive = false,
   preferredFocus = false,
   onFocusHandle,
+  nextFocusUp,
   onPress,
 }: ChannelHeroCardProps) {
   const { theme } = useAppTheme();
@@ -52,10 +55,11 @@ export const ChannelHeroCard = memo(function ChannelHeroCard({
         collapsable={false}
         focusable
         hasTVPreferredFocus={preferredFocus}
+        {...(nextFocusUp != null ? { nextFocusUp } : null)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onPress={onPress}
-        style={[styles.card, novaTvFocus.base, focused && styles.cardFocused]}>
+        style={[styles.card, novaTvFocus.base, styles.cardGlassBase, focused && styles.cardFocused]}>
           <View style={[styles.artwork, focused && styles.artworkFocused]}>
             {logoUrl ? (
               <>
@@ -97,20 +101,29 @@ function createStyles(theme: NovaTheme) {
   const focusChrome = createNovaTvFocusChrome(theme);
   return StyleSheet.create({
     wrap: {
-      width: 168,
+      width: 215,
     },
     card: {
-      width: 168,
-      minHeight: 164,
-      borderRadius: 0,
+      width: 215,
+      minHeight: 160,
       backgroundColor: 'transparent',
       padding: 0,
       ...focusChrome.base,
     },
-    cardFocused: focusChrome.active,
+    cardGlassBase: {
+      borderWidth: 1,
+      borderRadius: NOVA_GLASS.radius.base,
+      borderColor: NOVA_GLASS.subtle.borderColor,
+      backgroundColor: NOVA_GLASS.subtle.backgroundColor,
+    },
+    cardFocused: {
+      borderColor: NOVA_GLASS.activeFocused.borderColor,
+      backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+      borderRadius: NOVA_GLASS.radius.base,
+    },
     artwork: {
-      height: 112,
-      borderRadius: 0,
+      height: 116,
+      borderRadius: 11,
       backgroundColor: 'transparent',
       alignItems: 'center',
       justifyContent: 'center',

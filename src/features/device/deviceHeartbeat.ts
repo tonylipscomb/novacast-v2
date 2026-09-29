@@ -3,7 +3,11 @@ import type { DeviceHeartbeatResponse, DevicePendingCommand } from './deviceType
 import { applyHeartbeatAccess, checkDeviceStatus, getDeviceState } from './deviceActivation';
 import { isLocalActivationBypassEnabled } from './deviceFeatureFlags';
 import { setContentPolicyOverride } from '@/features/content-policy/ContentPolicyService';
-import { downloadManagedProviderAssignment } from './managedProviderDownload';
+import {
+  assignmentFromHeartbeat,
+  getAppliedAssignmentDiagnostics,
+  reconcileDeviceAssignment,
+} from './deviceAssignmentReconcile';
 import { resetPairingKeepDevice, factoryResetNovacast } from '@/features/pairing/resetPairing';
 import { scheduleProviderCatalogSync } from '@/features/providers/providerCatalogSync';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
@@ -11,6 +15,8 @@ import { closeUnifiedPlayback, getUnifiedPlayerState } from '@/features/playback
 import { isUnifiedPlaybackActive } from '@/features/playback/unified/unifiedPlayerLogic';
 import { reportNetworkOutcome } from '@/features/resilience/offlineStatus';
 import { router } from 'expo-router';
+import { setDiagnosticsEnabled } from '@/features/diagnostics/diagnosticsConfig';
+import { applyDiagnosticCaptureCommand } from '@/features/diagnostics/diagnosticCapture';
 
 type CommandHandlerResult = { id: string; status: 'completed' | 'failed'; result?: Record<string, unknown> };
 
@@ -35,6 +41,10 @@ async function executeRemoteCommand(command: DevicePendingCommand): Promise<Comm
       case 'run_diagnostics':
         await checkDeviceStatus();
         return { id: command.id, status: 'completed', result: { action: 'run_diagnostics' } };
+      case 'start_diagnostics_capture':
+      case 'stop_diagnostics_capture':
+        await applyDiagnosticCaptureCommand(command.payload);
+        return { id: command.id, status: 'completed', result: { action: command.command } };
       case 'push_configuration':
         if (typeof command.payload?.contentPolicy === 'string') {
           setContentPolicyOverride(
@@ -42,7 +52,7 @@ async function executeRemoteCommand(command: DevicePendingCommand): Promise<Comm
           );
         }
         if (command.payload?.redownloadProvider === true) {
-          await downloadManagedProviderAssignment();
+          await reconcileDeviceAssignment({ source: 'heartbeat' });
         }
         return { id: command.id, status: 'completed', result: { action: 'push_configuration' } };
       case 'reset_pairing':
@@ -96,7 +106,10 @@ export async function sendDeviceHeartbeat(options?: {
       metadata: deviceMetadata(),
       currentRoute: options?.currentRoute,
       appFocus: options?.appFocus,
-      diagnostics: options?.diagnostics,
+      diagnostics: {
+        ...(options?.diagnostics ?? {}),
+        ...getAppliedAssignmentDiagnostics(),
+      },
     }),
   }).catch(() => null);
 
@@ -105,10 +118,13 @@ export async function sendDeviceHeartbeat(options?: {
     return null;
   }
 
+  // A successful heartbeat response is direct evidence that the device is
+  // online, even if a malformed/empty payload prevents the rest of the
+  // heartbeat state from being applied.
+  reportNetworkOutcome(true);
   const payload = (await response.json().catch(() => null)) as DeviceHeartbeatResponse | null;
   if (!payload) return null;
-
-  reportNetworkOutcome(true);
+  setDiagnosticsEnabled(payload.diagnosticsEnabled === true);
 
   const localBypass = isLocalActivationBypassEnabled({ log: false });
 
@@ -191,6 +207,11 @@ export async function sendDeviceHeartbeat(options?: {
     setContentPolicyOverride(payload.contentPolicy);
   }
 
+  await reconcileDeviceAssignment({
+    source: 'heartbeat',
+    snapshot: assignmentFromHeartbeat(payload),
+  });
+
   const pending = Array.isArray(payload.pendingCommands) ? payload.pendingCommands : [];
   if (pending.length) {
     const results: CommandHandlerResult[] = [];
@@ -208,6 +229,7 @@ export async function sendDeviceHeartbeat(options?: {
       },
       body: JSON.stringify({
         metadata: deviceMetadata(),
+        diagnostics: getAppliedAssignmentDiagnostics(),
         acknowledgedCommandIds: pending.map((command) => command.id),
         commandResults: results,
       }),

@@ -34,6 +34,7 @@ import {
   type ProviderState,
 } from './providerModel.ts';
 import { formatProviderExpirationLabel } from './providerExpiration.ts';
+import { logAccountOutputFormatPropagation, rememberAccountOutputFormats } from './accountOutputFormats.ts';
 import {
   activateRepositoryBundle,
   createRepositoryBundle,
@@ -171,13 +172,24 @@ function validatedProviderMetadata(provider: ProviderRecord, accountMetadata: Pr
     return provider;
   }
 
-  return {
+  const nextProvider = {
     ...provider,
     account: accountMetadata ?? undefined,
     expirationAt: accountMetadata?.expiresAt ?? null,
     status: deriveProviderStatus(accountMetadata),
     updatedAt: Date.now(),
   } satisfies ProviderRecord;
+
+  rememberAccountOutputFormats(nextProvider.id, accountMetadata);
+  logAccountOutputFormatPropagation({
+    stage: 'persisted',
+    outputFormatKeyPresent: Boolean(accountMetadata?.allowedOutputFormats?.length || accountMetadata?.preferredOutputFormat),
+    outputFormatValueKind: accountMetadata?.allowedOutputFormats?.length ? 'array' : 'missing',
+    allowedOutputFormats: accountMetadata?.allowedOutputFormats,
+    preferredOutputFormat: accountMetadata?.preferredOutputFormat ?? null,
+  });
+
+  return nextProvider;
 }
 
 async function resolveProviderCredentials(provider: ProviderRecord) {
@@ -502,7 +514,10 @@ export async function switchActiveProvider(providerId: string) {
       // Keep the old bundle untouched until candidate validation succeeds.
       closeActivePlayback();
       if (current.selectedProviderId && current.selectedProviderId !== providerId) {
-        cancelProviderCatalogSync(current.selectedProviderId);
+        cancelProviderCatalogSync(current.selectedProviderId, {
+          cancelSource: 'provider-switch',
+          cancelCaller: 'providerStore.selectProvider',
+        });
       }
       await writeState(next);
       stateCommitted = true;
@@ -622,7 +637,10 @@ export async function connectXtreamProvider(input: {
       if (activate) {
         closeActivePlayback();
         if (current.selectedProviderId && current.selectedProviderId !== providerId) {
-          cancelProviderCatalogSync(current.selectedProviderId);
+          cancelProviderCatalogSync(current.selectedProviderId, {
+          cancelSource: 'provider-switch',
+          cancelCaller: 'providerStore.selectProvider',
+        });
         }
       }
       await runPairingTransactionStep('writeState', () => writeState(next), {
@@ -753,7 +771,10 @@ export async function retryProviderInitialization() {
 
     closeActivePlayback();
     if (current.selectedProviderId && current.selectedProviderId !== selected.id) {
-      cancelProviderCatalogSync(current.selectedProviderId);
+      cancelProviderCatalogSync(current.selectedProviderId, {
+        cancelSource: 'provider-switch',
+        cancelCaller: 'providerStore.activateSavedProvider',
+      });
     }
     await writeState(nextState);
     stateCommitted = true;

@@ -1,13 +1,18 @@
 import { useSyncExternalStore } from 'react';
+import { useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
+import { useAppTheme } from '@/theme/AppThemeProvider';
 import { getOfflineSnapshot, subscribeOfflineStatus } from './offlineStatus';
 
 /**
  * Subtle passive offline chip — never focusable, never blocking.
  */
 export function OfflineStatusBanner() {
+  const { theme } = useAppTheme();
   const snapshot = useSyncExternalStore(subscribeOfflineStatus, getOfflineSnapshot, getOfflineSnapshot);
+  const styles = useMemo(() => createStyles(theme), [theme]);
   if (snapshot.status !== 'offline') {
     return null;
   }
@@ -19,21 +24,24 @@ export function OfflineStatusBanner() {
   );
 }
 
-const styles = StyleSheet.create({
-  banner: {
+function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {
+  return StyleSheet.create({
+    banner: {
     position: 'absolute',
     top: 12,
     alignSelf: 'center',
     zIndex: 9000,
     paddingHorizontal: 14,
     paddingVertical: 6,
-    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    borderRadius: NOVA_GLASS.radius.subtle,
+    backgroundColor: NOVA_GLASS.subtle.backgroundColor,
     borderWidth: 1,
-    borderColor: 'rgba(255, 200, 80, 0.45)',
-  },
-  text: {
-    color: '#F5E6C8',
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    },
+    text: {
+    color: theme.colors.textSecondary,
     fontSize: 12,
     fontWeight: '700',
-  },
-});
+    },
+  });
+}

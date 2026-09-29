@@ -364,14 +364,16 @@ export function SearchScreen() {
   return (
     <NovaTvShell
       activeId="search"
-      title="Search"
-      subtitle="Movies, series, channels, and programs."
       providerLabel={selectedProviderLabel}
       preferActiveNavigationFocus={false}
+      navigationFocusable={!searchMedia.detailOpen && !searchMedia.playbackActive}
       onNavigationFocusHandles={setNavFocusHandles}
       navigationContentFocusHandle={searchFocusUpHandle}
       compactNavigationRail>
-      <View style={styles.screen} pointerEvents={searchMedia.detailOpen || searchMedia.playbackActive ? 'none' : 'auto'}>
+      <View
+        style={styles.screen}
+        pointerEvents={searchMedia.detailOpen || searchMedia.playbackActive ? 'none' : 'auto'}
+        importantForAccessibility={searchMedia.detailOpen ? 'no-hide-descendants' : 'auto'}>
         <SearchInput
           focusRef={searchShellRef}
           inputRef={searchInputRef}

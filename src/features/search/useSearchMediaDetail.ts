@@ -175,7 +175,11 @@ export function useSearchMediaDetail(providerId: string, bundle: ProviderReposit
       // Search results already carry the provider stream id. Build the normal Xtream Live URL
       // directly from that id so Search does not need to mount Live TV, load a category, or wait
       // for preview playback before entering fullscreen.
-      const streamUrl = buildLiveChannelPlaybackUrl(bundle, { id: result.id });
+      const streamUrl = buildLiveChannelPlaybackUrl(bundle, {
+        id: result.id,
+        containerExtension: result.containerExtension,
+        streamUrl: result.streamUrl,
+      });
       if (!streamUrl) {
         return false;
       }

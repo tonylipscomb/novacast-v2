@@ -72,6 +72,7 @@ export function toLiveSearchPlaybackChannel(result: LiveSearchResult): LiveSearc
     currentEnd: '',
     logoUrl: result.logoUrl,
     containerExtension: result.containerExtension,
+    streamUrl: result.streamUrl,
   };
 }
 

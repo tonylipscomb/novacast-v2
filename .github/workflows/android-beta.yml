@@ -29,6 +29,7 @@ env:
   EXPO_PUBLIC_PERSONAL_PROVIDER_PAIRING_ENABLED: 'false'
 
   EXPO_PUBLIC_NOVACAST_PAIRING_API_URL: ${{ secrets.EXPO_PUBLIC_NOVACAST_PAIRING_API_URL }}
+  EXPO_PUBLIC_SUPABASE_URL: https://vazqcvybajylcwnwnmon.supabase.co
   EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
   EXPO_PUBLIC_NOVACAST_PAIRING_WEBSITE_URL: ${{ secrets.EXPO_PUBLIC_NOVACAST_PAIRING_WEBSITE_URL }}
 
@@ -155,6 +156,32 @@ jobs:
           NOVACAST_KEY_ALIAS: ${{ secrets.NOVACAST_KEY_ALIAS }}
           NOVACAST_KEY_PASSWORD: ${{ secrets.NOVACAST_KEY_PASSWORD }}
         run: ./gradlew app:assembleRelease --no-daemon
+
+      - name: Verify Beta23 production APK
+        shell: bash
+        env:
+          NOVACAST_RELEASE_CERT_SHA256: ${{ secrets.NOVACAST_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          [[ -f "$APK_PATH" ]] || { echo "::error::Release APK missing"; exit 1; }
+          CERT_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "$APK_PATH")"
+          ACTUAL_CERT="$(printf '%s\n' "$CERT_OUTPUT" | awk -F': ' '/certificate SHA-256 digest:/{print $NF; exit}' | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          EXPECTED_CERT="$(printf '%s' "$NOVACAST_RELEASE_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')"
+          [[ -n "$ACTUAL_CERT" && "$ACTUAL_CERT" == "$EXPECTED_CERT" ]] || { echo "::error::APK certificate mismatch"; exit 1; }
+          BADGING="$("$AAPT" dump badging "$APK_PATH")"
+          printf '%s\n' "$BADGING" | grep -Fq "package: name='com.novacast.novacastv2' versionCode='23' versionName='1.0.5-beta23'" || {
+            echo "::error::APK package/version metadata mismatch"
+            exit 1
+          }
+          printf '%s\n' "$BADGING" | grep -Fq "application-debuggable" && {
+            echo "::error::APK is debuggable"
+            exit 1
+          }
+          echo "Beta23 production APK signature and metadata verified."
 
       - name: Package novacast.apk artifacts
         id: apk

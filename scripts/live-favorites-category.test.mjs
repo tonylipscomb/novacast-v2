@@ -169,6 +169,15 @@ test('6. Favorite Channels hydration is bounded to favorite IDs', () => {
   resetLiveChannelIndex('p1');
 });
 
+test('6a. Favorite hydration prefers the current catalog label over a legacy shortened title', () => {
+  const hydrated = hydrateFavoriteLiveChannels({
+    favoriteIds: ['fox'],
+    loadedChannels: [channel('fox', 'NCAAF 06: FOX')],
+    favoriteRecords: [favoriteRecord('fox', 'FOX')],
+  });
+  assert.equal(hydrated.channels[0]?.name, 'NCAAF 06: FOX');
+});
+
 test('7. Favorite Channels does not require full Live network fetch', () => {
   assert.match(liveScreen, /hydrateFavoriteLiveChannels\(/);
   assert.match(liveScreen, /getLiveChannelIndexEntry\(activeProviderId, id\)/);

@@ -1,6 +1,5 @@
 import type { ProviderLiveChannel } from '../providers/providerRepositories.ts';
-import { displayStreamTitle } from '../series/metadata/titleNormalization.ts';
-import { LIVE_TV_NO_PROGRAM_LABEL, resolveLiveTvNowPlaying } from './liveTvProgramText.ts';
+import { displayLiveChannelName, LIVE_TV_NO_PROGRAM_LABEL, resolveLiveTvNowPlaying } from './liveTvProgramText.ts';
 
 /** Stable row shell — EPG text/progress live in LiveTvChannelEpgInfo. */
 export type LiveTvChannelRowShellData = {
@@ -37,7 +36,7 @@ function epgFieldsEqualForRow(previous: LiveTvChannelEpgData, next: LiveTvChanne
 export type LiveTvChannelRowData = LiveTvChannelRowShellData;
 
 export function toLiveTvChannelRowShell(channel: ProviderLiveChannel): LiveTvChannelRowShellData {
-  const name = displayStreamTitle(channel.name);
+  const name = displayLiveChannelName(channel.name);
   return {
     id: channel.id,
     number: channel.number,

@@ -39,6 +39,7 @@ type LiveTvChannelListProps = {
   preferFocusChannelId: string | null;
   listRef: RefObject<FlatList<LiveTvChannelRowShellData> | null>;
   categoryFocusLeftHandle?: number;
+  channelNextFocusUpHandle?: number;
   favoriteChannelIds: ReadonlySet<string>;
   onFavoriteChannel: (channelId: string) => void;
   onPlayChannel: (channelId: string) => void;
@@ -71,6 +72,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   preferFocusChannelId,
   listRef,
   categoryFocusLeftHandle,
+  channelNextFocusUpHandle,
   favoriteChannelIds,
   onFavoriteChannel,
   onPlayChannel,
@@ -134,11 +136,11 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
     const previous = Array.from(mountedRowRefsRef.current.values()).find((candidate) => candidate.index === entry.index - 1);
     const next = Array.from(mountedRowRefsRef.current.values()).find((candidate) => candidate.index === entry.index + 1);
     (entry.instance as unknown as { setNativeProps?: (props: object) => void }).setNativeProps?.({
-      nextFocusUp: previous?.handle ?? entry.handle,
+      nextFocusUp: entry.index === 0 ? channelNextFocusUpHandle ?? entry.handle : previous?.handle ?? entry.handle,
       nextFocusDown: next?.handle ?? entry.handle,
       nextFocusRight: entry.handle,
     });
-  }, []);
+  }, [channelNextFocusUpHandle]);
 
   const refreshNativeFocusGraphAround = useCallback((index: number) => {
     for (const entry of mountedRowRefsRef.current.values()) {
@@ -260,8 +262,8 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   // Do not include a full-list EPG signature — per-row EPG props drive memoized updates.
   const listExtraData = useMemo(
     () =>
-      `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}:${favoriteChannelIds.size}:${epgRevision}`,
-    [categoryFocusLeftHandle, epgRevision, favoriteChannelIds.size, previewChannelId, selectedChannelId],
+      `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}:${channelNextFocusUpHandle ?? ''}:${favoriteChannelIds.size}:${epgRevision}`,
+    [categoryFocusLeftHandle, channelNextFocusUpHandle, epgRevision, favoriteChannelIds.size, previewChannelId, selectedChannelId],
   );
 
   const handleChannelFocus = useCallback(
@@ -334,6 +336,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
           trapFocusUp={index === 0}
           trapFocusDown={index === rowShells.length - 1}
           trapFocusRight
+          nextFocusUp={index === 0 ? channelNextFocusUpHandle : undefined}
         nextFocusLeft={categoryFocusLeftHandle}
         nextFocusRight={undefined}
           isFavorite={favoriteChannelIds.has(item.id)}
@@ -352,6 +355,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
     },
     [
       categoryFocusLeftHandle,
+      channelNextFocusUpHandle,
       favoriteChannelIds,
       epgByChannelId,
       epgPendingChannelIds,

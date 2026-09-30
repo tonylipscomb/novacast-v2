@@ -6,7 +6,7 @@ import type { NovaTheme } from '@/theme/tokens';
 
 import type { ProviderLiveChannel } from '@/features/providers/providerRepositories';
 import { LiveGlassBadge } from './LiveGlassBadge';
-import { displayLiveProgramText } from './liveTvProgramText';
+import { displayLiveChannelName, displayLiveProgramText } from './liveTvProgramText';
 import { LiveTvMarqueeText } from './LiveTvMarqueeText';
 
 const androidTextFit = Platform.OS === 'android' ? ({ includeFontPadding: false } as const) : {};
@@ -53,7 +53,7 @@ export const LiveTvProgramDetailPanel = memo(function LiveTvProgramDetailPanel({
 }: LiveTvProgramDetailPanelProps) {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
-  const channelName = channel?.name ? displayLiveProgramText(channel.name, 'No channel selected') : 'No channel selected';
+  const channelName = displayLiveChannelName(channel?.name);
   const currentProgram = displayLiveProgramText(channel?.current, 'No program information available.');
   const upNextProgram = displayLiveProgramText(upNext ?? channel?.next, '');
 

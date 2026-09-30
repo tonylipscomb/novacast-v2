@@ -22,6 +22,12 @@ export function isRawLiveStreamValue(value?: string | null) {
 /** Shorter TV row label when EPG is missing or still loading. */
 export const LIVE_TV_NO_PROGRAM_LABEL = 'No program info';
 
+/** Live channel labels are provider identifiers; never apply Movie/Series title cleanup. */
+export function displayLiveChannelName(value: string | null | undefined, fallback = 'No channel selected') {
+  const normalized = value?.trim();
+  return normalized || fallback;
+}
+
 export function resolveLiveTvNowPlaying(
   program: string | null | undefined,
   channelName: string,
@@ -31,7 +37,7 @@ export function resolveLiveTvNowPlaying(
     return LIVE_TV_NO_PROGRAM_LABEL;
   }
 
-  const normalizedChannelName = displayStreamTitle(channelName);
+  const normalizedChannelName = displayLiveChannelName(channelName, '');
   if (normalized === normalizedChannelName || normalized === channelName.trim()) {
     return LIVE_TV_NO_PROGRAM_LABEL;
   }

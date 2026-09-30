@@ -3,13 +3,12 @@ import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { findNodeHandle, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 
-import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { novaTvFocus, createNovaTvFocusTextStyles, createNovaTvFocusChrome } from '@/components/nova/novaTvFocus';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 
-import { LIVE_TV_NO_PROGRAM_LABEL, resolveLiveTvNowPlaying } from './liveTvProgramText';
+import { displayLiveChannelName, LIVE_TV_NO_PROGRAM_LABEL, resolveLiveTvNowPlaying } from './liveTvProgramText';
 import { LiveTvMarqueeText } from './LiveTvMarqueeText';
 
 import type { LiveTvChannelEpgData, LiveTvChannelRowShellData } from './liveTvChannelRowData';
@@ -28,6 +27,7 @@ export type LiveTvChannelRowProps = {
   trapFocusUp: boolean;
   trapFocusDown: boolean;
   trapFocusRight: boolean;
+  nextFocusUp?: number;
   nextFocusLeft?: number;
   nextFocusRight?: number;
   onFocus: (channelId: string) => void;
@@ -54,6 +54,7 @@ function channelRowPropsAreEqual(previous: LiveTvChannelRowProps, next: LiveTvCh
     previous.trapFocusUp === next.trapFocusUp &&
     previous.trapFocusDown === next.trapFocusDown &&
     previous.trapFocusRight === next.trapFocusRight &&
+    previous.nextFocusUp === next.nextFocusUp &&
     previous.nextFocusLeft === next.nextFocusLeft &&
     previous.nextFocusRight === next.nextFocusRight &&
     previous.onFocus === next.onFocus &&
@@ -80,6 +81,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   trapFocusUp,
   trapFocusDown,
   trapFocusRight,
+  nextFocusUp,
   nextFocusLeft,
   nextFocusRight,
   onFocus,
@@ -106,7 +108,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
   // Edge trap handles must be in state so nextFocus* props update after layout.
   const [focusTrapHandle, setFocusTrapHandle] = useState<number | undefined>(undefined);
 
-  const displayName = displayStreamTitle(data.name);
+  const displayName = displayLiveChannelName(data.name);
   const displayCurrent = resolveLiveTvNowPlaying(epg.current, data.name);
   const hasProgram = displayCurrent !== LIVE_TV_NO_PROGRAM_LABEL;
   const showEpgLoading = epgPending && !hasProgram;
@@ -135,6 +137,7 @@ export const LiveTvChannelRow = memo(function LiveTvChannelRow({
       {...(trapFocusUp && focusTrapHandle ? { nextFocusUp: focusTrapHandle } : null)}
       {...(trapFocusDown && focusTrapHandle ? { nextFocusDown: focusTrapHandle } : null)}
       {...(trapFocusRight && focusTrapHandle ? { nextFocusRight: focusTrapHandle } : null)}
+      {...(Platform.OS === 'android' && nextFocusUp ? { nextFocusUp } : null)}
       {...(Platform.OS === 'android' && nextFocusLeft ? { nextFocusLeft } : null)}
       {...(Platform.OS === 'android' && !trapFocusRight && nextFocusRight ? { nextFocusRight } : null)}
       onFocus={() => {

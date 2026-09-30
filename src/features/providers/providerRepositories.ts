@@ -1011,7 +1011,9 @@ function partitionXtreamLiveStreamsUsFirst(streams: XtreamLiveStreamResponse[]):
 function mapLiveStream(stream: XtreamLiveStreamResponse, index: number, categoryId: string): ProviderLiveChannel {
   const rawName = stream.name?.trim() || `Channel ${index + 1}`;
   const parsedPrefix = parseProviderTitlePrefix(rawName);
-  const name = stripProviderStreamTitlePrefix(rawName) || rawName;
+  // Live channel labels are provider identifiers, not Movie/Series titles.
+  // Preserve league, number, region, and delimiter segments verbatim.
+  const name = rawName;
   const number = toSafeNumber(stream.num ?? stream.stream_id, index + 1);
   const channelId = String(stream.stream_id ?? `${categoryId}-${index}`);
   const shortName = shortNameForTitle(name);

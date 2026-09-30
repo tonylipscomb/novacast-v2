@@ -38,7 +38,6 @@ import { ONBOARDING_GUIDES } from '@/features/onboarding/onboardingGuides';
 import { WalkthroughOverlay } from '@/features/onboarding/WalkthroughOverlay';
 import { useGuideWalkthrough } from '@/features/onboarding/useGuideWalkthrough';
 import { useProviderStore } from '@/features/providers/providerStore';
-import { displayStreamTitle } from '@/features/series/metadata/titleNormalization';
 import { classifyProviderBoundaryError, logProviderBoundary } from '@/features/providers/providerBoundaryDiagnostics';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -161,7 +160,7 @@ import {
 } from '@/features/search/liveSearchSqliteCatalog';
 import { useLiveTvScreenModel } from './useLiveTvScreenModel';
 import { getLiveChannelIndexEntry } from '@/features/search/liveChannelIndex';
-import { displayLiveProgramText, isRawLiveStreamValue } from './liveTvProgramText';
+import { displayLiveChannelName, displayLiveProgramText, isRawLiveStreamValue } from './liveTvProgramText';
 import {
   isLiveSearchUiBlockingSurf,
   mergeLiveSearchPlaybackChannels,
@@ -1000,6 +999,7 @@ export function LiveTvScreen() {
   const categoryRowRefs = useRef<Map<string, ElementRef<typeof View>>>(new Map());
   const [categoryFocusLeftHandle, setCategoryFocusLeftHandle] = useState<number | undefined>();
   const [categoryNextFocusRightHandle, setCategoryNextFocusRightHandle] = useState<number | undefined>();
+  const [channelNextFocusUpHandle, setChannelNextFocusUpHandle] = useState<number | undefined>();
   const focusedChannelIdRef = useRef<string | null>(liveMemory.focusedChannelId ?? null);
   const focusedActionChannelIdRef = useRef<string | null>(null);
   const favoriteHoldRef = useRef<ReturnType<typeof createFavoriteHoldDetector> | null>(null);
@@ -1381,6 +1381,9 @@ export function LiveTvScreen() {
     const channelRef = channelId ? channelRowRefs.current.get(channelId) : null;
     const nextRight = channelRef ? findNodeHandle(channelRef) ?? undefined : undefined;
     setCategoryNextFocusRightHandle((current) => (current === nextRight ? current : nextRight));
+
+    const searchHandle = searchToolbarRef.current ? findNodeHandle(searchToolbarRef.current) ?? undefined : undefined;
+    setChannelNextFocusUpHandle((current) => (current === searchHandle ? current : searchHandle));
   }, [channels]);
 
   const registerChannelRowRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
@@ -3293,7 +3296,7 @@ export function LiveTvScreen() {
           channels.find((channel) => channel.id === adjacent.toChannelId);
         publishFullscreenSurfOverlay({
           channelId: adjacent.toChannelId,
-          channelName: displayStreamTitle(selectedChannel?.name ?? 'Channel'),
+          channelName: displayLiveChannelName(selectedChannel?.name ?? 'Channel'),
           channelNumber: selectedChannel?.number ? String(selectedChannel.number) : undefined,
         });
         focusedChannelIdRef.current = adjacent.toChannelId;
@@ -3455,7 +3458,7 @@ export function LiveTvScreen() {
       if (!nativeCommitPrepare) {
         publishFullscreenSurfOverlay({
           channelId: nextId,
-          channelName: displayStreamTitle(nextChannel?.name ?? 'Channel'),
+          channelName: displayLiveChannelName(nextChannel?.name ?? 'Channel'),
           channelNumber: nextChannel?.number ? String(nextChannel.number) : undefined,
         });
       }
@@ -3740,7 +3743,7 @@ export function LiveTvScreen() {
           channels.find((channel) => channel.id === nextId);
         publishFullscreenSurfOverlay({
           channelId: nextId,
-          channelName: displayStreamTitle(nextChannel?.name ?? 'Channel'),
+          channelName: displayLiveChannelName(nextChannel?.name ?? 'Channel'),
           channelNumber: nextChannel?.number ? String(nextChannel.number) : undefined,
         });
         nativeSurfCursorMovesRef.current += 1;
@@ -4583,6 +4586,7 @@ export function LiveTvScreen() {
                 <MovieToolbar
                   accessibilityLabel="Search Live TV"
                   buttonRef={searchToolbarRef}
+                  searchNextFocusDown={channelNextFocusUpHandle}
                   focusable={!searchOverlayVisible && !renderState.fullscreenChannelId}
                   onSearchFocus={() => setFocusedAction('search')}
                   onSearchPress={openLiveSearch}
@@ -4631,6 +4635,7 @@ export function LiveTvScreen() {
                   previewChannelId={renderState.previewChannelId}
                   preferFocusChannelId={preferChannelFocusRef.current ? (preferredChannelFocusId.current ?? channels[0]?.id ?? null) : null}
                   categoryFocusLeftHandle={categoryFocusLeftHandle}
+                  channelNextFocusUpHandle={channelNextFocusUpHandle}
                   favoriteChannelIds={favoriteChannelIds}
                   onFavoriteChannel={favoriteChannel}
                   onPlayChannel={playChannel}
@@ -4663,14 +4668,14 @@ export function LiveTvScreen() {
                 {renderState.previewStatus === 'loading' ? (
                   <View style={styles.previewLoading}>
                     <NovaSpaceLoader label="Loading preview…" />
-                    <Text style={styles.previewLoadingCopy}>{detailPanelChannel?.name ? displayStreamTitle(detailPanelChannel.name) : 'Unknown channel'}</Text>
+                    <Text style={styles.previewLoadingCopy}>{displayLiveChannelName(detailPanelChannel?.name, 'Unknown channel')}</Text>
                   </View>
                 ) : renderState.previewStatus === 'error' ? (
                   <View style={styles.previewLoading}>
                     <MaterialCommunityIcons name="television" size={34} color={theme.colors.textMuted} />
                     <Text style={styles.previewLoadingTitle}>Preview unavailable</Text>
                     <Text style={styles.previewLoadingCopy}>
-                      {detailPanelChannel?.name ? displayStreamTitle(detailPanelChannel.name) : 'Try another channel'}
+                      {displayLiveChannelName(detailPanelChannel?.name, 'Try another channel')}
                     </Text>
                     <Pressable
                       focusable
@@ -4690,7 +4695,7 @@ export function LiveTvScreen() {
                           ? 'Select a channel'
                           : 'Preparing stream'}
                     </Text>
-                    <Text style={styles.previewLoadingCopy}>{detailPanelChannel?.name ? displayStreamTitle(detailPanelChannel.name) : 'Unknown channel'}</Text>
+                    <Text style={styles.previewLoadingCopy}>{displayLiveChannelName(detailPanelChannel?.name, 'Unknown channel')}</Text>
                   </View>
                 ) : (
                   <NovaStreamSurface player={liveStreamPlayer} style={styles.previewPlayer} />
@@ -4767,7 +4772,7 @@ export function LiveTvScreen() {
           {shouldShowFullscreenLoadingOverlay(fullscreenFrameStatus) ? (
             <View pointerEvents="none" style={styles.fullscreenStatusOverlay}>
               <NovaSpaceLoader label="Starting playback..." />
-              <Text style={styles.previewLoadingCopy}>{displayStreamTitle(fullscreenChannel.name)}</Text>
+              <Text style={styles.previewLoadingCopy}>{displayLiveChannelName(fullscreenChannel.name)}</Text>
             </View>
           ) : null}
           {fullscreenFallbackVisible ? (
@@ -4857,7 +4862,7 @@ export function LiveTvScreen() {
                   {displayLiveProgramText(fullscreenChannel.current, 'No program information available.')}
                 </Text>
                 <Text numberOfLines={1} style={styles.fullscreenMeta}>
-                  {displayStreamTitle(fullscreenChannel.name)} · {formatPreviewWindow(fullscreenChannel)}
+                  {displayLiveChannelName(fullscreenChannel.name)} · {formatPreviewWindow(fullscreenChannel)}
                 </Text>
                 {fullscreenChannel.description ? (
                   <Text numberOfLines={2} style={styles.fullscreenDescription}>

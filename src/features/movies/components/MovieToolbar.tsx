@@ -30,6 +30,8 @@ type MovieToolbarProps = {
   discoverButtonRef?: RefObject<View | null>;
   searchNextFocusLeft?: number;
   searchNextFocusRight?: number;
+  searchNextFocusUp?: number;
+  searchNextFocusDown?: number;
   discoverNextFocusLeft?: number;
   discoverNextFocusRight?: number;
   /** True while Discover Zone overlay owns focus. Must not reuse native-focus chrome. */
@@ -51,6 +53,8 @@ export function MovieToolbar({
   discoverButtonRef,
   searchNextFocusLeft,
   searchNextFocusRight,
+  searchNextFocusUp,
+  searchNextFocusDown,
   discoverNextFocusLeft,
   discoverNextFocusRight,
   discoverZoneOpen = false,
@@ -105,6 +109,8 @@ export function MovieToolbar({
           accessibilityLabel={accessibilityLabel}
           {...(searchNextFocusLeft != null ? { nextFocusLeft: searchNextFocusLeft } : null)}
           {...(searchNextFocusRight != null ? { nextFocusRight: searchNextFocusRight } : null)}
+          {...(searchNextFocusUp != null ? { nextFocusUp: searchNextFocusUp } : null)}
+          {...(searchNextFocusDown != null ? { nextFocusDown: searchNextFocusDown } : null)}
           {...(Platform.isTV ? ({ onClick: onSearchPress } as object) : null)}
           style={[styles.actionButton, showLabels && styles.actionButtonWithLabel, focusChrome.base, searchFocused && focusChrome.active, searchFocused && styles.actionButtonFocused]}>
           {searchLabel}

@@ -1,7 +1,6 @@
 import type { ProviderRepositoryBundle } from '../providers/providerBundle.ts';
 import type { ProviderGuideProgram, ProviderLiveChannel } from '../providers/providerRepositories.ts';
-import { displayStreamTitle } from '../series/metadata/titleNormalization.ts';
-import { displayLiveProgramText } from './liveTvProgramText.ts';
+import { displayLiveChannelName, displayLiveProgramText } from './liveTvProgramText.ts';
 import {
   getLiveTvWorkload,
   noteLiveEpgRequestCancelled,
@@ -45,13 +44,13 @@ function logLiveTitleAudit(
     reason,
     streamId: channel.id,
     rawName: channel.rawName ?? channel.name,
-    normalizedName: displayStreamTitle(channel.name),
+    normalizedName: displayLiveChannelName(channel.name, ''),
     epgChannelId: channel.epgChannelId ?? null,
     epgTitle: first ? displayLiveProgramText(first.title, '') : null,
     epgStart: first?.startAt ?? null,
     epgEnd: first?.endAt ?? null,
-    rowDisplayTitle: displayStreamTitle(result.name),
-    playerDisplayTitle: displayLiveProgramText(result.current, displayStreamTitle(result.name)),
+    rowDisplayTitle: displayLiveChannelName(result.name),
+    playerDisplayTitle: displayLiveProgramText(result.current, displayLiveChannelName(result.name)),
   });
 }
 
@@ -98,7 +97,7 @@ export function orderTimedEpgPrograms(programs: ProviderGuideProgram[], now = Da
 export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: ProviderGuideProgram[], audit = false): ProviderLiveChannel {
   if (!programs.length) {
     const title = displayLiveProgramText(channel.current, '');
-    const channelLabel = displayStreamTitle(channel.name);
+    const channelLabel = displayLiveChannelName(channel.name, '');
     const enriched = {
       ...channel,
       current: title && title !== channelLabel && title !== channel.name.trim() ? title : '',
@@ -124,7 +123,7 @@ export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: Pro
   const next = hasTimedPrograms ? orderedPrograms[hasCurrent ? 1 : 0] : programs[1];
   const following = hasTimedPrograms ? orderedPrograms[hasCurrent ? 2 : 1] : programs[2];
   const programTitle = displayLiveProgramText(now.title, '');
-  const channelLabel = displayStreamTitle(channel.name);
+  const channelLabel = displayLiveChannelName(channel.name, '');
   const current = hasCurrent || !hasTimedPrograms;
 
   const enriched = {

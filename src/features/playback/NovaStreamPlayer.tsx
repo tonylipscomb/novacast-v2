@@ -410,7 +410,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
     });
   }, [autoPlay, bufferPolicy, enqueuePlayerReplacement, muted, player, playerGenerationId, streamUrl]);
 
-  return { player, retry, hasStream: Boolean(streamUrl) };
+  return { player, retry, hasStream: Boolean(streamUrl), playerGenerationId };
 }
 
 export function NovaStreamSurface({

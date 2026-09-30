@@ -21,7 +21,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getTvDensity, NovaSpaceLoader, NovaTvShell, novaTvFocus, createNovaTvFocusChrome } from '@/components/nova';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { usePlaybackActivity } from '@/features/playback/usePlaybackActivity';
-import type { PlayingChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
+import type { PlayingChangeEventPayload, StatusChangeEventPayload, TimeUpdateEventPayload } from 'expo-video';
 import { NovaStreamSurface, useNovaStreamPlayer } from '@/features/playback/NovaStreamPlayer';
 import { NovaViewProbe } from './NovaViewProbe';
 import type { LivePlaybackSource } from '@/features/providers/providerPlayback';
@@ -127,6 +127,7 @@ import {
 } from './fullscreenSurfNative';
 import { logLiveSelection } from './liveTvSelectionDiagnostics';
 import { createLiveTimeshiftProbe, type LiveTimeshiftProbe } from './liveTimeshiftDiagnostics';
+import { createLivePlaybackWatchdog, type LivePlaybackWatchdog } from './livePlaybackWatchdog';
 import { markLiveCatalogInteraction } from '@/features/catalog/catalogForegroundPriority';
 import {
   LIVE_SURF_OVERLAY_HIDE_MS,
@@ -736,7 +737,7 @@ export function LiveTvScreen() {
     ? { uri: singleHlsProbeUrl, contentType: 'hls' as const, headers: { 'User-Agent': 'NovaCast NovaShift Probe' } }
     : previewStreamUrl;
   const playerStreamUrl = typeof playerStreamSource === 'string' ? playerStreamSource : playerStreamSource?.uri ?? null;
-  const { player: liveStreamPlayer, retry: retryLiveStream, hasStream: hasLiveStream } = useNovaStreamPlayer(
+  const { player: liveStreamPlayer, retry: retryLiveStream, hasStream: hasLiveStream, playerGenerationId } = useNovaStreamPlayer(
     playerStreamSource,
     {
       shouldAcceptAsyncCommit: shouldAcceptLiveSurfPlayerCommit,
@@ -770,6 +771,57 @@ export function LiveTvScreen() {
       },
     },
   );
+
+  const watchdogRebindTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rebindLiveStream = useCallback(() => {
+    const source = previewStreamSource;
+    const channelId = fullscreenChannelIdRef.current;
+    if (!source || !channelId) return;
+    if (watchdogRebindTimerRef.current) clearTimeout(watchdogRebindTimerRef.current);
+    setPreviewStreamSource(null);
+    const generation = fullscreenSurfIntentGenerationRef.current;
+    watchdogRebindTimerRef.current = setTimeout(() => {
+      watchdogRebindTimerRef.current = null;
+      if (
+        fullscreenChannelIdRef.current === channelId &&
+        generation === fullscreenSurfIntentGenerationRef.current &&
+        shouldAcceptLiveSurfPlayerCommit()
+      ) {
+        setPreviewStreamSource(source);
+      }
+    }, 0);
+  }, [previewStreamSource, shouldAcceptLiveSurfPlayerCommit]);
+  const watchdogRecoveryRef = useRef<(attempt: 1 | 2) => void>(() => {});
+  const livePlaybackWatchdogRef = useRef<LivePlaybackWatchdog | null>(null);
+  if (!livePlaybackWatchdogRef.current) {
+    livePlaybackWatchdogRef.current = createLivePlaybackWatchdog({
+      recover: (attempt) => watchdogRecoveryRef.current(attempt),
+      emit: (event, fields) => recordLivePerformanceEvent(event, fields),
+    });
+  }
+  const livePlaybackWatchdog = livePlaybackWatchdogRef.current;
+  watchdogRecoveryRef.current = (attempt) => {
+    if (attempt === 1) retryLiveStream();
+    else rebindLiveStream();
+  };
+  useEffect(() => {
+    livePlaybackWatchdog.setContext({
+      channelId: currentFullscreenId,
+      playerGeneration: playerGenerationId,
+      streamKey: playerStreamUrl,
+      streamPresent: hasLiveStream,
+      expectedActive: Boolean(currentFullscreenId && hasLiveStream),
+      channelChanging: Boolean(surfTransactionRef.current),
+      userPaused: false,
+    });
+  }, [currentFullscreenId, hasLiveStream, livePlaybackWatchdog, playerGenerationId, playerStreamUrl]);
+  useEffect(() => () => {
+    livePlaybackWatchdog.dispose();
+    if (watchdogRebindTimerRef.current) {
+      clearTimeout(watchdogRebindTimerRef.current);
+      watchdogRebindTimerRef.current = null;
+    }
+  }, [livePlaybackWatchdog]);
 
   const streamSurfaceInFullscreen = Boolean(liveState?.fullscreenChannelId);
   const liveTimeshiftProbeRef = useRef<LiveTimeshiftProbe | null>(null);
@@ -1923,6 +1975,7 @@ export function LiveTvScreen() {
       playing: liveStreamPlayer.playing,
     });
     lastReadyFullscreenChannelIdRef.current = liveStateRef.current?.fullscreenChannelId ?? null;
+    livePlaybackWatchdog.markPlayable();
     playbackAnalyticsTracker.firstFrame();
     setFullscreenFrameStatus('ready');
   };
@@ -1937,6 +1990,7 @@ export function LiveTvScreen() {
       });
       return;
     }
+    livePlaybackWatchdog.onPlaying(isPlaying);
     if (isPlaying) {
       liveTimeshiftProbeRef.current?.markPlaying();
     }
@@ -1963,8 +2017,12 @@ export function LiveTvScreen() {
       });
       playbackAnalyticsTracker.firstFrame('playing_transition');
     }
-  }, [activeProviderId, bundle?.connectionType, liveLoadAudit, liveStreamPlayer, previewStreamUrl, shouldAcceptLiveSurfPlayerCommit]);
+  }, [activeProviderId, bundle?.connectionType, liveLoadAudit, livePlaybackWatchdog, liveStreamPlayer, previewStreamUrl, shouldAcceptLiveSurfPlayerCommit]);
+  const handleLivePlayerStatusChange = useCallback(({ status }: StatusChangeEventPayload) => {
+    livePlaybackWatchdog.onStatus(String(status));
+  }, [livePlaybackWatchdog]);
   const handleLivePlayerTimeUpdate = useCallback(({ currentTime }: TimeUpdateEventPayload) => {
+    livePlaybackWatchdog.onTimeUpdate(currentTime);
     if (
       liveStateRef.current?.fullscreenChannelId &&
       currentTime > 0 &&
@@ -1973,7 +2031,7 @@ export function LiveTvScreen() {
     ) {
       playbackAnalyticsTracker.firstFrame('current_time_progress');
     }
-  }, [liveStreamPlayer]);
+  }, [livePlaybackWatchdog, liveStreamPlayer]);
   const retryFullscreenPlayback = () => {
     setFullscreenFrameStatus('pending');
     setFullscreenChromeVisible(true);
@@ -4763,6 +4821,7 @@ export function LiveTvScreen() {
               contentFit="cover"
               style={[styles.fullscreenPlayer, fullscreenFrameStatus !== 'ready' && styles.hiddenStreamSurface]}
               onFirstFrameRender={handleFullscreenFirstFrame}
+              onStatusChange={handleLivePlayerStatusChange}
               onPlayingChange={handleLivePlayerPlayingChange}
               onTimeUpdate={handleLivePlayerTimeUpdate}
             />

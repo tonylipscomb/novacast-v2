@@ -1,6 +1,7 @@
 import { deviceFeatureFlags, isClosedBetaManagedFlow } from '@/features/device';
 import { StartupGate } from '@/features/startup/StartupGate';
 import { NovaPortalScreen } from '@/features/portal/NovaPortalScreen';
+import { PublicStartupGate } from '@/features/startup/PublicStartupGate';
 
 /**
  * Closed beta uses StartupGate as the coordinator (invite → provider → Home).
@@ -11,5 +12,9 @@ export default function IndexRoute() {
     return <StartupGate />;
   }
 
-  return <NovaPortalScreen />;
+  return (
+    <PublicStartupGate>
+      <NovaPortalScreen />
+    </PublicStartupGate>
+  );
 }

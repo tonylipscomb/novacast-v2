@@ -19,11 +19,17 @@ import { setDiagnosticsEnabled } from '@/features/diagnostics/diagnosticsConfig'
 import { applyDiagnosticCaptureCommand } from '@/features/diagnostics/diagnosticCapture';
 import { acknowledgeInventoryReports, getPendingInventoryReports, loadPendingInventoryReports } from './inventoryTelemetry';
 import type { DeviceInventoryReport } from './deviceTypes';
+import { novacastTrace } from '@/features/diagnostics/novacastLogPolicy';
 
 type CommandHandlerResult = { id: string; status: 'completed' | 'failed'; result?: Record<string, unknown> };
 
-function logHeartbeat(event: string, fields: Record<string, unknown> = {}) {
-  console.info('[NovaCast Device Heartbeat]', { event, ...fields });
+function logHeartbeat(event: string, fields: Record<string, unknown> = {}, important = false) {
+  const payload = { event, ...fields };
+  if (important) {
+    console.warn('[NovaCast Device Heartbeat]', payload);
+    return;
+  }
+  novacastTrace('[NovaCast Device Heartbeat]', payload);
 }
 
 function statusCategory(status: number) {
@@ -106,7 +112,7 @@ export async function sendDeviceHeartbeat(options?: {
     logHeartbeat('config-missing', {
       pairingApiConfigured: Boolean(apiUrl),
       publicKeyConfigured: Boolean(anonKey),
-    });
+    }, true);
     return null;
   }
   logHeartbeat('request-started');
@@ -135,11 +141,11 @@ export async function sendDeviceHeartbeat(options?: {
       }),
     });
   } catch {
-    logHeartbeat('network-failure', { errorCategory: 'network' });
+    logHeartbeat('network-failure', { errorCategory: 'network' }, true);
     reportNetworkOutcome(false);
     return null;
   }
-  logHeartbeat('http-result', { statusCategory: statusCategory(response.status), ok: response.ok });
+  logHeartbeat('http-result', { statusCategory: statusCategory(response.status), ok: response.ok }, !response.ok);
   if (!response.ok) {
     reportNetworkOutcome(false);
     return null;
@@ -152,7 +158,7 @@ export async function sendDeviceHeartbeat(options?: {
   reportNetworkOutcome(true);
   const payload = (await response.json().catch(() => null)) as DeviceHeartbeatResponse | null;
   if (!payload) {
-    logHeartbeat('response-invalid', { reason: 'empty-or-malformed' });
+    logHeartbeat('response-invalid', { reason: 'empty-or-malformed' }, true);
     return null;
   }
   logHeartbeat('success');
@@ -216,7 +222,7 @@ export async function sendDeviceHeartbeat(options?: {
     activationStatus: payload.activationStatus,
     deviceActive: payload.deviceActive,
     applied: heartbeatAccessApplied,
-  });
+  }, !heartbeatAccessApplied);
 
   const shouldRevokeSession =
     explicitRevocation ||
@@ -255,7 +261,7 @@ export async function sendDeviceHeartbeat(options?: {
     decision: reconciliation.decision,
     refreshed: reconciliation.refreshed,
     assignmentPresent: Boolean(reconciliation.managedProviderId),
-  });
+  }, reconciliation.decision === 'pending');
 
   const pending = Array.isArray(payload.pendingCommands) ? payload.pendingCommands : [];
   if (pending.length) {

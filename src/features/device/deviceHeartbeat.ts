@@ -22,6 +22,14 @@ import type { DeviceInventoryReport } from './deviceTypes';
 
 type CommandHandlerResult = { id: string; status: 'completed' | 'failed'; result?: Record<string, unknown> };
 
+function logHeartbeat(event: string, fields: Record<string, unknown> = {}) {
+  console.info('[NovaCast Device Heartbeat]', { event, ...fields });
+}
+
+function statusCategory(status: number) {
+  return `${Math.floor(status / 100)}xx`;
+}
+
 async function executeRemoteCommand(command: DevicePendingCommand): Promise<CommandHandlerResult> {
   try {
     switch (command.command) {
@@ -94,31 +102,45 @@ export async function sendDeviceHeartbeat(options?: {
 }): Promise<DeviceHeartbeatResponse | null> {
   const apiUrl = process.env.EXPO_PUBLIC_NOVACAST_PAIRING_API_URL?.trim().replace(/\/+$/, '');
   const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim();
-  if (!apiUrl || !anonKey) return null;
+  if (!apiUrl || !anonKey) {
+    logHeartbeat('config-missing', {
+      pairingApiConfigured: Boolean(apiUrl),
+      publicKeyConfigured: Boolean(anonKey),
+    });
+    return null;
+  }
+  logHeartbeat('request-started');
   await loadPendingInventoryReports();
 
   const inventoryReports = getPendingInventoryReports();
-  const response = await fetch(`${apiUrl}/device-heartbeat`, {
-    method: 'POST',
-    headers: {
-      apikey: anonKey,
-      Authorization: `Bearer ${anonKey}`,
-      'Content-Type': 'application/json',
-      ...(await deviceAuthHeaders()),
-    },
-    body: JSON.stringify({
-      metadata: deviceMetadata(),
-      currentRoute: options?.currentRoute,
-      appFocus: options?.appFocus,
-      diagnostics: {
-        ...(options?.diagnostics ?? {}),
-        ...getAppliedAssignmentDiagnostics(),
+  let response: Response;
+  try {
+    response = await fetch(`${apiUrl}/device-heartbeat`, {
+      method: 'POST',
+      headers: {
+        apikey: anonKey,
+        Authorization: `Bearer ${anonKey}`,
+        'Content-Type': 'application/json',
+        ...(await deviceAuthHeaders()),
       },
-      ...(inventoryReports.length ? { inventoryReports } : {}),
-    }),
-  }).catch(() => null);
-
-  if (!response || !response.ok) {
+      body: JSON.stringify({
+        metadata: deviceMetadata(),
+        currentRoute: options?.currentRoute,
+        appFocus: options?.appFocus,
+        diagnostics: {
+          ...(options?.diagnostics ?? {}),
+          ...getAppliedAssignmentDiagnostics(),
+        },
+        ...(inventoryReports.length ? { inventoryReports } : {}),
+      }),
+    });
+  } catch {
+    logHeartbeat('network-failure', { errorCategory: 'network' });
+    reportNetworkOutcome(false);
+    return null;
+  }
+  logHeartbeat('http-result', { statusCategory: statusCategory(response.status), ok: response.ok });
+  if (!response.ok) {
     reportNetworkOutcome(false);
     return null;
   }
@@ -129,7 +151,11 @@ export async function sendDeviceHeartbeat(options?: {
   // heartbeat state from being applied.
   reportNetworkOutcome(true);
   const payload = (await response.json().catch(() => null)) as DeviceHeartbeatResponse | null;
-  if (!payload) return null;
+  if (!payload) {
+    logHeartbeat('response-invalid', { reason: 'empty-or-malformed' });
+    return null;
+  }
+  logHeartbeat('success');
   setDiagnosticsEnabled(payload.diagnosticsEnabled === true);
 
   const localBypass = isLocalActivationBypassEnabled({ log: false });
@@ -147,6 +173,7 @@ export async function sendDeviceHeartbeat(options?: {
     getDeviceState().authorization.effectiveAuthorized;
 
   let confirmedRevocation = false;
+  let heartbeatAccessApplied = false;
 
   // A heartbeat can transiently report deviceActive=false even while the
   // authoritative device-status endpoint still considers this device active.
@@ -179,10 +206,17 @@ export async function sendDeviceHeartbeat(options?: {
 
     if (confirmedRevocation) {
       applyHeartbeatAccess(payload);
+      heartbeatAccessApplied = true;
     }
   } else {
     applyHeartbeatAccess(payload);
+    heartbeatAccessApplied = true;
   }
+  logHeartbeat('activation-state-applied', {
+    activationStatus: payload.activationStatus,
+    deviceActive: payload.deviceActive,
+    applied: heartbeatAccessApplied,
+  });
 
   const shouldRevokeSession =
     explicitRevocation ||
@@ -213,9 +247,14 @@ export async function sendDeviceHeartbeat(options?: {
     setContentPolicyOverride(payload.contentPolicy);
   }
 
-  await reconcileDeviceAssignment({
+  const reconciliation = await reconcileDeviceAssignment({
     source: 'heartbeat',
     snapshot: assignmentFromHeartbeat(payload),
+  });
+  logHeartbeat('provider-assignment-reconciled', {
+    decision: reconciliation.decision,
+    refreshed: reconciliation.refreshed,
+    assignmentPresent: Boolean(reconciliation.managedProviderId),
   });
 
   const pending = Array.isArray(payload.pendingCommands) ? payload.pendingCommands : [];

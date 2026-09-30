@@ -20,6 +20,12 @@ let channel: RealtimeChannel | null = null;
 let subscribedDeviceId: string | null = null;
 let lifecycleBound = false;
 let unbindLifecycle: (() => void) | null = null;
+let startPromise: Promise<void> | null = null;
+let lifecycleGeneration = 0;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+let retryAttempt = 0;
+
+const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
 
 export function resolveSupabaseRealtimeConfig() {
   const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim();
@@ -47,6 +53,103 @@ function getRealtimeClient() {
   return client;
 }
 
+function realtimeErrorCategory(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (!message) return 'unknown';
+  if (/timeout|timed_out/.test(message)) return 'timeout';
+  if (/auth|unauthorized|forbidden|401|403/.test(message)) return 'authorization';
+  if (/network|socket|websocket|connect|closed/.test(message)) return 'network';
+  return 'channel';
+}
+
+function clearRetryTimer() {
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+}
+
+function scheduleRetry(deviceId: string, generation: number) {
+  if (!lifecycleBound || generation !== lifecycleGeneration || retryTimer) return;
+  const attempt = retryAttempt;
+  const delayMs = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+  retryAttempt = Math.min(attempt + 1, RETRY_DELAYS_MS.length - 1);
+  logDeviceAssignmentRealtime('retry-scheduled', {
+    deviceId: shortenDeviceId(deviceId),
+    retryAttempt: attempt + 1,
+    delayMs,
+  });
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (!lifecycleBound || generation !== lifecycleGeneration) return;
+    void startDeviceAssignmentRealtime(deviceId, true);
+  }, delayMs);
+}
+
+async function removeErroredChannel(
+  erroredChannel: RealtimeChannel,
+  deviceId: string,
+  generation: number,
+  error: unknown,
+) {
+  if (channel !== erroredChannel || subscribedDeviceId !== deviceId || generation !== lifecycleGeneration) return;
+  channel = null;
+  subscribedDeviceId = null;
+  logDeviceAssignmentRealtime('channel-removed', {
+    deviceId: shortenDeviceId(deviceId),
+    reason: 'subscription-error',
+    errorCategory: realtimeErrorCategory(error),
+  });
+  try {
+    await erroredChannel.unsubscribe();
+  } catch {
+    // Teardown is best effort after detaching the channel from application state.
+  }
+  getRealtimeClient()?.removeChannel(erroredChannel);
+  scheduleRetry(deviceId, generation);
+}
+
+async function startChannel(deviceId: string, generation: number) {
+  const realtime = getRealtimeClient();
+  if (!realtime || generation !== lifecycleGeneration) {
+    if (!realtime) {
+      logDeviceAssignmentRealtime('subscription-error', {
+        reason: 'realtime-unconfigured',
+        deviceId: shortenDeviceId(deviceId),
+      });
+    }
+    return;
+  }
+  const nextChannel = realtime.channel(buildDeviceAssignmentChannelName(deviceId), {
+    config: { broadcast: { self: false } },
+  });
+  nextChannel.on('broadcast', { event: ASSIGNMENT_CHANGED_EVENT }, (message) => {
+    void handleDeviceAssignmentRealtimeEvent(deviceId, message?.payload);
+  });
+  channel = nextChannel;
+  subscribedDeviceId = deviceId;
+  logDeviceAssignmentRealtime('subscribe-started', {
+    deviceId: shortenDeviceId(deviceId),
+    lifecycleGeneration: generation,
+  });
+  nextChannel.subscribe((status, error) => {
+    if (status === 'SUBSCRIBED') {
+      retryAttempt = 0;
+      logDeviceAssignmentRealtime('subscribed', {
+        deviceId: shortenDeviceId(deviceId),
+        reason: 'device-identity-ready',
+      });
+      return;
+    }
+    if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      logDeviceAssignmentRealtime('subscription-error', {
+        deviceId: shortenDeviceId(deviceId),
+        reason: status.toLowerCase(),
+        errorCategory: realtimeErrorCategory(error),
+      });
+      void removeErroredChannel(nextChannel, deviceId, generation, error);
+    }
+  });
+}
+
 export function getDeviceAssignmentSubscriptionState() {
   return {
     deviceId: subscribedDeviceId,
@@ -55,53 +158,35 @@ export function getDeviceAssignmentSubscriptionState() {
   };
 }
 
-export async function startDeviceAssignmentRealtime(deviceId = getDeviceState().identity?.deviceId) {
+export async function startDeviceAssignmentRealtime(
+  deviceId = getDeviceState().identity?.deviceId,
+  preserveRetryBackoff = false,
+) {
   const nextDeviceId = String(deviceId ?? '').trim();
-  if (!nextDeviceId) {
-    return;
-  }
-  if (subscribedDeviceId === nextDeviceId && channel) {
-    return;
-  }
+  if (!nextDeviceId) return;
+  if (subscribedDeviceId === nextDeviceId && channel) return;
+  if (startPromise) return startPromise;
 
-  await stopDeviceAssignmentRealtime('device-identity-replacement');
-  const realtime = getRealtimeClient();
-  if (!realtime) {
-    logDeviceAssignmentRealtime('subscription-error', {
-      reason: 'realtime-unconfigured',
-      deviceId: shortenDeviceId(nextDeviceId),
-    });
-    return;
+  const generation = ++lifecycleGeneration;
+  if (!preserveRetryBackoff) {
+    clearRetryTimer();
+    retryAttempt = 0;
   }
-
-  const channelName = buildDeviceAssignmentChannelName(nextDeviceId);
-  const nextChannel = realtime.channel(channelName, {
-    config: { broadcast: { self: false } },
+  startPromise = (async () => {
+    await stopDeviceAssignmentRealtime('device-identity-replacement', false);
+    await startChannel(nextDeviceId, generation);
+  })().finally(() => {
+    startPromise = null;
   });
-  nextChannel.on('broadcast', { event: ASSIGNMENT_CHANGED_EVENT }, (message) => {
-    void handleDeviceAssignmentRealtimeEvent(nextDeviceId, message?.payload);
-  });
-  channel = nextChannel;
-  subscribedDeviceId = nextDeviceId;
-  nextChannel.subscribe((status, error) => {
-    if (status === 'SUBSCRIBED') {
-      logDeviceAssignmentRealtime('subscribed', {
-        deviceId: shortenDeviceId(nextDeviceId),
-        reason: 'device-identity-ready',
-      });
-      return;
-    }
-    if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-      logDeviceAssignmentRealtime('subscription-error', {
-        deviceId: shortenDeviceId(nextDeviceId),
-        reason: status.toLowerCase(),
-        elapsedMs: error ? 0 : undefined,
-      });
-    }
-  });
+  return startPromise;
 }
 
-export async function stopDeviceAssignmentRealtime(reason = 'unsubscribed') {
+export async function stopDeviceAssignmentRealtime(reason = 'unsubscribed', invalidate = true) {
+  if (invalidate) {
+    lifecycleGeneration += 1;
+    clearRetryTimer();
+    retryAttempt = 0;
+  }
   const deviceId = subscribedDeviceId;
   const active = channel;
   channel = null;
@@ -166,15 +251,21 @@ export function bindDeviceAssignmentRealtimeLifecycle() {
     unsubscribe();
     lifecycleBound = false;
     unbindLifecycle = null;
+    lifecycleGeneration += 1;
+    clearRetryTimer();
     void stopDeviceAssignmentRealtime('app-teardown');
   };
   return unbindLifecycle;
 }
 
 export function resetDeviceAssignmentRealtimeForTests() {
+  clearRetryTimer();
   channel = null;
   subscribedDeviceId = null;
   client = null;
   lifecycleBound = false;
   unbindLifecycle = null;
+  startPromise = null;
+  lifecycleGeneration = 0;
+  retryAttempt = 0;
 }

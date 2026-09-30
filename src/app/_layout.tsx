@@ -215,16 +215,25 @@ export default function RootLayout() {
     const unbindAssignmentRealtime = bindDeviceAssignmentRealtimeLifecycle();
     // Keep device commands (including enhanced diagnostics capture) responsive
     // while the app is foregrounded; the heartbeat also enables diagnostics.
-    const heartbeat = setInterval(() => {
+    let heartbeatInFlight = false;
+    const runHeartbeat = () => {
+      if (heartbeatInFlight) return;
+      heartbeatInFlight = true;
       void sendDeviceHeartbeat().finally(() => {
+        heartbeatInFlight = false;
         void sendNovaAnalyticsHeartbeat();
       });
+    };
+    const heartbeat = setInterval(() => {
+      runHeartbeat();
     }, 60 * 1000);
-    void sendDeviceHeartbeat().finally(() => {
-      void sendNovaAnalyticsHeartbeat();
+    const appStateSubscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') runHeartbeat();
     });
+    runHeartbeat();
     return () => {
       clearInterval(heartbeat);
+      appStateSubscription.remove();
       unbindAssignmentRealtime();
     };
   }, []);

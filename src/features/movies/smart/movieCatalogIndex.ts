@@ -13,6 +13,10 @@ import { parseRatingNumber } from './movieMetadata.ts';
 export type MovieCatalogEntry = {
   id: string;
   title: string;
+  /** Provider category label retained for NovaPulse regional/adult curation. */
+  categoryName?: string;
+  /** Original provider title retained for NovaPulse language evidence. */
+  rawTitle?: string;
   /** Lowercased title for fast substring checks during search. */
   normalizedTitle: string;
   /** Title + genres/year haystack for fast reject before ranking. */
@@ -47,6 +51,8 @@ function toEntry(movie: MovieSummary, added = 0): MovieCatalogEntry {
   return {
     id: movie.id,
     title,
+    categoryName: movie.categoryName,
+    rawTitle: movie.rawTitle,
     normalizedTitle,
     searchHaystack,
     countryCode: movie.countryCode,
@@ -70,7 +76,9 @@ export function entryToSummary(entry: MovieCatalogEntry): MovieSummary {
   return {
     id: entry.id,
     categoryId: entry.categoryId,
+    categoryName: entry.categoryName,
     title: entry.title,
+    rawTitle: entry.rawTitle,
     countryCode: entry.countryCode,
     year: entry.year,
     addedAt: entry.added || undefined,

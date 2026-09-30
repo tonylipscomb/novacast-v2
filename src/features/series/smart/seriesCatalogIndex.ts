@@ -13,6 +13,8 @@ export type SeriesCatalogEntry = {
   id: string;
   seriesId: string;
   title: string;
+  /** Provider category label retained for NovaPulse regional/adult curation. */
+  categoryName?: string;
   countryCode?: string;
   rawTitle?: string;
   categoryId: string;
@@ -36,6 +38,7 @@ function toEntry(series: SeriesSummary): SeriesCatalogEntry {
   return {
     id: series.id,
     seriesId: series.seriesId,
+    categoryName: series.categoryName,
     title,
     countryCode: series.countryCode,
     rawTitle: series.rawTitle,
@@ -58,6 +61,7 @@ export function entryToSeriesSummary(entry: SeriesCatalogEntry): SeriesSummary {
     id: entry.id,
     seriesId: entry.seriesId,
     categoryId: entry.categoryId,
+    categoryName: entry.categoryName,
     title: entry.title,
     countryCode: entry.countryCode,
     rawTitle: entry.rawTitle,

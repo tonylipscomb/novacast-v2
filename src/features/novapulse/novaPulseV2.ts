@@ -18,6 +18,10 @@ export type NovaPulseV2Diagnostics = {
   candidateSeries: number;
   candidateSports: number;
   candidateAnnouncements: number;
+  candidateNews: number;
+  candidateWeather: number;
+  hasCriticalAnnouncementCandidate: boolean;
+  hasNormalAnnouncementCandidate: boolean;
   candidateLive: number;
   sportsAvailable: number;
   selectedCount: number;
@@ -25,6 +29,9 @@ export type NovaPulseV2Diagnostics = {
   selectedSeries: number;
   selectedSports: number;
   selectedAnnouncements: number;
+  selectedNews: number;
+  selectedWeather: number;
+  informationSelected: number;
   selectedLive: number;
   sportsSelected: number;
   announcementsSelected: number;
@@ -112,7 +119,7 @@ function qualityScore(item: NovaPulseItem, recentHistory: readonly NovaPulseHist
 }
 
 function isUseful(item: NovaPulseItem, score: number) {
-  if (item.type === 'sports' || item.type === 'announcement' || item.type === 'provider_alert' || item.type === 'weather') return true;
+  if (item.type === 'sports' || item.type === 'announcement' || item.type === 'provider_alert' || item.type === 'weather' || item.type === 'news') return true;
   if (score >= 3) return true;
   return Boolean(item.sourceItemId);
 }
@@ -206,14 +213,17 @@ function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: reado
   const sports = selectSports(ranked, nowMs);
   const normalAnnouncement = ranked.find((item) => item.type === 'announcement' && !isCriticalAnnouncement(item));
   const weather = ranked.find((item) => item.type === 'weather');
-  const information = [critical, normalAnnouncement, weather].filter((item): item is NovaPulseItem => Boolean(item)).slice(0, 2);
-  return [...information, urgentProviderAlert, recoveredProviderAlert, ...sports, ...liveCandidates.slice(0, 2)].filter((item): item is NovaPulseItem => Boolean(item));
+  const news = ranked.find((item) => item.type === 'news');
+  const information = [critical, normalAnnouncement, weather, news]
+    .filter((item): item is NovaPulseItem => Boolean(item))
+    .slice(0, 2);
+  return [urgentProviderAlert, recoveredProviderAlert, ...information, ...sports, ...liveCandidates.slice(0, 2)].filter((item): item is NovaPulseItem => Boolean(item));
 }
 
 function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonly NovaPulseItem[], nowMs: number) {
   const protectedItems = selectProtected(ranked, liveCandidates, nowMs);
   const selected: NovaPulseItem[] = [];
-  const remaining = ranked.filter((item) => item.type !== 'sports' && item.type !== 'announcement' && item.type !== 'provider_alert' && item.type !== 'weather' && !protectedItems.some((protectedItem) => stableKey(protectedItem) === stableKey(item)));
+  const remaining = ranked.filter((item) => item.type !== 'sports' && item.type !== 'announcement' && item.type !== 'provider_alert' && item.type !== 'weather' && item.type !== 'news' && !protectedItems.some((protectedItem) => stableKey(protectedItem) === stableKey(item)));
   const mixedCatalog = new Set(remaining.filter((item) => item.type === 'movie' || item.type === 'series').map((item) => item.type)).size > 1;
   const reserved = new Set(protectedItems.map(stableKey));
   while ((remaining.length || protectedItems.some((item) => !selected.some((selectedItem) => stableKey(selectedItem) === stableKey(item)))) && selected.length < NOVA_PULSE_V2_MAX_ITEMS) {
@@ -241,6 +251,7 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
       if (item.type === 'announcement' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'provider_alert' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'weather' && !reserved.has(stableKey(item))) return false;
+      if (item.type === 'news' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'sports' && selectedSports >= 2) return false;
       if (isRecentlyAddedMovie(item, nowMs) && recentMovieCount >= 2 && enforceRecentMovieTarget) return false;
       if (item.type === 'announcement' && !isCriticalAnnouncement(item) && selected.some((selectedItem) => selectedItem.type === 'announcement' && !isCriticalAnnouncement(selectedItem))) return false;
@@ -255,6 +266,7 @@ function selectDiverse(ranked: readonly NovaPulseItem[], liveCandidates: readonl
       if (item.type === 'announcement' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'provider_alert' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'weather' && !reserved.has(stableKey(item))) return false;
+      if (item.type === 'news' && !reserved.has(stableKey(item))) return false;
       if (item.type === 'announcement' && !isCriticalAnnouncement(item) && selected.some((selectedItem) => selectedItem.type === 'announcement' && !isCriticalAnnouncement(selectedItem))) return false;
       return !(item.type === last && item.type === previous);
     });
@@ -307,6 +319,10 @@ export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[], opti
     candidateSeries: typeCount(ranked, 'series'),
     candidateSports: typeCount(ranked, 'sports'),
     candidateAnnouncements: typeCount(ranked, 'announcement'),
+    candidateNews: typeCount(ranked, 'news'),
+    candidateWeather: typeCount(ranked, 'weather'),
+    hasCriticalAnnouncementCandidate: ranked.some(isCriticalAnnouncement),
+    hasNormalAnnouncementCandidate: ranked.some((item) => item.type === 'announcement' && !isCriticalAnnouncement(item)),
     candidateLive: liveCandidates.length,
     sportsAvailable: typeCount(ranked, 'sports'),
     selectedCount: items.length,
@@ -314,6 +330,9 @@ export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[], opti
     selectedSeries: typeCount(items, 'series'),
     selectedSports: typeCount(items, 'sports'),
     selectedAnnouncements: typeCount(items, 'announcement'),
+    selectedNews: typeCount(items, 'news'),
+    selectedWeather: typeCount(items, 'weather'),
+    informationSelected: items.filter((item) => item.type === 'announcement' || item.type === 'weather' || item.type === 'news').length,
     selectedLive: typeCount(items, 'live_epg'),
     sportsSelected: typeCount(items, 'sports'),
     announcementsSelected: typeCount(items, 'announcement'),

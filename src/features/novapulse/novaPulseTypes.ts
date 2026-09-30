@@ -1,6 +1,7 @@
 import type { ImageRef } from 'expo-image';
 
-export type NovaPulseItemType = 'movie' | 'series' | 'sports' | 'live_event' | 'live_epg' | 'announcement' | 'provider_alert' | 'weather';
+export type NovaPulseItemType = 'movie' | 'series' | 'sports' | 'live_event' | 'live_epg' | 'announcement' | 'provider_alert' | 'weather' | 'news';
+export type NovaPulseNewsCategory = 'top' | 'entertainment' | 'sports';
 export type NovaPulseProviderHealthState = 'degraded' | 'unavailable' | 'authentication_required' | 'subscription_expired' | 'recovered';
 
 export type NovaPulseSubtype = 'featured' | 'upcoming' | 'starting_soon' | 'live' | 'final' | 'postponed' | 'cancelled';
@@ -115,6 +116,7 @@ export type NovaPulseItem = {
   ctaLabel?: string;
   badgeOverride?: string;
   weatherArtKey?: string;
+  newsCategory?: NovaPulseNewsCategory;
   sports?: NovaPulseSportsData;
   action?: NovaPulseAction;
   providerHealthState?: NovaPulseProviderHealthState;

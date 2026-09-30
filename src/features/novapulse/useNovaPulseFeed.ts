@@ -5,7 +5,7 @@ import { Image } from 'expo-image';
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import { NOVA_PULSE_MOCK_FEED } from './novaPulseMockFeed';
-import { createNovaPulseCatalogSource, createNovaPulseLiveEpgSource, createNovaPulseMockSource, createNovaPulseProviderHealthSource, createNovaPulseSportsSource, createNovaPulseWeatherSource } from './novaPulseSources';
+import { createNovaPulseCatalogSource, createNovaPulseLiveEpgSource, createNovaPulseMockSource, createNovaPulseNewsSource, createNovaPulseProviderHealthSource, createNovaPulseSportsSource, createNovaPulseWeatherSource } from './novaPulseSources';
 import { fetchNovaPulseSportsItems, NOVA_PULSE_SPORTS_ENABLED } from './novaPulseSportsSource';
 import type { NovaPulseItem } from './novaPulseTypes';
 import { createNovaPulseArtworkPrefetchPlan, inspectNovaPulseArtworkPrefetch } from './novaPulseArtworkPrefetch';
@@ -34,6 +34,8 @@ import {
 import { getRepositoryBundleGeneration } from '@/features/providers/providerBundle';
 import { NOVA_PULSE_PROVIDER_HEALTH_ENABLED, useNovaPulseProviderHealth } from '@/features/providers/providerHealth';
 import { loadNovaPulseWeather, NOVA_PULSE_WEATHER_ENABLED, type NovaPulseWeatherResult } from './novaPulseWeather';
+import { getCachedNovaPulseNews, loadNovaPulseNews, NOVA_PULSE_NEWS_ENABLED, recordNovaPulseNewsReleaseDiagnostic, type NovaPulseNewsResult } from './novaPulseNews';
+import { recordSanitizedDiagnostic } from '@/features/resilience/sanitizedDiagnostics';
 
 const EMPTY_NOVA_PULSE_HISTORY = [] as const;
 
@@ -102,6 +104,7 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const [compositionContentPolicy] = useState(() => getContentPolicy());
   const [announcementSession, setAnnouncementSession] = useState<{ providerId: string; result: NovaPulseAnnouncementsResult | null }>(() => ({ providerId, result: getCachedNovaPulseAnnouncements() }));
   const [weatherSession, setWeatherSession] = useState<{ providerId: string; result: NovaPulseWeatherResult | null }>({ providerId, result: null });
+  const [newsSession, setNewsSession] = useState<{ providerId: string; result: NovaPulseNewsResult | null }>({ providerId, result: getCachedNovaPulseNews() });
   const providerBundleGeneration = getRepositoryBundleGeneration();
   const providerHealthLiveSnapshot = useNovaPulseProviderHealth(providerId, providerBundleGeneration);
   const [providerHealthSnapshot, setProviderHealthSnapshot] = useState(providerHealthLiveSnapshot);
@@ -143,6 +146,15 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       console.info('[NOVAPULSE_HISTORY]', JSON.stringify(metadata));
       recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_history_load', ...metadata } });
     }).catch(() => undefined);
+  }, [providerId]);
+  useEffect(() => {
+    if (!NOVA_PULSE_NEWS_ENABLED) return;
+    let active = true;
+    setNewsSession({ providerId, result: getCachedNovaPulseNews() });
+    void loadNovaPulseNews().then((result) => {
+      if (active) setNewsSession({ providerId, result });
+    }).catch(() => undefined);
+    return () => { active = false; };
   }, [providerId]);
   useEffect(() => {
     if (!NOVA_PULSE_WEATHER_ENABLED) {
@@ -330,16 +342,18 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
         ? NOVA_PULSE_MOCK_FEED
         : announcementResult.items;
     const weatherResult = weatherSession.providerId === providerId ? weatherSession.result : null;
+    const newsResult = newsSession.providerId === providerId ? newsSession.result : null;
     const result = composeNovaPulseFeedV2([
       createNovaPulseCatalogSource(languageFilteredCatalog.movies, languageFilteredCatalog.series, recommendationSignals, compositionSession.startedAt),
       ...(realSports ? [createNovaPulseSportsSource(realSports)] : []),
       ...(liveEpgItems.length ? [createNovaPulseLiveEpgSource(liveEpgItems)] : []),
       ...(providerHealthSnapshot.enabled ? [createNovaPulseProviderHealthSource(providerHealthSnapshot)] : []),
       ...(NOVA_PULSE_WEATHER_ENABLED && weatherResult ? [createNovaPulseWeatherSource(weatherResult)] : []),
+      ...(NOVA_PULSE_NEWS_ENABLED && newsResult ? [createNovaPulseNewsSource(newsResult)] : []),
       createNovaPulseMockSource(realSports ? announcementItems.filter((item) => item.type !== 'sports') : announcementItems, includeMockCatalogFallback),
     ], { seed: compositionSession.seed, nowMs: compositionSession.startedAt, recentHistory: historySnapshot });
     return result.items.length ? result : { ...result, items: [NOVA_PULSE_BRANDED_FALLBACK] };
-  }, [announcementSession, compositionSession, historySnapshot, languageFilteredCatalog, liveEpgItems, providerHealthSnapshot, providerId, realSportsSignature, recommendationSignalSignature, weatherSession]);
+  }, [announcementSession, compositionSession, historySnapshot, languageFilteredCatalog, liveEpgItems, newsSession, providerHealthSnapshot, providerId, realSportsSignature, recommendationSignalSignature, weatherSession]);
   const catalogReadyForHistory = boundedMovies.length > 0 || boundedSeries.length > 0;
   useEffect(() => {
     if (catalogReadyForHistory && historySessionRef.current?.providerId === providerId) {
@@ -449,6 +463,15 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
     };
     if (previous === composed.diagnostics.signature) return;
     lastV2SignatureRef.current = composed.diagnostics.signature;
+    recordNovaPulseNewsReleaseDiagnostic('composition', {
+      candidateCount: composed.diagnostics.candidateNews,
+      selectedCount: composed.diagnostics.selectedNews,
+      informationSelectedCount: composed.diagnostics.informationSelected,
+      weatherCandidate: composed.diagnostics.candidateWeather > 0,
+      criticalAnnouncementCandidate: composed.diagnostics.hasCriticalAnnouncementCandidate,
+      normalAnnouncementCandidate: composed.diagnostics.hasNormalAnnouncementCandidate,
+    });
+    recordSanitizedDiagnostic({ operation: 'novapulse_news', screen: 'home', errorType: 'composition', outcome: `candidate:${composed.diagnostics.candidateNews}:selected:${composed.diagnostics.selectedNews}` });
     console.info('[NOVAPULSE_V2]', JSON.stringify(payload));
     recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_v2', ...payload } });
   }, [composed]);

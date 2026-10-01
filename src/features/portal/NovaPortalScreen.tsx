@@ -27,6 +27,8 @@ import { completeLaunchOverlay } from '@/features/startup/launchOverlay';
 import { getActiveRepositoryBundle } from '@/features/providers/providerBundle';
 import { refreshProviderLiveChannelCount } from '@/features/providers/providerCatalogSync';
 import { getProviderRuntime, retryProviderInitialization, selectProvider, useProviderStore } from '@/features/providers/providerStore';
+import { useNovaPulseProviderHealth } from '@/features/providers/providerHealth';
+import { resolveProviderAccess } from '@/features/providers/providerAccess';
 import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdown';
 import { useProviderLibrarySummary } from '@/features/providers/providerLibrarySummaryStore';
 import { initializeDevice, isDeviceActivationRequired, useDeviceState } from '@/features/device';
@@ -503,9 +505,11 @@ export function NovaPortalScreen() {
     providerInitialized,
     providerSwitchError,
     isSwitchingProvider,
+    bundleGeneration,
   } = useProviderStore();
   const { state: onboardingState, ready: onboardingReady } = useOnboardingStore();
   const device = useDeviceState();
+  const providerHealth = useNovaPulseProviderHealth(selectedProvider?.id ?? '', bundleGeneration);
   const [panel, setPanel] = useState<PortalPanel>(null);
   const [pairingVisible, setPairingVisible] = useState(false);
   const [exitConfirmVisible, setExitConfirmVisible] = useState(false);
@@ -551,12 +555,15 @@ export function NovaPortalScreen() {
     return 'connected' as const;
   }, [hasSavedProvider, isSwitchingProvider, providerInitialized, providerSwitchError, ready, selectedProvider]);
 
-  const canEnterApp =
-    ready &&
-    !isSwitchingProvider &&
-    hasSavedProvider &&
-    Boolean(selectedProvider) &&
-    selectedProvider.status !== 'expired';
+  const providerAccess = resolveProviderAccess({
+    ready,
+    provider: selectedProvider,
+    providerHealth,
+    providerInitialized,
+    isSwitchingProvider,
+    providerSwitchError,
+  });
+  const canEnterApp = providerAccess.state === 'allowed' || providerAccess.state === 'temporarily_unavailable';
 
   const welcomeTitle =
     onboardingReady && onboardingState.portalWelcomeSeen ? 'Welcome Back' : 'Welcome to NovaCast';

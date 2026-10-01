@@ -19,6 +19,8 @@ export type AdminNavItem = {
 };
 
 export type AdminNavGroup = { label?: string; items: AdminNavItem[] };
+export type DeviceInspectorTab = 'overview' | 'provider' | 'diagnostics' | 'playback' | 'activity';
+export type AdminLocation = { tab: AdminTab; deviceKey?: string; inspectorTab?: DeviceInspectorTab };
 
 export const ADMIN_NAV_GROUPS: AdminNavGroup[] = [
   { items: [{ id: 'overview', label: 'Overview', icon: 'O', tab: 'dashboard' }] },
@@ -101,4 +103,18 @@ export function resolveAdminTab(pathname: string): AdminTab {
 
 export function adminPathForTab(tab: AdminTab): string {
   return TAB_PATHS[tab];
+}
+
+export function adminPathForDevice(deviceKey: string, tab: DeviceInspectorTab = 'overview'): string {
+  const encoded = encodeURIComponent(deviceKey);
+  return tab === 'overview' ? `/admin/devices/${encoded}` : `/admin/devices/${encoded}/${tab}`;
+}
+
+export function resolveAdminLocation(pathname: string): AdminLocation {
+  const path = pathname.replace(/\/+$/, '') || '/';
+  const match = path.match(/^\/admin\/devices\/([^/]+)(?:\/(overview|provider|diagnostics|playback|activity))?$/);
+  if (match) {
+    return { tab: 'devices', deviceKey: decodeURIComponent(match[1]), inspectorTab: (match[2] as DeviceInspectorTab | undefined) ?? 'overview' };
+  }
+  return { tab: resolveAdminTab(path) };
 }

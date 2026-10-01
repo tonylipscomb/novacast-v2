@@ -5,6 +5,7 @@ type Provider = Record<string, unknown>;
 type Action = (id: string) => void;
 type ExtendAction = (id: string, hours: number) => void;
 type AssignProviderAction = (id: string, managedProviderId: string) => void;
+type ViewDeviceAction = (device: Device) => void;
 
 type ExtendPreset = '7' | '30' | '90' | 'custom' | 'never';
 
@@ -16,6 +17,7 @@ export function AdminDevices({
   onCommand,
   onRevoke,
   onMessage,
+  onView,
 }: {
   devices: Device[];
   providers: Provider[];
@@ -24,6 +26,7 @@ export function AdminDevices({
   onCommand: Action;
   onRevoke: Action;
   onMessage: (message: string) => void;
+  onView: ViewDeviceAction;
 }) {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('all');
@@ -43,6 +46,14 @@ export function AdminDevices({
       const id = String(provider.id ?? '');
       if (!id) continue;
       map.set(id, String(provider.display_name ?? provider.slug ?? 'Managed provider'));
+    }
+    return map;
+  }, [providers]);
+  const providerHealthById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const provider of providers) {
+      const id = String(provider.id ?? '');
+      if (id) map.set(id, String(provider.health_status ?? 'Not reported'));
     }
     return map;
   }, [providers]);
@@ -281,11 +292,13 @@ export function AdminDevices({
               providerName={
                 providerNameById.get(String(device.managed_provider_id ?? '')) ?? 'No provider'
               }
+              providerHealth={providerHealthById.get(String(device.managed_provider_id ?? '')) ?? 'Not reported'}
               onExtend={() => openExtend(device)}
               onChangeProvider={() => openChangeProvider(device)}
               onCommand={onCommand}
               onRevoke={onRevoke}
               onMessage={onMessage}
+              onView={onView}
             />
           ))
         ) : (
@@ -503,19 +516,23 @@ function DeviceMetric({
 function DeviceRow({
   device,
   providerName,
+  providerHealth,
   onExtend,
   onChangeProvider,
   onCommand,
   onRevoke,
   onMessage,
+  onView,
 }: {
   device: Device;
   providerName: string;
+  providerHealth: string;
   onExtend: () => void;
   onChangeProvider: () => void;
   onCommand: Action;
   onRevoke: Action;
   onMessage: (message: string) => void;
+  onView: ViewDeviceAction;
 }) {
   const id = String(device.id);
   const active = String(device.activation_status ?? 'inactive');
@@ -547,6 +564,7 @@ function DeviceRow({
             {String(device.manufacturer ?? '')} {String(device.model ?? '')}
           </small>
           <small>{providerName}</small>
+          <small>Health: {providerHealth}</small>
         </div>
       </div>
 
@@ -592,13 +610,7 @@ function DeviceRow({
         <button
           aria-label={`View ${name}`}
           title="View device"
-          onClick={() =>
-            onMessage(
-              `${name} - ${String(device.public_device_code ?? '')} - ${providerName} - ${String(
-                device.status ?? 'registered',
-              )} - ${remaining}`,
-            )
-          }>
+          onClick={() => onView(device)}>
           View
         </button>
 

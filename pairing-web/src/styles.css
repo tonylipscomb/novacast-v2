@@ -441,6 +441,14 @@ a.downloadButton {
 .cloudSidebar nav button small,
 .cloudSidebar nav .adminNavButton small { color: #7185a7; font-size: 9px; white-space: nowrap; }
 .cloudSidebar nav button:disabled { cursor: not-allowed; opacity: .42; }
+.deviceInspector { display: grid; gap: 14px; }
+.inspectorBack { justify-self: start; min-height: 30px; padding: 0 10px; border: 1px solid rgba(74,124,205,.28); border-radius: 7px; color: #a9c0e5; background: transparent; font-size: 11px; }
+.inspectorHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 20px; border: 1px solid rgba(74,124,205,.28); border-radius: 12px; background: rgba(7,20,40,.78); }
+.inspectorEyebrow { color: #7fa7df; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+.inspectorHeader h2 { margin: 6px 0 3px; font-size: 24px; }.inspectorHeader strong { color: #c8d9f6; letter-spacing: .08em; }.inspectorHeader p { margin: 7px 0 0; color: #879cbb; font-size: 12px; }
+.inspectorStatusStack { display: grid; justify-items: end; gap: 8px; color: #879cbb; font-size: 11px; text-align: right; }.inspectorStatus { padding: 6px 9px; border-radius: 6px; font-size: 10px; letter-spacing: .08em; }.inspectorStatus.healthy { color: #8df2c5; background: rgba(16,185,129,.18); }.inspectorStatus.offline { color: #ffd28b; background: rgba(245,158,11,.16); }
+.inspectorTabs { display: flex; gap: 6px; padding: 5px; border: 1px solid rgba(74,124,205,.22); border-radius: 9px; background: rgba(5,16,33,.65); }.inspectorTabs button { min-height: 34px; padding: 0 14px; color: #94a9c8; background: transparent; font-size: 11px; }.inspectorTabs button.selected { color: #fff; border: 1px solid rgba(111,121,255,.65); border-radius: 7px; background: rgba(83,67,202,.55); }
+.inspectorPanel { padding: 18px; border: 1px solid rgba(74,124,205,.25); border-radius: 11px; background: rgba(7,20,40,.78); }.inspectorPanel > header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 14px; }.inspectorPanel h3 { margin: 0; font-size: 14px; }.inspectorPanel header span { color: #7187a7; font-size: 10px; }.inspectorGrid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }.inspectorGrid > div { min-width: 0; padding: 12px; border: 1px solid rgba(74,124,205,.16); border-radius: 8px; background: rgba(10,28,54,.55); }.inspectorGrid small { display: block; margin-bottom: 5px; color: #7890b2; font-size: 10px; text-transform: uppercase; }.inspectorGrid strong { display: block; overflow: hidden; color: #eef5ff; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.inspectorEmpty { min-height: 150px; }.inspectorEmpty p { color: #8ba1c0; font-size: 12px; }.inspectorTimeline { display: grid; gap: 4px; }.inspectorTimeline article { display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 10px; min-height: 48px; padding: 8px 0; border-bottom: 1px solid rgba(74,124,205,.14); }.inspectorTimeline i { width: 7px; height: 7px; border-radius: 50%; background: #4fd4ff; box-shadow: 0 0 8px rgba(79,212,255,.4); }.inspectorTimeline article > div { display: grid; gap: 3px; }.inspectorTimeline strong { color: #e8f1ff; font-size: 11px; }.inspectorTimeline small, .inspectorTimeline time { color: #8197b8; font-size: 10px; }.inspectorTimeline time { text-align: right; }.diagnosticsEmbedded { margin-top: 0; }
 .cloudSidebar nav button.active span { color: #8d86ff; }
 .cloudSidebarFooter {
   margin-top: auto;
@@ -660,6 +668,9 @@ a.downloadButton {
  .diagnosticEmpty { color: #8499b9; }
  @media (max-width: 900px) { .diagnosticMetricGrid { grid-template-columns: repeat(2, 1fr); } .diagnosticRow { grid-template-columns: 1fr 1fr; } }
 @keyframes providerPulse { 50% { opacity: .35; } }
+ .diagnosticInspectorLink { display: flex; justify-content: flex-end; }
+ .diagnosticInspectorLink button { min-height: 32px; padding: 0 11px; border: 1px solid rgba(111,121,255,.55); border-radius: 7px; color: #dfe5ff; background: rgba(83,67,202,.35); font-size: 11px; }
+
 @media (max-width: 760px) {
   .providerCardGrid { grid-template-columns: 1fr; }
   .providerCard dl { grid-template-columns: 1fr; }
@@ -1091,4 +1102,13 @@ body::before {
   .announcementRow, .announcementRowBody { min-width: 0; max-width: 100%; overflow: hidden; }
   .announcementRow .adminRowActions { gap: 5px; }
   .announcementRow .adminRowActions button { min-width: 0; padding: 0 7px; }
+}
+
+@media (max-width: 760px) {
+  .inspectorHeader { display: grid; }
+  .inspectorStatusStack { justify-items: start; text-align: left; }
+  .inspectorGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .inspectorTabs { overflow-x: auto; }
+  .inspectorTabs button { flex: 0 0 auto; padding: 0 11px; }
+  .inspectorTimeline time { display: none; }
 }

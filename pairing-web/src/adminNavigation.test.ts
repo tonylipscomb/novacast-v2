@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { ADMIN_NAV_GROUPS, adminPathForTab, resolveAdminTab } from './adminNavigation.ts';
+import { ADMIN_NAV_GROUPS, adminPathForDevice, adminPathForTab, resolveAdminLocation, resolveAdminTab } from './adminNavigation.ts';
 
 test('admin deep links resolve to existing functional pages', () => {
   assert.equal(resolveAdminTab('/admin'), 'dashboard');
@@ -30,4 +30,14 @@ test('future destinations are visibly disabled rather than backed by invented da
   assert.equal(items.find((item) => item.id === 'playback')?.disabled, true);
   assert.equal(items.find((item) => item.id === 'catalog')?.disabled, true);
   assert.equal(items.find((item) => item.id === 'service-health')?.disabled, true);
+});
+
+test('device inspector routes preserve device key and selected tab', () => {
+  assert.equal(adminPathForDevice('NC-TEST-01', 'provider'), '/admin/devices/NC-TEST-01/provider');
+  assert.deepEqual(resolveAdminLocation('/admin/devices/NC-TEST-01/diagnostics'), {
+    tab: 'devices', deviceKey: 'NC-TEST-01', inspectorTab: 'diagnostics',
+  });
+  assert.deepEqual(resolveAdminLocation('/admin/devices/NC-TEST-01'), {
+    tab: 'devices', deviceKey: 'NC-TEST-01', inspectorTab: 'overview',
+  });
 });

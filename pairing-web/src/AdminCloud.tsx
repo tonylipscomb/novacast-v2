@@ -13,7 +13,9 @@ import {
 } from './adminAssignmentCopy';
 import { adminLogin, adminRequest } from './pairing';
 import { shouldShowGlobalAdminHeaderAction } from './adminHeaderActions';
-import { ADMIN_NAV_GROUPS, adminPathForTab, resolveAdminTab, type AdminTab } from './adminNavigation';
+import { ADMIN_NAV_GROUPS, adminPathForDevice, adminPathForTab, resolveAdminLocation, type AdminTab, type DeviceInspectorTab } from './adminNavigation';
+import { DeviceInspector } from './DeviceInspector';
+import { resolveDeviceRecord } from './deviceInspectorModel';
 
 type Row = Record<string, unknown>;
 type InvitationInput = {
@@ -27,7 +29,10 @@ export function AdminCloud() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [token, setToken] = useState(() => sessionStorage.getItem('novacast-admin-token') ?? '');
-  const [tab, setTab] = useState<AdminTab>(() => resolveAdminTab(window.location.pathname));
+  const [location, setLocation] = useState(() => resolveAdminLocation(window.location.pathname));
+  const tab = location.tab;
+  const selectedDeviceCode = location.deviceKey;
+  const inspectorTab = location.inspectorTab;
   const [devices, setDevices] = useState<Row[]>([]);
   const [invitations, setInvitations] = useState<Row[]>([]);
   const [providers, setProviders] = useState<Row[]>([]);
@@ -84,14 +89,19 @@ export function AdminCloud() {
   }, [load, tab, token]);
 
   useEffect(() => {
-    const onPopState = () => setTab(resolveAdminTab(window.location.pathname));
+    const onPopState = () => setLocation(resolveAdminLocation(window.location.pathname));
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, []);
 
   const navigateTab = useCallback((next: AdminTab) => {
     window.history.pushState({}, '', adminPathForTab(next));
-    setTab(next);
+    setLocation({ tab: next });
+  }, []);
+
+  const navigateDevice = useCallback((key: string, nextTab: DeviceInspectorTab = 'overview') => {
+    window.history.pushState({}, '', adminPathForDevice(key, nextTab));
+    setLocation({ tab: 'devices', deviceKey: key, inspectorTab: nextTab });
   }, []);
 
   const login = async (event: FormEvent) => {
@@ -350,7 +360,20 @@ export function AdminCloud() {
           />
         ) : null}
 
-        {!loading && tab === 'devices' ? (
+        {!loading && tab === 'devices' && selectedDeviceCode ? (() => {
+          const selectedDevice = resolveDeviceRecord(devices, selectedDeviceCode);
+          if (!selectedDevice) return <div className="deviceEmpty">Device data is unavailable. Return to the device list and refresh.</div>;
+          const selectedProvider = providers.find((provider) => String(provider.id ?? '') === String(selectedDevice.managed_provider_id ?? '')) ?? null;
+          return <DeviceInspector
+            token={token}
+            device={selectedDevice}
+            provider={selectedProvider}
+            initialTab={inspectorTab}
+            onBack={() => navigateTab('devices')}
+            onTabChange={(next) => navigateDevice(selectedDeviceCode, next)}
+          />;
+        })() : null}
+        {!loading && tab === 'devices' && !selectedDeviceCode ? (
           <AdminDevices
             devices={devices}
             providers={providers}
@@ -359,6 +382,7 @@ export function AdminCloud() {
             onCommand={(id) => void command(id)}
             onRevoke={(id) => void revoke(id)}
             onMessage={setMessage}
+            onView={(device) => navigateDevice(String(device.public_device_code ?? device.id ?? ''))}
           />
         ) : null}
 
@@ -384,7 +408,7 @@ export function AdminCloud() {
           />
         ) : null}
         {!loading && tab === 'diagnostics' ? (
-          <AdminDiagnostics token={token} onMessage={setMessage} />
+          <AdminDiagnostics token={token} onMessage={setMessage} onOpenDevice={(code) => navigateDevice(code, 'diagnostics')} />
         ) : null}
         {!loading && tab === 'announcements' ? <AdminAnnouncements token={token} onMessage={setMessage} /> : null}
         {!loading && tab === 'gold' ? <AdminGoldPanel token={token} devices={devices} providers={providers} openCreate={openAddGold} onOpenCreateHandled={() => setOpenAddGold(false)} onAssignProvider={(id, providerId) => void assignProvider(id, providerId)} onMessage={setMessage} /> : null}

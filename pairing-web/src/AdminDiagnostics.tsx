@@ -9,13 +9,13 @@ type DiagnosticsData = { summary?: Row; devices?: Row[]; selectedDevice?: Row; s
 const TABS = ['OVERVIEW', 'PLAYBACK', 'NETWORK', 'PROVIDER', 'SUPPORT LOG', 'TECHNICAL'];
 const LOG_FILTERS = ['ALL', 'ERRORS', 'WARNINGS', 'PLAYBACK', 'NETWORK', 'PROVIDER', 'APP'];
 
-function AdminDiagnosticsContent({ token }: { token: string; onMessage?: (message: string) => void }) {
+function AdminDiagnosticsContent({ token, initialDeviceCode = '', embedded = false, onOpenDevice }: { token: string; onMessage?: (message: string) => void; initialDeviceCode?: string; embedded?: boolean; onOpenDevice?: (deviceCode: string) => void }) {
   const [data, setData] = useState<DiagnosticsData | null>(null);
   const [hours, setHours] = useState('24');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
-  const [selectedCode, setSelectedCode] = useState('');
+  const [selectedCode, setSelectedCode] = useState(initialDeviceCode);
   const [tab, setTab] = useState('OVERVIEW');
   const [logFilter, setLogFilter] = useState('ALL');
   const [logHours, setLogHours] = useState('24');
@@ -55,14 +55,13 @@ function AdminDiagnosticsContent({ token }: { token: string; onMessage?: (messag
     finally { setCaptureBusy(false); }
   };
 
-  return <div className="diagnosticsPage">
-    <div className="diagnosticsToolbar"><div><span className="diagnosticsEyebrow">BETA SUPPORT</span><strong>Device Diagnostics Center</strong><small>Fleet health at a glance, with one focused device workspace.</small></div><select value={hours} onChange={(event) => setHours(event.target.value)} aria-label="Diagnostics time range"><option value="1">Last hour</option><option value="24">Last 24 hours</option><option value="168">Last 7 days</option></select><button onClick={() => void load(selectedCode)} disabled={loading}>{loading ? 'Refreshing' : 'Refresh'}</button></div>
+  return <div className={`diagnosticsPage ${embedded ? 'diagnosticsEmbedded' : ''}`}>
+    {!embedded ? <div className="diagnosticsToolbar"><div><span className="diagnosticsEyebrow">OPERATIONS</span><strong>Device Diagnostics Center</strong><small>Fleet health at a glance, with one focused device workspace.</small></div><select value={hours} onChange={(event) => setHours(event.target.value)} aria-label="Diagnostics time range"><option value="1">Last hour</option><option value="24">Last 24 hours</option><option value="168">Last 7 days</option></select><button onClick={() => void load(selectedCode)} disabled={loading}>{loading ? 'Refreshing' : 'Refresh'}</button></div> : null}
     {error ? <div className="diagnosticsError" role="alert">{error}<button onClick={() => void load(selectedCode)}>Retry</button></div> : null}
     {loading && !data ? <div className="diagnosticEmpty">Loading support diagnostics…</div> : null}
     {data ? <>
-      <div className="diagnosticMetricGrid">{metrics.map(([label, value]) => <article className="diagnosticMetric" key={String(label)}><small>{label}</small><strong>{value ?? 0}</strong></article>)}</div>
-      <section className="diagnosticPanel diagnosticPicker"><header><div><span className="diagnosticsEyebrow">SELECT DEVICE</span><h2>Choose a beta tester device</h2></div><span>{devices.length} devices</span></header><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search code, tester, email, or model" aria-label="Search beta devices" />{query || !selected ? <div className="diagnosticDeviceOptions" role="listbox">{filteredDevices.map((device, index) => <button key={device.publicDeviceCode ?? index} role="option" aria-selected={device.publicDeviceCode === selectedCode} onClick={() => selectDevice(device)}><span><strong>{device.publicDeviceCode ?? 'Code unavailable'}</strong><small>{device.assignedTesterName || device.friendlyName || 'Unassigned'} · {[device.manufacturer, device.model].filter(Boolean).join(' ') || 'Model not reported'}</small></span><b className={`diagnosticStatus ${diagnosticTone(device.overallStatus)}`}>{device.overallStatus ?? 'NO DATA'}</b></button>)}{!filteredDevices.length ? <p className="diagnosticEmpty">No beta device matches that search.</p> : null}</div> : null}</section>
-      {!selected ? <div className="diagnosticEmpty diagnosticNoSelection">Select a beta device to view diagnostics.</div> : <SelectedWorkspace device={selected} tab={tab} setTab={setTab} logFilter={logFilter} setLogFilter={setLogFilter} logHours={logHours} setLogHours={setLogHours} captureBusy={captureBusy} captureMessage={captureMessage} onCapture={runCapture} clock={clock} />}
+      {!embedded ? <><div className="diagnosticMetricGrid">{metrics.map(([label, value]) => <article className="diagnosticMetric" key={String(label)}><small>{label}</small><strong>{value ?? 0}</strong></article>)}</div><section className="diagnosticPanel diagnosticPicker"><header><div><span className="diagnosticsEyebrow">SELECT DEVICE</span><h2>Choose a device</h2></div><span>{devices.length} devices</span></header><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search code, tester, email, or model" aria-label="Search devices" />{query || !selected ? <div className="diagnosticDeviceOptions" role="listbox">{filteredDevices.map((device, index) => <button key={device.publicDeviceCode ?? index} role="option" aria-selected={device.publicDeviceCode === selectedCode} onClick={() => selectDevice(device)}><span><strong>{device.publicDeviceCode ?? 'Code unavailable'}</strong><small>{device.assignedTesterName || device.friendlyName || 'Unassigned'} · {[device.manufacturer, device.model].filter(Boolean).join(' ') || 'Model not reported'}</small></span><b className={`diagnosticStatus ${diagnosticTone(device.overallStatus)}`}>{device.overallStatus ?? 'NO DATA'}</b></button>)}{!filteredDevices.length ? <p className="diagnosticEmpty">No device matches that search.</p> : null}</div> : null}</section></> : null}
+      {!selected ? <div className="diagnosticEmpty diagnosticNoSelection">Select a device to view diagnostics.</div> : <><div className="diagnosticInspectorLink">{onOpenDevice ? <button onClick={() => onOpenDevice(String(selected.publicDeviceCode ?? ''))}>Open Device Inspector</button> : null}</div><SelectedWorkspace device={selected} tab={tab} setTab={setTab} logFilter={logFilter} setLogFilter={setLogFilter} logHours={logHours} setLogHours={setLogHours} captureBusy={captureBusy} captureMessage={captureMessage} onCapture={runCapture} clock={clock} /></>}
     </> : null}
   </div>;
 }
@@ -113,6 +112,6 @@ function SupportLog(props: { device: Row; filter: string; setFilter: (value: str
   return <DiagnosticsErrorBoundary key={props.device.publicDeviceCode ?? 'device'}><UnsafeSupportLog {...props} /></DiagnosticsErrorBoundary>;
 }
 
-export function AdminDiagnostics(props: { token: string; onMessage?: (message: string) => void }) {
+export function AdminDiagnostics(props: { token: string; onMessage?: (message: string) => void; initialDeviceCode?: string; embedded?: boolean; onOpenDevice?: (deviceCode: string) => void }) {
   return <AdminDiagnosticsContent {...props} />;
 }

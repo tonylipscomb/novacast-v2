@@ -55,7 +55,7 @@ export function AdminDashboard({
   const providerById = new Map(providers.map((provider) => [String(provider.id), provider]));
   const activity = deriveActivity(devices, invitations, providers);
   const currentBuild = typeof core.currentBetaBuild === 'string' ? core.currentBetaBuild : null;
-  const fleet = deriveFleetSummary(devices, providers);
+  const fleet = deriveFleetSummary(devices, providers, undefined, core.fleetSummary as Row | undefined);
   const attention = deriveNeedsAttention(devices, providers);
   const playback = derivePlaybackIssues(devices, providers);
 

@@ -7,6 +7,8 @@ type Action = (id: string) => void;
 type ExtendAction = (id: string, hours: number) => void;
 type AssignProviderAction = (id: string, managedProviderId: string) => void;
 type ViewDeviceAction = (device: Device) => void;
+type DeviceQuery = { page: number; pageSize: number; search: string; status: string; platform: string; activation: string; version: string; providerId: string; providerHealth: string };
+type DevicePagination = { page: number; pageSize: number; total: number; totalPages: number };
 
 type ExtendPreset = '7' | '30' | '90' | 'custom' | 'never';
 
@@ -19,6 +21,9 @@ export function AdminDevices({
   onRevoke,
   onMessage,
   onView,
+  pagination,
+  query: serverQuery,
+  onQueryChange,
 }: {
   devices: Device[];
   providers: Provider[];
@@ -28,6 +33,9 @@ export function AdminDevices({
   onRevoke: Action;
   onMessage: (message: string) => void;
   onView: ViewDeviceAction;
+  pagination: DevicePagination;
+  query: DeviceQuery;
+  onQueryChange: (query: DeviceQuery) => void;
 }) {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('all');
@@ -36,13 +44,12 @@ export function AdminDevices({
   const [version, setVersion] = useState('all');
   const [providerId, setProviderId] = useState('all');
   const [providerHealth, setProviderHealth] = useState('all');
-  const [page, setPage] = useState(1);
+  const [, setPage] = useState(1);
   const [extendDevice, setExtendDevice] = useState<Device | null>(null);
   const [extendPreset, setExtendPreset] = useState<ExtendPreset>('30');
   const [customDate, setCustomDate] = useState('');
   const [providerDevice, setProviderDevice] = useState<Device | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState('');
-  const pageSize = 10;
 
   const providerNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -61,6 +68,7 @@ export function AdminDevices({
     }
     return map;
   }, [providers]);
+  const notifyQuery = (patch: Partial<DeviceQuery>) => onQueryChange({ ...serverQuery, ...patch, page: 1 });
 
   const activeProviders = useMemo(
     () => providers.filter((provider) => String(provider.status ?? 'active') === 'active'),
@@ -72,10 +80,10 @@ export function AdminDevices({
     [devices, providers, query, status, platform, beta, version, providerId, providerHealth],
   );
 
-  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
-  const visible = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const pageCount = Math.max(1, pagination.totalPages || 1);
+  const visible = filtered;
   const counts = {
-    total: devices.length,
+    total: pagination.total,
     online: devices.filter(isOnline).length,
     active: devices.filter((device) => device.activation_status === 'active').length,
     expired: devices.filter((device) => device.activation_status === 'expired').length,
@@ -95,6 +103,7 @@ export function AdminDevices({
     setProviderId('all');
     setProviderHealth('all');
     setPage(1);
+    onQueryChange({ ...serverQuery, search: '', status: 'all', platform: 'all', activation: 'all', version: '', providerId: '', providerHealth: 'all', page: 1 });
   };
 
   const exportDevices = () => {
@@ -209,6 +218,7 @@ export function AdminDevices({
             onChange={(event) => {
               setQuery(event.target.value);
               setPage(1);
+              notifyQuery({ search: event.target.value });
             }}
             placeholder="Search devices by name, ID, model, or platform"
           />
@@ -218,6 +228,7 @@ export function AdminDevices({
           onChange={(event) => {
             setStatus(event.target.value);
             setPage(1);
+            notifyQuery({ status: event.target.value });
           }}
           aria-label="Filter by status">
           <option value="all">All statuses</option>
@@ -232,6 +243,7 @@ export function AdminDevices({
           onChange={(event) => {
             setPlatform(event.target.value);
             setPage(1);
+            notifyQuery({ platform: event.target.value });
           }}
           aria-label="Filter by platform">
           <option value="all">All platforms</option>
@@ -246,6 +258,7 @@ export function AdminDevices({
           onChange={(event) => {
             setBeta(event.target.value);
             setPage(1);
+            notifyQuery({ activation: event.target.value });
           }}
           aria-label="Filter by beta status">
           <option value="all">All beta statuses</option>
@@ -254,15 +267,15 @@ export function AdminDevices({
           <option value="expired">Expired</option>
           <option value="revoked">Revoked</option>
         </select>
-        <select value={version} onChange={(event) => { setVersion(event.target.value); setPage(1); }} aria-label="Filter by app version">
+        <select value={version} onChange={(event) => { setVersion(event.target.value); setPage(1); notifyQuery({ version: event.target.value }); }} aria-label="Filter by app version">
           <option value="all">All app versions</option>
           {versions.map((item) => <option key={item} value={item}>{item}</option>)}
         </select>
-        <select value={providerId} onChange={(event) => { setProviderId(event.target.value); setPage(1); }} aria-label="Filter by provider">
+        <select value={providerId} onChange={(event) => { setProviderId(event.target.value); setPage(1); notifyQuery({ providerId: event.target.value }); }} aria-label="Filter by provider">
           <option value="all">All providers</option>
           {providers.map((provider) => <option key={String(provider.id)} value={String(provider.id)}>{String(provider.display_name ?? provider.slug ?? 'Provider')}</option>)}
         </select>
-        <select value={providerHealth} onChange={(event) => { setProviderHealth(event.target.value); setPage(1); }} aria-label="Filter by provider health">
+        <select value={providerHealth} onChange={(event) => { setProviderHealth(event.target.value); setPage(1); notifyQuery({ providerHealth: event.target.value }); }} aria-label="Filter by provider health">
           <option value="all">All provider health</option>
           {providerHealthValues.map((item) => <option key={item} value={item}>{item}</option>)}
         </select>
@@ -307,15 +320,15 @@ export function AdminDevices({
         )}
         <footer className="devicePagination">
           <span>
-            Showing {filtered.length ? (page - 1) * pageSize + 1 : 0} to{' '}
-            {Math.min(page * pageSize, filtered.length)} of {filtered.length} devices
+            Showing {pagination.total ? (pagination.page - 1) * pagination.pageSize + 1 : 0} to{' '}
+            {Math.min(pagination.page * pagination.pageSize, pagination.total)} of {pagination.total} devices
           </span>
           <div>
-            <button disabled={page <= 1} onClick={() => setPage((current) => current - 1)}>
+            <button disabled={pagination.page <= 1} onClick={() => { const next = pagination.page - 1; setPage(next); onQueryChange({ ...serverQuery, page: next }); }}>
 
             </button>
-            <strong>{page}</strong>
-            <button disabled={page >= pageCount} onClick={() => setPage((current) => current + 1)}>
+            <strong>{pagination.page}</strong>
+            <button disabled={pagination.page >= pageCount} onClick={() => { const next = pagination.page + 1; setPage(next); onQueryChange({ ...serverQuery, page: next }); }}>
 
             </button>
           </div>

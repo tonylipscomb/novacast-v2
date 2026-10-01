@@ -209,23 +209,25 @@ export function deriveVersionDistribution(devices: Row[]): VersionDistributionRo
     .sort((a, b) => b.count - a.count || a.version.localeCompare(b.version));
 }
 
-export function deriveFleetSummary(devices: Row[], providers: Row[], now: number = Date.now()): FleetSummary {
+export function deriveFleetSummary(devices: Row[], providers: Row[], now: number | undefined = Date.now(), aggregate?: Row): FleetSummary {
   const versions = deriveVersionDistribution(devices);
   const providerHealth: Record<string, number> = {};
   for (const provider of providers) {
     const health = normalizedStatus(provider.health_status);
     providerHealth[health] = (providerHealth[health] ?? 0) + 1;
   }
+  const serverVersions = Array.isArray(aggregate?.versionDistribution) ? aggregate.versionDistribution as VersionDistributionRow[] : null;
+  const serverHealth = aggregate?.providerHealthCounts && typeof aggregate.providerHealthCounts === 'object' ? aggregate.providerHealthCounts as Record<string, number> : null;
   return {
-    totalDevices: devices.length,
-    onlineDevices: devices.filter((device) => isDeviceOnline(device, now)).length,
-    staleDevices: devices.filter((device) => !isDeviceOnline(device, now)).length,
-    activeProviders: providers.filter((provider) => normalizedStatus(provider.status) === 'active').length,
-    providerHealth,
-    playbackIssues: devices.filter(hasPlaybackIssue).length,
-    diagnosticIssues: devices.filter(hasDiagnosticIssue).length,
-    versions,
-    mostObserved: versions[0] ?? null,
+    totalDevices: Number(aggregate?.totalDevices ?? devices.length),
+    onlineDevices: Number(aggregate?.onlineDevices ?? devices.filter((device) => isDeviceOnline(device, now)).length),
+    staleDevices: Number(aggregate?.staleDevices ?? devices.filter((device) => !isDeviceOnline(device, now)).length),
+    activeProviders: Number(aggregate?.activeProviders ?? providers.filter((provider) => normalizedStatus(provider.status) === 'active').length),
+    providerHealth: serverHealth ?? providerHealth,
+    playbackIssues: Number(aggregate?.playbackFailureCount ?? devices.filter(hasPlaybackIssue).length),
+    diagnosticIssues: Number(aggregate?.diagnosticIssueCount ?? devices.filter(hasDiagnosticIssue).length),
+    versions: serverVersions ?? versions,
+    mostObserved: (serverVersions ?? versions)[0] ?? null,
   };
 }
 

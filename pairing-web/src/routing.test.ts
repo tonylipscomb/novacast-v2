@@ -13,6 +13,7 @@ test('resolves connect site routes', () => {
   assert.equal(resolveAppRoute('/activate'), 'activate');
   assert.equal(resolveAppRoute('/admin'), 'admin');
   assert.equal(resolveAppRoute('/admin/devices'), 'admin');
+  assert.equal(resolveAppRoute('/admin/release-testing'), 'admin');
 });
 
 test('legacy root pairing codes redirect to /pair', () => {

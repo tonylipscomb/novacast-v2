@@ -202,7 +202,7 @@ export function AdminDashboard({
 
         <Panel title="Quick actions" subtitle="Common operations">
           <div className="opsQuickGrid">
-            <button className="opsQuick" onClick={onCreateInvite}>Create invitation</button>
+            <button className="opsQuick" onClick={onCreateInvite}>Create release invite</button>
             <button className="opsQuick" onClick={onAddProvider ?? (() => onNavigate('providers'))}>Add provider</button>
             <button className="opsQuick" onClick={onAddGoldAccount ?? (() => onNavigate('gold'))}>Add Gold account</button>
             <button className="opsQuick" onClick={() => onNavigate('analytics')}>Open diagnostics</button>
@@ -274,7 +274,7 @@ function deriveActivity(devices: Row[], invitations: Row[], providers: Row[]) {
   });
   invitations.forEach((invite) => {
     const timestamp = String(invite.created_at ?? '');
-    if (timestamp) entries.push({ type: 'invite', title: 'Invitation created', context: String(invite.display_label ?? 'Beta invitation'), timestamp });
+    if (timestamp) entries.push({ type: 'invite', title: 'Invitation created', context: String(invite.display_label ?? 'Release invitation'), timestamp });
   });
   providers.forEach((provider) => {
     const timestamp = String(provider.created_at ?? '');

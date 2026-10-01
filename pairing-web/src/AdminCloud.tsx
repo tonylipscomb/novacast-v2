@@ -13,10 +13,9 @@ import {
 } from './adminAssignmentCopy';
 import { adminLogin, adminRequest } from './pairing';
 import { shouldShowGlobalAdminHeaderAction } from './adminHeaderActions';
+import { ADMIN_NAV_GROUPS, adminPathForTab, resolveAdminTab, type AdminTab } from './adminNavigation';
 
 type Row = Record<string, unknown>;
-type AdminTab = 'dashboard' | 'devices' | 'providers' | 'gold' | 'invitations' | 'announcements' | 'analytics' | 'settings';
-
 type InvitationInput = {
   label: string;
   maximumDevices: number;
@@ -28,7 +27,7 @@ export function AdminCloud() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [token, setToken] = useState(() => sessionStorage.getItem('novacast-admin-token') ?? '');
-  const [tab, setTab] = useState<AdminTab>(() => window.location.pathname === '/admin/diagnostics' ? 'analytics' : window.location.pathname === '/admin/announcements' ? 'announcements' : 'dashboard');
+  const [tab, setTab] = useState<AdminTab>(() => resolveAdminTab(window.location.pathname));
   const [devices, setDevices] = useState<Row[]>([]);
   const [invitations, setInvitations] = useState<Row[]>([]);
   const [providers, setProviders] = useState<Row[]>([]);
@@ -81,8 +80,19 @@ export function AdminCloud() {
   useEffect(() => {
     // Admin dashboard hydration is an external request lifecycle.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (token && tab !== 'analytics') void load(token);
+    if (token && tab !== 'diagnostics') void load(token);
   }, [load, tab, token]);
+
+  useEffect(() => {
+    const onPopState = () => setTab(resolveAdminTab(window.location.pathname));
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const navigateTab = useCallback((next: AdminTab) => {
+    window.history.pushState({}, '', adminPathForTab(next));
+    setTab(next);
+  }, []);
 
   const login = async (event: FormEvent) => {
     event.preventDefault();
@@ -226,7 +236,7 @@ export function AdminCloud() {
           </div>
           <span className="cloudLoginEyebrow">SECURE OPERATIONS CONSOLE</span>
           <h1>Administrator sign in</h1>
-          <p>Manage devices, beta access, invitations, providers, and platform activity.</p>
+          <p>Manage NovaCast devices, providers, content, and platform operations.</p>
           <form onSubmit={login}>
             <label>
               Email
@@ -267,15 +277,24 @@ export function AdminCloud() {
           </div>
         </div>
 
-        <nav>
-          <NavButton active={tab === 'dashboard'} icon="D" label="Dashboard" onClick={() => setTab('dashboard')} />
-          <NavButton active={tab === 'devices'} icon="V" label="Devices" onClick={() => setTab('devices')} />
-          <NavButton active={tab === 'providers'} icon="P" label="Providers" onClick={() => setTab('providers')} />
-          <NavButton active={tab === 'gold'} icon="G" label="Gold Panel" onClick={() => setTab('gold')} />
-          <NavButton active={tab === 'invitations'} icon="I" label="Invitations" onClick={() => setTab('invitations')} />
-          <NavButton active={tab === 'announcements'} icon="N" label="NovaPulse" onClick={() => setTab('announcements')} />
-          <NavButton active={tab === 'analytics'} icon="A" label="Analytics" onClick={() => setTab('analytics')} />
-          <NavButton active={tab === 'settings'} icon="S" label="Settings" onClick={() => setTab('settings')} />
+        <nav aria-label="Operations Console">
+          {ADMIN_NAV_GROUPS.map((group, groupIndex) => (
+            <div className="adminNavGroup" key={group.label ?? `primary-${groupIndex}`}>
+              {group.label ? <span className="adminNavGroupLabel">{group.label}</span> : null}
+              {group.items.map((item) => (
+                <NavButton
+                  key={item.id}
+                  active={item.tab === tab}
+                  icon={item.icon}
+                  label={item.label}
+                  disabled={item.disabled}
+                  note={item.note}
+                  href={item.href}
+                  onClick={item.tab ? () => navigateTab(item.tab!) : undefined}
+                />
+              ))}
+            </div>
+          ))}
         </nav>
 
         <div className="cloudSidebarFooter">
@@ -293,12 +312,12 @@ export function AdminCloud() {
           </div>
           <div className="cloudTopActions">
             {shouldShowGlobalAdminHeaderAction(tab, 'refresh') ? (
-              <button onClick={() => { if (tab !== 'analytics') void load(token, true); }} disabled={refreshing || tab === 'analytics'}>
+              <button onClick={() => { if (tab !== 'diagnostics') void load(token, true); }} disabled={refreshing || tab === 'diagnostics'}>
                 {refreshing ? 'Refreshing' : ' Refresh'}
               </button>
             ) : null}
             {shouldShowGlobalAdminHeaderAction(tab, 'new_invitation') ? (
-              <button className="cloudPrimary" onClick={() => { setTab('invitations'); setOpenCreateInvite(true); }}>
+              <button className="cloudPrimary" onClick={() => { navigateTab('invitations'); setOpenCreateInvite(true); }}>
                  New invitation
               </button>
             ) : null}
@@ -322,12 +341,12 @@ export function AdminCloud() {
             providers={providers}
             goldAccounts={goldAccounts}
             goldReseller={goldReseller}
-            onNavigate={(next) => setTab(next)}
-            onAddProvider={() => { setTab('providers'); setOpenAddProvider(true); }}
-            onAddGoldAccount={() => { setTab('gold'); setOpenAddGold(true); }}
+            onNavigate={(next) => navigateTab(next === 'analytics' ? 'diagnostics' : next)}
+            onAddProvider={() => { navigateTab('providers'); setOpenAddProvider(true); }}
+            onAddGoldAccount={() => { navigateTab('gold'); setOpenAddGold(true); }}
             onRefresh={() => void load(token, true)}
             refreshing={refreshing}
-            onCreateInvite={() => { setTab('invitations'); setOpenCreateInvite(true); }}
+            onCreateInvite={() => { navigateTab('invitations'); setOpenCreateInvite(true); }}
           />
         ) : null}
 
@@ -364,7 +383,7 @@ export function AdminCloud() {
             onOpenCreateHandled={() => setOpenAddProvider(false)}
           />
         ) : null}
-        {!loading && tab === 'analytics' ? (
+        {!loading && tab === 'diagnostics' ? (
           <AdminDiagnostics token={token} onMessage={setMessage} />
         ) : null}
         {!loading && tab === 'announcements' ? <AdminAnnouncements token={token} onMessage={setMessage} /> : null}
@@ -382,16 +401,25 @@ function NavButton({
   icon,
   label,
   onClick,
+  disabled,
+  note,
+  href,
 }: {
   active: boolean;
   icon: string;
   label: string;
-  onClick: () => void;
+  onClick?: () => void;
+  disabled?: boolean;
+  note?: string;
+  href?: string;
 }) {
+  const content = <><span>{icon}</span><span className="adminNavLabel">{label}</span>{note ? <small>{note}</small> : null}</>;
+  if (href) return <a className={`adminNavButton ${active ? 'active' : ''}`} href={href}>{content}</a>;
   return (
-    <button className={active ? 'active' : ''} onClick={onClick}>
+    <button className={active ? 'active' : ''} onClick={onClick} disabled={disabled} aria-disabled={disabled || undefined}>
       <span>{icon}</span>
-      {label}
+      <span className="adminNavLabel">{label}</span>
+      {note ? <small>{note}</small> : null}
     </button>
   );
 }
@@ -408,13 +436,13 @@ function ComingSoon({ title, text }: { title: string; text: string }) {
 
 function titleFor(tab: AdminTab) {
   return {
-    dashboard: 'Operations Center',
+    dashboard: 'Overview',
     devices: 'Devices',
     providers: 'Providers',
     gold: 'Gold Panel',
-    invitations: 'Invitations',
+    invitations: 'Release Testing',
     announcements: 'NovaPulse Announcements',
-    analytics: 'Analytics',
+    diagnostics: 'Diagnostics',
     settings: 'Settings',
   }[tab];
 }
@@ -423,11 +451,11 @@ function subtitleFor(tab: AdminTab) {
   return {
     dashboard: 'Live operational health across NovaCast devices, providers, and Gold reseller capacity.',
     devices: 'Manage and monitor all registered NovaCast devices.',
-    providers: 'Add, validate, and activate managed IPTV providers before testers see them.',
+    providers: 'Add, validate, and activate managed IPTV providers for NovaCast operations.',
     gold: 'Provision and monitor Gold reseller accounts linked to NovaCast providers.',
-    invitations: 'Create and track controlled beta access.',
+    invitations: 'Manage controlled release access and invitation capacity.',
     announcements: 'Create, schedule, and preview safe NovaPulse TV announcements.',
-    analytics: 'Review device and playback performance.',
+    diagnostics: 'Review device health and operational diagnostics.',
     settings: 'Configure NovaCast Cloud Admin.',
   }[tab];
 }

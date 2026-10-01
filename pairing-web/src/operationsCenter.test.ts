@@ -93,7 +93,7 @@ test('deriveReleaseReadiness returns real binary signals', () => {
 });
 
 test('deriveOpsSummary counts critical alerts from real signals', () => {
-  const core = { devicesOnline: 0, activatedDevices: 3, recentErrors: [{}, {}] };
+  const core = { devicesOnline: 0, devicesOffline: 4, activatedDevices: 3, recentErrors: [{}, {}] };
   const providerHealth = deriveProviderHealthSummary([
     { id: 'b', display_name: 'Bravo', status: 'active', health_status: 'failed', validation_stale: false },
   ]);
@@ -108,5 +108,6 @@ test('deriveOpsSummary counts critical alerts from real signals', () => {
   assert.equal(byId.alerts.value, 2);
   assert.equal(byId.alerts.tone, 'critical');
   assert.equal(byId.devicesOnline.tone, 'warning');
+  assert.equal(byId.registeredDevices.value, 4);
   assert.equal(byId.goldCredits.tone, 'warning');
 });

@@ -426,6 +426,21 @@ a.downloadButton {
   background: linear-gradient(135deg, rgba(72, 58, 198, 0.56), rgba(28, 78, 158, 0.32));
   box-shadow: inset 3px 0 #6558ff, 0 10px 24px rgba(26, 36, 110, 0.18);
 }
+
+.cloudSidebar nav { gap: 14px; }
+.adminNavGroup { display: grid; gap: 4px; }
+.adminNavGroupLabel { padding: 8px 12px 2px; color: #6f87ae; font-size: 9px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+.cloudSidebar nav button,
+.cloudSidebar nav .adminNavButton { position: relative; display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 12px; border: 1px solid transparent; border-radius: 8px; color: #b6c6db; background: transparent; font: inherit; font-size: 12px; text-align: left; text-decoration: none; }
+.cloudSidebar nav .adminNavButton:hover,
+.cloudSidebar nav .adminNavButton:focus-visible { color: #fff; background: rgba(46, 80, 151, .30); }
+.cloudSidebar nav button.active,
+.cloudSidebar nav .adminNavButton.active { color: #fff; border-color: rgba(111, 121, 255, .82); background: linear-gradient(100deg, rgba(94, 67, 222, .72), rgba(35, 90, 174, .62)); }
+.cloudSidebar nav button .adminNavLabel,
+.cloudSidebar nav .adminNavButton .adminNavLabel { flex: 1; }
+.cloudSidebar nav button small,
+.cloudSidebar nav .adminNavButton small { color: #7185a7; font-size: 9px; white-space: nowrap; }
+.cloudSidebar nav button:disabled { cursor: not-allowed; opacity: .42; }
 .cloudSidebar nav button.active span { color: #8d86ff; }
 .cloudSidebarFooter {
   margin-top: auto;

@@ -279,7 +279,8 @@ export function deriveOpsSummary(input: {
 }): OpsMetric[] {
   const { core, providerHealth, gold, deviceCount } = input;
   const online = num(core.devicesOnline) ?? 0;
-  const activated = num(core.activatedDevices) ?? 0;
+  const offline = num(core.devicesOffline);
+  const registered = offline === null ? null : online + offline;
   const failedProviders = providerHealth.unhealthy.filter((p) => p.tone === 'fail').length;
   const criticalAlerts = failedProviders + gold.expired;
 
@@ -292,11 +293,11 @@ export function deriveOpsSummary(input: {
       tone: deviceCount === 0 ? 'neutral' : online > 0 ? 'healthy' : 'warning',
     },
     {
-      id: 'activated',
-      label: 'Activated devices',
-      value: activated,
-      detail: 'Beta testers live',
-      tone: 'neutral',
+      id: 'registeredDevices',
+      label: 'Registered devices',
+      value: registered ?? '—',
+      detail: registered === null ? 'Not reported' : `${online} online · ${offline} offline`,
+      tone: registered === null ? 'neutral' : registered > 0 ? 'healthy' : 'warning',
     },
     {
       id: 'healthyProviders',

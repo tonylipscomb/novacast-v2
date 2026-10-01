@@ -3,6 +3,9 @@ import type { ReactNode } from 'react';
 import { formatCount, formatTimestamp } from './providerHealthDisplay';
 import {
   deriveDeviceSupportRows,
+  deriveFleetSummary,
+  deriveNeedsAttention,
+  derivePlaybackIssues,
   deriveGoldSummary,
   deriveOpsSummary,
   deriveProviderHealthSummary,
@@ -27,6 +30,7 @@ export function AdminDashboard({
   onCreateInvite,
   onAddProvider,
   onAddGoldAccount,
+  onOpenDevice,
 }: {
   data: Row | null;
   devices: Row[];
@@ -40,6 +44,7 @@ export function AdminDashboard({
   onCreateInvite: () => void;
   onAddProvider?: () => void;
   onAddGoldAccount?: () => void;
+  onOpenDevice?: (deviceKey: string, tab?: 'playback' | 'overview') => void;
 }) {
   const core = readDashboardCore(data);
   const providerHealth = deriveProviderHealthSummary(providers);
@@ -50,6 +55,9 @@ export function AdminDashboard({
   const providerById = new Map(providers.map((provider) => [String(provider.id), provider]));
   const activity = deriveActivity(devices, invitations, providers);
   const currentBuild = typeof core.currentBetaBuild === 'string' ? core.currentBetaBuild : null;
+  const fleet = deriveFleetSummary(devices, providers);
+  const attention = deriveNeedsAttention(devices, providers);
+  const playback = derivePlaybackIssues(devices, providers);
 
   return (
     <div className="opsPage">
@@ -62,6 +70,27 @@ export function AdminDashboard({
           </article>
         ))}
       </div>
+
+      <div className="opsGrid opsGridWide">
+        <Panel title="Fleet visibility" subtitle="Observed device and provider signals">
+          <div className="opsStatRow">
+            <Stat label="Online" value={fleet.onlineDevices} tone="healthy" />
+            <Stat label="Stale/offline" value={fleet.staleDevices} tone={fleet.staleDevices ? 'warning' : 'neutral'} />
+            <Stat label="Active providers" value={fleet.activeProviders} tone="neutral" />
+            <Stat label="Playback issues" value={fleet.playbackIssues} tone={fleet.playbackIssues ? 'critical' : 'healthy'} />
+            <Stat label="Diagnostic issues" value={fleet.diagnosticIssues} tone={fleet.diagnosticIssues ? 'warning' : 'healthy'} />
+          </div>
+          <div className="opsMicroNotes"><span className="opsFlag muted">Version data is observed from registered devices.</span>{fleet.mostObserved ? <span className="opsFlag ok">Most observed: {fleet.mostObserved.version}{fleet.mostObserved.build ? ` (${fleet.mostObserved.build})` : ''}</span> : null}</div>
+          {fleet.versions.length ? <div className="opsVersionList">{fleet.versions.slice(0, 5).map((version) => <div key={`${version.version}-${version.build ?? ''}`}><span>{version.version}{version.build ? ` · ${version.build}` : ''}</span><strong>{version.count} devices · {version.percentage}%</strong></div>)}</div> : <Empty text="No device-reported app versions yet." />}
+        </Panel>
+        <Panel title="Needs attention" subtitle="Read-only signals from current Admin data">
+          {attention.length ? <ul className="opsList opsAttentionList">{attention.map((item) => <li key={item.id}><span className={`opsDot dot-${item.tone === 'problem' ? 'critical' : 'warning'}`} /><span className="opsListName">{item.label}<small>{item.detail}</small></span>{item.deviceKey && onOpenDevice ? <button className="opsInlineAction" onClick={() => onOpenDevice(item.deviceKey!, item.label === 'Recent playback failure' ? 'playback' : 'overview')}>Open device</button> : item.providerId ? <button className="opsInlineAction" onClick={() => onNavigate('providers')}>Open provider</button> : null}</li>)}</ul> : <Empty text="No current attention signals reported." />}
+        </Panel>
+      </div>
+
+      <Panel title="Playback issues" subtitle="Recent persisted device telemetry only">
+        {!playback.available ? <Empty text="Playback telemetry unavailable in the current device projection." /> : playback.rows.length ? <div className="opsTableWrap"><table className="opsTable"><thead><tr><th>Device</th><th>Provider</th><th>Type</th><th>Route</th><th>Reason</th><th>Time</th></tr></thead><tbody>{playback.rows.slice(0, 8).map((row) => <tr key={row.id}><td>{onOpenDevice ? <button className="opsTableLink" onClick={() => onOpenDevice(row.deviceKey, 'playback')}>{row.deviceKey}</button> : row.deviceKey}</td><td>{row.provider}</td><td>{row.contentType}</td><td>{row.route}</td><td>{row.reason}</td><td>{row.timestamp ? formatTimestamp(row.timestamp) : 'Not reported'}</td></tr>)}</tbody></table></div> : <Empty text="No recent playback issues reported." />}
+      </Panel>
 
       <div className="opsGrid">
         <Panel

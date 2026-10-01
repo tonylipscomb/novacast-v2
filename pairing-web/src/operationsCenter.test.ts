@@ -3,12 +3,16 @@ import test from 'node:test';
 
 import {
   deriveDeviceSupportRows,
+  deriveFleetSummary,
   deriveGoldSummary,
+  deriveNeedsAttention,
   deriveOpsSummary,
+  derivePlaybackIssues,
   deriveProviderHealthSummary,
   deriveReleaseReadiness,
   goldCreditsTone,
   readDashboardCore,
+  filterAdminDevices,
 } from './operationsCenter.ts';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -110,4 +114,37 @@ test('deriveOpsSummary counts critical alerts from real signals', () => {
   assert.equal(byId.devicesOnline.tone, 'warning');
   assert.equal(byId.registeredDevices.value, 4);
   assert.equal(byId.goldCredits.tone, 'warning');
+});
+
+test('fleet summary derives stale devices, provider health, versions, and persisted issues', () => {
+  const devices = [
+    { id: '1', public_device_code: 'A', last_seen_at: new Date(NOW - 60_000).toISOString(), app_version: '1.0.5', app_build: '25', recentError: { errorCode: 'decoder_error' } },
+    { id: '2', public_device_code: 'B', last_seen_at: new Date(NOW - 5 * DAY).toISOString(), app_version: '1.0.4', app_build: '24' },
+  ];
+  const summary = deriveFleetSummary(devices, [{ id: 'p1', status: 'active', health_status: 'healthy' }, { id: 'p2', status: 'active', health_status: 'failed' }], NOW);
+  assert.equal(summary.onlineDevices, 1);
+  assert.equal(summary.staleDevices, 1);
+  assert.equal(summary.activeProviders, 2);
+  assert.equal(summary.playbackIssues, 1);
+  assert.equal(summary.mostObserved?.version, '1.0.4');
+});
+
+test('needs attention uses concrete device/provider conditions and playback rows stay sanitized', () => {
+  const devices = [{ id: '1', public_device_code: 'A', last_seen_at: new Date(NOW - 5 * DAY).toISOString(), managed_provider_id: 'p1', current_route: 'Live', recentError: { error: 'decoder_error', credentials: 'secret' } }];
+  const providers = [{ id: 'p1', display_name: 'Bravo', health_status: 'unavailable' }];
+  const attention = deriveNeedsAttention(devices, providers, NOW);
+  assert.deepEqual(attention.map((row) => row.label), ['Device stale', 'Recent playback failure', 'Provider unavailable']);
+  const playback = derivePlaybackIssues(devices, providers);
+  assert.equal(playback.rows[0].reason, 'decoder_error');
+  assert.equal(JSON.stringify(playback.rows[0]).includes('secret'), false);
+});
+
+test('device filters compose status, version, provider, and provider health', () => {
+  const devices = [
+    { id: '1', public_device_code: 'A', last_seen_at: new Date(NOW - 60_000).toISOString(), app_version: '1.0.5', managed_provider_id: 'p1' },
+    { id: '2', public_device_code: 'B', last_seen_at: new Date(NOW - 5 * DAY).toISOString(), app_version: '1.0.4', managed_provider_id: 'p2' },
+  ];
+  const providers = [{ id: 'p1', health_status: 'healthy' }, { id: 'p2', health_status: 'failed' }];
+  assert.equal(filterAdminDevices(devices, { status: 'offline', version: '1.0.4', providerHealth: 'failed' }, providers, NOW).length, 1);
+  assert.equal(filterAdminDevices(devices, { status: 'online', version: '1.0.4' }, providers, NOW).length, 0);
 });

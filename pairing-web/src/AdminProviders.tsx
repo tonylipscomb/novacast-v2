@@ -98,6 +98,7 @@ export function AdminProviders({
   onOpenCreateHandled?: () => void;
 }) {
   const [query, setQuery] = useState('');
+  const [healthFilter, setHealthFilter] = useState('all');
   const [modal, setModal] = useState<'add' | 'edit' | 'diagnostics' | null>(null);
   const [selected, setSelected] = useState<Row | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -158,9 +159,9 @@ export function AdminProviders({
     const needle = query.trim().toLowerCase();
     return providers.filter((provider) => {
       const haystack = `${String(provider.display_name ?? '')} ${String(provider.slug ?? '')} ${String(provider.status ?? '')}`.toLowerCase();
-      return !needle || haystack.includes(needle);
+      return (!needle || haystack.includes(needle)) && (healthFilter === 'all' || String(provider.health_status ?? 'unvalidated') === healthFilter);
     });
-  }, [providers, query]);
+  }, [providers, query, healthFilter]);
 
   const metrics = {
     total: providers.length,
@@ -503,7 +504,11 @@ export function AdminProviders({
           <span />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search providers" />
         </label>
-        <button className="filterButton" onClick={() => setQuery('')}>Clear</button>
+        <select value={healthFilter} onChange={(event) => setHealthFilter(event.target.value)} aria-label="Filter providers by health">
+          <option value="all">All health states</option>
+          {[...new Set(providers.map((provider) => String(provider.health_status ?? 'unvalidated')))].map((value) => <option key={value} value={value}>{value}</option>)}
+        </select>
+        <button className="filterButton" onClick={() => { setQuery(''); setHealthFilter('all'); }}>Clear</button>
         <button
           className="cloudPrimary"
           onClick={() => {

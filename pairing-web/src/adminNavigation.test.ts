@@ -10,6 +10,7 @@ test('admin deep links resolve to existing functional pages', () => {
   assert.equal(resolveAdminTab('/admin/providers'), 'providers');
   assert.equal(resolveAdminTab('/admin/diagnostics'), 'diagnostics');
   assert.equal(resolveAdminTab('/admin/analytics'), 'diagnostics');
+  assert.equal(resolveAdminTab('/admin/playback'), 'playback');
   assert.equal(resolveAdminTab('/admin/gold'), 'gold');
   assert.equal(resolveAdminTab('/admin/novapulse'), 'announcements');
   assert.equal(resolveAdminTab('/admin/announcements'), 'announcements');
@@ -25,9 +26,9 @@ test('functional tab paths are stable and pairing remains a real public route', 
   assert.equal(ADMIN_NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === 'pairing')?.href, '/pair');
 });
 
-test('future destinations are visibly disabled rather than backed by invented data', () => {
+test('unsupported destinations remain disabled while playback uses real telemetry', () => {
   const items = ADMIN_NAV_GROUPS.flatMap((group) => group.items);
-  assert.equal(items.find((item) => item.id === 'playback')?.disabled, true);
+  assert.equal(items.find((item) => item.id === 'playback')?.disabled, undefined);
   assert.equal(items.find((item) => item.id === 'catalog')?.disabled, true);
   assert.equal(items.find((item) => item.id === 'service-health')?.disabled, true);
 });

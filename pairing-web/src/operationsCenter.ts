@@ -154,6 +154,136 @@ export function deriveProviderHealthSummary(providers: Row[]): ProviderHealthSum
   return { total: providers.length, healthy, needsAttention, draft, goldManaged, unhealthy };
 }
 
+export type VersionDistributionRow = { version: string; build: string | null; count: number; percentage: number };
+export type FleetSummary = {
+  totalDevices: number;
+  onlineDevices: number;
+  staleDevices: number;
+  activeProviders: number;
+  providerHealth: Record<string, number>;
+  playbackIssues: number;
+  diagnosticIssues: number;
+  versions: VersionDistributionRow[];
+  mostObserved: VersionDistributionRow | null;
+};
+
+function normalizedStatus(value: unknown): string {
+  return String(value ?? 'unknown').trim().toLowerCase().replace(/[- ]+/g, '_');
+}
+
+export function isDeviceOnline(device: Row, now: number = Date.now()): boolean {
+  const lastSeen = parseTime(device.last_seen_at);
+  return lastSeen !== null && lastSeen >= now - ONLINE_WINDOW_MS;
+}
+
+function hasPlaybackIssue(device: Row): boolean {
+  const candidates = [device.recentPlayback, device.recentError, device.last_diagnostics];
+  return candidates.some((value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const row = value as Row;
+    return Boolean(row.error || row.errorCode || row.reason || row.event === 'playback_error' || row.status === 'failed');
+  });
+}
+
+function hasDiagnosticIssue(device: Row): boolean {
+  const value = device.last_diagnostics;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Row;
+  return String(row.level ?? row.status ?? '').toLowerCase() === 'error' || Boolean(row.error || row.errorCode);
+}
+
+export function deriveVersionDistribution(devices: Row[]): VersionDistributionRow[] {
+  const counts = new Map<string, { version: string; build: string | null; count: number }>();
+  for (const device of devices) {
+    const version = String(device.app_version ?? '').trim();
+    if (!version) continue;
+    const build = device.app_build == null || String(device.app_build).trim() === '' ? null : String(device.app_build);
+    const key = `${version}\u0000${build ?? ''}`;
+    const current = counts.get(key) ?? { version, build, count: 0 };
+    current.count += 1;
+    counts.set(key, current);
+  }
+  const total = [...counts.values()].reduce((sum, row) => sum + row.count, 0);
+  return [...counts.values()]
+    .map((row) => ({ ...row, percentage: total ? Math.round((row.count / total) * 1000) / 10 : 0 }))
+    .sort((a, b) => b.count - a.count || a.version.localeCompare(b.version));
+}
+
+export function deriveFleetSummary(devices: Row[], providers: Row[], now: number = Date.now()): FleetSummary {
+  const versions = deriveVersionDistribution(devices);
+  const providerHealth: Record<string, number> = {};
+  for (const provider of providers) {
+    const health = normalizedStatus(provider.health_status);
+    providerHealth[health] = (providerHealth[health] ?? 0) + 1;
+  }
+  return {
+    totalDevices: devices.length,
+    onlineDevices: devices.filter((device) => isDeviceOnline(device, now)).length,
+    staleDevices: devices.filter((device) => !isDeviceOnline(device, now)).length,
+    activeProviders: providers.filter((provider) => normalizedStatus(provider.status) === 'active').length,
+    providerHealth,
+    playbackIssues: devices.filter(hasPlaybackIssue).length,
+    diagnosticIssues: devices.filter(hasDiagnosticIssue).length,
+    versions,
+    mostObserved: versions[0] ?? null,
+  };
+}
+
+export type AttentionRow = { id: string; label: string; detail: string; tone: 'warning' | 'problem'; deviceKey?: string; providerId?: string };
+
+export function deriveNeedsAttention(devices: Row[], providers: Row[], now: number = Date.now()): AttentionRow[] {
+  const rows: AttentionRow[] = [];
+  for (const device of devices) {
+    const deviceKey = String(device.public_device_code ?? device.id ?? '');
+    if (!isDeviceOnline(device, now)) rows.push({ id: `stale-${deviceKey}`, label: 'Device stale', detail: deviceKey || 'Device code unavailable', tone: 'warning', deviceKey });
+    if (hasPlaybackIssue(device)) rows.push({ id: `playback-${deviceKey}`, label: 'Recent playback failure', detail: deviceKey || 'Device code unavailable', tone: 'problem', deviceKey });
+    if (hasDiagnosticIssue(device)) rows.push({ id: `diagnostic-${deviceKey}`, label: 'Diagnostic error', detail: deviceKey || 'Device code unavailable', tone: 'problem', deviceKey });
+  }
+  for (const provider of providers) {
+    const health = normalizedStatus(provider.health_status);
+    if (!['healthy', 'active', 'unknown', 'unvalidated', 'draft'].includes(health)) {
+      rows.push({ id: `provider-${String(provider.id ?? '')}`, label: health === 'authentication_required' ? 'Authentication required' : health === 'subscription_expired' ? 'Subscription expired' : health === 'unavailable' ? 'Provider unavailable' : 'Provider degraded', detail: String(provider.display_name ?? provider.slug ?? 'Managed provider'), tone: health === 'unavailable' || health === 'subscription_expired' ? 'problem' : 'warning', providerId: String(provider.id ?? '') });
+    }
+  }
+  return rows.slice(0, 12);
+}
+
+export type PlaybackIssueRow = { id: string; deviceKey: string; provider: string; contentType: string; route: string; reason: string; timestamp: string | null; recovery: string };
+
+export function derivePlaybackIssues(devices: Row[], providers: Row[]): { available: boolean; rows: PlaybackIssueRow[] } {
+  const providerNames = new Map(providers.map((provider) => [String(provider.id), String(provider.display_name ?? provider.slug ?? 'Provider unavailable')]));
+  const rows: PlaybackIssueRow[] = [];
+  for (const device of devices) {
+    const values = [device.recentError, device.recentPlayback, device.last_diagnostics];
+    const value = values.find((item) => item && typeof item === 'object' && !Array.isArray(item)) as Row | undefined;
+    if (!value || !(value.error || value.errorCode || value.reason || value.event === 'playback_error' || value.status === 'failed')) continue;
+    rows.push({
+      id: `${String(device.id ?? device.public_device_code ?? '')}-${String(value.timestamp ?? value.createdAt ?? device.last_seen_at ?? '')}`,
+      deviceKey: String(device.public_device_code ?? device.id ?? 'Unavailable'),
+      provider: providerNames.get(String(device.managed_provider_id ?? '')) ?? 'Unassigned',
+      contentType: String(value.contentType ?? value.mediaType ?? 'Not reported'),
+      route: String(value.route ?? device.current_route ?? 'Not reported'),
+      reason: String(value.error ?? value.errorCode ?? value.reason ?? 'Playback failure'),
+      timestamp: typeof value.timestamp === 'string' ? value.timestamp : typeof value.createdAt === 'string' ? value.createdAt : null,
+      recovery: String(value.recovery ?? value.watchdog ?? 'Not reported'),
+    });
+  }
+  return { available: devices.some((device) => device.recentError !== undefined || device.recentPlayback !== undefined || device.last_diagnostics !== undefined), rows };
+}
+
+export function filterAdminDevices(devices: Row[], filters: { query?: string; status?: string; platform?: string; activation?: string; version?: string; providerId?: string; providerHealth?: string }, providers: Row[], now: number = Date.now()): Row[] {
+  const needle = String(filters.query ?? '').trim().toLowerCase();
+  const providerById = new Map(providers.map((provider) => [String(provider.id), provider]));
+  return devices.filter((device) => {
+    const provider = providerById.get(String(device.managed_provider_id ?? ''));
+    const health = normalizedStatus(provider?.health_status);
+    const haystack = [device.public_device_code, device.friendly_name, device.model, device.platform, device.assigned_tester_name].map(String).join(' ').toLowerCase();
+    const status = String(filters.status ?? 'all');
+    const statusMatches = status === 'all' || (status === 'online' && isDeviceOnline(device, now)) || (status === 'offline' && !isDeviceOnline(device, now)) || normalizedStatus(device.status) === status;
+    return (!needle || haystack.includes(needle)) && statusMatches && (filters.platform === undefined || filters.platform === 'all' || String(device.platform ?? '') === filters.platform) && (filters.activation === undefined || filters.activation === 'all' || normalizedStatus(device.activation_status) === filters.activation) && (filters.version === undefined || filters.version === 'all' || String(device.app_version ?? '') === filters.version) && (filters.providerId === undefined || filters.providerId === 'all' || String(device.managed_provider_id ?? '') === filters.providerId) && (filters.providerHealth === undefined || filters.providerHealth === 'all' || health === filters.providerHealth);
+  });
+}
+
 export type DeviceSupportRow = {
   id: string;
   code: string;

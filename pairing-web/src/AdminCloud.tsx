@@ -5,6 +5,7 @@ import { AdminDevices } from './AdminDevices';
 import { AdminInvitations } from './AdminInvitations';
 import { AdminProviders } from './AdminProviders';
 import { AdminDiagnostics } from './AdminDiagnostics';
+import { AdminPlayback } from './AdminPlayback';
 import { AdminGoldPanel } from './AdminGoldPanel';
 import { AdminAnnouncements } from './AdminAnnouncements';
 import {
@@ -354,6 +355,7 @@ export function AdminCloud() {
             onNavigate={(next) => navigateTab(next === 'analytics' ? 'diagnostics' : next)}
             onAddProvider={() => { navigateTab('providers'); setOpenAddProvider(true); }}
             onAddGoldAccount={() => { navigateTab('gold'); setOpenAddGold(true); }}
+            onOpenDevice={(code, nextTab) => navigateDevice(code, nextTab ?? 'overview')}
             onRefresh={() => void load(token, true)}
             refreshing={refreshing}
             onCreateInvite={() => { navigateTab('invitations'); setOpenCreateInvite(true); }}
@@ -410,6 +412,7 @@ export function AdminCloud() {
         {!loading && tab === 'diagnostics' ? (
           <AdminDiagnostics token={token} onMessage={setMessage} onOpenDevice={(code) => navigateDevice(code, 'diagnostics')} />
         ) : null}
+        {!loading && tab === 'playback' ? <AdminPlayback devices={devices} providers={providers} onOpenDevice={(code) => navigateDevice(code, 'playback')} /> : null}
         {!loading && tab === 'announcements' ? <AdminAnnouncements token={token} onMessage={setMessage} /> : null}
         {!loading && tab === 'gold' ? <AdminGoldPanel token={token} devices={devices} providers={providers} openCreate={openAddGold} onOpenCreateHandled={() => setOpenAddGold(false)} onAssignProvider={(id, providerId) => void assignProvider(id, providerId)} onMessage={setMessage} /> : null}
         {!loading && tab === 'settings' ? (
@@ -467,6 +470,7 @@ function titleFor(tab: AdminTab) {
     invitations: 'Release Testing',
     announcements: 'NovaPulse Announcements',
     diagnostics: 'Diagnostics',
+    playback: 'Playback',
     settings: 'Settings',
   }[tab];
 }
@@ -480,6 +484,7 @@ function subtitleFor(tab: AdminTab) {
     invitations: 'Manage controlled release access and invitation capacity.',
     announcements: 'Create, schedule, and preview safe NovaPulse TV announcements.',
     diagnostics: 'Review device health and operational diagnostics.',
+    playback: 'Review recent persisted playback issues from the device fleet.',
     settings: 'Configure NovaCast Cloud Admin.',
   }[tab];
 }

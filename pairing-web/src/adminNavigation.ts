@@ -3,6 +3,7 @@ export type AdminTab =
   | 'devices'
   | 'providers'
   | 'diagnostics'
+  | 'playback'
   | 'gold'
   | 'invitations'
   | 'announcements'
@@ -31,7 +32,7 @@ export const ADMIN_NAV_GROUPS: AdminNavGroup[] = [
       { id: 'providers', label: 'Providers', icon: 'P', tab: 'providers' },
       { id: 'pairing', label: 'Pairing', icon: '↗', href: '/pair' },
       { id: 'diagnostics', label: 'Diagnostics', icon: 'D', tab: 'diagnostics' },
-      { id: 'playback', label: 'Playback', icon: '▶', disabled: true, note: 'Coming later' },
+      { id: 'playback', label: 'Playback', icon: '▶', tab: 'playback' },
     ],
   },
   {
@@ -74,6 +75,7 @@ const TAB_PATHS: Record<AdminTab, string> = {
   devices: '/admin/devices',
   providers: '/admin/providers',
   diagnostics: '/admin/diagnostics',
+  playback: '/admin/playback',
   gold: '/admin/gold',
   invitations: '/admin/release-testing',
   announcements: '/admin/novapulse',
@@ -91,6 +93,7 @@ export function resolveAdminTab(pathname: string): AdminTab {
     case '/admin/providers': return 'providers';
     case '/admin/diagnostics':
     case '/admin/analytics': return 'diagnostics';
+    case '/admin/playback': return 'playback';
     case '/admin/gold': return 'gold';
     case '/admin/release-testing':
     case '/admin/invitations': return 'invitations';

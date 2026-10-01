@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { filterAdminDevices } from './operationsCenter';
 
 type Device = Record<string, unknown>;
 type Provider = Record<string, unknown>;
@@ -32,6 +33,9 @@ export function AdminDevices({
   const [status, setStatus] = useState('all');
   const [platform, setPlatform] = useState('all');
   const [beta, setBeta] = useState('all');
+  const [version, setVersion] = useState('all');
+  const [providerId, setProviderId] = useState('all');
+  const [providerHealth, setProviderHealth] = useState('all');
   const [page, setPage] = useState(1);
   const [extendDevice, setExtendDevice] = useState<Device | null>(null);
   const [extendPreset, setExtendPreset] = useState<ExtendPreset>('30');
@@ -64,29 +68,8 @@ export function AdminDevices({
   );
 
   const filtered = useMemo(
-    () =>
-      devices.filter((device) => {
-        const haystack = [
-          device.public_device_code,
-          device.friendly_name,
-          device.model,
-          device.platform,
-          device.assigned_tester_name,
-        ]
-          .map(String)
-          .join(' ')
-          .toLowerCase();
-        const activation = String(device.activation_status ?? 'inactive');
-        return (
-          (!query.trim() || haystack.includes(query.trim().toLowerCase())) &&
-          (status === 'all' ||
-            String(device.status ?? '') === status ||
-            (status === 'online' && isOnline(device))) &&
-          (platform === 'all' || String(device.platform ?? '') === platform) &&
-          (beta === 'all' || activation === beta)
-        );
-      }),
-    [devices, query, status, platform, beta],
+    () => filterAdminDevices(devices, { query, status, platform, activation: beta, version, providerId, providerHealth }, providers),
+    [devices, providers, query, status, platform, beta, version, providerId, providerHealth],
   );
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -100,12 +83,17 @@ export function AdminDevices({
     errors: devices.filter((device) => Boolean(device.last_diagnostics)).length,
   };
   const platforms = [...new Set(devices.map((device) => String(device.platform ?? '')).filter(Boolean))];
+  const versions = [...new Set(devices.map((device) => String(device.app_version ?? '')).filter(Boolean))];
+  const providerHealthValues = [...new Set(providers.map((provider) => String(provider.health_status ?? '')).filter(Boolean))];
 
   const clear = () => {
     setQuery('');
     setStatus('all');
     setPlatform('all');
     setBeta('all');
+    setVersion('all');
+    setProviderId('all');
+    setProviderHealth('all');
     setPage(1);
   };
 
@@ -237,6 +225,7 @@ export function AdminDevices({
           <option value="active">Active</option>
           <option value="registered">Registered</option>
           <option value="revoked">Revoked</option>
+          <option value="offline">Offline / stale</option>
         </select>
         <select
           value={platform}
@@ -264,6 +253,18 @@ export function AdminDevices({
           <option value="inactive">Pending</option>
           <option value="expired">Expired</option>
           <option value="revoked">Revoked</option>
+        </select>
+        <select value={version} onChange={(event) => { setVersion(event.target.value); setPage(1); }} aria-label="Filter by app version">
+          <option value="all">All app versions</option>
+          {versions.map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
+        <select value={providerId} onChange={(event) => { setProviderId(event.target.value); setPage(1); }} aria-label="Filter by provider">
+          <option value="all">All providers</option>
+          {providers.map((provider) => <option key={String(provider.id)} value={String(provider.id)}>{String(provider.display_name ?? provider.slug ?? 'Provider')}</option>)}
+        </select>
+        <select value={providerHealth} onChange={(event) => { setProviderHealth(event.target.value); setPage(1); }} aria-label="Filter by provider health">
+          <option value="all">All provider health</option>
+          {providerHealthValues.map((item) => <option key={item} value={item}>{item}</option>)}
         </select>
         <button className="filterButton" onClick={clear}>
           Clear filters

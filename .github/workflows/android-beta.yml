@@ -217,7 +217,7 @@ jobs:
           }
 
           BADGING="$($AAPT dump badging "$APK_PATH")"
-          echo "$BADGING" | grep -Fq "package: name='com.novacast.novacastv2' versionCode='26' versionName='1.0.6-dev1'" || {
+          echo "$BADGING" | grep -Fq "package: name='com.novacast.novacastv2' versionCode='27' versionName='1.0.6-dev2'" || {
             echo "::error::APK package/version metadata mismatch"
             exit 1
           }

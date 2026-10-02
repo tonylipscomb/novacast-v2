@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as ReactNative from 'react-native';
 import {
   Animated,
   BackHandler,
@@ -33,6 +34,27 @@ import {
 type IconName = React.ComponentProps<typeof MaterialCommunityIcons>['name'];
 
 const splashArtwork = require('../../../splash.png');
+
+const nativeReactNative = ReactNative as typeof ReactNative & {
+  TVFocusGuideView?: React.ComponentType<{
+    children: React.ReactNode;
+    style?: object;
+    autoFocus?: boolean;
+    trapFocusLeft?: boolean;
+    trapFocusRight?: boolean;
+    trapFocusUp?: boolean;
+    trapFocusDown?: boolean;
+  }>;
+};
+const FocusBoundaryView = (nativeReactNative.TVFocusGuideView ?? View) as React.ComponentType<{
+  children: React.ReactNode;
+  style?: object;
+  autoFocus?: boolean;
+  trapFocusLeft?: boolean;
+  trapFocusRight?: boolean;
+  trapFocusUp?: boolean;
+  trapFocusDown?: boolean;
+}>;
 
 const PROVIDER_VISUALS: Record<string, { icon: IconName; accent: string }> = {
   'demo-provider': { icon: 'television-play', accent: '#8B5CF6' },
@@ -253,14 +275,21 @@ export function ContentHubOverlayScreen() {
         </ImageBackground>
       </Animated.View>
 
-      <Animated.View
-        style={[
-          styles.card,
-          {
-            opacity: enterAnim,
-            transform: [{ scale: enterAnim.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }],
-          },
-        ]}>
+      <FocusBoundaryView
+        autoFocus
+        trapFocusLeft
+        trapFocusRight
+        trapFocusUp
+        trapFocusDown
+        style={styles.focusBoundary}>
+        <Animated.View
+          style={[
+            styles.card,
+            {
+              opacity: enterAnim,
+              transform: [{ scale: enterAnim.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] }) }],
+            },
+          ]}>
         <Pressable
           focusable
           onFocus={() => setFocusedId('close-x')}
@@ -294,13 +323,17 @@ export function ContentHubOverlayScreen() {
                     hasTVPreferredFocus={selectedIndex < 0 ? index === 0 : selected}
                     onFocus={() => setFocusedId(provider.id)}
                     onBlur={() => setFocusedId((current) => (current === provider.id ? null : current))}
+                    disabled={provider.status === 'expired'}
+                    accessibilityState={{ disabled: provider.status === 'expired', selected }}
                     onPress={() => {
+                      if (provider.status === 'expired') return;
                       void activateProvider(provider.id);
                     }}
                     style={[
                       styles.providerCard,
                       novaTvFocus.base,
                       selected && styles.providerCardSelected,
+                      provider.status === 'expired' && styles.providerCardDisabled,
                       focused && novaTvFocus.active,
                     ]}>
                     <View style={styles.providerCardTop}>
@@ -425,7 +458,8 @@ export function ContentHubOverlayScreen() {
             </View>
           </Pressable>
         </ScrollView>
-      </Animated.View>
+        </Animated.View>
+      </FocusBoundaryView>
     </View>
   );
 }
@@ -490,12 +524,17 @@ const styles = StyleSheet.create({
     borderRadius: 30,
     borderWidth: 1,
     borderColor: 'rgba(139,152,255,0.30)',
-    backgroundColor: 'rgba(10,14,22,0.96)',
+    backgroundColor: 'rgba(10,14,22,0.88)',
     paddingHorizontal: 26,
     paddingVertical: 22,
     shadowColor: '#000',
     shadowOpacity: 0.55,
     shadowRadius: 32,
+  },
+  focusBoundary: {
+    width: '100%',
+    maxWidth: 760,
+    maxHeight: '94%',
   },
   scrollContent: {
     gap: 20,
@@ -555,13 +594,17 @@ const styles = StyleSheet.create({
     borderRadius: 0,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: 'rgba(18,24,36,0.94)',
+    backgroundColor: 'rgba(18,24,36,0.78)',
     padding: 14,
     gap: 10,
   },
   providerCardSelected: {
     borderColor: 'rgba(96,165,255,0.9)',
     backgroundColor: 'rgba(28,45,73,0.7)',
+  },
+  providerCardDisabled: {
+    opacity: 0.5,
+    borderColor: 'rgba(255,255,255,0.06)',
   },
   providerCardTop: {
     flexDirection: 'row',

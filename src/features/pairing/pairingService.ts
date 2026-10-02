@@ -6,7 +6,12 @@ import {
   getPendingPairingSession,
   savePendingPairingSession,
 } from './pairingDevice.ts';
-import { pairingDiagnostic, pairingInstallationFingerprint } from './pairingDiagnostics.ts';
+import {
+  classifyPairingHttpStatus,
+  logPairingReleaseDiagnostic,
+  pairingDiagnostic,
+  pairingInstallationFingerprint,
+} from './pairingDiagnostics.ts';
 import { normalizePairingCode, PAIRING_CODE_LENGTH } from './pairingLogic.ts';
 import {
   getBootstrapPromise,
@@ -41,6 +46,11 @@ function getPairingApiConfig() {
   const apiUrl = process.env.EXPO_PUBLIC_NOVACAST_PAIRING_API_URL?.trim().replace(/\/+$/, '');
   const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim();
   if (!apiUrl || !anonKey) {
+    logPairingReleaseDiagnostic('config-missing', {
+      apiConfigured: Boolean(apiUrl),
+      anonKeyConfigured: Boolean(anonKey),
+      failureCategory: 'pairing_service_unavailable',
+    });
     return null;
   }
 
@@ -59,13 +69,17 @@ function normalizeSession(value: PairingApiResponse) {
     typeof value.pairUrl !== 'string' ||
     typeof value.expiresAt !== 'number'
   ) {
+    logPairingReleaseDiagnostic('response-schema-invalid', { responseSchemaValid: false, failureCategory: 'invalid_pairing_response' });
     throw new Error('invalid_pairing_response');
   }
 
   const code = normalizePairingCode(value.code);
   if (code.length !== PAIRING_CODE_LENGTH) {
+    logPairingReleaseDiagnostic('response-schema-invalid', { responseSchemaValid: false, failureCategory: 'invalid_pairing_response' });
     throw new Error('invalid_pairing_response');
   }
+
+  logPairingReleaseDiagnostic('response-schema-valid', { responseSchemaValid: true });
 
   return {
     id: value.sessionId,
@@ -93,6 +107,7 @@ function createRemotePairingService(): PairingService | null {
   const { apiUrl, anonKey } = config;
 
   async function request(path: string, body: Record<string, unknown>) {
+    logPairingReleaseDiagnostic('request-start', { apiConfigured: true, anonKeyConfigured: true });
     let response: Response;
     try {
       response = await fetch(`${apiUrl}/${path}`, {
@@ -105,19 +120,27 @@ function createRemotePairingService(): PairingService | null {
         },
         body: JSON.stringify(body),
       });
-    } catch {
+    } catch (error) {
+      const failureCategory = error instanceof DOMException && error.name === 'AbortError' ? 'timeout' : 'pairing_service_unavailable';
+      logPairingReleaseDiagnostic('request-complete', { httpCategory: failureCategory === 'timeout' ? 'timeout' : 'network_error', failureCategory });
       throw new Error('pairing_service_unavailable');
     }
+
+    const httpCategory = classifyPairingHttpStatus(response.status);
+    logPairingReleaseDiagnostic('request-complete', { httpCategory });
 
     let payload: PairingApiResponse = {};
     try {
       payload = (await response.json()) as PairingApiResponse;
     } catch {
+      logPairingReleaseDiagnostic('response-schema-invalid', { responseSchemaValid: false, failureCategory: 'invalid_pairing_response' });
       throw new Error('invalid_pairing_response');
     }
 
     if (!response.ok) {
-      throw toPairingError(payload, 'pairing_request_failed');
+      const error = toPairingError(payload, 'pairing_request_failed');
+      logPairingReleaseDiagnostic('request-failed', { httpCategory, responseSchemaValid: true, failureCategory: error.message });
+      throw error;
     }
 
     return payload;

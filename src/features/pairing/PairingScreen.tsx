@@ -488,6 +488,11 @@ export function PairingScreen({
                       style={{ ...styles.retryButton, minHeight: layout.actionMinHeight, width: layout.actionWidth }}
                     />
                   ) : null}
+                  <NovaButton
+                    label="Close"
+                    onPress={() => router.back()}
+                    style={{ ...styles.closeButton, minHeight: layout.actionMinHeight, width: layout.actionWidth }}
+                  />
                 </View>
 
                 {awaitingActivation ? (
@@ -696,6 +701,12 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: NOVA_GLASS.activeFocused.borderColor,
     backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
+  },
+  closeButton: {
+    borderRadius: NOVA_GLASS.radius.base,
+    borderWidth: 1,
+    borderColor: NOVA_GLASS.subtle.borderColor,
+    backgroundColor: NOVA_GLASS.subtle.backgroundColor,
   },
   inlineStatus: {
     marginTop: 2,

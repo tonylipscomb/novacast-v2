@@ -1,5 +1,5 @@
-import { Pressable, StyleSheet, Text } from 'react-native';
-import { useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useState, type RefObject } from 'react';
 import type { ViewStyle } from 'react-native';
 
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
@@ -11,6 +11,13 @@ type NovaButtonProps = {
   hasTVPreferredFocus?: boolean;
   disabled?: boolean;
   style?: ViewStyle;
+  nativeRef?: RefObject<View | null>;
+  nextFocusLeft?: number;
+  nextFocusRight?: number;
+  nextFocusUp?: number;
+  nextFocusDown?: number;
+  onFocus?: () => void;
+  onBlur?: () => void;
 };
 
 export function NovaButton({
@@ -19,17 +26,36 @@ export function NovaButton({
   hasTVPreferredFocus,
   disabled,
   style,
+  nativeRef,
+  nextFocusLeft,
+  nextFocusRight,
+  nextFocusUp,
+  nextFocusDown,
+  onFocus,
+  onBlur,
 }: NovaButtonProps) {
   const [isFocused, setIsFocused] = useState(false);
 
   return (
     <Pressable
+      ref={nativeRef}
+      collapsable={false}
       disabled={disabled}
       focusable
       hasTVPreferredFocus={hasTVPreferredFocus}
-      onFocus={() => setIsFocused(true)}
-      onBlur={() => setIsFocused(false)}
+      onFocus={() => {
+        setIsFocused(true);
+        onFocus?.();
+      }}
+      onBlur={() => {
+        setIsFocused(false);
+        onBlur?.();
+      }}
       onPress={onPress}
+      {...(nextFocusLeft != null ? { nextFocusLeft } : null)}
+      {...(nextFocusRight != null ? { nextFocusRight } : null)}
+      {...(nextFocusUp != null ? { nextFocusUp } : null)}
+      {...(nextFocusDown != null ? { nextFocusDown } : null)}
       style={[
         styles.button,
         novaTvFocus.base,

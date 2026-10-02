@@ -5,6 +5,8 @@ import { connectXtreamProvider } from '@/features/providers/providerStore';
 import { markPairingCompleted } from '@/features/pairing/pairingState';
 import { waitForHomeChannelsReady } from '@/features/pairing/waitForHomeChannelsReady';
 
+export const MANAGED_PROVIDER_DOWNLOAD_TIMEOUT_MS = 12_000;
+
 export type ManagedProviderDownloadResult = {
   providerName: string;
   contentPolicy: ContentPolicyId;
@@ -37,17 +39,38 @@ export async function downloadManagedProviderAssignment(): Promise<ManagedProvid
     publicDeviceIdPresent: Boolean(identity?.publicDeviceCode || authHeaders['x-novacast-device-id']),
     privateCredentialPresent: Boolean(identity?.deviceSecret || authHeaders['x-novacast-device-secret']),
   }));
-  const response = await fetch(`${api.apiUrl}/device-provider-assignment`, {
-    method: 'POST',
-    headers: {
-      apikey: api.anonKey,
-      Authorization: `Bearer ${api.anonKey}`,
-      'Content-Type': 'application/json',
-      ...authHeaders,
-      ...(localTestBypassHeaderSent ? { 'x-novacast-local-test-bypass': '1' } : {}),
-    },
-    body: JSON.stringify({ metadata: deviceMetadata() }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MANAGED_PROVIDER_DOWNLOAD_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${api.apiUrl}/device-provider-assignment`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        apikey: api.anonKey,
+        Authorization: `Bearer ${api.anonKey}`,
+        'Content-Type': 'application/json',
+        ...authHeaders,
+        ...(localTestBypassHeaderSent ? { 'x-novacast-local-test-bypass': '1' } : {}),
+      },
+      body: JSON.stringify({ metadata: deviceMetadata() }),
+    });
+  } catch {
+    const timeoutFailure = controller.signal.aborted;
+    console.info('[NovaCast Managed Provider Download]', JSON.stringify({
+      event: timeoutFailure ? 'timeout' : 'network-failure',
+      outcome: timeoutFailure ? 'timeout' : 'network-failure',
+    }));
+    throw new Error('managed_provider_unavailable');
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  console.info('[NovaCast Managed Provider Download]', JSON.stringify({
+    event: 'response',
+    outcome: response.ok ? 'success' : response.status >= 500 ? 'server-failure' : 'client-failure',
+    statusCategory: `${Math.floor(response.status / 100)}xx`,
+  }));
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {

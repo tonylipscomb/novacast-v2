@@ -622,6 +622,9 @@ export async function connectXtreamProvider(input: {
   pairingTransactionStart('connectXtreamProvider', { activate, validateAccount });
 
   if (runtime.isSwitching) {
+    if (runtimeLoadPromise) {
+      return runtimeLoadPromise;
+    }
     const error = new Error('Another provider operation is already in progress.');
     pairingTransactionFailure('connectXtreamProvider', error, { activate, validateAccount });
     throw error;
@@ -801,7 +804,18 @@ export async function connectXtreamProvider(input: {
   return runtimeLoadPromise;
 }
 
-export async function retryProviderInitialization() {
+export function retryProviderInitialization() {
+  if (runtime.isSwitching && runtimeLoadPromise) return runtimeLoadPromise;
+  if (runtime.isSwitching) return Promise.reject(new Error('Another provider operation is already in progress.'));
+  const promise = retryProviderInitializationInternal();
+  const trackedPromise = promise.finally(() => {
+    if (runtimeLoadPromise === trackedPromise) runtimeLoadPromise = null;
+  });
+  runtimeLoadPromise = trackedPromise;
+  return trackedPromise;
+}
+
+async function retryProviderInitializationInternal() {
   const current = await readState();
   const selected = getSelectedProvider(current);
 

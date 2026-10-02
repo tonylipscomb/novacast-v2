@@ -4,6 +4,7 @@ import { isProviderConnectionReady, type ProviderRecord } from './providerModel.
 export type ProviderAccessState =
   | 'loading'
   | 'allowed'
+  | 'recovery_available'
   | 'no_provider'
   | 'authentication_required'
   | 'subscription_expired'
@@ -21,6 +22,8 @@ export type ProviderAccessInput = {
   providerInitialized: boolean;
   isSwitchingProvider?: boolean;
   providerSwitchError?: string | null;
+  loadingTimedOut?: boolean;
+  cachedProviderUsable?: boolean;
 };
 
 function isConfirmedHealthBlock(status: NovaPulseProviderHealthStatus | undefined) {
@@ -34,14 +37,24 @@ export function resolveProviderAccess({
   providerInitialized,
   isSwitchingProvider = false,
   providerSwitchError = null,
+  loadingTimedOut = false,
+  cachedProviderUsable = false,
 }: ProviderAccessInput): ProviderAccessDecision {
-  if (!ready || isSwitchingProvider) return { state: 'loading', provider: provider ?? null };
+  if (!ready || isSwitchingProvider) {
+    if (loadingTimedOut && !cachedProviderUsable) return { state: 'recovery_available', provider: provider ?? null };
+    if (loadingTimedOut && cachedProviderUsable) return { state: 'allowed', provider: provider ?? null };
+    return { state: 'loading', provider: provider ?? null };
+  }
   if (!provider || !isProviderConnectionReady(provider)) return { state: 'no_provider', provider: null };
   if (provider.status === 'expired' || providerHealth?.status === 'subscription_expired') {
     return { state: 'subscription_expired', provider };
   }
   if (isConfirmedHealthBlock(providerHealth?.status)) return { state: 'authentication_required', provider };
-  if (!providerInitialized) return { state: 'loading', provider };
+  if (!providerInitialized) {
+    if (loadingTimedOut && cachedProviderUsable) return { state: 'allowed', provider };
+    if (loadingTimedOut) return { state: 'recovery_available', provider };
+    return { state: 'loading', provider };
+  }
   if (providerSwitchError) return { state: 'temporarily_unavailable', provider };
 
   // Temporary network loss, degraded/unavailable health, and unknown state do not hard-block access.

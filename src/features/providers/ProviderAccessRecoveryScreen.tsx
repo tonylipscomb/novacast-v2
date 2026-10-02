@@ -6,6 +6,7 @@ import { NovaButton, NovaScreen, NovaSpaceLoader } from '@/components/nova';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { novaTheme } from '@/theme';
 import { retryProviderInitialization } from './providerStore';
+import { clearAssignmentRetryBackoff } from '@/features/device/deviceAssignmentReconcile';
 import type { ProviderAccessState } from './providerAccess';
 
 type Props = { state: Exclude<ProviderAccessState, 'loading' | 'allowed'> };
@@ -32,6 +33,7 @@ export function ProviderAccessRecoveryScreen({ state }: Props) {
     setRetrying(true);
     setRetryMessage(null);
     try {
+      clearAssignmentRetryBackoff();
       await retryProviderInitialization();
     } catch {
       setRetryMessage('The provider still needs attention. Pair another provider or try again.');
@@ -48,9 +50,15 @@ export function ProviderAccessRecoveryScreen({ state }: Props) {
       <View style={styles.screen}>
         <View style={styles.card}>
           <Text style={styles.badge}>PROVIDER ACCESS</Text>
-          <Text style={styles.title}>Provider unavailable</Text>
+          <Text style={styles.title}>
+            {state === 'recovery_available' ? 'Provider refresh unavailable' : 'Provider unavailable'}
+          </Text>
           <Text style={styles.message}>
-            {state === 'no_provider' ? 'Pair a TV provider to continue.' : 'Your current TV provider has expired or needs to be reconnected.'}
+            {state === 'no_provider'
+              ? 'Pair a TV provider to continue.'
+              : state === 'recovery_available'
+                ? 'NovaCast could not refresh the provider promptly. Retry or open Settings while the current connection is preserved.'
+                : 'Your current TV provider has expired or needs to be reconnected.'}
           </Text>
           {retryMessage ? <Text style={styles.error}>{retryMessage}</Text> : null}
           <View style={styles.actions}>

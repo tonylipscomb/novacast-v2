@@ -31,16 +31,25 @@ export function logPairingReleaseDiagnostic(
     apiConfigured?: boolean;
     anonKeyConfigured?: boolean;
     httpCategory?: PairingHttpCategory;
+    statusCode?: number | null;
+    serverErrorCode?: string | null;
+    deviceIdentityFieldsPresent?: boolean;
+    activationDeviceAuthHeadersPresent?: boolean;
     responseSchemaValid?: boolean;
     failureCategory?: string | null;
   } = {},
 ) {
   const failureCategory = fields.failureCategory?.replace(/[^a-z0-9_-]/gi, '').slice(0, 64) || undefined;
+  const serverErrorCode = fields.serverErrorCode?.replace(/[^a-z0-9_-]/gi, '').slice(0, 64) || undefined;
   console.info('[NovaCast Pairing Diagnostics]', {
     event,
     ...(fields.apiConfigured !== undefined ? { apiConfigured: fields.apiConfigured } : {}),
     ...(fields.anonKeyConfigured !== undefined ? { anonKeyConfigured: fields.anonKeyConfigured } : {}),
     ...(fields.httpCategory ? { httpCategory: fields.httpCategory } : {}),
+    ...(fields.statusCode !== undefined ? { statusCode: fields.statusCode } : {}),
+    ...(serverErrorCode ? { serverErrorCode } : {}),
+    ...(fields.deviceIdentityFieldsPresent !== undefined ? { deviceIdentityFieldsPresent: fields.deviceIdentityFieldsPresent } : {}),
+    ...(fields.activationDeviceAuthHeadersPresent !== undefined ? { activationDeviceAuthHeadersPresent: fields.activationDeviceAuthHeadersPresent } : {}),
     ...(fields.responseSchemaValid !== undefined ? { responseSchemaValid: fields.responseSchemaValid } : {}),
     ...(failureCategory ? { failureCategory } : {}),
   });

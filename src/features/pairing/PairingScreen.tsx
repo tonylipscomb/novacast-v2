@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Platform, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Animated, Easing, findNodeHandle, Platform, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import QRCode from 'react-native-qrcode-svg';
 import { useRouter } from 'expo-router';
@@ -17,6 +17,7 @@ import { markPairingCompleted } from '@/features/pairing/pairingState';
 import { completePersistedPairing, usePairing } from '@/features/pairing/useMockPairing';
 import { isPairingSetupInProgress } from '@/features/pairing/pairingResume';
 import { logPairingEvent } from '@/features/pairing/pairingDiagnostics';
+import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
 import { waitForHomeChannelsReady } from '@/features/pairing/waitForHomeChannelsReady';
 import { getProviderState } from '@/features/providers/providerStore';
 import { hasSavedProvider } from '@/features/providers/providerModel';
@@ -119,6 +120,10 @@ export function PairingScreen({
   const [preparingChannels, setPreparingChannels] = useState(false);
   const [pairingAttempt, setPairingAttempt] = useState(0);
   const prepareCancelRef = useRef({ cancelled: false });
+  const primaryActionRef = useRef<View | null>(null);
+  const retryActionRef = useRef<View | null>(null);
+  const closeActionRef = useRef<View | null>(null);
+  const [focusTargets, setFocusTargets] = useState({ primary: null as number | null, retry: null as number | null, close: null as number | null });
 
   const navigateHome = useCallback(async () => {
     onPairingComplete?.();
@@ -355,6 +360,18 @@ export function PairingScreen({
   const awaitingActivation = isAwaitingServerActivation(status, isConnecting, connectionFailed);
   const setupInProgress = isPairingSetupInProgress(status, isConnecting);
   const codeExpired = status === 'expired';
+  const retryVisible = status === 'failed' || status === 'binding_error' || connectionFailed;
+
+  useEffect(() => {
+    if (!retryVisible || !isAvailable) {
+      logOverlayFocus('pairing', 'primary-action', 'preferred-focus');
+    }
+    setFocusTargets({
+      primary: findNodeHandle(primaryActionRef.current),
+      retry: retryVisible ? findNodeHandle(retryActionRef.current) : null,
+      close: findNodeHandle(closeActionRef.current),
+    });
+  }, [retryVisible, status, isAvailable]);
 
   return (
     <NovaScreen
@@ -476,21 +493,43 @@ export function PairingScreen({
                 <View style={[styles.actions, { width: layout.actionWidth }]}>
                   <NovaButton
                     label={!isAvailable ? 'Retry Pairing' : codeExpired ? 'Refresh Code' : 'Generate New Code'}
-                    onPress={() => void regenerateCode()}
-                    hasTVPreferredFocus={status !== 'failed' && status !== 'binding_error' && !connectionFailed}
+                    nativeRef={primaryActionRef}
+                    hasTVPreferredFocus={!isAvailable || !retryVisible}
+                    nextFocusDown={(retryVisible ? focusTargets.retry : focusTargets.close) ?? undefined}
+                    onFocus={() => logOverlayFocus('pairing', 'primary-action', 'focus-received')}
+                    onBlur={() => logOverlayFocus('pairing', 'primary-action', 'focus-lost')}
+                    onPress={() => {
+                      logOverlayFocus('pairing', 'primary-action', 'press');
+                      void regenerateCode();
+                    }}
                     style={{ ...styles.primaryButton, minHeight: layout.actionMinHeight, width: layout.actionWidth }}
                   />
-                  {status === 'failed' || status === 'binding_error' || connectionFailed ? (
+                  {retryVisible ? (
                     <NovaButton
                       label="Retry Same Code"
-                      onPress={handlePairingRetry}
-                      hasTVPreferredFocus
+                      nativeRef={retryActionRef}
+                      hasTVPreferredFocus={!isAvailable}
+                      nextFocusUp={focusTargets.primary ?? undefined}
+                      nextFocusDown={focusTargets.close ?? undefined}
+                      onFocus={() => logOverlayFocus('pairing', 'retry-same-code', 'focus-received')}
+                      onBlur={() => logOverlayFocus('pairing', 'retry-same-code', 'focus-lost')}
+                      onPress={() => {
+                        logOverlayFocus('pairing', 'retry-same-code', 'press');
+                        handlePairingRetry();
+                      }}
                       style={{ ...styles.retryButton, minHeight: layout.actionMinHeight, width: layout.actionWidth }}
                     />
                   ) : null}
                   <NovaButton
                     label="Close"
-                    onPress={() => router.back()}
+                    nativeRef={closeActionRef}
+                    nextFocusUp={(retryVisible ? focusTargets.retry : focusTargets.primary) ?? undefined}
+                    onFocus={() => logOverlayFocus('pairing', 'close', 'focus-received')}
+                    onBlur={() => logOverlayFocus('pairing', 'close', 'focus-lost')}
+                    onPress={() => {
+                      logOverlayFocus('pairing', 'close', 'press');
+                      router.back();
+                    }}
                     style={{ ...styles.closeButton, minHeight: layout.actionMinHeight, width: layout.actionWidth }}
                   />
                 </View>

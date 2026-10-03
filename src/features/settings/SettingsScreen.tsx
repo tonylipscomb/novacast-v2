@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BackHandler, Platform, StyleSheet, Text, View } from 'react-native';
+import { BackHandler, findNodeHandle, Platform, StyleSheet, Text, View } from 'react-native';
 import Constants from 'expo-constants';
 import { useRouter } from 'expo-router';
 
-import { NovaTvShell } from '@/components/nova';
+import { NovaButton, NovaScreen, NovaSpaceLoader, NovaTvShell } from '@/components/nova';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
@@ -16,10 +17,15 @@ import { useAccessExpirationDisplay } from '@/features/device/betaAccessCountdow
 import { getSafeDeviceDiagnostics } from '@/features/device/deviceDiagnostics';
 import { useMoviesSettingsStore } from '@/features/movies/smart/moviesSettingsStore';
 import { useProviderLibrarySummary } from '@/features/providers/providerLibrarySummaryStore';
-import { useProviderStore } from '@/features/providers/providerStore';
+import { retryProviderInitialization, useProviderStore } from '@/features/providers/providerStore';
+import { useNovaPulseProviderHealth } from '@/features/providers/providerHealth';
+import { resolveProviderAccess, type ProviderAccessState } from '@/features/providers/providerAccess';
+import { clearAssignmentRetryBackoff } from '@/features/device/deviceAssignmentReconcile';
+import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
 import { getOfflineSnapshot } from '@/features/resilience/offlineStatus';
 import { buildDiagnosticCode, getSanitizedDiagnostics } from '@/features/resilience/sanitizedDiagnostics';
 import { useAppTheme } from '@/theme/AppThemeProvider';
+import { novaTheme } from '@/theme';
 
 import {
   useAppSettingsStore,
@@ -64,7 +70,20 @@ export function SettingsScreen() {
     selectedProviderLabel,
     selectedProviderExpiration,
     providerInitialized,
+    isSwitchingProvider,
+    providerSwitchError,
+    ready: providerStoreReady,
+    bundleGeneration,
   } = useProviderStore();
+  const providerHealth = useNovaPulseProviderHealth(selectedProvider?.id ?? '', bundleGeneration);
+  const providerAccess = resolveProviderAccess({
+    ready: providerStoreReady,
+    provider: selectedProvider,
+    providerHealth,
+    providerInitialized,
+    isSwitchingProvider,
+    providerSwitchError,
+  });
   const accessExpiration = useAccessExpirationDisplay({
     provider: selectedProvider,
     account: selectedProvider?.account ?? null,
@@ -255,6 +274,10 @@ export function SettingsScreen() {
     };
   }, [clearScope]);
 
+  if (providerAccess.state !== 'allowed') {
+    return <RestrictedSettingsSurface state={providerAccess.state} />;
+  }
+
   return (
     <NovaTvShell
       activeId="settings"
@@ -318,6 +341,96 @@ export function SettingsScreen() {
     </NovaTvShell>
   );
 }
+
+function RestrictedSettingsSurface({ state }: { state: ProviderAccessState }) {
+  const router = useRouter();
+  const [retrying, setRetrying] = useState(false);
+  const [focusTargets, setFocusTargets] = useState({ portal: null as number | null, pair: null as number | null, retry: null as number | null });
+  const portalRef = useRef<View | null>(null);
+  const pairRef = useRef<View | null>(null);
+  const retryRef = useRef<View | null>(null);
+  const retryAvailable = state !== 'no_provider';
+
+  useEffect(() => {
+    setFocusTargets({
+      portal: findNodeHandle(portalRef.current),
+      pair: findNodeHandle(pairRef.current),
+      retry: retryAvailable ? findNodeHandle(retryRef.current) : null,
+    });
+  }, [retryAvailable]);
+
+  const retry = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    clearAssignmentRetryBackoff();
+    try {
+      await retryProviderInitialization();
+    } catch {
+      // The provider access gate will continue to expose the restricted state.
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  if (retrying) {
+    return <View style={restrictedStyles.screen}><NovaSpaceLoader label="Checking your provider…" /></View>;
+  }
+
+  return (
+    <NovaScreen padded={false} contentStyle={restrictedStyles.screenFrame}>
+      <View style={restrictedStyles.screen}>
+        <View style={restrictedStyles.card}>
+          <Text style={restrictedStyles.badge}>LIMITED SETTINGS</Text>
+          <Text style={restrictedStyles.title}>Provider access required</Text>
+          <Text style={restrictedStyles.message}>
+            Settings is available for recovery, but Home, Movies, Series, Live, Guide, and Search remain locked until provider access is confirmed.
+          </Text>
+          <View style={restrictedStyles.actions}>
+            <NovaButton
+              label="Provider Portal"
+              nativeRef={portalRef}
+              hasTVPreferredFocus
+              nextFocusDown={focusTargets.pair ?? undefined}
+              onFocus={() => logOverlayFocus('restricted-settings', 'provider-portal', 'focus-received')}
+              onPress={() => { logOverlayFocus('restricted-settings', 'provider-portal', 'press'); router.replace('/'); }}
+              style={restrictedStyles.action}
+            />
+            <NovaButton
+              label="Pair Provider"
+              nativeRef={pairRef}
+              nextFocusUp={focusTargets.portal ?? undefined}
+              nextFocusDown={(retryAvailable ? focusTargets.retry : focusTargets.portal) ?? undefined}
+              onFocus={() => logOverlayFocus('restricted-settings', 'pair-provider', 'focus-received')}
+              onPress={() => { logOverlayFocus('restricted-settings', 'pair-provider', 'press'); router.replace('/pair'); }}
+              style={restrictedStyles.action}
+            />
+            {retryAvailable ? (
+              <NovaButton
+                label="Retry Provider"
+                nativeRef={retryRef}
+                nextFocusUp={focusTargets.pair ?? undefined}
+                onFocus={() => logOverlayFocus('restricted-settings', 'retry-provider', 'focus-received')}
+                onPress={() => { logOverlayFocus('restricted-settings', 'retry-provider', 'press'); void retry(); }}
+                style={restrictedStyles.action}
+              />
+            ) : null}
+          </View>
+        </View>
+      </View>
+    </NovaScreen>
+  );
+}
+
+const restrictedStyles = StyleSheet.create({
+  screenFrame: { flex: 1 },
+  screen: { flex: 1, backgroundColor: novaTheme.colors.background, alignItems: 'center', justifyContent: 'center', padding: 48 },
+  card: { width: '72%', maxWidth: 1100, padding: 48, borderRadius: NOVA_GLASS.radius.base, backgroundColor: 'rgba(7,9,22,0.82)', borderWidth: 1, borderColor: NOVA_GLASS.focused.borderColor },
+  badge: { color: NOVA_GLASS.text.secondary, fontSize: 18, fontWeight: '800', letterSpacing: 2 },
+  title: { color: NOVA_GLASS.text.primary, fontSize: 42, fontWeight: '800', marginTop: 18 },
+  message: { color: NOVA_GLASS.text.secondary, fontSize: 24, lineHeight: 34, marginTop: 16 },
+  actions: { flexDirection: 'row', gap: 18, marginTop: 34 },
+  action: { minWidth: 190, minHeight: 60, paddingHorizontal: 24, paddingVertical: 18, borderRadius: NOVA_GLASS.radius.base, backgroundColor: NOVA_GLASS.active.backgroundColor, borderColor: NOVA_GLASS.active.borderColor },
+});
 
 function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {
   return StyleSheet.create({

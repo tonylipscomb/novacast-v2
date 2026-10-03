@@ -7,6 +7,7 @@ import {
   BackHandler,
   Image,
   ImageBackground,
+  findNodeHandle,
   Modal,
   Platform,
   Pressable,
@@ -20,6 +21,7 @@ import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/nova
 import { markOnboardingGuideSeen, useOnboardingStore } from '@/features/onboarding/onboardingStore';
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
+import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
 import { ExitConfirmOverlay } from '@/features/navigation/ExitConfirmOverlay';
 import { PairingScreen } from '@/features/pairing/PairingScreen';
 import { factoryResetNovacast, resetPairingKeepDevice } from '@/features/pairing/resetPairing';
@@ -133,24 +135,39 @@ function PortalMenuItem({
   scale,
   preferred,
   onPress,
+  controlId,
+  nextFocusUp,
+  nextFocusDown,
+  focusRef,
 }: {
   item: (typeof MENU_ITEMS)[number];
   index: number;
   scale: number;
   preferred: boolean;
   onPress: () => void;
+  controlId: string;
+  nextFocusUp?: number;
+  nextFocusDown?: number;
+  focusRef?: RefObject<View | null>;
 }) {
   const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (preferred) logOverlayFocus('portal', controlId, 'preferred-focus');
+  }, [controlId, preferred]);
   return (
     <Pressable
+      ref={focusRef}
       accessible
       accessibilityRole="button"
       accessibilityLabel={`${item.title}. ${item.subtitle}`}
       focusable
       hasTVPreferredFocus={preferred}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      onPress={onPress}
+      onFocus={() => { setFocused(true); logOverlayFocus('portal', controlId, 'focus-received'); }}
+      onBlur={() => { setFocused(false); logOverlayFocus('portal', controlId, 'focus-lost'); }}
+      onPress={() => { logOverlayFocus('portal', controlId, 'press'); onPress(); }}
+      {...(nextFocusUp != null ? { nextFocusUp } : null)}
+      {...(nextFocusDown != null ? { nextFocusDown } : null)}
       style={[styles.menuItem, { height: 112 * scale }, focused && styles.menuItemFocused]}>
       <MaterialCommunityIcons name={item.icon} size={46 * scale} color={focused ? novaTheme.colors.accentHover : '#7DD3FC'} />
       <View style={styles.menuCopy}>
@@ -172,9 +189,9 @@ function PortalPanelCloseButton({ onPress, focusRef }: { onPress: () => void; fo
       accessibilityRole="button"
       accessibilityLabel="Close panel"
       focusable
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      onPress={onPress}
+      onFocus={() => { setFocused(true); logOverlayFocus('provider-overlay', 'close', 'focus-received'); }}
+      onBlur={() => { setFocused(false); logOverlayFocus('provider-overlay', 'close', 'focus-lost'); }}
+      onPress={() => { logOverlayFocus('provider-overlay', 'close', 'press'); onPress(); }}
       {...(Platform.isTV ? ({ onClick: onPress } as object) : null)}
       style={[styles.panelCloseButton, novaTvFocus.base, focused && novaTvFocus.active]}>
       <MaterialCommunityIcons name="close" size={25} color={focused ? novaTheme.colors.accentHover : novaTheme.colors.textPrimary} />
@@ -188,14 +205,24 @@ function PortalSwitchProviderRow({
   preferredFocus,
   focusRef,
   onPress,
+  nextFocusUp,
+  nextFocusDown,
+  disabled,
 }: {
   provider: ProviderRecord;
   selected: boolean;
   preferredFocus: boolean;
   focusRef?: RefObject<View | null>;
   onPress: () => void;
+  nextFocusUp?: number;
+  nextFocusDown?: number;
+  disabled?: boolean;
 }) {
   const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (preferredFocus) logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'preferred-focus');
+  }, [preferredFocus, provider.id]);
 
   return (
     <Pressable
@@ -204,10 +231,14 @@ function PortalSwitchProviderRow({
       accessibilityRole="button"
       accessibilityLabel={`Use ${provider.name}`}
       focusable
+      disabled={disabled}
+      accessibilityState={{ disabled: Boolean(disabled), selected }}
       hasTVPreferredFocus={preferredFocus && Platform.isTV}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      onPress={onPress}
+      onFocus={() => { setFocused(true); logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'focus-received'); }}
+      onBlur={() => { setFocused(false); logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'focus-lost'); }}
+      onPress={() => { logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'press'); onPress(); }}
+      {...(nextFocusUp != null ? { nextFocusUp } : null)}
+      {...(nextFocusDown != null ? { nextFocusDown } : null)}
       {...(Platform.isTV ? ({ onClick: onPress } as object) : null)}
       style={[styles.providerRow, novaTvFocus.base, focused && styles.providerRowFocused]}>
       <View style={styles.providerRowCopy}>
@@ -516,8 +547,13 @@ export function NovaPortalScreen() {
   const providerCardRef = useRef<View | null>(null);
   const panelFirstFocusRef = useRef<View | null>(null);
   const panelCloseRef = useRef<View | null>(null);
+  const menuItemRefs = useRef<Record<string, RefObject<View | null>>>({});
+  const panelProviderRefs = useRef<Record<string, RefObject<View | null>>>({});
+  const [menuFocusTargets, setMenuFocusTargets] = useState<Record<string, number | null>>({});
+  const [panelFocusTargets, setPanelFocusTargets] = useState<Record<string, number | null>>({});
   const initRetryRef = useRef(false);
   const portalBlocked = panel !== null || pairingVisible;
+  const menuItems = useMemo(() => portalMenuItems(), []);
 
   const reactNative = ReactNative as typeof ReactNative & {
     TVFocusGuideView?: typeof View;
@@ -539,12 +575,25 @@ export function NovaPortalScreen() {
     }
 
     const focusTarget =
-      panel === 'diagnostics' || providers.length === 0 ? panelCloseRef.current : panelFirstFocusRef.current;
+      panel === 'diagnostics' || !providers.some((provider) => provider.status !== 'expired' && provider.status !== 'offline')
+        ? panelCloseRef.current
+        : panelFirstFocusRef.current;
 
     focusNativeViewWhenReady(() => focusTarget, () => {
       focusTarget?.focus();
     });
-  }, [panel, providers.length]);
+  }, [panel, providers]);
+
+  useEffect(() => {
+    setMenuFocusTargets(Object.fromEntries(menuItems.map((item) => [item.id, findNodeHandle(menuItemRefs.current[item.id]?.current ?? null)] )));
+  }, [menuItems]);
+
+  useEffect(() => {
+    setPanelFocusTargets(Object.fromEntries([
+      ['__close', findNodeHandle(panelCloseRef.current)],
+      ...providers.map((provider) => [provider.id, findNodeHandle(panelProviderRefs.current[provider.id]?.current ?? null)]),
+    ]));
+  }, [panel, providers]);
 
   const state = useMemo(() => {
     if (!ready || isSwitchingProvider) return 'checking' as const;
@@ -554,6 +603,7 @@ export function NovaPortalScreen() {
     if (!providerInitialized) return 'loading' as const;
     return 'connected' as const;
   }, [hasSavedProvider, isSwitchingProvider, providerInitialized, providerSwitchError, ready, selectedProvider]);
+  const firstSelectableProviderIndex = providers.findIndex((provider) => provider.status !== 'expired' && provider.status !== 'offline');
 
   const providerAccess = resolveProviderAccess({
     ready,
@@ -747,13 +797,17 @@ export function NovaPortalScreen() {
         <View style={[styles.rightColumn, { width: '52%' }]}>
           <Text style={[styles.portalLabel, { fontSize: 23 * scale }]}>PORTAL</Text>
           <View style={styles.menuList}>
-            {portalMenuItems().map((item, index) => (
+            {menuItems.map((item, index) => (
               <PortalMenuItem
                 key={item.id}
                 item={item}
                 index={index}
                 scale={scale}
                 preferred={!canEnterApp && index === 0}
+                controlId={item.id}
+                nextFocusUp={index > 0 ? menuFocusTargets[menuItems[index - 1].id] ?? undefined : undefined}
+                nextFocusDown={index < menuItems.length - 1 ? menuFocusTargets[menuItems[index + 1].id] ?? undefined : undefined}
+                focusRef={(menuItemRefs.current[item.id] ??= { current: null })}
                 onPress={() => menuAction(item.id)}
               />
             ))}
@@ -806,7 +860,7 @@ export function NovaPortalScreen() {
                   {panel === 'switch' ? 'Switch Provider' : panel === 'manage' ? 'Manage Providers' : 'Diagnostics'}
                 </Text>
                 <PortalPanelCloseButton
-                  focusRef={panel === 'diagnostics' || providers.length === 0 ? panelCloseRef : undefined}
+                  focusRef={panelCloseRef}
                   onPress={() => setPanel(null)}
                 />
               </View>
@@ -818,8 +872,11 @@ export function NovaPortalScreen() {
                       key={provider.id}
                       provider={provider}
                       selected={provider.id === selectedProvider?.id}
-                      preferredFocus={index === 0}
-                      focusRef={index === 0 ? panelFirstFocusRef : undefined}
+                      preferredFocus={index === firstSelectableProviderIndex}
+                      focusRef={index === firstSelectableProviderIndex ? panelFirstFocusRef : (panelProviderRefs.current[provider.id] ??= { current: null })}
+                      nextFocusUp={index > 0 ? panelFocusTargets[providers[index - 1].id] ?? undefined : undefined}
+                      nextFocusDown={index < providers.length - 1 ? panelFocusTargets[providers[index + 1].id] ?? undefined : panelFocusTargets.__close ?? undefined}
+                      disabled={provider.status === 'expired' || provider.status === 'offline'}
                       onPress={() => void selectAndContinue(provider.id)}
                     />
                   ))}

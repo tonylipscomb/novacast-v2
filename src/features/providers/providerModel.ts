@@ -310,6 +310,28 @@ export function isXtreamProvider(provider: ProviderRecord | null | undefined) {
   return provider?.connection?.type === 'xtream';
 }
 
+/** A durable bundle is not proof that its cached provider is still usable. */
+export function isCachedProviderUsable(
+  provider: ProviderRecord | null | undefined,
+  activeBundleProviderId: string | null | undefined,
+  runtimeError?: string | null,
+) {
+  if (!provider || !isXtreamProvider(provider) || !activeBundleProviderId || provider.id !== activeBundleProviderId || runtimeError) {
+    return false;
+  }
+  if (provider.status === 'expired' || provider.status === 'offline') {
+    return false;
+  }
+  const accountStatus = provider.account?.status?.trim().toLowerCase();
+  if (accountStatus && ['expired', 'disabled', 'banned', 'offline'].includes(accountStatus)) {
+    return false;
+  }
+  if (typeof provider.expirationAt === 'number' && provider.expirationAt > 0 && provider.expirationAt <= Date.now()) {
+    return false;
+  }
+  return true;
+}
+
 export function deriveProviderStatus(account: ProviderAccountMetadata | null | undefined): ProviderStatus {
   const expiresAt = account?.expiresAt;
   if (typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= Date.now()) {

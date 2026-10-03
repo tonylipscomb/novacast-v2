@@ -107,7 +107,15 @@ function createRemotePairingService(): PairingService | null {
   const { apiUrl, anonKey } = config;
 
   async function request(path: string, body: Record<string, unknown>) {
-    logPairingReleaseDiagnostic('request-start', { apiConfigured: true, anonKeyConfigured: true });
+    const authHeaders = await deviceAuthHeaders();
+    logPairingReleaseDiagnostic('request-start', {
+      apiConfigured: true,
+      anonKeyConfigured: true,
+      deviceIdentityFieldsPresent: Boolean(body.installationId),
+      activationDeviceAuthHeadersPresent: Boolean(
+        authHeaders['x-novacast-device-id'] && authHeaders['x-novacast-device-secret'],
+      ),
+    });
     let response: Response;
     try {
       response = await fetch(`${apiUrl}/${path}`, {
@@ -116,7 +124,7 @@ function createRemotePairingService(): PairingService | null {
           apikey: anonKey,
           Authorization: `Bearer ${anonKey}`,
           'Content-Type': 'application/json',
-          ...(await deviceAuthHeaders()),
+          ...authHeaders,
         },
         body: JSON.stringify(body),
       });
@@ -127,7 +135,7 @@ function createRemotePairingService(): PairingService | null {
     }
 
     const httpCategory = classifyPairingHttpStatus(response.status);
-    logPairingReleaseDiagnostic('request-complete', { httpCategory });
+    logPairingReleaseDiagnostic('request-complete', { httpCategory, statusCode: response.status });
 
     let payload: PairingApiResponse = {};
     try {
@@ -139,7 +147,13 @@ function createRemotePairingService(): PairingService | null {
 
     if (!response.ok) {
       const error = toPairingError(payload, 'pairing_request_failed');
-      logPairingReleaseDiagnostic('request-failed', { httpCategory, responseSchemaValid: true, failureCategory: error.message });
+      logPairingReleaseDiagnostic('request-failed', {
+        httpCategory,
+        statusCode: response.status,
+        responseSchemaValid: true,
+        failureCategory: error.message,
+        serverErrorCode: typeof payload.errorCategory === 'string' ? payload.errorCategory : typeof payload.error === 'string' ? payload.error : null,
+      });
       throw error;
     }
 

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import * as ReactNative from 'react-native';
 import {
   Animated,
   BackHandler,
   ImageBackground,
+  findNodeHandle,
   Platform,
   Pressable,
   ScrollView,
@@ -17,6 +18,7 @@ import { useRouter } from 'expo-router';
 import { NovaLogo } from '@/components/nova/NovaLogo';
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
+import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
 import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/navigation/tvNavigation';
 import { useAppNotification } from '@/features/notifications/useAppNotification';
 import { markOnboardingGuideSeen } from '@/features/onboarding/onboardingStore';
@@ -113,6 +115,8 @@ export function ContentHubOverlayScreen() {
   const { providers, selectedProvider, providerSwitchError, isSwitchingProvider } = useProviderStore();
   const { showNotification, dismissNotification, clearScope } = useAppNotification();
   const [focusedId, setFocusedId] = useState<string | null>(null);
+  const providerRefs = useRef<Record<string, RefObject<View | null>>>({});
+  const [providerFocusTargets, setProviderFocusTargets] = useState<Record<string, number | null>>({});
   const [retryProviderId, setRetryProviderId] = useState<string | null>(null);
   const [enterAnim] = useState(() => new Animated.Value(0));
 
@@ -152,6 +156,12 @@ export function ContentHubOverlayScreen() {
 
     return () => subscription.remove();
   }, [router]);
+
+  useEffect(() => {
+    setProviderFocusTargets(Object.fromEntries(
+      providers.map((provider) => [provider.id, findNodeHandle(providerRefs.current[provider.id]?.current ?? null)]),
+    ));
+  }, [providers]);
 
   const goHome = async () => {
     if (!tryAcquireTvNavigationGate(navigationGateRef.current)) {
@@ -292,9 +302,9 @@ export function ContentHubOverlayScreen() {
           ]}>
         <Pressable
           focusable
-          onFocus={() => setFocusedId('close-x')}
-          onBlur={() => setFocusedId((current) => (current === 'close-x' ? null : current))}
-          onPress={goHome}
+          onFocus={() => { setFocusedId('close-x'); logOverlayFocus('provider-overlay', 'close-x', 'focus-received'); }}
+          onBlur={() => { setFocusedId((current) => (current === 'close-x' ? null : current)); logOverlayFocus('provider-overlay', 'close-x', 'focus-lost'); }}
+          onPress={() => { logOverlayFocus('provider-overlay', 'close-x', 'press'); goHome(); }}
           style={[styles.closeX, novaTvFocus.base, focusedId === 'close-x' && novaTvFocus.active]}>
           <MaterialCommunityIcons name="close" size={22} color={novaTheme.colors.textPrimary} />
         </Pressable>
@@ -319,14 +329,18 @@ export function ContentHubOverlayScreen() {
                 return (
                   <Pressable
                     key={provider.id}
+                    ref={(providerRefs.current[provider.id] ??= { current: null })}
                     focusable
                     hasTVPreferredFocus={selectedIndex < 0 ? index === 0 : selected}
-                    onFocus={() => setFocusedId(provider.id)}
-                    onBlur={() => setFocusedId((current) => (current === provider.id ? null : current))}
-                    disabled={provider.status === 'expired'}
-                    accessibilityState={{ disabled: provider.status === 'expired', selected }}
+                    onFocus={() => { setFocusedId(provider.id); logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'focus-received'); }}
+                    onBlur={() => { setFocusedId((current) => (current === provider.id ? null : current)); logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'focus-lost'); }}
+                    disabled={provider.status === 'expired' || provider.status === 'offline'}
+                    accessibilityState={{ disabled: provider.status === 'expired' || provider.status === 'offline', selected }}
+                    {...(index > 0 ? { nextFocusUp: providerFocusTargets[providers[index - 1].id] ?? undefined } : null)}
+                    {...(index < providers.length - 1 ? { nextFocusDown: providerFocusTargets[providers[index + 1].id] ?? undefined } : null)}
                     onPress={() => {
-                      if (provider.status === 'expired') return;
+                      logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'press');
+                      if (provider.status === 'expired' || provider.status === 'offline') return;
                       void activateProvider(provider.id);
                     }}
                     style={[

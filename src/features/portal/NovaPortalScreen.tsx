@@ -18,6 +18,7 @@ import {
 } from 'react-native';
 
 import { novaTvFocus, createNovaTvFocusTextStyles } from '@/components/nova/novaTvFocus';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { markOnboardingGuideSeen, useOnboardingStore } from '@/features/onboarding/onboardingStore';
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
@@ -48,13 +49,13 @@ type PortalPanel = 'switch' | 'manage' | 'diagnostics' | null;
 type PortalIcon = keyof typeof MaterialCommunityIcons.glyphMap;
 
 const GLASS = {
-  fill: 'rgba(8, 18, 38, 0.42)',
-  fillStrong: 'rgba(10, 22, 48, 0.58)',
-  fillFocus: 'rgba(18, 36, 72, 0.62)',
-  border: 'rgba(255, 255, 255, 0.16)',
-  borderBright: 'rgba(120, 196, 255, 0.42)',
-  borderFocus: 'rgba(131, 180, 255, 0.72)',
-  accentFill: 'rgba(59, 130, 246, 0.18)',
+  fill: 'rgba(8, 18, 38, 0.68)',
+  fillStrong: 'rgba(7, 13, 30, 0.94)',
+  fillFocus: 'rgba(28, 42, 86, 0.86)',
+  border: 'rgba(255, 255, 255, 0.14)',
+  borderBright: 'rgba(120, 196, 255, 0.48)',
+  borderFocus: 'rgba(165, 195, 255, 0.88)',
+  accentFill: 'rgba(59, 130, 246, 0.22)',
 } as const;
 
 const backgroundAsset = require('@/assets/images/pairingbackground.png');
@@ -953,7 +954,7 @@ const styles = StyleSheet.create({
   portalRoot: { flex: 1 },
   overlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0, 3, 12, 0.18)' },
   content: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  leftColumn: { justifyContent: 'center', gap: 12 },
+  leftColumn: { justifyContent: 'center', gap: 10 },
   rightColumn: { justifyContent: 'center' },
   logo: { alignSelf: 'flex-start', marginBottom: -4 },
   welcome: { color: '#F5F8FF', fontWeight: '700', letterSpacing: -1.2 },
@@ -971,17 +972,15 @@ const styles = StyleSheet.create({
   activationQrCard: { minWidth: 320, minHeight: 360, padding: 28, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(4,13,31,.9)', borderWidth: 1, borderColor: '#3D7FDC' },
   qrHint: { color: '#AAB6CC', fontSize: 16, marginTop: 18 },
   providerCard: {
-    paddingHorizontal: 38,
-    paddingVertical: 30,
-    borderRadius: 18,
+    paddingHorizontal: 30,
+    paddingVertical: 24,
+    borderRadius: NOVA_GLASS.radius.base,
     backgroundColor: GLASS.fill,
     borderWidth: 1,
     borderColor: GLASS.borderBright,
     justifyContent: 'space-between',
   },
-  providerCardStatic: {
-    borderRadius: 20,
-  },
+  providerCardStatic: { borderRadius: NOVA_GLASS.radius.base },
   providerCardLaunch: {
     overflow: 'hidden',
   },
@@ -996,7 +995,7 @@ const styles = StyleSheet.create({
   connected: { backgroundColor: '#20E878' },
   notConnected: { backgroundColor: '#18D7FF' },
   statusText: { color: '#F5F8FF', fontWeight: '600' },
-  providerMain: { flexDirection: 'row', alignItems: 'center', gap: 28 },
+  providerMain: { flexDirection: 'row', alignItems: 'center', gap: 20 },
   tvIcon: {
     borderWidth: 1,
     borderColor: GLASS.borderBright,
@@ -1007,7 +1006,7 @@ const styles = StyleSheet.create({
   providerCopy: { flex: 1, minWidth: 0 },
   providerName: { color: '#F5F8FF', fontWeight: '700' },
   expiration: { color: '#AAB6CC', marginTop: 6 },
-  cardDivider: { height: 1, backgroundColor: 'rgba(126, 157, 207, 0.3)' },
+  cardDivider: { height: 1, backgroundColor: 'rgba(126, 157, 207, 0.24)' },
   counts: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around' },
   countGroup: { flex: 1, flexDirection: 'row', justifyContent: 'center' },
   countCopy: { alignItems: 'center', minWidth: 92 },
@@ -1016,14 +1015,14 @@ const styles = StyleSheet.create({
   countDivider: { width: 1, backgroundColor: 'rgba(126, 157, 207, 0.35)', marginRight: 18 },
   emptyCounts: { color: '#AAB6CC', textAlign: 'center', fontSize: 16 },
   error: { color: '#FF9CA7', fontSize: 14 },
-  portalLabel: { color: '#00AEEF', fontWeight: '700', letterSpacing: 6, marginBottom: 24 },
-  menuList: { gap: 12 },
+  portalLabel: { color: '#7DD3FC', fontWeight: '800', letterSpacing: 5, marginBottom: 16 },
+  menuList: { gap: 9 },
   menuItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 34,
-    gap: 26,
-    borderRadius: 18,
+    paddingHorizontal: 24,
+    gap: 18,
+    borderRadius: NOVA_GLASS.radius.base,
     backgroundColor: GLASS.fill,
     borderWidth: 1,
     borderColor: GLASS.border,
@@ -1046,14 +1045,14 @@ const styles = StyleSheet.create({
   modalRoot: { flex: 1, backgroundColor: '#020611' },
   closeButton: { position: 'absolute', top: 22, right: 28, padding: 10, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(17,21,28,0.92)' },
   closeLabel: { color: '#F5F8FF', fontWeight: '700' },
-  panelBackdrop: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 48 },
-  panelScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(7, 9, 13, 0.88)' },
+  panelBackdrop: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 36 },
+  panelScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(2, 4, 12, 0.92)' },
   panelFocusGuide: { flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center' },
   panel: {
     width: '100%',
-    maxWidth: 760,
-    padding: 26,
-    borderRadius: 18,
+    maxWidth: 720,
+    padding: 22,
+    borderRadius: NOVA_GLASS.radius.base,
     backgroundColor: GLASS.fillStrong,
     borderWidth: 1,
     borderColor: GLASS.borderBright,
@@ -1062,7 +1061,7 @@ const styles = StyleSheet.create({
     shadowRadius: 24,
     elevation: 12,
   },
-  panelHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 14, gap: 12 },
+  panelHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, gap: 10 },
   panelCloseButton: {
     width: 44,
     height: 44,
@@ -1076,30 +1075,30 @@ const styles = StyleSheet.create({
   panelTitle: { flex: 1, color: '#F5F8FF', fontSize: 25, fontWeight: '800' },
   panelHint: { color: '#AAB6CC', fontSize: 16, lineHeight: 23, marginBottom: 14 },
   providerRow: {
-    minHeight: 76,
-    padding: 16,
-    borderRadius: 12,
+    minHeight: 64,
+    padding: 13,
+    borderRadius: NOVA_GLASS.radius.subtle,
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
     borderColor: GLASS.border,
     backgroundColor: GLASS.fill,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   providerRowFocused: {
     borderColor: GLASS.borderFocus,
     backgroundColor: GLASS.fillFocus,
   },
   manageRow: {
-    minHeight: 76,
-    padding: 16,
-    borderRadius: 12,
+    minHeight: 64,
+    padding: 13,
+    borderRadius: NOVA_GLASS.radius.subtle,
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
     borderColor: GLASS.border,
     backgroundColor: GLASS.fill,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   providerRowCopy: { flex: 1, gap: 5 },
   providerRowName: { color: '#F5F8FF', fontSize: 18, fontWeight: '800' },

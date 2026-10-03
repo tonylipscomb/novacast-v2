@@ -22,6 +22,8 @@ assert.match(pairing, /label=\{!isAvailable \? 'Retry Pairing' : codeExpired \? 
 assert.match(pairing, /label="Retry Same Code"/);
 assert.match(pairing, /label="Close"/);
 assert.match(pairing, /qrCard/);
+assert.match(pairing, /Pairing unavailable/);
+assert.match(pairing, /Generate a new code to retry/);
 
 assert.match(hub, /TVFocusGuideView/);
 assert.match(hub, /trapFocusLeft/);
@@ -30,6 +32,9 @@ assert.match(hub, /trapFocusUp/);
 assert.match(hub, /trapFocusDown/);
 assert.match(hub, /providerCardDisabled/);
 assert.match(hub, /accessibilityState=\{\{ disabled:/);
+assert.match(hub, /NOVA_GLASS\.activeFocused/);
+
+assert.match(read('src/features/settings/SettingsScreen.tsx'), /PROVIDER RECOVERY/);
 
 assert.match(diagnostics, /NovaCast Pairing Diagnostics/);
 assert.match(diagnostics, /network_error/);

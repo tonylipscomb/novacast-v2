@@ -16,6 +16,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 
 import { NovaLogo } from '@/components/nova/NovaLogo';
+import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { novaTvFocus } from '@/components/nova/novaTvFocus';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
@@ -518,7 +519,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 20,
-    backgroundColor: 'rgba(3,6,12,0.55)',
+    backgroundColor: 'rgba(3,6,12,0.70)',
   },
   backdropLayer: {
     ...StyleSheet.absoluteFill,
@@ -529,18 +530,18 @@ const styles = StyleSheet.create({
   },
   backgroundShade: {
     ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(2,4,8,0.62)',
+    backgroundColor: 'rgba(2,4,8,0.74)',
   },
   card: {
     width: '100%',
-    maxWidth: 760,
+    maxWidth: 720,
     maxHeight: '94%',
-    borderRadius: 30,
+    borderRadius: NOVA_GLASS.radius.base,
     borderWidth: 1,
     borderColor: 'rgba(139,152,255,0.30)',
-    backgroundColor: 'rgba(10,14,22,0.88)',
-    paddingHorizontal: 26,
-    paddingVertical: 22,
+    backgroundColor: 'rgba(7,13,30,0.94)',
+    paddingHorizontal: 22,
+    paddingVertical: 18,
     shadowColor: '#000',
     shadowOpacity: 0.55,
     shadowRadius: 32,
@@ -561,7 +562,7 @@ const styles = StyleSheet.create({
     zIndex: 10,
     width: 40,
     height: 40,
-    borderRadius: 0,
+    borderRadius: NOVA_GLASS.radius.subtle,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: 'rgba(30,38,54,0.9)',
@@ -608,13 +609,13 @@ const styles = StyleSheet.create({
     borderRadius: 0,
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: 'rgba(18,24,36,0.78)',
-    padding: 14,
+    backgroundColor: 'rgba(18,24,36,0.88)',
+    padding: 12,
     gap: 10,
   },
   providerCardSelected: {
-    borderColor: 'rgba(96,165,255,0.9)',
-    backgroundColor: 'rgba(28,45,73,0.7)',
+    borderColor: NOVA_GLASS.activeFocused.borderColor,
+    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
   },
   providerCardDisabled: {
     opacity: 0.5,

@@ -470,6 +470,7 @@ export function PairingScreen({
                   <View style={[styles.qrUnavailable, { width: layout.qrCardSize, height: layout.qrCardSize }]}>
                     <MaterialCommunityIcons name="qrcode-remove" size={36} color={novaTheme.colors.textMuted} />
                     <Text style={styles.unavailableText}>Pairing unavailable</Text>
+                    <Text style={styles.unavailableHint}>Generate a new code to retry</Text>
                   </View>
                 )}
 
@@ -661,18 +662,25 @@ const styles = StyleSheet.create({
     backgroundColor: NOVA_GLASS.focused.backgroundColor,
   },
   qrUnavailable: {
-    borderRadius: 14,
+    borderRadius: NOVA_GLASS.radius.base,
     borderWidth: 1,
     borderColor: NOVA_GLASS.focused.borderColor,
-    backgroundColor: NOVA_GLASS.focused.backgroundColor,
+    backgroundColor: 'rgba(8, 14, 30, 0.86)',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
+    padding: 24,
   },
   unavailableText: {
-    color: novaTheme.colors.textMuted,
-    fontSize: 14,
+    color: novaTheme.colors.textSecondary,
+    fontSize: 16,
     fontWeight: '700',
+    textAlign: 'center',
+  },
+  unavailableHint: {
+    color: novaTheme.colors.textMuted,
+    fontSize: 13,
+    textAlign: 'center',
   },
   stepAccent: {
     color: novaTheme.colors.accentHover,

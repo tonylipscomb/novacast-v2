@@ -380,7 +380,7 @@ function RestrictedSettingsSurface({ state }: { state: ProviderAccessState }) {
     <NovaScreen padded={false} contentStyle={restrictedStyles.screenFrame}>
       <View style={restrictedStyles.screen}>
         <View style={restrictedStyles.card}>
-          <Text style={restrictedStyles.badge}>LIMITED SETTINGS</Text>
+          <Text style={restrictedStyles.badge}>PROVIDER RECOVERY</Text>
           <Text style={restrictedStyles.title}>Provider access required</Text>
           <Text style={restrictedStyles.message}>
             Settings is available for recovery, but Home, Movies, Series, Live, Guide, and Search remain locked until provider access is confirmed.
@@ -423,13 +423,13 @@ function RestrictedSettingsSurface({ state }: { state: ProviderAccessState }) {
 
 const restrictedStyles = StyleSheet.create({
   screenFrame: { flex: 1 },
-  screen: { flex: 1, backgroundColor: novaTheme.colors.background, alignItems: 'center', justifyContent: 'center', padding: 48 },
-  card: { width: '72%', maxWidth: 1100, padding: 48, borderRadius: NOVA_GLASS.radius.base, backgroundColor: 'rgba(7,9,22,0.82)', borderWidth: 1, borderColor: NOVA_GLASS.focused.borderColor },
+  screen: { flex: 1, backgroundColor: novaTheme.colors.background, alignItems: 'center', justifyContent: 'center', padding: 36 },
+  card: { width: '64%', maxWidth: 900, padding: 36, borderRadius: NOVA_GLASS.radius.base, backgroundColor: 'rgba(7,9,22,0.92)', borderWidth: 1, borderColor: NOVA_GLASS.focused.borderColor },
   badge: { color: NOVA_GLASS.text.secondary, fontSize: 18, fontWeight: '800', letterSpacing: 2 },
-  title: { color: NOVA_GLASS.text.primary, fontSize: 42, fontWeight: '800', marginTop: 18 },
-  message: { color: NOVA_GLASS.text.secondary, fontSize: 24, lineHeight: 34, marginTop: 16 },
-  actions: { flexDirection: 'row', gap: 18, marginTop: 34 },
-  action: { minWidth: 190, minHeight: 60, paddingHorizontal: 24, paddingVertical: 18, borderRadius: NOVA_GLASS.radius.base, backgroundColor: NOVA_GLASS.active.backgroundColor, borderColor: NOVA_GLASS.active.borderColor },
+  title: { color: NOVA_GLASS.text.primary, fontSize: 36, fontWeight: '800', marginTop: 14 },
+  message: { color: NOVA_GLASS.text.secondary, fontSize: 20, lineHeight: 30, marginTop: 14 },
+  actions: { flexDirection: 'row', gap: 14, marginTop: 28 },
+  action: { minWidth: 170, minHeight: 54, paddingHorizontal: 20, paddingVertical: 14, borderRadius: NOVA_GLASS.radius.base, backgroundColor: NOVA_GLASS.subtle.backgroundColor, borderColor: NOVA_GLASS.subtle.borderColor },
 });
 
 function createStyles(theme: ReturnType<typeof useAppTheme>['theme']) {

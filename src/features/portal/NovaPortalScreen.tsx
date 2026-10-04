@@ -24,6 +24,7 @@ import { markOnboardingGuideSeen, useOnboardingStore } from '@/features/onboardi
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
 import { wrapOnnMoviesBackHandler } from '@/features/diagnostics/onnMoviesTrace';
 import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
+import { logPortalProviderFocus } from '@/features/portal/portalProviderFocusDiagnostics';
 import { ExitConfirmOverlay } from '@/features/navigation/ExitConfirmOverlay';
 import { PairingScreen } from '@/features/pairing/PairingScreen';
 import { factoryResetNovacast, resetPairingKeepDevice } from '@/features/pairing/resetPairing';
@@ -139,6 +140,8 @@ function PortalMenuItem({
   controlId,
   nextFocusUp,
   nextFocusDown,
+  nextFocusLeft,
+  nextFocusRight,
   focusRef,
 }: {
   item: (typeof MENU_ITEMS)[number];
@@ -149,6 +152,8 @@ function PortalMenuItem({
   controlId: string;
   nextFocusUp?: number;
   nextFocusDown?: number;
+  nextFocusLeft?: number;
+  nextFocusRight?: number;
   focusRef?: RefObject<View | null>;
 }) {
   const [focused, setFocused] = useState(false);
@@ -169,6 +174,8 @@ function PortalMenuItem({
       onPress={() => { logOverlayFocus('portal', controlId, 'press'); onPress(); }}
       {...(nextFocusUp != null ? { nextFocusUp } : null)}
       {...(nextFocusDown != null ? { nextFocusDown } : null)}
+      {...(nextFocusLeft != null ? { nextFocusLeft } : null)}
+      {...(nextFocusRight != null ? { nextFocusRight } : null)}
       style={[styles.menuItem, { height: 112 * scale }, focused && styles.menuItemFocused]}>
       <MaterialCommunityIcons name={item.icon} size={46 * scale} color={focused ? novaTheme.colors.accentHover : '#7DD3FC'} />
       <View style={styles.menuCopy}>
@@ -382,6 +389,8 @@ function ProviderCard({
   launchable,
   focusRef,
   preferredFocus,
+  nextFocusRight,
+  providerState,
   onLaunch,
 }: {
   scale: number;
@@ -391,6 +400,8 @@ function ProviderCard({
   launchable: boolean;
   focusRef?: RefObject<View | null>;
   preferredFocus: boolean;
+  nextFocusRight?: number;
+  providerState: string;
   onLaunch: () => void;
 }) {
   const [focused, setFocused] = useState(false);
@@ -469,10 +480,29 @@ function ProviderCard({
       accessibilityLabel={`Continue with ${safeProviderName(selectedProvider)}`}
       focusable
       hasTVPreferredFocus={preferredFocus && Platform.isTV}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      onPress={onLaunch}
+      onFocus={() => {
+        setFocused(true);
+        logOverlayFocus('portal', 'provider-card', 'focus-received');
+        logPortalProviderFocus('focus-received', {
+          providerState,
+          launchable: true,
+          nativeHandlePresent: Boolean(findNodeHandle(focusRef?.current ?? null)),
+          neighborHandlePresent: nextFocusRight != null,
+          reason: 'native-focus',
+        });
+      }}
+      onBlur={() => {
+        setFocused(false);
+        logOverlayFocus('portal', 'provider-card', 'focus-lost');
+        logPortalProviderFocus('focus-lost', { providerState, launchable: true, reason: 'native-blur' });
+      }}
+      onPress={() => {
+        logOverlayFocus('portal', 'provider-card', 'press');
+        logPortalProviderFocus('action-pressed', { providerState, launchable: true, reason: 'provider-card' });
+        onLaunch();
+      }}
       {...(Platform.isTV ? ({ onClick: onLaunch } as object) : null)}
+      {...(nextFocusRight != null ? { nextFocusRight } : null)}
       style={[
         styles.providerCard,
         styles.providerCardLaunch,
@@ -512,6 +542,8 @@ export function NovaPortalScreen() {
   const panelProviderRefs = useRef<Record<string, RefObject<View | null>>>({});
   const [menuFocusTargets, setMenuFocusTargets] = useState<Record<string, number | null>>({});
   const [panelFocusTargets, setPanelFocusTargets] = useState<Record<string, number | null>>({});
+  const [portalFocusTargets, setPortalFocusTargets] = useState<{ provider: number | null; firstMenu: number | null }>({ provider: null, firstMenu: null });
+  const providerFocusRequestKeyRef = useRef<string | null>(null);
   const initRetryRef = useRef(false);
   const portalBlocked = panel !== null || pairingVisible;
   const menuItems = useMemo(() => portalMenuItems(), []);
@@ -546,7 +578,26 @@ export function NovaPortalScreen() {
   }, [panel, providers]);
 
   useEffect(() => {
-    setMenuFocusTargets(Object.fromEntries(menuItems.map((item) => [item.id, findNodeHandle(menuItemRefs.current[item.id]?.current ?? null)] )));
+    let cancelled = false;
+    let frame: number | null = null;
+    let attempts = 0;
+    const refresh = () => {
+      if (cancelled) return;
+      const nextMenuTargets = Object.fromEntries(menuItems.map((item) => [item.id, findNodeHandle(menuItemRefs.current[item.id]?.current ?? null)]));
+      const nextProvider = findNodeHandle(providerCardRef.current);
+      const nextFirstMenu = findNodeHandle(menuItemRefs.current[menuItems[0]?.id ?? '']?.current ?? null);
+      setMenuFocusTargets(nextMenuTargets);
+      setPortalFocusTargets({ provider: nextProvider, firstMenu: nextFirstMenu });
+      if (attempts < 4 && (nextProvider == null || nextFirstMenu == null || Object.values(nextMenuTargets).some((handle) => handle == null))) {
+        attempts += 1;
+        frame = requestAnimationFrame(refresh);
+      }
+    };
+    refresh();
+    return () => {
+      cancelled = true;
+      if (frame != null) cancelAnimationFrame(frame);
+    };
   }, [menuItems]);
 
   useEffect(() => {
@@ -587,14 +638,73 @@ export function NovaPortalScreen() {
   }, []);
 
   useEffect(() => {
-    if (!canEnterApp || portalBlocked) {
+    if (portalBlocked) {
+      providerFocusRequestKeyRef.current = null;
+      return;
+    }
+    if (!canEnterApp) {
       return;
     }
 
+    const focusRequestKey = `${canEnterApp ? 'launchable' : 'blocked'}:${portalBlocked ? 'blocked' : 'open'}`;
+    if (providerFocusRequestKeyRef.current === focusRequestKey) {
+      return;
+    }
+    providerFocusRequestKeyRef.current = focusRequestKey;
+
+    const startedAt = Date.now();
+    logPortalProviderFocus('card-mounted', {
+      providerState: state,
+      launchable: true,
+      nativeHandlePresent: Boolean(findNodeHandle(providerCardRef.current)),
+      neighborHandlePresent: portalFocusTargets.firstMenu != null,
+      elapsedMs: 0,
+      reason: 'portal-mounted',
+    });
+    logPortalProviderFocus('focus-neighbor-ready', {
+      providerState: state,
+      launchable: true,
+      nativeHandlePresent: portalFocusTargets.provider != null,
+      neighborHandlePresent: portalFocusTargets.firstMenu != null,
+      elapsedMs: Date.now() - startedAt,
+      reason: 'explicit-right-target',
+    });
+    logPortalProviderFocus('focus-requested', {
+      providerState: state,
+      launchable: true,
+      nativeHandlePresent: portalFocusTargets.provider != null,
+      neighborHandlePresent: portalFocusTargets.firstMenu != null,
+      elapsedMs: Date.now() - startedAt,
+      reason: 'initial-actionable-target',
+    });
     focusNativeViewWhenReady(() => providerCardRef.current, () => {
       providerCardRef.current?.focus();
     });
-  }, [canEnterApp, portalBlocked]);
+  }, [canEnterApp, portalBlocked, portalFocusTargets.firstMenu, portalFocusTargets.provider, state]);
+
+  useEffect(() => {
+    if (!canEnterApp || portalBlocked || portalFocusTargets.provider == null || portalFocusTargets.firstMenu == null) {
+      return;
+    }
+    logPortalProviderFocus('focus-neighbor-ready', {
+      providerState: state,
+      launchable: true,
+      nativeHandlePresent: true,
+      neighborHandlePresent: true,
+      reason: 'native-handles-attached',
+    });
+  }, [canEnterApp, portalBlocked, portalFocusTargets.firstMenu, portalFocusTargets.provider, state]);
+
+  useEffect(() => {
+    if (!canEnterApp) return;
+    logPortalProviderFocus('state-changed', {
+      providerState: state,
+      launchable: true,
+      nativeHandlePresent: portalFocusTargets.provider != null,
+      neighborHandlePresent: portalFocusTargets.firstMenu != null,
+      reason: 'provider-state-update',
+    });
+  }, [canEnterApp, portalFocusTargets.firstMenu, portalFocusTargets.provider, state]);
 
   useEffect(() => {
     if (!ready || isSwitchingProvider || !hasSavedProvider || providerInitialized || initRetryRef.current) {
@@ -752,6 +862,8 @@ export function NovaPortalScreen() {
             launchable={canEnterApp}
             focusRef={providerCardRef}
             preferredFocus
+            nextFocusRight={portalFocusTargets.firstMenu ?? undefined}
+            providerState={state}
             onLaunch={launchAction}
           />
         </View>
@@ -769,6 +881,7 @@ export function NovaPortalScreen() {
                 controlId={item.id}
                 nextFocusUp={index > 0 ? menuFocusTargets[menuItems[index - 1].id] ?? undefined : undefined}
                 nextFocusDown={index < menuItems.length - 1 ? menuFocusTargets[menuItems[index + 1].id] ?? undefined : undefined}
+                nextFocusLeft={canEnterApp ? portalFocusTargets.provider ?? undefined : undefined}
                 focusRef={(menuItemRefs.current[item.id] ??= { current: null })}
                 onPress={() => menuAction(item.id)}
               />

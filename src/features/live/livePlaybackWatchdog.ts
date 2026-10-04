@@ -123,21 +123,35 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       }
       if (attempts >= LIVE_PLAYBACK_WATCHDOG_MAX_ATTEMPTS) {
         exhausted = true;
+        const elapsedSinceProgressMs = Math.max(0, Math.round(stalledForMs));
         emit('live_watchdog_exhausted', {
           attempts,
-          stallDurationMs: Math.max(0, Math.round(stalledForMs)),
+          elapsedSinceProgressMs,
+          stallDurationMs: elapsedSinceProgressMs,
+          playerGenerationId: context.playerGeneration,
+          channelId: context.channelId,
+          sourceIdentitySame: true,
+          reason: 'recovery-attempts-exhausted',
         });
         return;
       }
       const attempt = (attempts + 1) as 1 | 2;
       attempts = attempt;
       recoveryInFlight = true;
-      emit('live_watchdog_stall_detected', {
+      const recoveryFields = {
         attempt,
+        elapsedSinceProgressMs: Math.max(0, Math.round(stalledForMs)),
         stallDurationMs: Math.max(0, Math.round(stalledForMs)),
+        playerGenerationId: context.playerGeneration,
+        channelId: context.channelId,
+        sourceIdentitySame: true,
+      };
+      emit('live_watchdog_stall_detected', {
+        ...recoveryFields,
+        reason: 'no-playback-progress',
       });
       emit('live_watchdog_recovery_attempt', {
-        attempt,
+        ...recoveryFields,
         recoveryMethod: attempt === 1 ? 'same-channel-retry' : 'same-channel-rebind',
       });
       Promise.resolve(input.recover(attempt)).catch(() => {}).finally(() => {
@@ -145,7 +159,16 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
         recoveryInFlight = false;
         if (attempt >= LIVE_PLAYBACK_WATCHDOG_MAX_ATTEMPTS) {
           exhausted = true;
-          emit('live_watchdog_exhausted', { attempts: attempt, stallDurationMs: Math.max(0, Math.round(now() - (lastProgressAt ?? now()))) });
+          const elapsedSinceProgressMs = Math.max(0, Math.round(now() - (lastProgressAt ?? now())));
+          emit('live_watchdog_exhausted', {
+            attempts: attempt,
+            elapsedSinceProgressMs,
+            stallDurationMs: elapsedSinceProgressMs,
+            playerGenerationId: context.playerGeneration,
+            channelId: context.channelId,
+            sourceIdentitySame: true,
+            reason: 'recovery-attempts-exhausted',
+          });
           return;
         }
         arm();
@@ -172,6 +195,11 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
     if (recoveredAttempt > 0) {
       emit('live_watchdog_recovered', {
         attempt: recoveredAttempt,
+        elapsedSinceProgressMs: Math.max(0, Math.round(now() - (lastProgressAt ?? now()))),
+        playerGenerationId: context.playerGeneration,
+        channelId: context.channelId,
+        sourceIdentitySame: true,
+        reason: 'playback-progress-resumed',
         recoveryMethod: recoveredAttempt === 1 ? 'same-channel-retry' : 'same-channel-rebind',
         success: true,
       });

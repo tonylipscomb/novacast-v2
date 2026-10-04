@@ -42,6 +42,13 @@ function getPlayerGenerationId(player: VideoPlayer) {
   return next;
 }
 
+function getSourceIdentity(source: VideoSource) {
+  if (!source) return 'none';
+  if (typeof source === 'string') return `uri:${source}`;
+  if (typeof source === 'number') return `asset:${source}`;
+  return `uri:${source.uri}|contentType:${source.contentType ?? ''}`;
+}
+
 function nativeErrorText(error: unknown) {
   if (typeof error === 'string') {
     return error;
@@ -138,7 +145,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
     shouldAcceptAsyncCommit,
     bufferPolicy = 'live',
   } = options;
-  const lastUrlRef = useRef(streamUrl);
+  const lastSourceIdentityRef = useRef(getSourceIdentity(streamUrl));
   const lastPlayerRef = useRef<VideoPlayer | null>(null);
   const onErrorRef = useRef(onError);
   const onReadyRef = useRef(onReady);
@@ -147,7 +154,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
 
   useEffect(() => {
     logPlayerFocus('player-hook-mount', { sourcePresent: Boolean(streamUrl) });
-    return () => logPlayerFocus('player-hook-unmount', { sourcePresent: Boolean(lastUrlRef.current) });
+    return () => logPlayerFocus('player-hook-unmount', { sourcePresent: lastSourceIdentityRef.current !== 'none' });
   }, []);
 
   useEffect(() => {
@@ -164,7 +171,8 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
     void primeVodHeapLimit();
   }, [bufferPolicy]);
 
-  const stableSource = useMemo(() => streamUrl, [streamUrl]);
+  const sourceIdentity = getSourceIdentity(streamUrl);
+  const stableSource = useMemo(() => streamUrl, [sourceIdentity]);
   const player = useVideoPlayer(stableSource, (nextPlayer) => {
     logPlayerPerf('player-init', { sourcePresent: Boolean(streamUrl), bufferPolicy });
     if (bufferPolicyRef.current === 'vod') {
@@ -178,16 +186,16 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
 
   const playerGenerationId = getPlayerGenerationId(player);
 
-  const previousStreamUrlRef = useRef<VideoSource>(streamUrl);
+  const previousSourceIdentityRef = useRef(sourceIdentity);
   useEffect(() => {
-    if (previousStreamUrlRef.current !== streamUrl) {
+    if (previousSourceIdentityRef.current !== sourceIdentity) {
       logPlayerPerf('source-update-requested', {
         sourcePresent: Boolean(streamUrl),
         playerGenerationId,
       });
-      previousStreamUrlRef.current = streamUrl;
+      previousSourceIdentityRef.current = sourceIdentity;
     }
-  }, [playerGenerationId, streamUrl]);
+  }, [playerGenerationId, sourceIdentity, streamUrl]);
 
   const previousPlayerRef = useRef<VideoPlayer | null>(null);
   useEffect(() => {
@@ -260,7 +268,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
     if (bufferPolicy === 'vod' && status === 'error') {
       logVodPlayerMemory('playback-error', { playerGenerationId, errorCategory });
     }
-    if (status === 'error' && lastUrlRef.current) {
+    if (status === 'error' && lastSourceIdentityRef.current !== 'none') {
       onErrorRef.current?.(errorText.trim() || 'Unable to play this stream right now.');
     }
   });
@@ -278,13 +286,13 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
 
   useEffect(() => {
     if (!streamUrl) {
-      if (!lastUrlRef.current) {
+      if (lastSourceIdentityRef.current === 'none') {
         lastPlayerRef.current = player;
         return;
       }
 
       replaceRequestRef.current += 1;
-      lastUrlRef.current = null;
+      lastSourceIdentityRef.current = 'none';
       lastPlayerRef.current = player;
       if (bufferPolicy === 'vod') {
         logVodPlayerMemory('source-cleared', { playerGenerationId });
@@ -306,11 +314,11 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
     const playerChanged = lastPlayerRef.current !== player;
     lastPlayerRef.current = player;
 
-    if (lastUrlRef.current === streamUrl) {
+    if (lastSourceIdentityRef.current === sourceIdentity) {
       return;
     }
 
-    lastUrlRef.current = streamUrl;
+    lastSourceIdentityRef.current = sourceIdentity;
 
     if (playerChanged) {
       // useVideoPlayer already constructed this generation with the new source.

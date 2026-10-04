@@ -772,31 +772,40 @@ export function LiveTvScreen() {
     },
   );
 
-  const watchdogRebindTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rebindLiveStream = useCallback(() => {
-    const source = previewStreamSource;
     const channelId = fullscreenChannelIdRef.current;
-    if (!source || !channelId) return;
-    if (watchdogRebindTimerRef.current) clearTimeout(watchdogRebindTimerRef.current);
-    setPreviewStreamSource(null);
-    const generation = fullscreenSurfIntentGenerationRef.current;
-    watchdogRebindTimerRef.current = setTimeout(() => {
-      watchdogRebindTimerRef.current = null;
-      if (
-        fullscreenChannelIdRef.current === channelId &&
-        generation === fullscreenSurfIntentGenerationRef.current &&
-        shouldAcceptLiveSurfPlayerCommit()
-      ) {
-        setPreviewStreamSource(source);
-      }
-    }, 0);
-  }, [previewStreamSource, shouldAcceptLiveSurfPlayerCommit]);
+    if (!previewStreamSource || !channelId || !shouldAcceptLiveSurfPlayerCommit()) return;
+    console.info('[NOVACAST_PLAYBACK_RECOVERY]', 'same-player-rebind', {
+      channelId,
+      attempt: 2,
+      sourceIdentitySame: true,
+      reason: 'watchdog-stall',
+    });
+    retryLiveStream();
+  }, [previewStreamSource, retryLiveStream, shouldAcceptLiveSurfPlayerCommit]);
   const watchdogRecoveryRef = useRef<(attempt: 1 | 2) => void>(() => {});
   const livePlaybackWatchdogRef = useRef<LivePlaybackWatchdog | null>(null);
   if (!livePlaybackWatchdogRef.current) {
     livePlaybackWatchdogRef.current = createLivePlaybackWatchdog({
       recover: (attempt) => watchdogRecoveryRef.current(attempt),
-      emit: (event, fields) => recordLivePerformanceEvent(event, fields),
+      emit: (event, fields) => {
+        recordLivePerformanceEvent(event, fields);
+        const diagnosticEvent = event === 'live_watchdog_stall_detected'
+          ? 'stall-detected'
+          : event === 'live_watchdog_recovery_attempt'
+            ? `recovery-attempt-${String(fields.attempt ?? '')}`
+            : event === 'live_watchdog_recovered'
+              ? 'recovery-success'
+              : 'recovery-failed';
+        console.info('[NOVACAST_PLAYBACK_RECOVERY]', diagnosticEvent, {
+          channelId: fields.channelId ?? null,
+          attempt: fields.attempt ?? fields.attempts ?? null,
+          elapsedSinceProgressMs: fields.elapsedSinceProgressMs ?? null,
+          playerGenerationId: fields.playerGenerationId ?? null,
+          sourceIdentitySame: fields.sourceIdentitySame === true,
+          reason: fields.reason ?? null,
+        });
+      },
     });
   }
   const livePlaybackWatchdog = livePlaybackWatchdogRef.current;
@@ -817,10 +826,6 @@ export function LiveTvScreen() {
   }, [currentFullscreenId, hasLiveStream, livePlaybackWatchdog, playerGenerationId, playerStreamUrl]);
   useEffect(() => () => {
     livePlaybackWatchdog.dispose();
-    if (watchdogRebindTimerRef.current) {
-      clearTimeout(watchdogRebindTimerRef.current);
-      watchdogRebindTimerRef.current = null;
-    }
   }, [livePlaybackWatchdog]);
 
   const streamSurfaceInFullscreen = Boolean(liveState?.fullscreenChannelId);

@@ -4,6 +4,7 @@ import { test } from 'node:test';
 
 const watchdog = readFileSync(new URL('../src/features/live/livePlaybackWatchdog.ts', import.meta.url), 'utf8');
 const screen = readFileSync(new URL('../src/features/live/LiveTvScreen.tsx', import.meta.url), 'utf8');
+const player = readFileSync(new URL('../src/features/playback/NovaStreamPlayer.tsx', import.meta.url), 'utf8');
 
 test('watchdog uses an event-driven ten-second stall observation and bounded cooldown', () => {
   assert.match(watchdog, /LIVE_PLAYBACK_WATCHDOG_STALL_MS = 10_000/);
@@ -27,12 +28,19 @@ test('progress recovery resets the episode and emits a bounded success event', (
   assert.match(watchdog, /cooldownUntil = now\(\) \+ LIVE_PLAYBACK_WATCHDOG_COOLDOWN_MS/);
 });
 
-test('recovery is limited to same-channel retry then same-channel rebind', () => {
+test('recovery uses same-player retry and rebind without a null-source transition', () => {
   assert.match(screen, /attempt === 1\) retryLiveStream\(\)/);
   assert.match(screen, /else rebindLiveStream\(\)/);
   assert.match(watchdog, /attempt === 1 \? 'same-channel-retry' : 'same-channel-rebind'/);
-  assert.match(screen, /setPreviewStreamSource\(null\)/);
-  assert.match(screen, /setPreviewStreamSource\(source\)/);
+  assert.match(screen, /same-player-rebind/);
+  assert.doesNotMatch(screen, /const source = previewStreamSource;[\s\S]*setPreviewStreamSource\(null\);[\s\S]*setPreviewStreamSource\(source\)/);
+});
+
+test('source identity stabilization compares URI/content type instead of object identity', () => {
+  assert.match(player, /function getSourceIdentity\(source: VideoSource\)/);
+  assert.match(player, /contentType:\$\{source\.contentType \?\? ''\}/);
+  assert.match(player, /lastSourceIdentityRef\.current === sourceIdentity/);
+  assert.doesNotMatch(player, /lastUrlRef/);
 });
 
 test('channel, source, player, pause, and teardown changes clear watchdog timers/state', () => {
@@ -50,6 +58,8 @@ test('diagnostics use bounded safe metadata only', () => {
   assert.match(watchdog, /attempt/);
   assert.match(watchdog, /stallDurationMs/);
   assert.match(watchdog, /recoveryMethod/);
+  assert.match(watchdog, /elapsedSinceProgressMs/);
+  assert.match(screen, /NOVACAST_PLAYBACK_RECOVERY/);
   for (const forbidden of ['streamUrl', 'username', 'password', 'authorization', 'rawResponse']) {
     assert.doesNotMatch(watchdog, new RegExp(`\\b${forbidden}\\b`));
   }
@@ -63,4 +73,4 @@ test('Live fullscreen surface feeds status, playing, first-frame, and time obser
   assert.match(screen, /livePlaybackWatchdog\.onTimeUpdate\(currentTime\)/);
 });
 
-console.log('live-playback-watchdog: 7 passed');
+console.log('live-playback-watchdog: 8 passed');

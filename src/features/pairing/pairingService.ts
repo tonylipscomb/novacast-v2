@@ -191,6 +191,10 @@ function createRemotePairingService(): PairingService | null {
         });
         const session = normalizeSession(payload);
         await savePendingPairingSession(session);
+        logPairingReleaseDiagnostic('session-created', {
+          expiresInMs: Math.max(0, session.expiresAt - Date.now()),
+          reason: 'pairing-create-success',
+        });
         pairingDiagnostic('pairing-session-created', {
           session: session.id.slice(0, 8),
           device: device.publicDeviceCode ?? 'unregistered',

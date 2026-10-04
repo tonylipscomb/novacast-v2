@@ -17,6 +17,7 @@ import { markPairingCompleted } from '@/features/pairing/pairingState';
 import { completePersistedPairing, usePairing } from '@/features/pairing/useMockPairing';
 import { isPairingSetupInProgress } from '@/features/pairing/pairingResume';
 import { logPairingEvent } from '@/features/pairing/pairingDiagnostics';
+import { logPairingFocus } from '@/features/pairing/pairingFocusDiagnostics';
 import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
 import { waitForHomeChannelsReady } from '@/features/pairing/waitForHomeChannelsReady';
 import { getProviderState } from '@/features/providers/providerStore';
@@ -32,6 +33,7 @@ import {
 import { completeLaunchOverlay, getLaunchOverlayState, requestLaunchOverlayExit } from '@/features/startup/launchOverlay';
 import { novaTheme } from '@/theme';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
+import { focusProviderRecoveryViewWhenReady } from '@/features/providers/providerRecoveryFocus';
 
 const PAIRING_HOME_ROUTE = '/main-menu';
 
@@ -123,6 +125,8 @@ export function PairingScreen({
   const primaryActionRef = useRef<View | null>(null);
   const retryActionRef = useRef<View | null>(null);
   const closeActionRef = useRef<View | null>(null);
+  const pairingFocusKeyRef = useRef<string | null>(null);
+  const focusedPairingControlRef = useRef<string | null>(null);
   const [focusTargets, setFocusTargets] = useState({ primary: null as number | null, retry: null as number | null, close: null as number | null });
 
   const navigateHome = useCallback(async () => {
@@ -361,17 +365,90 @@ export function PairingScreen({
   const setupInProgress = isPairingSetupInProgress(status, isConnecting);
   const codeExpired = status === 'expired';
   const retryVisible = status === 'failed' || status === 'binding_error' || connectionFailed;
+  const pairingFocusKey = `${isAvailable ? 'available' : 'unavailable'}:${retryVisible ? 'retry' : 'primary'}:${setupInProgress ? 'setup' : 'actions'}:${codeExpired ? 'expired' : 'live'}`;
 
   useEffect(() => {
-    if (!retryVisible || !isAvailable) {
-      logOverlayFocus('pairing', 'primary-action', 'preferred-focus');
-    }
-    setFocusTargets({
-      primary: findNodeHandle(primaryActionRef.current),
-      retry: retryVisible ? findNodeHandle(retryActionRef.current) : null,
-      close: findNodeHandle(closeActionRef.current),
+    logPairingFocus('screen-mounted', {
+      controlId: 'pairing-screen',
+      pairingState: 'mounting',
+      focusHandlePresent: false,
+      elapsedMs: 0,
+      reason: 'mount',
     });
-  }, [retryVisible, status, isAvailable]);
+  }, []);
+
+  useEffect(() => {
+    logPairingFocus('state-changed', {
+      controlId: 'pairing-screen',
+      pairingState: status,
+      focusHandlePresent: Boolean(primaryActionRef.current || retryActionRef.current || closeActionRef.current),
+      elapsedMs: 0,
+      reason: `${isAvailable ? 'available' : 'unavailable'}:${retryVisible ? 'retry' : 'primary'}`,
+    });
+  }, [isAvailable, retryVisible, status]);
+
+  useEffect(() => {
+    if (pairingFocusKeyRef.current === pairingFocusKey) {
+      return;
+    }
+    pairingFocusKeyRef.current = pairingFocusKey;
+
+    if (setupInProgress) {
+      return;
+    }
+
+    if (codeExpired && focusedPairingControlRef.current === 'close') {
+      return;
+    }
+
+    const targetControlId = retryVisible ? 'retry-same-code' : 'primary-action';
+    const startedAt = Date.now();
+    const cancelFocus = focusProviderRecoveryViewWhenReady(
+      () => (retryVisible ? retryActionRef.current : primaryActionRef.current) ?? closeActionRef.current,
+      (attempt, focusHandlePresent) => {
+        const nextTargets = {
+          primary: findNodeHandle(primaryActionRef.current),
+          retry: retryVisible ? findNodeHandle(retryActionRef.current) : null,
+          close: findNodeHandle(closeActionRef.current),
+        };
+        setFocusTargets((current) =>
+          current.primary === nextTargets.primary && current.retry === nextTargets.retry && current.close === nextTargets.close
+            ? current
+            : nextTargets,
+        );
+
+        if (nextTargets.primary !== null && nextTargets.close !== null) {
+          logPairingFocus('neighbor-ready', {
+            controlId: targetControlId,
+            pairingState: status,
+            focusHandlePresent: true,
+            elapsedMs: Date.now() - startedAt,
+            reason: 'native-neighbors-ready',
+          });
+        }
+
+        logPairingFocus('preferred-focus-requested', {
+          controlId: targetControlId,
+          pairingState: status,
+          focusHandlePresent,
+          elapsedMs: Date.now() - startedAt,
+          reason: focusHandlePresent ? `native-ready-attempt-${attempt}` : 'native-ref-not-ready',
+        });
+        if (focusHandlePresent) {
+          logOverlayFocus('pairing', targetControlId, 'preferred-focus');
+          logPairingFocus('focus-restored', {
+            controlId: targetControlId,
+            pairingState: status,
+            focusHandlePresent: true,
+            elapsedMs: Date.now() - startedAt,
+            reason: 'post-mount-focus',
+          });
+        }
+      },
+    );
+
+    return cancelFocus;
+  }, [codeExpired, isAvailable, pairingFocusKey, retryVisible, setupInProgress, status]);
 
   return (
     <NovaScreen
@@ -497,10 +574,19 @@ export function PairingScreen({
                     nativeRef={primaryActionRef}
                     hasTVPreferredFocus={!isAvailable || !retryVisible}
                     nextFocusDown={(retryVisible ? focusTargets.retry : focusTargets.close) ?? undefined}
-                    onFocus={() => logOverlayFocus('pairing', 'primary-action', 'focus-received')}
-                    onBlur={() => logOverlayFocus('pairing', 'primary-action', 'focus-lost')}
+                    onFocus={() => {
+                      focusedPairingControlRef.current = 'primary-action';
+                      logOverlayFocus('pairing', 'primary-action', 'focus-received');
+                      logPairingFocus('focus-received', { controlId: 'primary-action', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'native-focus' });
+                    }}
+                    onBlur={() => {
+                      if (focusedPairingControlRef.current === 'primary-action') focusedPairingControlRef.current = null;
+                      logOverlayFocus('pairing', 'primary-action', 'focus-lost');
+                      logPairingFocus('focus-lost', { controlId: 'primary-action', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'native-blur' });
+                    }}
                     onPress={() => {
                       logOverlayFocus('pairing', 'primary-action', 'press');
+                      logPairingFocus('action-pressed', { controlId: 'primary-action', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'press' });
                       void regenerateCode();
                     }}
                     style={{ ...styles.primaryButton, minHeight: layout.actionMinHeight, width: layout.actionWidth }}
@@ -512,10 +598,19 @@ export function PairingScreen({
                       hasTVPreferredFocus={!isAvailable}
                       nextFocusUp={focusTargets.primary ?? undefined}
                       nextFocusDown={focusTargets.close ?? undefined}
-                      onFocus={() => logOverlayFocus('pairing', 'retry-same-code', 'focus-received')}
-                      onBlur={() => logOverlayFocus('pairing', 'retry-same-code', 'focus-lost')}
+                      onFocus={() => {
+                        focusedPairingControlRef.current = 'retry-same-code';
+                        logOverlayFocus('pairing', 'retry-same-code', 'focus-received');
+                        logPairingFocus('focus-received', { controlId: 'retry-same-code', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'native-focus' });
+                      }}
+                      onBlur={() => {
+                        if (focusedPairingControlRef.current === 'retry-same-code') focusedPairingControlRef.current = null;
+                        logOverlayFocus('pairing', 'retry-same-code', 'focus-lost');
+                        logPairingFocus('focus-lost', { controlId: 'retry-same-code', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'native-blur' });
+                      }}
                       onPress={() => {
                         logOverlayFocus('pairing', 'retry-same-code', 'press');
+                        logPairingFocus('action-pressed', { controlId: 'retry-same-code', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'press' });
                         handlePairingRetry();
                       }}
                       style={{ ...styles.retryButton, minHeight: layout.actionMinHeight, width: layout.actionWidth }}
@@ -525,10 +620,19 @@ export function PairingScreen({
                     label="Close"
                     nativeRef={closeActionRef}
                     nextFocusUp={(retryVisible ? focusTargets.retry : focusTargets.primary) ?? undefined}
-                    onFocus={() => logOverlayFocus('pairing', 'close', 'focus-received')}
-                    onBlur={() => logOverlayFocus('pairing', 'close', 'focus-lost')}
+                    onFocus={() => {
+                      focusedPairingControlRef.current = 'close';
+                      logOverlayFocus('pairing', 'close', 'focus-received');
+                      logPairingFocus('focus-received', { controlId: 'close', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'native-focus' });
+                    }}
+                    onBlur={() => {
+                      if (focusedPairingControlRef.current === 'close') focusedPairingControlRef.current = null;
+                      logOverlayFocus('pairing', 'close', 'focus-lost');
+                      logPairingFocus('focus-lost', { controlId: 'close', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'native-blur' });
+                    }}
                     onPress={() => {
                       logOverlayFocus('pairing', 'close', 'press');
+                      logPairingFocus('action-pressed', { controlId: 'close', pairingState: status, focusHandlePresent: true, elapsedMs: 0, reason: 'press' });
                       router.back();
                     }}
                     style={{ ...styles.closeButton, minHeight: layout.actionMinHeight, width: layout.actionWidth }}
@@ -739,15 +843,9 @@ const styles = StyleSheet.create({
   },
   primaryButton: {
     borderRadius: NOVA_GLASS.radius.base,
-    borderWidth: 1,
-    borderColor: NOVA_GLASS.active.borderColor,
-    backgroundColor: NOVA_GLASS.active.backgroundColor,
   },
   retryButton: {
     borderRadius: NOVA_GLASS.radius.base,
-    borderWidth: 1,
-    borderColor: NOVA_GLASS.activeFocused.borderColor,
-    backgroundColor: NOVA_GLASS.activeFocused.backgroundColor,
   },
   closeButton: {
     borderRadius: NOVA_GLASS.radius.base,

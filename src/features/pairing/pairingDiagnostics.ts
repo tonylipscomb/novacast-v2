@@ -37,10 +37,22 @@ export function logPairingReleaseDiagnostic(
     activationDeviceAuthHeadersPresent?: boolean;
     responseSchemaValid?: boolean;
     failureCategory?: string | null;
+    sessionGeneration?: number;
+    state?: string | null;
+    remainingMs?: number;
+    expiresInMs?: number;
+    elapsedMs?: number;
+    reason?: string | null;
   } = {},
 ) {
   const failureCategory = fields.failureCategory?.replace(/[^a-z0-9_-]/gi, '').slice(0, 64) || undefined;
   const serverErrorCode = fields.serverErrorCode?.replace(/[^a-z0-9_-]/gi, '').slice(0, 64) || undefined;
+  const state = fields.state?.replace(/[^a-z0-9_-]/gi, '').slice(0, 64) || undefined;
+  const reason = fields.reason?.replace(/[^a-z0-9_-]/gi, '').slice(0, 64) || undefined;
+  const sessionGeneration = Number.isInteger(fields.sessionGeneration) ? fields.sessionGeneration : undefined;
+  const remainingMs = Number.isFinite(fields.remainingMs) ? Math.max(0, Math.round(fields.remainingMs ?? 0)) : undefined;
+  const expiresInMs = Number.isFinite(fields.expiresInMs) ? Math.max(0, Math.round(fields.expiresInMs ?? 0)) : undefined;
+  const elapsedMs = Number.isFinite(fields.elapsedMs) ? Math.max(0, Math.round(fields.elapsedMs ?? 0)) : undefined;
   console.info('[NovaCast Pairing Diagnostics]', {
     event,
     ...(fields.apiConfigured !== undefined ? { apiConfigured: fields.apiConfigured } : {}),
@@ -52,6 +64,12 @@ export function logPairingReleaseDiagnostic(
     ...(fields.activationDeviceAuthHeadersPresent !== undefined ? { activationDeviceAuthHeadersPresent: fields.activationDeviceAuthHeadersPresent } : {}),
     ...(fields.responseSchemaValid !== undefined ? { responseSchemaValid: fields.responseSchemaValid } : {}),
     ...(failureCategory ? { failureCategory } : {}),
+    ...(sessionGeneration !== undefined ? { sessionGeneration } : {}),
+    ...(state ? { state } : {}),
+    ...(remainingMs !== undefined ? { remainingMs } : {}),
+    ...(expiresInMs !== undefined ? { expiresInMs } : {}),
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    ...(reason ? { reason } : {}),
   });
 }
 

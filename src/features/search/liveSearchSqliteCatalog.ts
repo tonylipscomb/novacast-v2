@@ -32,6 +32,7 @@ import {
 import { liveSearchSqlRankCase } from './liveSearchMatching.ts';
 import type { LiveSearchResult, SearchPageResult } from './searchTypes.ts';
 import { processTimeBudgeted, type TimeBudgetResult } from '../catalog/jsChunkBudget.ts';
+import { recordLiveSearchDiagnostic } from './liveSearchDiagnostics.ts';
 
 export const LIVE_SEARCH_SQLITE_CATALOG_MARKER = 'live-search-sqlite-v1_1';
 export { LIVE_SEARCH_BUILD_CONCURRENCY, LIVE_SEARCH_WRITE_BATCH_SIZE } from './liveSearchCatalogPolicy.ts';
@@ -597,7 +598,8 @@ async function writeChannelRows(
   });
   let persistedRows = 0;
   for (let offset = 0; offset < uniqueRows.length; offset += LIVE_SEARCH_WRITE_BATCH_SIZE) {
-    if (isCancelled?.()) {
+    const pauseState = await waitWhileLiveSearchIndexPaused({ isCancelled });
+    if (pauseState === 'cancelled' || isCancelled?.()) {
       break;
     }
     const batch = uniqueRows.slice(offset, offset + LIVE_SEARCH_WRITE_BATCH_SIZE);
@@ -1169,6 +1171,12 @@ export async function searchLiveSqliteCatalog(input: {
   }
 
   const tokens = tokenizeSearchQuery(input.query);
+  const filterStartedAt = Date.now();
+  recordLiveSearchDiagnostic('filter-start', {
+    queryLength: normalized.length,
+    sourceChannelCount: asNumber(state?.channel_count),
+    liveIndexReady: activeGeneration > 0,
+  });
   const escaped = escapeLikeWildcards(normalized);
   const titleTokens = buildTokenClause('normalized_title', tokens);
   const currentTokens = buildTokenClause('normalized_current', tokens);
@@ -1264,6 +1272,13 @@ export async function searchLiveSqliteCatalog(input: {
     returnedCount: items.length,
     totalCount: asNumber(totalRow?.total),
     durationMs: Date.now() - startedAt,
+  });
+  recordLiveSearchDiagnostic('filter-complete', {
+    queryLength: normalized.length,
+    sourceChannelCount: asNumber(state?.channel_count),
+    resultCount: items.length,
+    filterMs: Date.now() - filterStartedAt,
+    liveIndexReady: activeGeneration > 0,
   });
 
   return {

@@ -42,6 +42,10 @@ export function hasActiveCatalogSqliteWriter(
   return Boolean(current && current.generation === generation);
 }
 
+export function hasAnyActiveCatalogSqliteWriter() {
+  return activeWriters.size > 0;
+}
+
 export function clearActiveCatalogSqliteWritersForTests() {
   activeWriters.clear();
 }

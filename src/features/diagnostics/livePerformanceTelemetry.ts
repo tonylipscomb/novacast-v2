@@ -26,6 +26,8 @@ let session: PerformanceSession | null = null;
 let history: Array<{ event: string; at: number }> = [];
 let stallTimer: ReturnType<typeof setInterval> | null = null;
 let stallStopTimer: ReturnType<typeof setTimeout> | null = null;
+let lastJsStallAt = 0;
+let lastJsStallMs = 0;
 
 function nowMs() {
   return typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
@@ -101,7 +103,11 @@ export function startLiveJsStallMonitor(scope: 'cold_start' | 'live_tv', duratio
     const actual = nowMs();
     const drift = actual - expected;
     expected = actual + STALL_INTERVAL_MS;
-    if (drift >= STALL_THRESHOLD_MS) recordLivePerformanceEvent('js_thread_stall', { scope, driftMs: Math.round(drift), thresholdMs: STALL_THRESHOLD_MS });
+    if (drift >= STALL_THRESHOLD_MS) {
+      lastJsStallAt = actual;
+      lastJsStallMs = Math.round(drift);
+      recordLivePerformanceEvent('js_thread_stall', { scope, driftMs: Math.round(drift), thresholdMs: STALL_THRESHOLD_MS });
+    }
   }, STALL_INTERVAL_MS);
   stallStopTimer = setTimeout(() => stopLiveJsStallMonitor(), durationMs);
 }
@@ -127,6 +133,13 @@ export function resetLivePerformanceTelemetryForTests() {
   stopLiveJsStallMonitor();
   session = null;
   history = [];
+  lastJsStallAt = 0;
+  lastJsStallMs = 0;
+}
+
+export function getRecentLiveJsStallMs(maxAgeMs = 2_000) {
+  const age = nowMs() - lastJsStallAt;
+  return lastJsStallAt > 0 && age <= maxAgeMs ? lastJsStallMs : 0;
 }
 
 export const livePerformanceTelemetryConstants = { maxHistory: MAX_HISTORY, stallIntervalMs: STALL_INTERVAL_MS, stallThresholdMs: STALL_THRESHOLD_MS };

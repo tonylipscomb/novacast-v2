@@ -5,6 +5,7 @@ import { scheduleLiveSearchCatalogIdleBuild, searchLiveSqliteCatalog } from '../
 import { ingestLiveChannels, ingestLiveSearchCategories, liveChannelIndexSize, searchLiveChannelIndex, findMatchingLiveCategoryIds, type LiveSearchMatchMode } from '../liveChannelIndex.ts';
 import { matchesSearchQuery } from '../searchRanking.ts';
 import type { LiveSearchResult, SearchPageRequest, SearchPageResult } from '../searchTypes.ts';
+import { recordLiveSearchDiagnostic } from '../liveSearchDiagnostics.ts';
 
 export async function searchLiveChannels(
   providerId: string,
@@ -53,7 +54,15 @@ export async function searchLiveChannels(
     // search-live-provider-fallback-v1_1
     // The index can be only partially warm (for example, categories already browsed in Live TV).
     // Trust it when it has a match; otherwise ask the provider instead of treating a partial cache as complete.
+    const filterStartedAt = Date.now();
+    recordLiveSearchDiagnostic('filter-start', { queryLength: request.query.trim().length, liveIndexReady: false });
     const indexedResult = searchLiveChannelIndex(providerId, request.query, request.offset, request.limit, matchMode);
+    recordLiveSearchDiagnostic('filter-complete', {
+      queryLength: request.query.trim().length,
+      resultCount: indexedResult.items.length,
+      filterMs: Date.now() - filterStartedAt,
+      liveIndexReady: false,
+    });
     if (indexedResult.totalCount > 0) {
       return indexedResult;
     }

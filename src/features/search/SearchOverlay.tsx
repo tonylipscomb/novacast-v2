@@ -55,6 +55,7 @@ import { scopedSearchEmptyHint } from './searchScopes';
 import { isSearchableQuery } from './searchQuery';
 import type { SearchResult, SearchScope } from './searchTypes';
 import { useSearchController } from './useSearchController';
+import { recordLiveSearchDiagnostic } from './liveSearchDiagnostics';
 
 const SEARCH_MODAL_STATE_AUDIT_ENABLED = __DEV__;
 
@@ -390,8 +391,14 @@ function SearchOverlayContent({
       nativeTvKeyboard: useNativeTvKeyboard,
       solidOverlay: true,
     });
+    if (scope === 'live') {
+      recordLiveSearchDiagnostic('search-open');
+    }
     return () => {
       logSearchEvent('search_overlay_close', { scope, providerId });
+      if (scope === 'live') {
+        recordLiveSearchDiagnostic('search-close');
+      }
     };
   }, [providerId, scope, useNativeTvKeyboard, useOnScreenKeyboard]);
 
@@ -697,6 +704,9 @@ function SearchOverlayContent({
   const setQueryLogged = useCallback(
     (value: string) => {
       logSearchEvent('search_query_change', { scope, queryLength: value.trim().length });
+      if (scope === 'live') {
+        recordLiveSearchDiagnostic('input-received', { queryLength: value.trim().length });
+      }
       bumpMoviesSearchInputQueryRevision();
       cancelMoviesSearchResultFocus('query-change', {
         query: value.trim(),
@@ -724,6 +734,29 @@ function SearchOverlayContent({
   const resultsFocusUpHandle = searchFieldHandle;
   const resultsCountLabel = controller.totalCount.toLocaleString();
   const showInitialResultsLoader = controller.status === 'loading' && controller.results.length === 0;
+
+  useEffect(() => {
+    if (scope !== 'live' || !showResults || controller.status !== 'ready') {
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      recordLiveSearchDiagnostic('results-render-complete', {
+        queryLength: trimmedQuery.length,
+        resultCount: controller.results.length,
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [controller.results.length, controller.status, scope, showResults, trimmedQuery.length]);
+
+  useEffect(() => {
+    if (scope !== 'live' || !focusedResultKey) {
+      return;
+    }
+    recordLiveSearchDiagnostic('first-result-focus', {
+      queryLength: trimmedQuery.length,
+      resultCount: controller.results.length,
+    });
+  }, [controller.results.length, focusedResultKey, scope, trimmedQuery.length]);
 
   useEffect(() => {
     if (scope !== 'movie') {

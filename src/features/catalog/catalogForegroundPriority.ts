@@ -1,3 +1,5 @@
+import { getLiveTvWorkload } from '../live/liveTvWorkload.ts';
+
 /**
  * Foreground catalog-read priority.
  * Background Movie/Series writers must yield while Live/Movies/Series UI is reading.
@@ -79,6 +81,10 @@ export async function waitForForegroundCatalogReadsToDrain(): Promise<void> {
 }
 
 export function getCatalogBackgroundWriteYield(): { pauseMs: number; reason: string } {
+  const liveWorkload = getLiveTvWorkload();
+  if (catalogUiSurface === 'live' && liveWorkload.searchOverlayVisible) {
+    return { pauseMs: 300, reason: 'live-search-foreground' };
+  }
   if (catalogUiSurface === 'live' && Date.now() < liveCatalogTuningUntilMs) {
     return { pauseMs: 250, reason: 'live-tuning' };
   }

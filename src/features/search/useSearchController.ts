@@ -13,6 +13,7 @@ import {
 import { SEARCH_DEBOUNCE_MS } from './searchConstants';
 import { isSearchableQuery, normalizeSearchQuery } from './searchQuery';
 import type { SearchLoadStatus, SearchScope } from './searchTypes';
+import { recordLiveSearchDiagnostic } from './liveSearchDiagnostics';
 
 type UseSearchControllerOptions<T> = {
   scope: SearchScope;
@@ -50,8 +51,11 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
   const [reloadToken, setReloadToken] = useState(0);
 
   const setQuery = useCallback((nextQuery: string) => {
+    if (scope === 'live') {
+      recordLiveSearchDiagnostic('query-state-updated', { queryLength: nextQuery.trim().length });
+    }
     setQueryState(nextQuery);
-  }, []);
+  }, [scope]);
 
   const clearQuery = useCallback(() => {
     setQueryState('');
@@ -166,6 +170,12 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
             moviesRequestId: moviesRequestId ?? getActiveMoviesSearchRequestId(),
           });
 
+          if (scope === 'live') {
+            recordLiveSearchDiagnostic('results-render-start', {
+              queryLength: trimmed.length,
+              resultCount: page.items.length,
+            });
+          }
           offsetRef.current = page.items.length;
           setResults(page.items);
           setTotalCount(page.totalCount);

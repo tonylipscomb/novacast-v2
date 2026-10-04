@@ -10,7 +10,7 @@ import {
   markMoviesSearchQueryFinished,
   markMoviesSearchStateApplied,
 } from './moviesSearchPerfDiagnostics';
-import { SEARCH_DEBOUNCE_MS } from './searchConstants';
+import { LIVE_SEARCH_DEBOUNCE_MS, SEARCH_DEBOUNCE_MS } from './searchConstants';
 import { isSearchableQuery, normalizeSearchQuery } from './searchQuery';
 import type { SearchLoadStatus, SearchScope } from './searchTypes';
 import { recordLiveSearchDiagnostic } from './liveSearchDiagnostics';
@@ -34,6 +34,7 @@ type UseSearchControllerOptions<T> = {
 
 export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
   const { scope, providerId, enabled = true, pageSize = 50, executeSearch, onQueryCommitted } = options;
+  const debounceMs = scope === 'live' ? LIVE_SEARCH_DEBOUNCE_MS : SEARCH_DEBOUNCE_MS;
   const executeSearchRef = useRef(executeSearch);
   executeSearchRef.current = executeSearch;
   const onQueryCommittedRef = useRef(onQueryCommitted);
@@ -115,7 +116,7 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
       moviesRequestId = beginMoviesSearchInput({
         query: trimmed,
         normalizedQueryLength: normalizeSearchQuery(trimmed).length,
-        debounceMs: SEARCH_DEBOUNCE_MS,
+        debounceMs,
         previousRequestCancelled: hadPrevious,
       });
     }
@@ -125,6 +126,9 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
 
     const timer = setTimeout(() => {
       const startedAt = Date.now();
+      if (scope === 'live') {
+        recordLiveSearchDiagnostic('debounce-fire');
+      }
       if (moviesRequestId != null) {
         markMoviesSearchDebounceReleased(moviesRequestId);
       }
@@ -214,7 +218,7 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
             markMoviesSearchStateApplied(moviesRequestId, 0);
           }
         });
-    }, SEARCH_DEBOUNCE_MS);
+    }, debounceMs);
 
     return () => {
       clearTimeout(timer);
@@ -224,7 +228,7 @@ export function useSearchController<T>(options: UseSearchControllerOptions<T>) {
         markMoviesSearchCancelled(moviesRequestId, 'aborted');
       }
     };
-  }, [enabled, pageSize, providerId, query, reloadToken, scope]);
+  }, [debounceMs, enabled, pageSize, providerId, query, reloadToken, scope]);
 
   const loadMore = useCallback(async () => {
     const trimmed = query.trim();

@@ -28,7 +28,7 @@ test('release-safe Search diagnostics contain no query or provider payload field
 
 test('Search lifecycle instrumentation covers input, filtering, rendering, and focus', () => {
   for (const event of [
-    'search-open', 'input-received', 'query-state-updated', 'filter-start',
+    'search-open', 'input-received', 'query-state-updated', 'debounce-fire', 'filter-start',
     'filter-complete', 'results-render-start', 'results-render-complete',
     'first-result-focus', 'search-close',
   ]) {

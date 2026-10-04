@@ -4,8 +4,11 @@ export const GLOBAL_PREVIEW_LIMIT = 12;
 /** Default page size for scoped and single-scope search results. */
 export const SEARCH_PAGE_SIZE = 50;
 
-/** Debounce delay before executing a search query. */
-export const SEARCH_DEBOUNCE_MS = 150;
+/** Default debounce delay for Movies, Series, and shared search surfaces. */
+export const SEARCH_DEBOUNCE_MS = 300;
+
+/** Live TV gets a shorter debounce because channel search is an interactive TV control. */
+export const LIVE_SEARCH_DEBOUNCE_MS = 150;
 
 /** Provider fallback timeout when the local catalog index is not ready. */
 export const SEARCH_PROVIDER_FALLBACK_TIMEOUT_MS = 8_000;

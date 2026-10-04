@@ -146,6 +146,7 @@ function SearchOverlayContent({
   const searchShellRef = useRef<View | null>(null);
   const closeButtonRef = useRef<View | null>(null);
   const restoreRowRef = useRef<View | null>(null);
+  const firstLiveResultRef = useRef<View | null>(null);
   const restoreResultRef = useRef<View | null>(null);
   const focusConfirmedRef = useRef(false);
   const initialFocusRequestedRef = useRef(false);
@@ -171,6 +172,7 @@ function SearchOverlayContent({
   const searchInputFocusedRef = useRef(false);
   const preferSearchFocusRef = useRef(true);
   const imeVisibleRef = useRef(false);
+  const imeSubmitFocusPendingRef = useRef(false);
   const handoffGuardRef = useRef(false);
   const liveFavoriteController = useSearchLiveFavoriteController({
     enabled: visible && scope === 'live',
@@ -316,8 +318,46 @@ function SearchOverlayContent({
     logSearchEvent('search_input_ime_armed', { scope });
   }, [scope]);
 
+  const controller = useSearchController<SearchResult>({
+    scope,
+    providerId,
+    // Keep searching while retainMounted even if the modal is temporarily hidden for Detail.
+    enabled: visible || retainMounted,
+    pageSize,
+    executeSearch,
+    onQueryCommitted,
+  });
+
   const handleImeReturnToShell = useCallback(() => {
     if (closeOwnsFocusRef.current || !shouldReturnFocusToSearchShellAfterIme({ closeFocused })) {
+      return;
+    }
+
+    if (scope === 'live' && isSearchableQuery(controller.query)) {
+      imeSubmitFocusPendingRef.current = true;
+      recordLiveSearchDiagnostic('ime-submit');
+      if (controller.results.length === 0 || !firstLiveResultRef.current) {
+        requestTvFocus({
+          screen: 'search-overlay',
+          source: 'SearchOverlay',
+          region: 'search-shell',
+          reason: 'ime-submit-first-result-pending',
+          isActive: () => visible && !closeOwnsFocusRef.current,
+          getTarget: () => searchShellRef.current,
+        });
+        return;
+      }
+      recordLiveSearchDiagnostic('focus-requested');
+      requestTvFocus({
+        screen: 'search-overlay',
+        source: 'SearchOverlay',
+        region: 'search-results',
+        itemId: controller.results[0]?.id,
+        reason: 'ime-submit-first-result',
+        isActive: () => visible && !closeOwnsFocusRef.current,
+        getTarget: () => firstLiveResultRef.current,
+      });
+      imeSubmitFocusPendingRef.current = false;
       return;
     }
 
@@ -329,17 +369,7 @@ function SearchOverlayContent({
       isActive: () => visible && !closeOwnsFocusRef.current,
       getTarget: () => searchShellRef.current,
     });
-  }, [closeFocused, visible]);
-
-  const controller = useSearchController<SearchResult>({
-    scope,
-    providerId,
-    // Keep searching while retainMounted even if the modal is temporarily hidden for Detail.
-    enabled: visible || retainMounted,
-    pageSize,
-    executeSearch,
-    onQueryCommitted,
-  });
+  }, [closeFocused, controller.query, controller.results, scope, visible]);
 
   useEffect(() => {
     if (scope !== 'live') {
@@ -419,6 +449,7 @@ function SearchOverlayContent({
       setHandoffActive(false);
       handoffGuardRef.current = false;
       imeVisibleRef.current = false;
+      imeSubmitFocusPendingRef.current = false;
       cancelMoviesSearchResultFocus('search-closed', {
         searchInputFocused: false,
         resultCount: 0,
@@ -721,6 +752,7 @@ function SearchOverlayContent({
       setFocusedSearchMovieId(null);
       setHandoffActive(false);
       handoffGuardRef.current = false;
+      imeSubmitFocusPendingRef.current = false;
       controller.setQuery(value);
     },
     [controller, scope],
@@ -757,6 +789,39 @@ function SearchOverlayContent({
       resultCount: controller.results.length,
     });
   }, [controller.results.length, focusedResultKey, scope, trimmedQuery.length]);
+
+  useEffect(() => {
+    if (scope !== 'live' || !imeSubmitFocusPendingRef.current) {
+      return;
+    }
+    if (controller.status === 'empty' || controller.status === 'error') {
+      imeSubmitFocusPendingRef.current = false;
+      return;
+    }
+    if (controller.results.length === 0) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      if (!firstLiveResultRef.current) {
+        return;
+      }
+      recordLiveSearchDiagnostic('result-ref-ready');
+      recordLiveSearchDiagnostic('focus-requested');
+      requestTvFocus({
+        screen: 'search-overlay',
+        source: 'SearchOverlay',
+        region: 'search-results',
+        itemId: controller.results[0]?.id,
+        reason: 'ime-submit-first-result-mounted',
+        isActive: () => visible && !closeOwnsFocusRef.current,
+        getTarget: () => firstLiveResultRef.current,
+      });
+      imeSubmitFocusPendingRef.current = false;
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [controller.results, controller.status, scope, visible]);
 
   useEffect(() => {
     if (scope !== 'movie') {
@@ -940,6 +1005,7 @@ function SearchOverlayContent({
         focusUpHandle={resultsFocusUpHandle}
         restoreResultKey={restoreFocusLiveChannelId ? `live:${restoreFocusLiveChannelId}` : null}
         restoreRowRef={restoreRowRef}
+        firstRowRef={firstLiveResultRef}
         favoriteContentIds={favoriteContentIds}
         onToggleLiveFavorite={onToggleLiveFavorite}
         onFocusLiveResult={liveFavoriteController.setFocusedLiveResult}

@@ -8,6 +8,7 @@ const diagnostics = read('src/features/pairing/pairingDiagnostics.ts');
 const service = read('src/features/pairing/pairingService.ts');
 const hub = read('src/features/hub/ContentHubOverlayScreen.tsx');
 const button = read('src/components/nova/NovaButton.tsx');
+const portal = read('src/features/portal/NovaPortalScreen.tsx');
 
 assert.match(recovery, /hasTVPreferredFocus/);
 assert.match(recovery, /nextFocusRight/);
@@ -35,6 +36,12 @@ assert.match(hub, /accessibilityState=\{\{ disabled:/);
 assert.match(hub, /NOVA_GLASS\.activeFocused/);
 
 assert.match(read('src/features/settings/SettingsScreen.tsx'), /PROVIDER RECOVERY/);
+assert.match(portal, /title: 'Providers'/);
+assert.match(portal, /Switch, review, or remove saved providers/);
+assert.doesNotMatch(portal, /title: 'Switch Provider'/);
+assert.doesNotMatch(portal, /title: 'Manage Providers'/);
+assert.match(portal, /providerScroll/);
+assert.match(portal, /Choose or manage your saved providers/);
 
 assert.match(diagnostics, /NovaCast Pairing Diagnostics/);
 assert.match(diagnostics, /network_error/);

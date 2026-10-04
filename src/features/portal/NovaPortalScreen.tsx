@@ -11,6 +11,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   useWindowDimensions,
@@ -45,7 +46,7 @@ import { novaTheme } from '@/theme';
 
 const focusText = createNovaTvFocusTextStyles(novaTheme);
 
-type PortalPanel = 'switch' | 'manage' | 'diagnostics' | null;
+type PortalPanel = 'providers' | 'diagnostics' | null;
 type PortalIcon = keyof typeof MaterialCommunityIcons.glyphMap;
 
 const GLASS = {
@@ -63,15 +64,14 @@ const logoAsset = require('@/assets/images/novacast-logo.png');
 
 const MENU_ITEMS: readonly { id: string; icon: PortalIcon; title: string; subtitle: string }[] = [
   { id: 'pair', icon: 'plus-circle-outline', title: 'Pair New Provider', subtitle: 'Add a new provider to NovaCast' },
-  { id: 'switch', icon: 'swap-horizontal', title: 'Switch Provider', subtitle: 'Change to a different provider' },
-  { id: 'manage', icon: 'account-multiple-outline', title: 'Manage Providers', subtitle: 'View, edit or remove providers' },
+  { id: 'providers', icon: 'account-multiple-outline', title: 'Providers', subtitle: 'Switch, review, or remove saved providers' },
   { id: 'settings', icon: 'cog-outline', title: 'Settings', subtitle: 'App preferences and configuration' },
   { id: 'diagnostics', icon: 'stethoscope', title: 'Diagnostics', subtitle: 'System information and tools' },
 ];
 
 function portalMenuItems() {
   if (isClosedBetaManagedFlow() || !deviceFeatureFlags.personalProviderPairingEnabled) {
-    return MENU_ITEMS.filter((item) => item.id !== 'pair' && item.id !== 'switch');
+    return MENU_ITEMS.filter((item) => item.id !== 'pair' && item.id !== 'providers');
   }
   return MENU_ITEMS;
 }
@@ -200,7 +200,7 @@ function PortalPanelCloseButton({ onPress, focusRef }: { onPress: () => void; fo
   );
 }
 
-function PortalSwitchProviderRow({
+function PortalManageProviderRow({
   provider,
   selected,
   preferredFocus,
@@ -208,7 +208,6 @@ function PortalSwitchProviderRow({
   onPress,
   nextFocusUp,
   nextFocusDown,
-  disabled,
 }: {
   provider: ProviderRecord;
   selected: boolean;
@@ -217,52 +216,6 @@ function PortalSwitchProviderRow({
   onPress: () => void;
   nextFocusUp?: number;
   nextFocusDown?: number;
-  disabled?: boolean;
-}) {
-  const [focused, setFocused] = useState(false);
-
-  useEffect(() => {
-    if (preferredFocus) logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'preferred-focus');
-  }, [preferredFocus, provider.id]);
-
-  return (
-    <Pressable
-      ref={focusRef}
-      accessible
-      accessibilityRole="button"
-      accessibilityLabel={`Use ${provider.name}`}
-      focusable
-      disabled={disabled}
-      accessibilityState={{ disabled: Boolean(disabled), selected }}
-      hasTVPreferredFocus={preferredFocus && Platform.isTV}
-      onFocus={() => { setFocused(true); logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'focus-received'); }}
-      onBlur={() => { setFocused(false); logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'focus-lost'); }}
-      onPress={() => { logOverlayFocus('provider-overlay', `provider-${provider.id}`, 'press'); onPress(); }}
-      {...(nextFocusUp != null ? { nextFocusUp } : null)}
-      {...(nextFocusDown != null ? { nextFocusDown } : null)}
-      {...(Platform.isTV ? ({ onClick: onPress } as object) : null)}
-      style={[styles.providerRow, novaTvFocus.base, focused && styles.providerRowFocused]}>
-      <View style={styles.providerRowCopy}>
-        <Text style={[styles.providerRowName, focused && styles.providerRowNameFocused]}>{provider.name}</Text>
-        <Text style={styles.providerRowStatus}>{provider.status}</Text>
-      </View>
-      {selected ? <MaterialCommunityIcons name="check-circle" size={24} color="#20E878" /> : null}
-    </Pressable>
-  );
-}
-
-function PortalManageProviderRow({
-  provider,
-  selected,
-  preferredFocus,
-  focusRef,
-  onPress,
-}: {
-  provider: ProviderRecord;
-  selected: boolean;
-  preferredFocus: boolean;
-  focusRef?: RefObject<View | null>;
-  onPress: () => void;
 }) {
   const [useFocused, setUseFocused] = useState(false);
   const accessExpiration = useAccessExpirationDisplay({
@@ -271,11 +224,16 @@ function PortalManageProviderRow({
   });
 
   return (
-    <View style={styles.manageRow}>
+    <View style={[styles.manageRow, provider.status === 'expired' && styles.manageRowExpired]}>
       <View style={styles.providerRowCopy}>
-        <Text style={styles.providerRowName}>{provider.name}</Text>
+        <Text numberOfLines={1} style={styles.providerRowName}>{provider.name}</Text>
         <Text style={styles.providerRowStatus}>
           {provider.status} · {accessExpiration.line}
+        </Text>
+      </View>
+      <View style={[styles.statusPill, provider.status === 'expired' && styles.statusPillExpired]}>
+        <Text style={[styles.statusPillText, provider.status === 'expired' && styles.statusPillTextExpired]}>
+          {selected ? 'Active' : provider.status === 'expired' ? 'Expired' : provider.status}
         </Text>
       </View>
       <Pressable
@@ -288,9 +246,11 @@ function PortalManageProviderRow({
         onFocus={() => setUseFocused(true)}
         onBlur={() => setUseFocused(false)}
         onPress={onPress}
+        {...(nextFocusUp != null ? { nextFocusUp } : null)}
+        {...(nextFocusDown != null ? { nextFocusDown } : null)}
         {...(Platform.isTV ? ({ onClick: onPress } as object) : null)}
         style={[styles.useButton, novaTvFocus.base, useFocused && styles.useButtonFocused]}>
-        <Text style={[styles.useButtonText, useFocused && styles.useButtonTextFocused]}>{selected ? 'Active' : 'Use'}</Text>
+        <Text style={[styles.useButtonText, useFocused && styles.useButtonTextFocused]}>{selected ? 'Active' : provider.status === 'expired' ? 'Reconnect' : 'Use'}</Text>
       </Pressable>
     </View>
   );
@@ -604,7 +564,10 @@ export function NovaPortalScreen() {
     if (!providerInitialized) return 'loading' as const;
     return 'connected' as const;
   }, [hasSavedProvider, isSwitchingProvider, providerInitialized, providerSwitchError, ready, selectedProvider]);
-  const firstSelectableProviderIndex = providers.findIndex((provider) => provider.status !== 'expired' && provider.status !== 'offline');
+  const preferredProviderIndex = Math.max(
+    0,
+    selectedProvider ? providers.findIndex((provider) => provider.id === selectedProvider.id) : 0,
+  );
 
   const providerAccess = resolveProviderAccess({
     ready,
@@ -702,8 +665,7 @@ export function NovaPortalScreen() {
     }
     setPairingVisible(true);
   }, [router]);
-  const openSwitchProvider = useCallback(() => setPanel('switch'), []);
-  const openManageProviders = useCallback(() => setPanel('manage'), []);
+  const openProviders = useCallback(() => setPanel('providers'), []);
   const handleResetPairing = useCallback(async () => {
     setPanel(null);
     await resetPairingKeepDevice();
@@ -730,11 +692,10 @@ export function NovaPortalScreen() {
 
   const menuAction = useCallback((id: string) => {
     if (id === 'pair') return openPairing();
-    if (id === 'switch') return openSwitchProvider();
-    if (id === 'manage') return openManageProviders();
+    if (id === 'providers') return openProviders();
     if (id === 'settings') return router.push('/settings');
     return setPanel('diagnostics');
-  }, [openManageProviders, openPairing, openSwitchProvider, router]);
+  }, [openPairing, openProviders, router]);
 
   if (isDeviceActivationRequired() && device.status && device.status.activationStatus !== 'active') {
     if (device.status.activationStatus === 'expired') {
@@ -858,46 +819,35 @@ export function NovaPortalScreen() {
             <View style={styles.panel}>
               <View style={styles.panelHeader}>
                 <Text style={styles.panelTitle}>
-                  {panel === 'switch' ? 'Switch Provider' : panel === 'manage' ? 'Manage Providers' : 'Diagnostics'}
+                  {panel === 'providers' ? 'Providers' : 'Diagnostics'}
                 </Text>
                 <PortalPanelCloseButton
                   focusRef={panelCloseRef}
                   onPress={() => setPanel(null)}
                 />
               </View>
-              {panel === 'switch' ? (
+              {panel === 'providers' ? (
                 <>
-                  <Text style={styles.panelHint}>Choose which saved provider NovaCast should use.</Text>
-                  {providers.map((provider, index) => (
-                    <PortalSwitchProviderRow
-                      key={provider.id}
-                      provider={provider}
-                      selected={provider.id === selectedProvider?.id}
-                      preferredFocus={index === firstSelectableProviderIndex}
-                      focusRef={index === firstSelectableProviderIndex ? panelFirstFocusRef : (panelProviderRefs.current[provider.id] ??= { current: null })}
-                      nextFocusUp={index > 0 ? panelFocusTargets[providers[index - 1].id] ?? undefined : undefined}
-                      nextFocusDown={index < providers.length - 1 ? panelFocusTargets[providers[index + 1].id] ?? undefined : panelFocusTargets.__close ?? undefined}
-                      disabled={provider.status === 'expired' || provider.status === 'offline'}
-                      onPress={() => void selectAndContinue(provider.id)}
-                    />
-                  ))}
-                  {!providers.length ? <Text style={styles.diagnosticCopy}>No saved providers are available.</Text> : null}
-                </>
-              ) : panel === 'manage' ? (
-                <>
-                  <Text style={styles.panelHint}>
-                    Review saved providers or reset pairing. Reset pairing keeps this TV’s identity and only removes the provider.
-                  </Text>
+                  <Text style={styles.panelHint}>Choose or manage your saved providers.</Text>
+                  <ScrollView
+                    style={styles.providerScroll}
+                    contentContainerStyle={styles.providerScrollContent}
+                    showsVerticalScrollIndicator={false}>
                   {providers.map((provider, index) => (
                     <PortalManageProviderRow
                       key={provider.id}
                       provider={provider}
                       selected={provider.id === selectedProvider?.id}
-                      preferredFocus={index === 0}
-                      focusRef={index === 0 ? panelFirstFocusRef : undefined}
+                      preferredFocus={index === preferredProviderIndex}
+                      focusRef={index === preferredProviderIndex
+                        ? panelFirstFocusRef
+                        : (panelProviderRefs.current[provider.id] ??= { current: null })}
+                      nextFocusUp={index > 0 ? panelFocusTargets[providers[index - 1].id] ?? undefined : undefined}
+                      nextFocusDown={index < providers.length - 1 ? panelFocusTargets[providers[index + 1].id] ?? undefined : panelFocusTargets.__close ?? undefined}
                       onPress={() => void selectAndContinue(provider.id)}
                     />
                   ))}
+                  {!providers.length ? <Text style={styles.diagnosticCopy}>No saved providers are available.</Text> : null}
                   <PortalAddProviderButton
                     preferredFocus={providers.length === 0}
                     focusRef={providers.length === 0 ? panelFirstFocusRef : undefined}
@@ -912,6 +862,7 @@ export function NovaPortalScreen() {
                     icon="link-off"
                     onPress={() => void handleResetPairing()}
                   />
+                  </ScrollView>
                 </>
               ) : (
                 <>
@@ -1049,8 +1000,9 @@ const styles = StyleSheet.create({
   panelScrim: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(2, 4, 12, 0.92)' },
   panelFocusGuide: { flex: 1, width: '100%', justifyContent: 'center', alignItems: 'center' },
   panel: {
-    width: '100%',
-    maxWidth: 720,
+    width: '66%',
+    maxWidth: 1180,
+    maxHeight: '72%',
     padding: 22,
     borderRadius: NOVA_GLASS.radius.base,
     backgroundColor: GLASS.fillStrong,
@@ -1074,6 +1026,8 @@ const styles = StyleSheet.create({
   },
   panelTitle: { flex: 1, color: '#F5F8FF', fontSize: 25, fontWeight: '800' },
   panelHint: { color: '#AAB6CC', fontSize: 16, lineHeight: 23, marginBottom: 14 },
+  providerScroll: { width: '100%', maxHeight: 420 },
+  providerScrollContent: { paddingBottom: 2 },
   providerRow: {
     minHeight: 64,
     padding: 13,
@@ -1090,7 +1044,7 @@ const styles = StyleSheet.create({
     backgroundColor: GLASS.fillFocus,
   },
   manageRow: {
-    minHeight: 64,
+    minHeight: 60,
     padding: 13,
     borderRadius: NOVA_GLASS.radius.subtle,
     flexDirection: 'row',
@@ -1100,10 +1054,25 @@ const styles = StyleSheet.create({
     backgroundColor: GLASS.fill,
     marginBottom: 8,
   },
+  manageRowExpired: { opacity: 0.72, borderColor: 'rgba(255, 155, 120, 0.22)' },
   providerRowCopy: { flex: 1, gap: 5 },
   providerRowName: { color: '#F5F8FF', fontSize: 18, fontWeight: '800' },
   providerRowNameFocused: focusText.title,
   providerRowStatus: { color: '#AAB6CC', fontSize: 14 },
+  statusPill: {
+    minWidth: 64,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: NOVA_GLASS.radius.pill,
+    backgroundColor: 'rgba(32, 232, 120, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(32, 232, 120, 0.34)',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  statusPillExpired: { backgroundColor: 'rgba(255, 150, 120, 0.12)', borderColor: 'rgba(255, 150, 120, 0.32)' },
+  statusPillText: { color: '#9FF3BD', fontSize: 12, fontWeight: '800', textTransform: 'capitalize' },
+  statusPillTextExpired: { color: '#FFB5A5' },
   useButton: {
     paddingHorizontal: 15,
     paddingVertical: 9,

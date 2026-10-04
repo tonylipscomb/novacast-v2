@@ -22,6 +22,8 @@ import { useNovaPulseProviderHealth } from '@/features/providers/providerHealth'
 import { resolveProviderAccess, type ProviderAccessState } from '@/features/providers/providerAccess';
 import { clearAssignmentRetryBackoff } from '@/features/device/deviceAssignmentReconcile';
 import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
+import { focusProviderRecoveryViewWhenReady } from '@/features/providers/providerRecoveryFocus';
+import { logProviderRecoveryFocus } from '@/features/providers/providerRecoveryDiagnostics';
 import { getOfflineSnapshot } from '@/features/resilience/offlineStatus';
 import { buildDiagnosticCode, getSanitizedDiagnostics } from '@/features/resilience/sanitizedDiagnostics';
 import { useAppTheme } from '@/theme/AppThemeProvider';
@@ -349,7 +351,30 @@ function RestrictedSettingsSurface({ state }: { state: ProviderAccessState }) {
   const portalRef = useRef<View | null>(null);
   const pairRef = useRef<View | null>(null);
   const retryRef = useRef<View | null>(null);
+  const [focusTarget, setFocusTarget] = useState<'portal' | 'retry'>('portal');
+  const mountedAtRef = useRef<number | null>(null);
   const retryAvailable = state !== 'no_provider';
+
+  useEffect(() => {
+    mountedAtRef.current ??= Date.now();
+    logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'surface-mounted', accessState: state });
+    const cancel = focusProviderRecoveryViewWhenReady(
+      () => (focusTarget === 'retry' ? retryRef.current : portalRef.current),
+      (attempt, focusHandlePresent) => {
+        logProviderRecoveryFocus({
+          surface: 'restricted-settings',
+          action: 'preferred-focus-requested',
+          controlId: focusTarget,
+          accessState: state,
+          focusHandlePresent,
+          elapsedMs: Date.now() - (mountedAtRef.current ?? Date.now()),
+          retryAttempt: attempt,
+          resultCategory: focusHandlePresent ? 'requested' : 'not-ready',
+        });
+      },
+    );
+    return cancel;
+  }, [focusTarget, retrying, state]);
 
   useEffect(() => {
     setFocusTargets({
@@ -362,11 +387,15 @@ function RestrictedSettingsSurface({ state }: { state: ProviderAccessState }) {
   const retry = async () => {
     if (retrying) return;
     setRetrying(true);
+    logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'retry-start', controlId: 'retry', accessState: state, retryAttempt: 1 });
     clearAssignmentRetryBackoff();
     try {
       await retryProviderInitialization();
+      logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'retry-success', controlId: 'retry', accessState: state, retryAttempt: 1, resultCategory: 'validated' });
     } catch {
       // The provider access gate will continue to expose the restricted state.
+      setFocusTarget('retry');
+      logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'retry-failed', controlId: 'retry', accessState: state, retryAttempt: 1, resultCategory: 'validation-failed' });
     } finally {
       setRetrying(false);
     }
@@ -389,10 +418,10 @@ function RestrictedSettingsSurface({ state }: { state: ProviderAccessState }) {
             <NovaButton
               label="Provider Portal"
               nativeRef={portalRef}
-              hasTVPreferredFocus
+              hasTVPreferredFocus={focusTarget === 'portal'}
               nextFocusDown={focusTargets.pair ?? undefined}
-              onFocus={() => logOverlayFocus('restricted-settings', 'provider-portal', 'focus-received')}
-              onPress={() => { logOverlayFocus('restricted-settings', 'provider-portal', 'press'); router.replace('/'); }}
+              onFocus={() => { logOverlayFocus('restricted-settings', 'provider-portal', 'focus-received'); logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'preferred-focus-received', controlId: 'portal', accessState: state }); }}
+              onPress={() => { logOverlayFocus('restricted-settings', 'provider-portal', 'press'); logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'action-pressed', controlId: 'portal', accessState: state }); router.replace('/'); }}
               style={restrictedStyles.action}
             />
             <NovaButton
@@ -400,8 +429,8 @@ function RestrictedSettingsSurface({ state }: { state: ProviderAccessState }) {
               nativeRef={pairRef}
               nextFocusUp={focusTargets.portal ?? undefined}
               nextFocusDown={(retryAvailable ? focusTargets.retry : focusTargets.portal) ?? undefined}
-              onFocus={() => logOverlayFocus('restricted-settings', 'pair-provider', 'focus-received')}
-              onPress={() => { logOverlayFocus('restricted-settings', 'pair-provider', 'press'); router.replace('/pair'); }}
+              onFocus={() => { logOverlayFocus('restricted-settings', 'pair-provider', 'focus-received'); logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'preferred-focus-received', controlId: 'pair', accessState: state }); }}
+              onPress={() => { logOverlayFocus('restricted-settings', 'pair-provider', 'press'); logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'action-pressed', controlId: 'pair', accessState: state }); router.replace('/pair'); }}
               style={restrictedStyles.action}
             />
             {retryAvailable ? (
@@ -409,8 +438,9 @@ function RestrictedSettingsSurface({ state }: { state: ProviderAccessState }) {
                 label="Retry Provider"
                 nativeRef={retryRef}
                 nextFocusUp={focusTargets.pair ?? undefined}
-                onFocus={() => logOverlayFocus('restricted-settings', 'retry-provider', 'focus-received')}
-                onPress={() => { logOverlayFocus('restricted-settings', 'retry-provider', 'press'); void retry(); }}
+                hasTVPreferredFocus={focusTarget === 'retry'}
+                onFocus={() => { logOverlayFocus('restricted-settings', 'retry-provider', 'focus-received'); logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'preferred-focus-received', controlId: 'retry', accessState: state }); }}
+                onPress={() => { logOverlayFocus('restricted-settings', 'retry-provider', 'press'); logProviderRecoveryFocus({ surface: 'restricted-settings', action: 'action-pressed', controlId: 'retry', accessState: state }); void retry(); }}
                 style={restrictedStyles.action}
               />
             ) : null}

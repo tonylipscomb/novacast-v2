@@ -9,6 +9,7 @@ import { resolveProviderAccess } from './providerAccess';
 import { useProviderStore } from './providerStore';
 import { logProviderStartupPhase } from './providerStartupDiagnostics';
 import { getAssignmentRetryBackoffState } from '@/features/device/deviceAssignmentReconcile';
+import { logProviderAccessDecision } from './providerRecoveryDiagnostics';
 
 const PROVIDER_ACCESS_LOADING_DEADLINE_MS = 12_000;
 
@@ -60,8 +61,6 @@ export function ProviderAccessGate({ children }: { children: ReactNode }) {
     return () => clearTimeout(timer);
   }, [cachedProviderUsable, providerId, providerPresent, retryBackoffActive, providerState.isSwitchingProvider, providerState.providerInitialized, providerState.ready]);
 
-  if (isClosedBetaManagedFlow() || deviceFeatureFlags.closedBetaMode) return <>{children}</>;
-
   const decision = resolveProviderAccess({
     ready: providerState.ready,
     provider: providerState.selectedProvider,
@@ -72,6 +71,25 @@ export function ProviderAccessGate({ children }: { children: ReactNode }) {
     loadingTimedOut,
     cachedProviderUsable,
   });
+
+  useEffect(() => {
+    if (isClosedBetaManagedFlow() || deviceFeatureFlags.closedBetaMode || decision.state === 'loading' || decision.state === 'allowed' || decision.state === 'temporarily_unavailable') return;
+    logProviderAccessDecision({
+      accessState: decision.state,
+      providerStatus: providerState.selectedProvider?.status,
+      healthStatus: health?.status,
+      providerInitialized: providerState.providerInitialized,
+      retryInFlight: providerState.isSwitchingProvider,
+      metadataFreshnessCategory: providerState.selectedProvider?.status === 'expired'
+        ? 'persisted-expired'
+        : health?.status === 'subscription_expired'
+          ? 'persisted-health-expired'
+          : 'unknown',
+      validationResultCategory: providerState.providerInitialized ? 'initialized' : 'not-validated',
+    });
+  }, [decision.state, health?.status, providerState.isSwitchingProvider, providerState.providerInitialized, providerState.selectedProvider?.status]);
+
+  if (isClosedBetaManagedFlow() || deviceFeatureFlags.closedBetaMode) return <>{children}</>;
 
   if (decision.state === 'loading') return <View style={{ flex: 1 }}><NovaSpaceLoader label="Preparing NovaCast…" /></View>;
   if (decision.state === 'allowed' || decision.state === 'temporarily_unavailable') return <>{children}</>;

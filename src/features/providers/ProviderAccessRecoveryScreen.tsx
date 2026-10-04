@@ -8,6 +8,8 @@ import { novaTheme } from '@/theme';
 import { retryProviderInitialization } from './providerStore';
 import { clearAssignmentRetryBackoff } from '@/features/device/deviceAssignmentReconcile';
 import type { ProviderAccessState } from './providerAccess';
+import { focusProviderRecoveryViewWhenReady } from './providerRecoveryFocus';
+import { logProviderRecoveryFocus } from './providerRecoveryDiagnostics';
 
 type Props = { state: Exclude<ProviderAccessState, 'loading' | 'allowed'> };
 
@@ -18,25 +20,52 @@ export function ProviderAccessRecoveryScreen({ state }: Props) {
   const pairRef = useRef<View | null>(null);
   const settingsRef = useRef<View | null>(null);
   const retryRef = useRef<View | null>(null);
+  const [focusTarget, setFocusTarget] = useState<'pair' | 'retry'>('pair');
   const [focusTargets, setFocusTargets] = useState({ pair: null as number | null, settings: null as number | null, retry: null as number | null });
+  const mountedAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    mountedAtRef.current ??= Date.now();
+    logProviderRecoveryFocus({ surface: 'provider-access', action: 'surface-mounted', accessState: state });
+    const cancel = focusProviderRecoveryViewWhenReady(
+      () => (focusTarget === 'retry' ? retryRef.current : pairRef.current),
+      (attempt, focusHandlePresent) => {
+        logProviderRecoveryFocus({
+          surface: 'provider-access',
+          action: 'preferred-focus-requested',
+          controlId: focusTarget,
+          accessState: state,
+          focusHandlePresent,
+          elapsedMs: Date.now() - (mountedAtRef.current ?? Date.now()),
+          retryAttempt: attempt,
+          resultCategory: focusHandlePresent ? 'requested' : 'not-ready',
+        });
+      },
+    );
+    return cancel;
+  }, [focusTarget, retrying, state]);
 
   useEffect(() => {
     setFocusTargets({
-      pair: findNodeHandle(pairRef.current),
-      settings: findNodeHandle(settingsRef.current),
-      retry: findNodeHandle(retryRef.current),
+      pair: pairRef.current ? findNodeHandle(pairRef.current) : null,
+      settings: settingsRef.current ? findNodeHandle(settingsRef.current) : null,
+      retry: retryRef.current ? findNodeHandle(retryRef.current) : null,
     });
-  }, [state, retrying]);
+  }, [focusTarget, retrying, state]);
 
   const retry = async () => {
     if (retrying) return;
     setRetrying(true);
     setRetryMessage(null);
+    logProviderRecoveryFocus({ surface: 'provider-access', action: 'retry-start', controlId: 'retry', accessState: state, retryAttempt: 1 });
     try {
       clearAssignmentRetryBackoff();
       await retryProviderInitialization();
+      logProviderRecoveryFocus({ surface: 'provider-access', action: 'retry-success', controlId: 'retry', accessState: state, retryAttempt: 1, resultCategory: 'validated' });
     } catch {
       setRetryMessage('The provider still needs attention. Pair another provider or try again.');
+      setFocusTarget('retry');
+      logProviderRecoveryFocus({ surface: 'provider-access', action: 'retry-failed', controlId: 'retry', accessState: state, retryAttempt: 1, resultCategory: 'validation-failed' });
     } finally {
       setRetrying(false);
     }
@@ -62,9 +91,9 @@ export function ProviderAccessRecoveryScreen({ state }: Props) {
           </Text>
           {retryMessage ? <Text style={styles.error}>{retryMessage}</Text> : null}
           <View style={styles.actions}>
-            <NovaButton label="Pair Provider" nativeRef={pairRef} hasTVPreferredFocus nextFocusRight={focusTargets.settings ?? undefined} onPress={() => router.replace('/pair')} style={styles.action} />
-            <NovaButton label="Open Settings" nativeRef={settingsRef} nextFocusLeft={focusTargets.pair ?? undefined} nextFocusRight={(hasRetry ? focusTargets.retry : focusTargets.pair) ?? undefined} onPress={() => router.replace('/settings')} style={styles.action} />
-            {hasRetry ? <NovaButton label="Retry" nativeRef={retryRef} nextFocusLeft={focusTargets.settings ?? undefined} onPress={() => void retry()} style={styles.action} /> : null}
+            <NovaButton label="Pair Provider" nativeRef={pairRef} hasTVPreferredFocus={focusTarget === 'pair'} nextFocusRight={focusTargets.settings ?? undefined} onFocus={() => logProviderRecoveryFocus({ surface: 'provider-access', action: 'preferred-focus-received', controlId: 'pair', accessState: state })} onPress={() => { logProviderRecoveryFocus({ surface: 'provider-access', action: 'action-pressed', controlId: 'pair', accessState: state }); router.replace('/pair'); }} style={styles.action} />
+            <NovaButton label="Open Settings" nativeRef={settingsRef} nextFocusLeft={focusTargets.pair ?? undefined} nextFocusRight={(hasRetry ? focusTargets.retry : focusTargets.pair) ?? undefined} onFocus={() => logProviderRecoveryFocus({ surface: 'provider-access', action: 'preferred-focus-received', controlId: 'settings', accessState: state })} onPress={() => { logProviderRecoveryFocus({ surface: 'provider-access', action: 'action-pressed', controlId: 'settings', accessState: state }); router.replace('/settings'); }} style={styles.action} />
+            {hasRetry ? <NovaButton label="Retry" nativeRef={retryRef} hasTVPreferredFocus={focusTarget === 'retry'} nextFocusLeft={focusTargets.settings ?? undefined} onFocus={() => logProviderRecoveryFocus({ surface: 'provider-access', action: 'preferred-focus-received', controlId: 'retry', accessState: state })} onPress={() => void retry()} style={styles.action} /> : null}
           </View>
         </View>
       </View>

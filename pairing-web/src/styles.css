@@ -545,6 +545,22 @@ a.downloadButton {
 .adminOpsHeading { color: #91a5c6; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .adminPager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; color: #91a5c6; font-size: 12px; }
 .adminError { color: #ffb5bd; }
+.releaseDashboardCard { display: grid; grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(120px, .6fr)) auto; align-items: center; gap: 18px; margin: 14px 0 18px; padding: 16px 18px; border: 1px solid rgba(121, 151, 208, .25); border-radius: 12px; background: linear-gradient(110deg, rgba(31, 37, 94, .72), rgba(10, 29, 61, .72)); }
+.releaseDashboardCard > div { display: grid; gap: 4px; }
+.releaseDashboardCard strong { color: #f1f5ff; font-size: 22px; }
+.releaseDashboardCard small, .releaseDashboardCard span { color: #9db0cf; font-size: 11px; }
+.releaseDashboardCard b { color: #eef4ff; font-size: 20px; }
+.releaseSummary { display: grid; grid-template-columns: 1.5fr repeat(2, 1fr); gap: 10px; margin: 22px 0; }
+.releaseSummary > div, .releaseDetail { display: grid; gap: 5px; padding: 14px; border: 1px solid rgba(121, 151, 208, .2); border-radius: 10px; background: rgba(8, 20, 47, .54); }
+.releaseSummary small, .releaseSummary span, .releaseDetail span { color: #91a5c6; font-size: 12px; }
+.releaseSummary strong { color: #eef4ff; font-size: 24px; }
+.releaseDetail { margin-bottom: 22px; color: #d8e3f7; }
+.releaseOpsPanel h3 { margin: 22px 0 10px; color: #dce8fb; }
+.releaseOpsRow { grid-template-columns: 1.4fr 1fr 1.5fr 1.3fr; }
+.releaseOpsRow span, .releaseOpsRow small { display: grid; gap: 3px; }
+.releaseOpsRow small { color: #91a5c6; font-size: 11px; }
+.releaseDistributionRow { grid-template-columns: 1.2fr 1fr .7fr 2fr; }
+@media (max-width: 760px) { .releaseDashboardCard, .releaseSummary { grid-template-columns: 1fr 1fr; } .releaseDashboardCard > div:first-child { grid-column: 1 / -1; } }
 @media (max-width: 760px) { .adminOpsCards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .cloudProviderList { display: grid; gap: 10px; margin-top: 20px; }
 .cloudProviderList article {

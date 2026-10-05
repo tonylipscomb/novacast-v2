@@ -10,6 +10,7 @@ export type AdminTab =
   | 'pairingOps'
   | 'novapulseOps'
   | 'epgOps'
+  | 'releases'
   | 'settings';
 
 export type AdminNavItem = {
@@ -53,7 +54,7 @@ export const ADMIN_NAV_GROUPS: AdminNavGroup[] = [
     label: 'Management',
     items: [
       { id: 'gold', label: 'Gold Panel', icon: 'G', tab: 'gold' },
-      { id: 'app-releases', label: 'App Releases', icon: 'R', disabled: true, note: 'Coming later' },
+      { id: 'app-releases', label: 'Release Ops', icon: 'R', tab: 'releases' },
       { id: 'release-testing', label: 'Release Testing', icon: 'I', tab: 'invitations' },
     ],
   },
@@ -88,6 +89,7 @@ const TAB_PATHS: Record<AdminTab, string> = {
   pairingOps: '/admin/pairing-ops',
   novapulseOps: '/admin/novapulse-ops',
   epgOps: '/admin/epg-ops',
+  releases: '/admin/releases',
   settings: '/admin/settings',
 };
 
@@ -111,6 +113,7 @@ export function resolveAdminTab(pathname: string): AdminTab {
     case '/admin/pairing-ops': return 'pairingOps';
     case '/admin/novapulse-ops': return 'novapulseOps';
     case '/admin/epg-ops': return 'epgOps';
+    case '/admin/releases': return 'releases';
     case '/admin/settings': return 'settings';
     default: return 'dashboard';
   }

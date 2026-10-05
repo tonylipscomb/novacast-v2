@@ -11,6 +11,7 @@ import { AdminAnnouncements } from './AdminAnnouncements';
 import { AdminPairingOps } from './AdminPairingOps';
 import { AdminNovaPulseOps } from './AdminNovaPulseOps';
 import { AdminEpgOps } from './AdminEpgOps';
+import { AdminReleases } from './AdminReleases';
 import {
   formatProviderAssignmentMessage,
   resolveProviderAssignmentAckState,
@@ -75,6 +76,7 @@ export function AdminCloud() {
   const [dashboard, setDashboard] = useState<Row | null>(null);
   const [goldAccounts, setGoldAccounts] = useState<Row[]>([]);
   const [goldReseller, setGoldReseller] = useState<Row | null>(null);
+  const [releaseSummary, setReleaseSummary] = useState<Row | null>(null);
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -87,13 +89,14 @@ export function AdminCloud() {
     else setRefreshing(true);
 
     try {
-      const [deviceResult, inviteResult, providerResult, dashboardResult, goldResult, resellerResult] = await Promise.all([
+      const [deviceResult, inviteResult, providerResult, dashboardResult, goldResult, resellerResult, releaseResult] = await Promise.all([
         adminRequest(adminDevicesPath(requestedDeviceQuery), nextToken),
         adminRequest('admin-invites', nextToken),
         adminRequest(adminProvidersPath(requestedProviderQuery), nextToken).catch(() => ({ providers: [] })),
         adminRequest('admin-dashboard', nextToken).catch(() => null),
         adminRequest('admin-gold-panel', nextToken).catch(() => ({ accounts: [] })),
         adminRequest('admin-gold-panel', nextToken, { method: 'POST', body: JSON.stringify({ action: 'reseller' }) }).catch(() => null),
+        adminRequest('admin-releases?pageSize=25', nextToken).catch(() => null),
       ]);
 
       setDevices(Array.isArray(deviceResult.items) ? deviceResult.items : Array.isArray(deviceResult.devices) ? deviceResult.devices : []);
@@ -105,6 +108,7 @@ export function AdminCloud() {
       setDashboard(dashboardResult && typeof dashboardResult === 'object' && dashboardResult.dashboard ? dashboardResult.dashboard : dashboardResult);
       setGoldAccounts(Array.isArray(goldResult?.accounts) ? goldResult.accounts : []);
       setGoldReseller(resellerResult?.reseller ?? null);
+      setReleaseSummary(releaseResult?.production ?? null);
     } catch (error) {
       const category = error instanceof Error ? error.message : 'admin_request_failed';
       if (category === 'admin_unauthorized') {
@@ -181,6 +185,7 @@ export function AdminCloud() {
     setDashboard(null);
     setGoldAccounts([]);
     setGoldReseller(null);
+    setReleaseSummary(null);
   };
 
   const extend = async (id: string, hours: number) => {
@@ -403,6 +408,7 @@ export function AdminCloud() {
             providers={providers}
             goldAccounts={goldAccounts}
             goldReseller={goldReseller}
+            releaseSummary={releaseSummary}
             onNavigate={(next) => navigateTab(next === 'analytics' ? 'diagnostics' : next)}
             onAddProvider={() => { navigateTab('providers'); setOpenAddProvider(true); }}
             onAddGoldAccount={() => { navigateTab('gold'); setOpenAddGold(true); }}
@@ -474,6 +480,7 @@ export function AdminCloud() {
         {!loading && tab === 'pairingOps' ? <AdminPairingOps token={token} /> : null}
         {!loading && tab === 'novapulseOps' ? <AdminNovaPulseOps token={token} /> : null}
         {!loading && tab === 'epgOps' ? <AdminEpgOps token={token} /> : null}
+        {!loading && tab === 'releases' ? <AdminReleases token={token} onOpenDevice={(code) => navigateDevice(code, 'overview')} /> : null}
         {!loading && tab === 'gold' ? <AdminGoldPanel token={token} devices={devices} providers={providers} openCreate={openAddGold} onOpenCreateHandled={() => setOpenAddGold(false)} onAssignProvider={(id, providerId) => void assignProvider(id, providerId)} onMessage={setMessage} /> : null}
         {!loading && tab === 'settings' ? (
           <ComingSoon title="Cloud Admin settings" text="Administrator preferences and platform controls will appear here." />
@@ -532,6 +539,7 @@ function titleFor(tab: AdminTab) {
     pairingOps: 'Pairing Operations',
     novapulseOps: 'NovaPulse Operations',
     epgOps: 'EPG Operations',
+    releases: 'Release Operations',
     diagnostics: 'Diagnostics',
     playback: 'Playback',
     settings: 'Settings',
@@ -549,6 +557,7 @@ function subtitleFor(tab: AdminTab) {
     pairingOps: 'Inspect bounded pairing health without exposing redemption or credential material.',
     novapulseOps: 'Review feed freshness and persisted content operations signals.',
     epgOps: 'Review provider guide coverage, freshness, and refresh results.',
+    releases: 'Review explicit production metadata and observed device adoption.',
     diagnostics: 'Review device health and operational diagnostics.',
     playback: 'Review recent persisted playback issues from the device fleet.',
     settings: 'Configure NovaCast Cloud Admin.',

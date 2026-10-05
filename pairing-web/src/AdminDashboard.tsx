@@ -15,7 +15,7 @@ import {
   type StatusTone,
 } from './operationsCenter';
 
-type DashboardNavTarget = 'devices' | 'invitations' | 'providers' | 'gold' | 'analytics';
+type DashboardNavTarget = 'devices' | 'invitations' | 'providers' | 'gold' | 'analytics' | 'releases';
 
 export function AdminDashboard({
   data,
@@ -31,6 +31,7 @@ export function AdminDashboard({
   onAddProvider,
   onAddGoldAccount,
   onOpenDevice,
+  releaseSummary,
 }: {
   data: Row | null;
   devices: Row[];
@@ -45,6 +46,7 @@ export function AdminDashboard({
   onAddProvider?: () => void;
   onAddGoldAccount?: () => void;
   onOpenDevice?: (deviceKey: string, tab?: 'playback' | 'overview') => void;
+  releaseSummary?: Row | null;
 }) {
   const core = readDashboardCore(data);
   const providerHealth = deriveProviderHealthSummary(providers);
@@ -58,6 +60,7 @@ export function AdminDashboard({
   const fleet = deriveFleetSummary(devices, providers, undefined, core.fleetSummary as Row | undefined);
   const attention = deriveNeedsAttention(devices, providers);
   const playback = derivePlaybackIssues(devices, providers);
+  const releaseAdoption = releaseSummary && typeof releaseSummary.adoption === 'object' && releaseSummary.adoption ? releaseSummary.adoption as Row : null;
 
   return (
     <div className="opsPage">
@@ -70,6 +73,8 @@ export function AdminDashboard({
           </article>
         ))}
       </div>
+
+      <section className="releaseDashboardCard"><div><span className="opsMetricLabel">CURRENT PRODUCTION</span><strong>{String(releaseSummary?.version_name ?? 'Unknown')}</strong><small>{releaseSummary ? `Build ${String(releaseSummary.version_code ?? '—')} · ${String(releaseAdoption?.percentage ?? 0)}% observed adoption` : 'Release catalog is unavailable'}</small></div><div><span>Outdated</span><b>{String(releaseSummary?.outdatedCount ?? '—')}</b></div><div><span>Unknown/dev</span><b>{String((Number(releaseSummary?.unknownCount ?? 0) + Number(releaseSummary?.aheadCount ?? 0)) || '—')}</b></div><button className="opsGhost" onClick={() => onNavigate('releases')}>Open Release Ops</button></section>
 
       <div className="opsGrid opsGridWide">
         <Panel title="Fleet visibility" subtitle="Observed device and provider signals">

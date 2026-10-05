@@ -782,15 +782,90 @@ async function readPersistedEpgMappingAudit(client: Awaited<ReturnType<typeof re
   };
 }
 
-async function loadPublicProviders(client: Awaited<ReturnType<typeof requireAdmin>>['client']) {
-  const { data, error } = await client.from('managed_providers').select(PROVIDER_SELECT).order('created_at', { ascending: false });
-  if (error) throw new Error('admin_query_failed');
+type ProviderListQuery = {
+  page: number;
+  pageSize: number;
+  search: string;
+  health: string;
+  type: string;
+  managed: string;
+  gold: string;
+};
+
+function readProviderListQuery(request: Request): ProviderListQuery {
+  const url = new URL(request.url);
+  const page = Math.max(1, Number.parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
+  const pageSize = Math.min(50, Math.max(10, Number.parseInt(url.searchParams.get('pageSize') ?? '25', 10) || 25));
+  const search = String(url.searchParams.get('search') ?? '').trim().slice(0, 80);
+  return {
+    page,
+    pageSize,
+    search,
+    health: String(url.searchParams.get('health') ?? 'all').trim().toLowerCase(),
+    type: String(url.searchParams.get('type') ?? 'all').trim().toLowerCase(),
+    managed: String(url.searchParams.get('managed') ?? 'all').trim().toLowerCase(),
+    gold: String(url.searchParams.get('gold') ?? 'all').trim().toLowerCase(),
+  };
+}
+
+function providerSearchTerm(value: string) {
+  return value.replace(/[%_,()]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
+async function loadPublicProviders(client: Awaited<ReturnType<typeof requireAdmin>>['client'], queryOptions: ProviderListQuery) {
+  if (queryOptions.managed === 'user' || queryOptions.type === 'user') {
+    return { providers: [], page: queryOptions.page, pageSize: queryOptions.pageSize, total: 0, totalPages: 0, summary: { total: 0, healthy: 0, degraded: 0, failed: 0, testing: 0, unvalidated: 0 } };
+  }
+
   const { data: goldAccounts, error: goldError } = await client.from('gold_panel_accounts').select('managed_provider_id,gold_user_id,gold_package_name,gold_country,gold_expiration,gold_enabled,last_synced_at,route_mode,route_domain');
   if (goldError && !isMissingGoldMetadataError(goldError)) throw new Error('admin_query_failed');
   const goldByProvider = new Map((goldAccounts ?? []).map((account) => [account.managed_provider_id, account]));
+  const goldIds = [...goldByProvider.keys()];
+  if (queryOptions.gold === 'gold' && !goldIds.length) return { providers: [], page: queryOptions.page, pageSize: queryOptions.pageSize, total: 0, totalPages: 0, summary: { total: 0, healthy: 0, degraded: 0, failed: 0, testing: 0, unvalidated: 0 } };
+
+  const term = providerSearchTerm(queryOptions.search);
+  let matchingDeviceProviderIds: string[] = [];
+  if (term) {
+    const { data: matchingDevices, error: deviceError } = await client
+      .from('devices')
+      .select('managed_provider_id')
+      .or(`public_device_code.ilike.%${term}%,friendly_name.ilike.%${term}%`)
+      .not('managed_provider_id', 'is', null)
+      .limit(200);
+    if (deviceError) throw new Error('admin_query_failed');
+    matchingDeviceProviderIds = [...new Set((matchingDevices ?? []).map((row) => String(row.managed_provider_id)).filter(Boolean))];
+  }
+
+  let providerQuery = client.from('managed_providers').select(PROVIDER_SELECT, { count: 'exact' }).order('created_at', { ascending: false }).order('id', { ascending: true });
+  if (queryOptions.health !== 'all') providerQuery = providerQuery.eq('health_status', queryOptions.health);
+  if (queryOptions.gold === 'gold') providerQuery = providerQuery.in('id', goldIds);
+  if (queryOptions.gold === 'non_gold' && goldIds.length) providerQuery = providerQuery.not('id', 'in', `(${goldIds.join(',')})`);
+  if (term) {
+    const providerParts = [`display_name.ilike.%${term}%`, `slug.ilike.%${term}%`];
+    if (matchingDeviceProviderIds.length) providerParts.push(`id.in.(${matchingDeviceProviderIds.join(',')})`);
+    providerQuery = providerQuery.or(providerParts.join(','));
+  }
+  const from = (queryOptions.page - 1) * queryOptions.pageSize;
+  const { data, error, count } = await providerQuery.range(from, from + queryOptions.pageSize - 1);
+  if (error) throw new Error('admin_query_failed');
+  const providerRows = data ?? [];
+  const providerIds = providerRows.map((provider) => provider.id);
+  const assignmentRows = providerIds.length
+    ? await client.from('device_provider_assignments').select('managed_provider_id,device_id,devices(public_device_code,friendly_name)').in('managed_provider_id', providerIds).eq('status', 'active')
+    : { data: [], error: null };
+  if (assignmentRows.error) throw new Error('admin_query_failed');
+  const assignedByProvider = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of assignmentRows.data ?? []) {
+    const providerId = String(row.managed_provider_id);
+    const device = Array.isArray(row.devices) ? row.devices[0] : row.devices;
+    const safeDevice = device && typeof device === 'object' ? { public_device_code: device.public_device_code, friendly_name: device.friendly_name } : null;
+    assignedByProvider.set(providerId, [...(assignedByProvider.get(providerId) ?? []), safeDevice ?? {}]);
+  }
+  if (error) throw new Error('admin_query_failed');
   const { data: sourceRows, error: sourceError } = await client
     .from('managed_provider_epg_sources')
     .select(EPG_SOURCE_SELECT)
+    .in('managed_provider_id', providerIds.length ? providerIds : ['00000000-0000-0000-0000-000000000000'])
     .order('enabled', { ascending: false })
     .order('priority', { ascending: true })
     .order('created_at', { ascending: true });
@@ -800,16 +875,22 @@ async function loadPublicProviders(client: Awaited<ReturnType<typeof requireAdmi
     const typedSource = source as ManagedProviderEpgSourceRow;
     sourcesByProvider.set(typedSource.managed_provider_id, [...(sourcesByProvider.get(typedSource.managed_provider_id) ?? []), toPublicEpgSource(typedSource)]);
   }
-  const providers = [];
-  for (const provider of data ?? []) {
-    const { count } = await client
-      .from('device_provider_assignments')
-      .select('id', { count: 'exact', head: true })
-      .eq('managed_provider_id', provider.id)
-      .eq('status', 'active');
-    providers.push({ ...toPublicProvider(provider as Record<string, unknown>), assignedDevices: count ?? 0, goldAccount: goldByProvider.get(provider.id) ?? null, epgSources: sourcesByProvider.get(provider.id) ?? [] });
-  }
-  return providers;
+  const providers = providerRows.map((provider) => {
+    const assignedDevices = assignedByProvider.get(provider.id) ?? [];
+    return {
+      ...toPublicProvider(provider as Record<string, unknown>),
+      assignedDevices: assignedDevices.length,
+      assignedDeviceSamples: assignedDevices.slice(0, 10),
+      goldAccount: goldByProvider.get(provider.id) ?? null,
+      epgSources: sourcesByProvider.get(provider.id) ?? [],
+    };
+  });
+  const summary = providerRows.reduce<Record<string, number>>((result, provider) => {
+    const status = String(provider.health_status ?? 'unvalidated');
+    result[status] = (result[status] ?? 0) + 1;
+    return result;
+  }, { total: Number(count ?? 0), healthy: 0, degraded: 0, failed: 0, testing: 0, unvalidated: 0 });
+  return { providers, page: queryOptions.page, pageSize: queryOptions.pageSize, total: Number(count ?? 0), totalPages: Math.ceil(Number(count ?? 0) / queryOptions.pageSize), summary };
 }
 
 function isMissingGoldMetadataError(error: unknown) {
@@ -875,7 +956,7 @@ Deno.serve(async (request) => {
     const { client } = await requireAdmin(request);
 
     if (request.method === 'GET') {
-      return adminJsonResponse(request, { providers: await loadPublicProviders(client) });
+      return adminJsonResponse(request, await loadPublicProviders(client, readProviderListQuery(request)));
     }
 
     if (request.method !== 'POST' && request.method !== 'PATCH') {

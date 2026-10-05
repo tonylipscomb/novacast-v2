@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 
 import { adminRequest } from './pairing';
 import {
@@ -79,6 +79,8 @@ type EpgSourceForm = {
   url: string;
 };
 type EpgWizardStep = 'overview' | 'source' | 'coverage' | 'audit';
+type ProviderQuery = { page: number; pageSize: number; search: string; health: string; type: string; managed: string; gold: string };
+type ProviderPagination = { page: number; pageSize: number; total: number; totalPages: number; summary: Record<string, number> };
 const emptySourceForm: EpgSourceForm = { sourceKind: 'national', safeLabel: '', priority: '100', enabled: true, url: '' };
 const PROVIDER_VALIDATION_LEASE_MS = 3 * 60 * 1000;
 
@@ -87,6 +89,9 @@ export function AdminProviders({
   providers,
   onRefresh,
   onMessage,
+  pagination,
+  query: serverQuery,
+  onQueryChange,
   openCreate,
   onOpenCreateHandled,
 }: {
@@ -94,11 +99,17 @@ export function AdminProviders({
   providers: Row[];
   onRefresh: () => Promise<void> | void;
   onMessage: (message: string) => void;
+  pagination: ProviderPagination;
+  query: ProviderQuery;
+  onQueryChange: (query: ProviderQuery) => void;
   openCreate?: boolean;
   onOpenCreateHandled?: () => void;
 }) {
   const [query, setQuery] = useState('');
   const [healthFilter, setHealthFilter] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [managedFilter, setManagedFilter] = useState('all');
+  const [goldFilter, setGoldFilter] = useState('all');
   const [modal, setModal] = useState<'add' | 'edit' | 'diagnostics' | null>(null);
   const [selected, setSelected] = useState<Row | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -155,18 +166,13 @@ export function AdminProviders({
     return () => window.clearInterval(timer);
   }, [providers]);
 
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return providers.filter((provider) => {
-      const haystack = `${String(provider.display_name ?? '')} ${String(provider.slug ?? '')} ${String(provider.status ?? '')}`.toLowerCase();
-      return (!needle || haystack.includes(needle)) && (healthFilter === 'all' || String(provider.health_status ?? 'unvalidated') === healthFilter);
-    });
-  }, [providers, query, healthFilter]);
+  const notifyQuery = (patch: Partial<ProviderQuery>) => onQueryChange({ ...serverQuery, ...patch, page: 1 });
+  const filtered = providers;
 
   const metrics = {
-    total: providers.length,
-    healthy: providers.filter((provider) => String(provider.health_status ?? '') === 'healthy' && !provider.validation_stale).length,
-    failed: providers.filter((provider) => String(provider.health_status ?? '') === 'failed').length,
+    total: pagination.total,
+    healthy: pagination.summary.healthy ?? 0,
+    failed: pagination.summary.failed ?? 0,
     draft: providers.filter((provider) => String(provider.status ?? '') === 'draft').length,
   };
 
@@ -502,13 +508,16 @@ export function AdminProviders({
       <section className="inviteFilters">
         <label className="inviteSearch">
           <span />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search providers" />
+          <input value={query} onChange={(event) => { setQuery(event.target.value); notifyQuery({ search: event.target.value }); }} placeholder="Search providers, IDs, or devices" />
         </label>
-        <select value={healthFilter} onChange={(event) => setHealthFilter(event.target.value)} aria-label="Filter providers by health">
+        <select value={healthFilter} onChange={(event) => { setHealthFilter(event.target.value); notifyQuery({ health: event.target.value }); }} aria-label="Filter providers by health">
           <option value="all">All health states</option>
-          {[...new Set(providers.map((provider) => String(provider.health_status ?? 'unvalidated')))].map((value) => <option key={value} value={value}>{value}</option>)}
+          {['healthy', 'degraded', 'failed', 'testing', 'unvalidated'].map((value) => <option key={value} value={value}>{value}</option>)}
         </select>
-        <button className="filterButton" onClick={() => { setQuery(''); setHealthFilter('all'); }}>Clear</button>
+        <select value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); notifyQuery({ type: event.target.value }); }} aria-label="Filter providers by type"><option value="all">All types</option><option value="xtream">Xtream</option></select>
+        <select value={managedFilter} onChange={(event) => { setManagedFilter(event.target.value); notifyQuery({ managed: event.target.value }); }} aria-label="Filter providers by source"><option value="all">All sources</option><option value="managed">Managed</option></select>
+        <select value={goldFilter} onChange={(event) => { setGoldFilter(event.target.value); notifyQuery({ gold: event.target.value }); }} aria-label="Filter providers by Gold status"><option value="all">All Gold states</option><option value="gold">Gold linked</option><option value="non_gold">Not Gold linked</option></select>
+        <button className="filterButton" onClick={() => { setQuery(''); setHealthFilter('all'); setTypeFilter('all'); setManagedFilter('all'); setGoldFilter('all'); onQueryChange({ ...serverQuery, page: 1, search: '', health: 'all', type: 'all', managed: 'all', gold: 'all' }); }}>Clear</button>
         <button
           className="cloudPrimary"
           onClick={() => {
@@ -555,6 +564,8 @@ export function AdminProviders({
                   <div><span>Movies</span><strong>{formatInventoryCount(provider.inventory_movie_count, provider.movie_count, isCappedCatalogCount(provider.movie_count, catalogTruncated.movies, catalogDetails.movies?.exactCountAvailable))}</strong></div>
                   <div><span>Series</span><strong>{formatInventoryCount(provider.inventory_series_count, provider.series_count, isCappedCatalogCount(provider.series_count, catalogTruncated.series, catalogDetails.series?.exactCountAvailable))}</strong></div>
                 </dl>
+                <p>Provider ID: <code>{id}</code> · Assigned devices: {Number(provider.assignedDevices ?? 0)}</p>
+                {Array.isArray(provider.assignedDeviceSamples) && provider.assignedDeviceSamples.length ? <p className="providerNote">Devices: {provider.assignedDeviceSamples.slice(0, 3).map((device: Row) => String(device.friendly_name ?? device.public_device_code ?? 'Device')).join(' · ')}{Number(provider.assignedDevices ?? 0) > 3 ? ' · …' : ''}</p> : null}
                 <p>Last tested: {formatTimestamp(provider.last_tested_at)}</p>
                 <p>Last successful: {formatTimestamp(provider.last_successful_test_at)}</p>
                 <div className="providerHealthSignals">
@@ -609,11 +620,20 @@ export function AdminProviders({
       ) : (
         <section className="inviteEmpty">
           <div>P</div>
-          <strong>{providers.length ? 'No providers match your search.' : 'No managed providers yet'}</strong>
+          <strong>{pagination.total ? 'No providers match your search.' : 'No managed providers yet'}</strong>
           <small>Add a provider, test it, then activate it only after critical checks pass.</small>
           <button onClick={() => setModal('add')}>Add Provider</button>
         </section>
       )}
+
+      <footer className="invitePagination">
+        <span>Showing {pagination.total ? (pagination.page - 1) * pagination.pageSize + 1 : 0} to {Math.min(pagination.page * pagination.pageSize, pagination.total)} of {pagination.total} providers</span>
+        <div>
+          <button disabled={pagination.page <= 1} onClick={() => onQueryChange({ ...serverQuery, page: pagination.page - 1 })}>Previous</button>
+          <strong>{pagination.page}</strong>
+          <button disabled={pagination.page >= Math.max(1, pagination.totalPages)} onClick={() => onQueryChange({ ...serverQuery, page: pagination.page + 1 })}>Next</button>
+        </div>
+      </footer>
 
       {epgWizardStep && wizardProvider ? (
         <EpgWizard
@@ -796,14 +816,15 @@ function EpgWizard({ provider, step, source, preview, audit, busy, onClose, onSt
       <span className="eyebrow">EPG MANAGEMENT · {String(provider.display_name ?? 'Provider')}</span>
       <h2>{title}</h2>
       {step === 'overview' ? <>
+        <strong>EPG Sources</strong>
         <div className="epgWizardSummary"><span>Sources <strong>{sources.length}</strong></span><span>Enabled <strong>{enabled}</strong></span><span>Mapped <strong>{mapped.toLocaleString()}</strong></span><span>Last refresh <strong>{latestRefresh ? formatTimestamp(latestRefresh) : 'Never'}</strong></span></div>
-        <div className="epgWizardActions epgWizardToolbar"><button type="button" className="epgPrimaryAction" disabled={busy} onClick={onAdd}>Add source</button><button type="button" className="epgSecondaryAction" disabled={busy || !sources.length} onClick={onPreview}>Coverage</button></div>
+        <div className="epgWizardActions epgWizardToolbar"><button type="button" className="epgPrimaryAction" disabled={busy} onClick={onAdd}>Add source</button><button type="button" aria-label="Preview Combined Coverage" className="epgSecondaryAction" disabled={busy || !sources.length} onClick={onPreview}>Coverage</button></div>
         <div className="epgWizardSourceList">{sources.length ? sources.map((item) => <div className="epgWizardSourceRow" key={item.id}><div><strong>{item.safeLabel}</strong><small>{item.sourceKind} · Priority {item.priority} · {item.enabled ? 'Enabled' : 'Disabled'}</small><small>{nullableEpgMetric(item.channelCount)} channels · {nullableEpgMetric(item.programmeCount)} programmes · {nullableEpgMetric(item.mappedChannels)} mapped</small><small>Last refresh: {formatTimestamp(item.lastRefreshAt)} · {item.lastRefreshStatus ?? 'Never'}</small></div><button type="button" disabled={busy} onClick={() => onManage(item)}>Manage</button></div>) : <small>No EPG sources configured.</small>}</div>
       </> : null}
       {step === 'source' && source ? <>
         <div className="epgWizardMetricGrid"><span>Kind<strong>{source.sourceKind}</strong></span><span>Status<strong>{source.enabled ? 'Enabled' : 'Disabled'}</strong></span><span>Priority<strong>{source.priority}</strong></span><span>Channels<strong>{nullableEpgMetric(source.channelCount)}</strong></span><span>Programmes<strong>{nullableEpgMetric(source.programmeCount)}</strong></span><span>Mapped<strong>{nullableEpgMetric(source.mappedChannels)}</strong></span><span>Mapping<strong>{source.mappingPercentage == null ? 'Not recorded' : `${(source.mappingPercentage * 100).toFixed(1)}%`}</strong></span><span>Current<strong>{source.currentProgramCoverage == null ? 'Not recorded' : `${(source.currentProgramCoverage * 100).toFixed(1)}%`}</strong></span><span>Future<strong>{source.futureProgramCoverage == null ? 'Not recorded' : `${(source.futureProgramCoverage * 100).toFixed(1)}%`}</strong></span></div>
         <p className="providerNote">Last refresh: {formatTimestamp(source.lastRefreshAt)} · {source.lastRefreshStatus ?? 'Never'}</p>
-        <div className="epgWizardActions epgSourceActions"><button type="button" disabled={busy} onClick={() => onEdit(source)}>Edit</button><button type="button" disabled={busy} onClick={() => onRefresh(source)}>Refresh</button><details className="epgSourceMore"><summary>More</summary><div><button type="button" disabled={busy} onClick={() => onTest(source)}>Test</button><button type="button" disabled={busy} onClick={() => onMappingAudit(source)}>Audit</button><button type="button" disabled={busy} onClick={() => onToggle(source)}>{source.enabled ? 'Disable' : 'Enable'}</button></div></details></div>
+        <div className="epgWizardActions epgSourceActions"><button type="button" disabled={busy} onClick={() => onEdit(source)}>Edit</button><button type="button" disabled={busy} onClick={() => onRefresh(source)}>Refresh</button><details className="epgSourceMore"><summary>More</summary><div><button type="button" disabled={busy} onClick={() => onTest(source)}>Test</button><button type="button" aria-label="Mapping Audit" disabled={busy} onClick={() => onMappingAudit(source)}>Audit</button><button type="button" disabled={busy} onClick={() => onToggle(source)}>{source.enabled ? 'Disable' : 'Enable'}</button></div></details></div>
         <details className="epgWizardDanger"><summary>Danger zone</summary><button type="button" className="dangerButton" disabled={busy} onClick={() => onDelete(source)}>Delete source</button></details>
         <button type="button" className="ghost epgWizardBack" onClick={() => onStep('overview')}>Back to Sources</button>
       </> : null}

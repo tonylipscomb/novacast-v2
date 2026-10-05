@@ -27,7 +27,10 @@ type InvitationInput = {
 };
 type DeviceQuery = { page: number; pageSize: number; search: string; status: string; platform: string; activation: string; version: string; providerId: string; providerHealth: string };
 type DevicePagination = { page: number; pageSize: number; total: number; totalPages: number };
+type ProviderQuery = { page: number; pageSize: number; search: string; health: string; type: string; managed: string; gold: string };
+type ProviderPagination = { page: number; pageSize: number; total: number; totalPages: number; summary: Record<string, number> };
 const DEFAULT_DEVICE_QUERY: DeviceQuery = { page: 1, pageSize: 25, search: '', status: 'all', platform: 'all', activation: 'all', version: '', providerId: '', providerHealth: 'all' };
+const DEFAULT_PROVIDER_QUERY: ProviderQuery = { page: 1, pageSize: 25, search: '', health: 'all', type: 'all', managed: 'all', gold: 'all' };
 
 function adminDevicesPath(query: DeviceQuery) {
   const params = new URLSearchParams({ page: String(query.page), pageSize: String(query.pageSize) });
@@ -39,6 +42,16 @@ function adminDevicesPath(query: DeviceQuery) {
   if (query.providerId) params.set('providerId', query.providerId);
   if (query.providerHealth !== 'all') params.set('providerHealth', query.providerHealth);
   return `admin-devices?${params.toString()}`;
+}
+
+function adminProvidersPath(query: ProviderQuery) {
+  const params = new URLSearchParams({ page: String(query.page), pageSize: String(query.pageSize) });
+  if (query.search) params.set('search', query.search);
+  if (query.health !== 'all') params.set('health', query.health);
+  if (query.type !== 'all') params.set('type', query.type);
+  if (query.managed !== 'all') params.set('managed', query.managed);
+  if (query.gold !== 'all') params.set('gold', query.gold);
+  return `admin-providers?${params.toString()}`;
 }
 
 export function AdminCloud() {
@@ -54,6 +67,8 @@ export function AdminCloud() {
   const [devicePagination, setDevicePagination] = useState<DevicePagination>({ page: 1, pageSize: 25, total: 0, totalPages: 0 });
   const [invitations, setInvitations] = useState<Row[]>([]);
   const [providers, setProviders] = useState<Row[]>([]);
+  const [providerQuery, setProviderQuery] = useState<ProviderQuery>(DEFAULT_PROVIDER_QUERY);
+  const [providerPagination, setProviderPagination] = useState<ProviderPagination>({ page: 1, pageSize: 25, total: 0, totalPages: 0, summary: {} });
   const [dashboard, setDashboard] = useState<Row | null>(null);
   const [goldAccounts, setGoldAccounts] = useState<Row[]>([]);
   const [goldReseller, setGoldReseller] = useState<Row | null>(null);
@@ -64,7 +79,7 @@ export function AdminCloud() {
   const [openAddProvider, setOpenAddProvider] = useState(false);
   const [openAddGold, setOpenAddGold] = useState(false);
 
-  const load = useCallback(async (nextToken: string, quiet = false, requestedDeviceQuery: DeviceQuery = DEFAULT_DEVICE_QUERY) => {
+  const load = useCallback(async (nextToken: string, quiet = false, requestedDeviceQuery: DeviceQuery = DEFAULT_DEVICE_QUERY, requestedProviderQuery: ProviderQuery = DEFAULT_PROVIDER_QUERY) => {
     if (!quiet) setLoading(true);
     else setRefreshing(true);
 
@@ -72,7 +87,7 @@ export function AdminCloud() {
       const [deviceResult, inviteResult, providerResult, dashboardResult, goldResult, resellerResult] = await Promise.all([
         adminRequest(adminDevicesPath(requestedDeviceQuery), nextToken),
         adminRequest('admin-invites', nextToken),
-        adminRequest('admin-providers', nextToken).catch(() => ({ providers: [] })),
+        adminRequest(adminProvidersPath(requestedProviderQuery), nextToken).catch(() => ({ providers: [] })),
         adminRequest('admin-dashboard', nextToken).catch(() => null),
         adminRequest('admin-gold-panel', nextToken).catch(() => ({ accounts: [] })),
         adminRequest('admin-gold-panel', nextToken, { method: 'POST', body: JSON.stringify({ action: 'reseller' }) }).catch(() => null),
@@ -82,6 +97,7 @@ export function AdminCloud() {
       setDevicePagination({ page: Number(deviceResult.page ?? requestedDeviceQuery.page), pageSize: Number(deviceResult.pageSize ?? requestedDeviceQuery.pageSize), total: Number(deviceResult.total ?? 0), totalPages: Number(deviceResult.totalPages ?? 0) });
       setInvitations(Array.isArray(inviteResult.invitations) ? inviteResult.invitations : []);
       setProviders(Array.isArray(providerResult.providers) ? providerResult.providers : []);
+      setProviderPagination({ page: Number(providerResult.page ?? requestedProviderQuery.page), pageSize: Number(providerResult.pageSize ?? requestedProviderQuery.pageSize), total: Number(providerResult.total ?? 0), totalPages: Number(providerResult.totalPages ?? 0), summary: (providerResult.summary && typeof providerResult.summary === 'object' ? providerResult.summary : {}) as Record<string, number> });
       // admin-dashboard returns { serverTime, dashboard: {...} }; keep the inner core.
       setDashboard(dashboardResult && typeof dashboardResult === 'object' && dashboardResult.dashboard ? dashboardResult.dashboard : dashboardResult);
       setGoldAccounts(Array.isArray(goldResult?.accounts) ? goldResult.accounts : []);
@@ -103,14 +119,19 @@ export function AdminCloud() {
 
   const updateDeviceQuery = useCallback((next: DeviceQuery) => {
     setDeviceQuery(next);
-    if (token) void load(token, true, next);
-  }, [load, token]);
+    if (token) void load(token, true, next, providerQuery);
+  }, [load, providerQuery, token]);
+
+  const updateProviderQuery = useCallback((next: ProviderQuery) => {
+    setProviderQuery(next);
+    if (token) void load(token, true, deviceQuery, next);
+  }, [deviceQuery, load, token]);
 
   useEffect(() => {
     // Admin dashboard hydration is an external request lifecycle.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (token && tab !== 'diagnostics') void load(token);
-  }, [load, tab, token]);
+    if (token && tab !== 'diagnostics') void load(token, false, deviceQuery, providerQuery);
+  }, [deviceQuery, load, providerQuery, tab, token]);
 
   useEffect(() => {
     const onPopState = () => setLocation(resolveAdminLocation(window.location.pathname));
@@ -152,6 +173,8 @@ export function AdminCloud() {
     setDevicePagination({ page: 1, pageSize: 25, total: 0, totalPages: 0 });
     setInvitations([]);
     setProviders([]);
+    setProviderQuery(DEFAULT_PROVIDER_QUERY);
+    setProviderPagination({ page: 1, pageSize: 25, total: 0, totalPages: 0, summary: {} });
     setDashboard(null);
     setGoldAccounts([]);
     setGoldReseller(null);
@@ -348,7 +371,7 @@ export function AdminCloud() {
           </div>
           <div className="cloudTopActions">
             {shouldShowGlobalAdminHeaderAction(tab, 'refresh') ? (
-              <button onClick={() => { if (tab !== 'diagnostics') void load(token, true); }} disabled={refreshing || tab === 'diagnostics'}>
+              <button onClick={() => { if (tab !== 'diagnostics') void load(token, true, deviceQuery, providerQuery); }} disabled={refreshing || tab === 'diagnostics'}>
                 {refreshing ? 'Refreshing' : ' Refresh'}
               </button>
             ) : null}
@@ -431,8 +454,11 @@ export function AdminCloud() {
           <AdminProviders
             token={token}
             providers={providers}
-            onRefresh={() => load(token, true)}
+            onRefresh={() => load(token, true, deviceQuery, providerQuery)}
             onMessage={setMessage}
+            pagination={providerPagination}
+            query={providerQuery}
+            onQueryChange={updateProviderQuery}
             openCreate={openAddProvider}
             onOpenCreateHandled={() => setOpenAddProvider(false)}
           />

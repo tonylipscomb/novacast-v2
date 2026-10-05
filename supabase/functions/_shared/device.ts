@@ -23,6 +23,65 @@ export async function authenticateDevice(request: Request, client: ReturnType<ty
   return device;
 }
 
+export function canBootstrapPairingForDevice(device: { status?: string | null; activation_status?: string | null }) {
+  return device.status === 'registered' && device.activation_status === 'inactive';
+}
+
+function logDeviceActivation(event: string, fields: { activationStatus?: string | null; reason?: string; sessionState?: string; elapsedMs?: number; devicePresent?: boolean } = {}) {
+  console.info('[NovaCastDeviceActivation]', JSON.stringify({
+    event,
+    ...(fields.activationStatus ? { activationStatus: fields.activationStatus } : {}),
+    ...(fields.reason ? { reason: fields.reason } : {}),
+    ...(fields.sessionState ? { sessionState: fields.sessionState } : {}),
+    ...(fields.elapsedMs !== undefined ? { elapsedMs: Math.max(0, Math.round(fields.elapsedMs)) } : {}),
+    ...(fields.devicePresent !== undefined ? { devicePresent: fields.devicePresent } : {}),
+  }));
+}
+
+/**
+ * Atomically activates the exact registered device for a completed pairing.
+ * The database function is intentionally idempotent and refuses blocked,
+ * revoked, expired, or mismatched sessions.
+ */
+export async function autoActivateDeviceAfterPairing(
+  client: ReturnType<typeof getAdminClient>,
+  sessionId: string,
+  deviceId: string,
+) {
+  const startedAt = Date.now();
+  logDeviceActivation('auto-activation-started', { devicePresent: true });
+  const { data, error } = await client.rpc('auto_activate_device_after_pairing', {
+    p_session_id: sessionId,
+    p_device_id: deviceId,
+  });
+  if (error || !data?.[0]) {
+    const category = String(error?.message ?? '').toLowerCase();
+    const reason = category.includes('blocked') || category.includes('revoked')
+      ? 'device-blocked'
+      : category.includes('mismatch')
+        ? 'session-device-mismatch'
+        : category.includes('expired')
+          ? 'session-expired'
+          : 'not-eligible';
+    logDeviceActivation('auto-activation-failed', {
+      reason,
+      elapsedMs: Date.now() - startedAt,
+      devicePresent: true,
+    });
+    throw new Error('activation_unavailable');
+  }
+
+  const activation = data[0] as { activation_status?: string | null };
+  const reason = activation.activation_status === 'active' ? 'validated-pairing' : 'not-eligible';
+  logDeviceActivation(reason === 'validated-pairing' ? 'auto-activation-complete' : 'auto-activation-skipped', {
+    activationStatus: activation.activation_status,
+    reason,
+    elapsedMs: Date.now() - startedAt,
+    devicePresent: true,
+  });
+  return activation;
+}
+
 export function isDeviceAuthorizationActive(
   device: { status?: string | null; activation_status?: string | null },
   activation: { status?: string | null; expires_at?: string | null } | null,

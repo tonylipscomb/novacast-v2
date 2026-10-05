@@ -2,7 +2,7 @@ import { getClientAddress, jsonResponse, optionsResponse, readJson } from '../_s
 import { pairingDiagnostic } from '../_shared/diagnostics.ts';
 import { consumeRateLimit, getAdminClient } from '../_shared/supabase.ts';
 import { decryptSecret, hashInstallation, hashToken, normalizeInstallationId } from '../_shared/security.ts';
-import { optionalAuthenticateDevice } from '../_shared/device.ts';
+import { assertPairingSessionOwnership, autoActivateDeviceAfterPairing, optionalAuthenticateDevice } from '../_shared/device.ts';
 
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return optionsResponse();
@@ -16,7 +16,7 @@ Deno.serve(async (request) => {
     if (!sessionId || token.length < 20) return jsonResponse({ errorCategory: 'invalid_redemption' }, 400);
 
     const client = getAdminClient();
-    await optionalAuthenticateDevice(request, client).catch(() => null);
+    const authenticatedDevice = await optionalAuthenticateDevice(request, client);
     pairingDiagnostic('redemption-started', { state: 'completed' });
     const installationHash = await hashInstallation(installationId);
     const rateKey = await hashToken(`${installationHash}:${getClientAddress(request)}:redeem`);
@@ -24,13 +24,35 @@ Deno.serve(async (request) => {
 
     const { data: session, error } = await client
       .from('pairing_sessions')
-      .select('id,state,installation_hash,redemption_hash,redemption_expires_at,redemption_consumed_at,provider_record_id')
+      .select('id,state,installation_hash,device_id,expires_at,redemption_hash,redemption_expires_at,redemption_consumed_at,provider_record_id')
       .eq('id', sessionId)
       .eq('installation_hash', installationHash)
       .maybeSingle();
     if (error || !session || session.state !== 'completed' || !session.provider_record_id) return jsonResponse({ errorCategory: 'invalid_redemption' }, 409);
+    try {
+      assertPairingSessionOwnership(session, installationHash, authenticatedDevice);
+    } catch {
+      return jsonResponse({ errorCategory: 'invalid_redemption' }, 409);
+    }
+    if (session.device_id && (!authenticatedDevice || authenticatedDevice.id !== session.device_id)) {
+      return jsonResponse({ errorCategory: 'invalid_redemption' }, 409);
+    }
+    if (
+      Deno.env.get('DEVICE_ACTIVATION_REQUIRED') === 'true' &&
+      (!authenticatedDevice || (
+        authenticatedDevice.activation_status !== 'active' &&
+        (!session.device_id || session.device_id !== authenticatedDevice.id)
+      ))
+    ) {
+      return jsonResponse({ errorCategory: 'activation_required' }, 403);
+    }
+    if (session.expires_at && new Date(session.expires_at).getTime() <= Date.now()) return jsonResponse({ errorCategory: 'redemption_expired' }, 409);
     if (session.redemption_expires_at && new Date(session.redemption_expires_at).getTime() <= Date.now()) return jsonResponse({ errorCategory: 'redemption_expired' }, 409);
     if (session.redemption_hash !== (await hashToken(token))) return jsonResponse({ errorCategory: 'invalid_redemption' }, 409);
+
+    if (authenticatedDevice && session.device_id === authenticatedDevice.id) {
+      await autoActivateDeviceAfterPairing(client, session.id, authenticatedDevice.id);
+    }
 
     if (!session.redemption_consumed_at) {
       const { data: consumed } = await client
@@ -59,10 +81,10 @@ Deno.serve(async (request) => {
     pairingDiagnostic('redemption-completed', { state: 'completed' });
     return jsonResponse({ providerName: provider.provider_name, ...credentials });
   } catch (error) {
-    const category = error instanceof Error && ['invalid_device', 'rate_limited', 'invalid_redemption', 'redemption_expired', 'redemption_already_used', 'invalid_pairing_session'].includes(error.message)
+    const category = error instanceof Error && ['activation_unavailable', 'invalid_device', 'rate_limited', 'invalid_redemption', 'redemption_expired', 'redemption_already_used', 'invalid_pairing_session'].includes(error.message)
       ? error.message
       : 'unexpected_server_error';
-    const status = category === 'rate_limited' ? 429 : 409;
+    const status = category === 'rate_limited' ? 429 : category === 'activation_unavailable' ? 503 : 409;
     return jsonResponse({ errorCategory: category }, status);
   }
 });

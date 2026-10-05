@@ -2,7 +2,7 @@ import { getClientAddress, jsonResponse, optionsResponse, readJson } from '../_s
 import { pairingDiagnostic } from '../_shared/diagnostics.ts';
 import { getAdminClient, consumeRateLimit } from '../_shared/supabase.ts';
 import { createPairingCode, hashCode, hashInstallation, hashToken, normalizeInstallationId } from '../_shared/security.ts';
-import { optionalAuthenticateDevice } from '../_shared/device.ts';
+import { canBootstrapPairingForDevice, optionalAuthenticateDevice } from '../_shared/device.ts';
 
 const SESSION_TTL_MS = 10 * 60 * 1000;
 
@@ -16,7 +16,13 @@ Deno.serve(async (request) => {
     const installationHash = await hashInstallation(installationId);
     const client = getAdminClient();
     const authenticatedDevice = await optionalAuthenticateDevice(request, client);
-    if (Deno.env.get('DEVICE_ACTIVATION_REQUIRED') === 'true' && (!authenticatedDevice || authenticatedDevice.activation_status !== 'active')) {
+    if (
+      Deno.env.get('DEVICE_ACTIVATION_REQUIRED') === 'true' &&
+      (!authenticatedDevice || (
+        authenticatedDevice.activation_status !== 'active' &&
+        !canBootstrapPairingForDevice(authenticatedDevice)
+      ))
+    ) {
       return jsonResponse({ errorCategory: 'activation_required' }, 403);
     }
     const clientKey = await hashToken(`${getClientAddress(request)}:create`);

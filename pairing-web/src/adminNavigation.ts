@@ -7,6 +7,9 @@ export type AdminTab =
   | 'gold'
   | 'invitations'
   | 'announcements'
+  | 'pairingOps'
+  | 'novapulseOps'
+  | 'epgOps'
   | 'settings';
 
 export type AdminNavItem = {
@@ -32,6 +35,7 @@ export const ADMIN_NAV_GROUPS: AdminNavGroup[] = [
       { id: 'providers', label: 'Providers', icon: 'P', tab: 'providers' },
       { id: 'pairing', label: 'Pairing', icon: '↗', href: '/pair' },
       { id: 'diagnostics', label: 'Diagnostics', icon: 'D', tab: 'diagnostics' },
+      { id: 'pairing-ops', label: 'Pairing Ops', icon: 'Q', tab: 'pairingOps' },
       { id: 'playback', label: 'Playback', icon: '▶', tab: 'playback' },
     ],
   },
@@ -39,8 +43,10 @@ export const ADMIN_NAV_GROUPS: AdminNavGroup[] = [
     label: 'Content',
     items: [
       { id: 'novapulse', label: 'NovaPulse', icon: 'N', tab: 'announcements' },
+      { id: 'novapulse-ops', label: 'NovaPulse Ops', icon: 'H', tab: 'novapulseOps' },
       { id: 'catalog', label: 'Catalog', icon: 'C', disabled: true, note: 'Coming later' },
       { id: 'epg', label: 'EPG', icon: 'E', disabled: true, note: 'Coming later' },
+      { id: 'epg-ops', label: 'EPG Ops', icon: 'E', tab: 'epgOps' },
     ],
   },
   {
@@ -79,6 +85,9 @@ const TAB_PATHS: Record<AdminTab, string> = {
   gold: '/admin/gold',
   invitations: '/admin/release-testing',
   announcements: '/admin/novapulse',
+  pairingOps: '/admin/pairing-ops',
+  novapulseOps: '/admin/novapulse-ops',
+  epgOps: '/admin/epg-ops',
   settings: '/admin/settings',
 };
 
@@ -99,6 +108,9 @@ export function resolveAdminTab(pathname: string): AdminTab {
     case '/admin/invitations': return 'invitations';
     case '/admin/novapulse':
     case '/admin/announcements': return 'announcements';
+    case '/admin/pairing-ops': return 'pairingOps';
+    case '/admin/novapulse-ops': return 'novapulseOps';
+    case '/admin/epg-ops': return 'epgOps';
     case '/admin/settings': return 'settings';
     default: return 'dashboard';
   }

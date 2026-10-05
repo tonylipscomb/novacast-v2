@@ -530,6 +530,22 @@ a.downloadButton {
 .cloudSimplePanel > header { display: flex; align-items: center; justify-content: space-between; }
 .cloudSimplePanel > header h2 { margin: 3px 0 0; }
 .cloudSimplePanel > header > strong { font-size: 30px; color: #8d86ff; }
+.adminOpsPanel { min-height: 360px; }
+.adminOpsPanel header { align-items: flex-start; }
+.adminOpsPanel header button { flex: 0 0 auto; }
+.adminOpsPanel .eyebrow { color: #7f9cff; font-size: 10px; font-weight: 800; letter-spacing: .14em; }
+.adminOpsCards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 24px 0; }
+.adminOpsCard { display: grid; gap: 6px; padding: 14px; border: 1px solid rgba(121, 151, 208, .2); border-radius: 10px; background: rgba(8, 20, 47, .54); }
+.adminOpsCard small { color: #91a5c6; text-transform: uppercase; letter-spacing: .08em; }
+.adminOpsCard strong { color: #eef4ff; font-size: 24px; }
+.adminOpsCard span, .adminOpsNote { color: #91a5c6; font-size: 12px; }
+.adminOpsTable { overflow-x: auto; border: 1px solid rgba(121, 151, 208, .18); border-radius: 10px; }
+.adminOpsRow { display: grid; grid-template-columns: 1.4fr 1fr 1.3fr 1.2fr; gap: 12px; min-width: 620px; padding: 12px 14px; border-top: 1px solid rgba(121, 151, 208, .12); color: #d8e3f7; font-size: 12px; }
+.adminOpsRow:first-child { border-top: 0; }
+.adminOpsHeading { color: #91a5c6; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.adminPager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; color: #91a5c6; font-size: 12px; }
+.adminError { color: #ffb5bd; }
+@media (max-width: 760px) { .adminOpsCards { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .cloudProviderList { display: grid; gap: 10px; margin-top: 20px; }
 .cloudProviderList article {
   display: flex; align-items: center; justify-content: space-between;

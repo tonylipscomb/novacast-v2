@@ -8,6 +8,9 @@ import { AdminDiagnostics } from './AdminDiagnostics';
 import { AdminPlayback } from './AdminPlayback';
 import { AdminGoldPanel } from './AdminGoldPanel';
 import { AdminAnnouncements } from './AdminAnnouncements';
+import { AdminPairingOps } from './AdminPairingOps';
+import { AdminNovaPulseOps } from './AdminNovaPulseOps';
+import { AdminEpgOps } from './AdminEpgOps';
 import {
   formatProviderAssignmentMessage,
   resolveProviderAssignmentAckState,
@@ -468,6 +471,9 @@ export function AdminCloud() {
         ) : null}
         {!loading && tab === 'playback' ? <AdminPlayback token={token} devices={devices} providers={providers} onOpenDevice={(code) => navigateDevice(code, 'playback')} /> : null}
         {!loading && tab === 'announcements' ? <AdminAnnouncements token={token} onMessage={setMessage} /> : null}
+        {!loading && tab === 'pairingOps' ? <AdminPairingOps token={token} /> : null}
+        {!loading && tab === 'novapulseOps' ? <AdminNovaPulseOps token={token} /> : null}
+        {!loading && tab === 'epgOps' ? <AdminEpgOps token={token} /> : null}
         {!loading && tab === 'gold' ? <AdminGoldPanel token={token} devices={devices} providers={providers} openCreate={openAddGold} onOpenCreateHandled={() => setOpenAddGold(false)} onAssignProvider={(id, providerId) => void assignProvider(id, providerId)} onMessage={setMessage} /> : null}
         {!loading && tab === 'settings' ? (
           <ComingSoon title="Cloud Admin settings" text="Administrator preferences and platform controls will appear here." />
@@ -523,6 +529,9 @@ function titleFor(tab: AdminTab) {
     gold: 'Gold Panel',
     invitations: 'Release Testing',
     announcements: 'NovaPulse Announcements',
+    pairingOps: 'Pairing Operations',
+    novapulseOps: 'NovaPulse Operations',
+    epgOps: 'EPG Operations',
     diagnostics: 'Diagnostics',
     playback: 'Playback',
     settings: 'Settings',
@@ -537,6 +546,9 @@ function subtitleFor(tab: AdminTab) {
     gold: 'Provision and monitor Gold reseller accounts linked to NovaCast providers.',
     invitations: 'Manage controlled release access and invitation capacity.',
     announcements: 'Create, schedule, and preview safe NovaPulse TV announcements.',
+    pairingOps: 'Inspect bounded pairing health without exposing redemption or credential material.',
+    novapulseOps: 'Review feed freshness and persisted content operations signals.',
+    epgOps: 'Review provider guide coverage, freshness, and refresh results.',
     diagnostics: 'Review device health and operational diagnostics.',
     playback: 'Review recent persisted playback issues from the device fleet.',
     settings: 'Configure NovaCast Cloud Admin.',

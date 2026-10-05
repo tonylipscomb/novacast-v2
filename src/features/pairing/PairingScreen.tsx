@@ -16,7 +16,7 @@ import {
 import { markPairingCompleted } from '@/features/pairing/pairingState';
 import { completePersistedPairing, usePairing } from '@/features/pairing/useMockPairing';
 import { isPairingSetupInProgress } from '@/features/pairing/pairingResume';
-import { logPairingEvent } from '@/features/pairing/pairingDiagnostics';
+import { logPairingEvent, logPairingReleaseDiagnostic } from '@/features/pairing/pairingDiagnostics';
 import { logPairingFocus } from '@/features/pairing/pairingFocusDiagnostics';
 import { logOverlayFocus } from '@/features/diagnostics/overlayFocusDiagnostics';
 import { waitForHomeChannelsReady } from '@/features/pairing/waitForHomeChannelsReady';
@@ -169,7 +169,9 @@ export function PairingScreen({
         (await runPairingTransactionStep('consumePendingPairingPayload', () => consumePendingPairingPayload()));
 
       if (payload) {
+        logPairingReleaseDiagnostic('provider-install-started', { reason: 'redeemed-payload' });
         await completePersistedPairing(payload);
+        logPairingReleaseDiagnostic('provider-install-complete', { state: 'connected', reason: 'provider-persisted' });
       } else {
         const state = await runPairingTransactionStep('getProviderState', () => getProviderState());
         if (hasSavedProvider(state)) {
@@ -192,6 +194,7 @@ export function PairingScreen({
 
       pairingRetryAttemptedRef.current = false;
       pairingNavigationCompletedRef.current = true;
+      logPairingReleaseDiagnostic('pairing-screen-exit', { reason: 'pairing-complete' });
       await prepareChannelsThenHome();
       pairingTransactionSuccess('completePairing');
     } catch (error) {

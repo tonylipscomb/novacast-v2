@@ -10,6 +10,7 @@ import {
 import { pairingInstallationFingerprint } from '../src/features/pairing/pairingDiagnostics.ts';
 import {
   computePollIntervalMs,
+  computeRateLimitBackoffMs,
   resolvePairingSetupPhase,
   isPairingSetupInProgress,
   resolvePairingResumeDecision,
@@ -103,9 +104,12 @@ test('redeemed payload resumes connect flow without another redeem request', () 
 });
 
 test('polling backoff grows and unavailable threshold is enforced', () => {
-  assert.equal(computePollIntervalMs(0), 1_200);
-  assert.equal(computePollIntervalMs(0, 'validating'), 800);
-  assert.equal(computePollIntervalMs(3), 4_800);
+  assert.equal(computePollIntervalMs(0), 5_000);
+  assert.equal(computePollIntervalMs(0, 'validating'), 5_000);
+  assert.equal(computePollIntervalMs(3), 20_000);
+  assert.equal(computeRateLimitBackoffMs(1), 10_000);
+  assert.equal(computeRateLimitBackoffMs(2), 15_000);
+  assert.equal(computeRateLimitBackoffMs(3), 30_000);
   assert.equal(shouldMarkPollingUnavailable(5), false);
   assert.equal(shouldMarkPollingUnavailable(6), true);
 });

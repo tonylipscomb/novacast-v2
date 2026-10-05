@@ -64,9 +64,11 @@ export function resolvePairingResumeDecision(
 export type PairingPollPhase = 'waiting' | 'validating';
 
 const POLL_INTERVAL_MS: Record<PairingPollPhase, number> = {
-  waiting: 1_200,
-  validating: 800,
+  waiting: 5_000,
+  validating: 5_000,
 };
+
+const RATE_LIMIT_BACKOFF_MS = [0, 10_000, 15_000, 30_000] as const;
 
 export function computePollIntervalMs(consecutiveFailures: number, phase: PairingPollPhase = 'waiting') {
   const baseInterval = POLL_INTERVAL_MS[phase];
@@ -76,6 +78,11 @@ export function computePollIntervalMs(consecutiveFailures: number, phase: Pairin
   }
 
   return Math.min(baseInterval * 2 ** Math.min(consecutiveFailures - 1, 3), 20_000);
+}
+
+export function computeRateLimitBackoffMs(backoffStep: number) {
+  const boundedStep = Math.max(1, Math.min(Math.floor(backoffStep), RATE_LIMIT_BACKOFF_MS.length - 1));
+  return RATE_LIMIT_BACKOFF_MS[boundedStep];
 }
 
 export function shouldMarkPollingUnavailable(consecutiveFailures: number) {

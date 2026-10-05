@@ -13,6 +13,7 @@ import { getPairingSecondsRemaining } from '@/features/pairing/pairingLogic';
 import { markPairingCompleted, resetPairingCompleted } from '@/features/pairing/pairingState';
 import {
   computePollIntervalMs,
+  computeRateLimitBackoffMs,
   resolvePairingUserMessage,
   shouldMarkPollingUnavailable,
 } from '@/features/pairing/pairingResume';
@@ -43,10 +44,14 @@ export function usePairing() {
   const pollingRef = useRef(false);
   const regeneratingRef = useRef(false);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const redeemRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollFailuresRef = useRef(0);
+  const rateLimitBackoffStepRef = useRef(0);
+  const redeemAttemptsRef = useRef(0);
   const mountedRef = useRef(true);
   const sessionRef = useRef<PairingSession | null>(null);
   const pollOnceRef = useRef<((expectedGeneration?: number) => Promise<void>) | null>(null);
+  const redeemSessionRef = useRef<((activeSession: PairingSession, redemptionToken: string, expectedGeneration?: number) => Promise<void>) | null>(null);
   const sessionGenerationRef = useRef(0);
   const pollingGenerationRef = useRef<number | null>(null);
 
@@ -64,6 +69,10 @@ export function usePairing() {
         clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
       }
+      if (redeemRetryTimerRef.current) {
+        clearTimeout(redeemRetryTimerRef.current);
+        redeemRetryTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -71,6 +80,13 @@ export function usePairing() {
     const sessionGeneration = sessionGenerationRef.current + 1;
     sessionGenerationRef.current = sessionGeneration;
     sessionRef.current = nextSession;
+    pollFailuresRef.current = 0;
+    rateLimitBackoffStepRef.current = 0;
+    redeemAttemptsRef.current = 0;
+    if (redeemRetryTimerRef.current) {
+      clearTimeout(redeemRetryTimerRef.current);
+      redeemRetryTimerRef.current = null;
+    }
     setSession(nextSession);
     setSecondsRemaining(getPairingSecondsRemaining(nextSession.expiresAt));
     logPairingReleaseDiagnostic('session-installed', {
@@ -87,9 +103,14 @@ export function usePairing() {
     sessionRef.current = null;
     pollingRef.current = false;
     pollingGenerationRef.current = null;
+    redeemAttemptsRef.current = 0;
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
+    }
+    if (redeemRetryTimerRef.current) {
+      clearTimeout(redeemRetryTimerRef.current);
+      redeemRetryTimerRef.current = null;
     }
     setSession(null);
     setSecondsRemaining(0);
@@ -97,33 +118,80 @@ export function usePairing() {
     return sessionGeneration;
   }, []);
 
-  const schedulePoll = useCallback((delayMs: number, expectedGeneration = sessionGenerationRef.current) => {
+  const schedulePoll = useCallback((delayMs: number, expectedGeneration = sessionGenerationRef.current, backoffStep = 0) => {
+    const scheduledSessionId = sessionRef.current?.id;
+    const remainingMs = scheduledSessionId && sessionRef.current
+      ? Math.max(0, sessionRef.current.expiresAt - Date.now())
+      : 0;
+    if (!scheduledSessionId || remainingMs <= 0) {
+      setStatus('expired');
+      logPairingReleaseDiagnostic('countdown-expired', {
+        sessionGeneration: expectedGeneration,
+        state: 'expired',
+        remainingMs: 0,
+        reason: 'schedule-after-expiry',
+      });
+      return;
+    }
+
+    const pollDelayMs = Math.min(delayMs, remainingMs);
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current);
     }
 
     pollTimerRef.current = setTimeout(() => {
       pollTimerRef.current = null;
-      if (expectedGeneration !== sessionGenerationRef.current || !sessionRef.current) {
+      if (
+        expectedGeneration !== sessionGenerationRef.current ||
+        !sessionRef.current ||
+        sessionRef.current.id !== scheduledSessionId
+      ) {
         logPairingReleaseDiagnostic('stale-timer-ignored', {
           sessionGeneration: expectedGeneration,
           reason: 'session-generation-mismatch',
         });
         return;
       }
+      if (Date.now() >= sessionRef.current.expiresAt) {
+        setStatus('expired');
+        logPairingReleaseDiagnostic('countdown-expired', {
+          sessionGeneration: expectedGeneration,
+          state: 'expired',
+          remainingMs: 0,
+          reason: 'scheduled-expiry',
+        });
+        return;
+      }
       void pollOnceRef.current?.(expectedGeneration);
-    }, delayMs);
+    }, pollDelayMs);
+    logPairingReleaseDiagnostic('poll-scheduled', {
+      sessionGeneration: expectedGeneration,
+      pollDelayMs,
+      backoffStep,
+      reason: backoffStep > 0 ? 'rate-limit-backoff' : 'normal-cadence',
+    });
   }, []);
 
   const redeemSession = useCallback(
     async (activeSession: PairingSession, redemptionToken: string, expectedGeneration = sessionGenerationRef.current) => {
-      if (!service || redeemingRef.current || expectedGeneration !== sessionGenerationRef.current) {
+      if (!service || expectedGeneration !== sessionGenerationRef.current) {
+        return;
+      }
+      if (redeemingRef.current) {
+        logPairingReleaseDiagnostic('redeem-skipped-duplicate', {
+          sessionGeneration: expectedGeneration,
+          reason: 'redeem-in-flight',
+        });
         return;
       }
 
       redeemingRef.current = true;
       setStatus('redeeming');
       setFailureCategory(null);
+      logPairingReleaseDiagnostic('redeem-started', {
+        sessionGeneration: expectedGeneration,
+        reason: 'completed-status',
+      });
 
       try {
         const payload = await service.redeemSession(activeSession.id, redemptionToken);
@@ -134,7 +202,7 @@ export function usePairing() {
         if (expectedGeneration !== sessionGenerationRef.current || sessionRef.current?.id !== activeSession.id) {
           logPairingReleaseDiagnostic('stale-status-ignored', {
             sessionGeneration: expectedGeneration,
-            reason: 'redemption-generation-mismatch',
+            reason: 'redeem-generation-mismatch',
           });
           return;
         }
@@ -142,12 +210,71 @@ export function usePairing() {
         setConnectionPayload(payload);
         setStatus('connected');
         markPairingCompleted();
+        logPairingReleaseDiagnostic('redeem-complete', {
+          sessionGeneration: expectedGeneration,
+          state: 'connected',
+          reason: 'provider-payload-received',
+        });
       } catch (error) {
         if (!mountedRef.current) {
           return;
         }
 
         const category = error instanceof Error ? error.message : 'redemption_failed';
+        if (expectedGeneration !== sessionGenerationRef.current || sessionRef.current?.id !== activeSession.id) {
+          logPairingReleaseDiagnostic('stale-status-ignored', {
+            sessionGeneration: expectedGeneration,
+            reason: 'redeem-error-generation-mismatch',
+          });
+          return;
+        }
+        const statusCode = typeof error === 'object' && error !== null && 'statusCode' in error && typeof error.statusCode === 'number'
+          ? error.statusCode
+          : undefined;
+        const transientFailure =
+          category === 'pairing_service_unavailable' ||
+          category === 'pairing_request_failed' ||
+          category === 'rate_limited' ||
+          (statusCode !== undefined && statusCode >= 500);
+        logPairingReleaseDiagnostic('redeem-failed', {
+          sessionGeneration: expectedGeneration,
+          statusCode,
+          failureCategory: category,
+          reason: 'redeem-request-failed',
+        });
+        if (transientFailure && redeemAttemptsRef.current < 3) {
+          redeemAttemptsRef.current += 1;
+          const retryDelayMs = Math.min(5_000 * 2 ** (redeemAttemptsRef.current - 1), 20_000);
+          redeemRetryTimerRef.current = setTimeout(() => {
+            redeemRetryTimerRef.current = null;
+            if (expectedGeneration !== sessionGenerationRef.current || sessionRef.current?.id !== activeSession.id) {
+              logPairingReleaseDiagnostic('stale-timer-ignored', {
+                sessionGeneration: expectedGeneration,
+                reason: 'redeem-retry-generation-mismatch',
+              });
+              return;
+            }
+            if (Date.now() >= activeSession.expiresAt) {
+              setStatus('expired');
+              logPairingReleaseDiagnostic('countdown-expired', {
+                sessionGeneration: expectedGeneration,
+                state: 'expired',
+                remainingMs: 0,
+                reason: 'redeem-retry-expiry',
+              });
+              return;
+            }
+            void redeemSessionRef.current?.(activeSession, redemptionToken, expectedGeneration);
+          }, Math.min(retryDelayMs, Math.max(0, activeSession.expiresAt - Date.now())));
+          setStatus('redeeming');
+          logPairingReleaseDiagnostic('redeem-retry-scheduled', {
+            sessionGeneration: expectedGeneration,
+            pollDelayMs: retryDelayMs,
+            backoffStep: redeemAttemptsRef.current,
+            reason: 'transient-redeem-failure',
+          });
+          return;
+        }
         setFailureCategory(category === 'invalid_pairing_session' ? 'binding_error' : 'redemption_failed');
         setStatus(category === 'invalid_pairing_session' ? 'binding_error' : 'failed');
       } finally {
@@ -197,6 +324,19 @@ export function usePairing() {
       }
 
       pollFailuresRef.current = 0;
+      if (rateLimitBackoffStepRef.current > 0) {
+        logPairingReleaseDiagnostic('poll-backoff-reset', {
+          sessionGeneration: expectedGeneration,
+          backoffStep: rateLimitBackoffStepRef.current,
+          reason: 'successful-status-response',
+        });
+        rateLimitBackoffStepRef.current = 0;
+      }
+      logPairingReleaseDiagnostic('poll-complete', {
+        sessionGeneration: expectedGeneration,
+        state: result.status,
+        reason: 'status-response',
+      });
 
       logPairingEvent('poll_result', { status: result.status, session: activeSession.id.slice(0, 8) });
 
@@ -218,6 +358,11 @@ export function usePairing() {
       }
 
       if (result.status === 'completed') {
+        logPairingReleaseDiagnostic('completed-observed', {
+          sessionGeneration: expectedGeneration,
+          state: 'completed',
+          reason: 'status-response',
+        });
         logPairingEvent('activation_received', { session: activeSession.id.slice(0, 8) });
         await redeemSession(activeSession, result.redemptionToken, expectedGeneration);
         return;
@@ -238,8 +383,32 @@ export function usePairing() {
         return;
       }
 
-      pollFailuresRef.current += 1;
       const category = error instanceof Error ? error.message : 'pairing_request_failed';
+      const statusCode = typeof error === 'object' && error !== null && 'statusCode' in error && typeof error.statusCode === 'number'
+        ? error.statusCode
+        : undefined;
+      const isRateLimited = statusCode === 429 || category === 'rate_limited';
+      if (isRateLimited) {
+        rateLimitBackoffStepRef.current = Math.min(rateLimitBackoffStepRef.current + 1, 3);
+        const backoffStep = rateLimitBackoffStepRef.current;
+        const pollDelayMs = computeRateLimitBackoffMs(backoffStep);
+        logPairingReleaseDiagnostic('poll-rate-limited', {
+          sessionGeneration: expectedGeneration,
+          statusCode,
+          failureCategory: 'rate_limited',
+          backoffStep,
+          reason: 'pairing-status-rate-limit',
+        });
+        logPairingReleaseDiagnostic('poll-backoff-scheduled', {
+          sessionGeneration: expectedGeneration,
+          pollDelayMs,
+          backoffStep,
+          reason: 'pairing-status-rate-limit',
+        });
+        schedulePoll(pollDelayMs, expectedGeneration, backoffStep);
+        return;
+      }
+      pollFailuresRef.current += 1;
       logPairingEvent('poll_failed', { category, failures: pollFailuresRef.current });
       if (category === 'invalid_pairing_session') {
         setFailureCategory('binding_error');
@@ -282,6 +451,10 @@ export function usePairing() {
   useEffect(() => {
     pollOnceRef.current = pollOnce;
   }, [pollOnce]);
+
+  useEffect(() => {
+    redeemSessionRef.current = redeemSession;
+  }, [redeemSession]);
 
   useEffect(() => {
     if (status !== 'validating' || pollingRef.current || redeemingRef.current || !sessionRef.current) {

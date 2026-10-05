@@ -40,6 +40,8 @@ type PairingApiResponse = {
   [key: string]: unknown;
 };
 
+type PairingRequestError = Error & { statusCode?: number };
+
 let remotePairingService: PairingService | null | undefined;
 
 function getPairingApiConfig() {
@@ -57,9 +59,11 @@ function getPairingApiConfig() {
   return { apiUrl, anonKey };
 }
 
-function toPairingError(response: PairingApiResponse, fallback: string) {
+function toPairingError(response: PairingApiResponse, fallback: string, statusCode?: number): PairingRequestError {
   const category = typeof response.errorCategory === 'string' ? response.errorCategory : fallback;
-  return new Error(category);
+  const error = new Error(category) as PairingRequestError;
+  error.statusCode = statusCode;
+  return error;
 }
 
 function normalizeSession(value: PairingApiResponse) {
@@ -146,7 +150,7 @@ function createRemotePairingService(): PairingService | null {
     }
 
     if (!response.ok) {
-      const error = toPairingError(payload, 'pairing_request_failed');
+      const error = toPairingError(payload, 'pairing_request_failed', response.status);
       logPairingReleaseDiagnostic('request-failed', {
         httpCategory,
         statusCode: response.status,

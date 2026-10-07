@@ -114,6 +114,9 @@ test('NovaPulse display metadata keeps only validated country codes', () => {
   assert.equal(sanitizeNovaPulseDisplayTitle('The Doll (2026) (PL)'), 'The Doll');
   assert.equal(formatNovaPulseCatalogMeta({ type: 'movie', year: 2026, countryCode: '1923', genres: [], runtimeMinutes: undefined }), '2026');
   assert.equal(formatNovaPulseCatalogMeta({ type: 'series', year: 2026, countryCode: 'PL', genres: [], runtimeMinutes: undefined }), '2026 • PL');
+  assert.equal(formatNovaPulseCatalogMeta({ type: 'movie', year: 2026, genres: ['1923'], runtimeMinutes: 96 }), '2026 • 1h 36m');
+  assert.equal(formatNovaPulseCatalogMeta({ type: 'movie', year: 2026, genres: ['550e8400-e29b-41d4-a716-446655440000'], runtimeMinutes: 96 }), '2026 • 1h 36m');
+  assert.equal(formatNovaPulseCatalogMeta({ type: 'movie', year: 1923, genres: ['Drama'], runtimeMinutes: 96 }), '1923 • Drama • 1h 36m');
 });
 
 test('NovaPulse omits implausible runtime placeholders without changing raw catalog data', () => {

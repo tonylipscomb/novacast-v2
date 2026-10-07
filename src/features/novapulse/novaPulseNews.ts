@@ -153,6 +153,7 @@ async function fetchRemote(): Promise<NovaPulseNewsResult> {
     if (!payload || payload.ok !== true || !Array.isArray(payload.items)) throw new Error('news_response_body_parse');
     const nowMs = Date.now();
     const items = payload.items.map((row) => validateRow(row, nowMs)).filter((row): row is NewsProjection => Boolean(row)).slice(0, NOVA_PULSE_NEWS_MAX_ITEMS);
+    recordNovaPulseNewsReleaseDiagnostic('fresh-count', { count: items.length });
     recordNovaPulseNewsReleaseDiagnostic('normalized-count', { count: items.length });
     const cache: CachedPayload = { schemaVersion: 1, fetchedAt: nowMs, kind: items.length ? 'items' : 'empty', items };
     memoryCache = cache;

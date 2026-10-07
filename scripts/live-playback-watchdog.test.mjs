@@ -10,6 +10,7 @@ test('watchdog uses an event-driven ten-second stall observation and bounded coo
   assert.match(watchdog, /LIVE_PLAYBACK_WATCHDOG_STALL_MS = 10_000/);
   assert.match(watchdog, /LIVE_PLAYBACK_WATCHDOG_COOLDOWN_MS = 25_000/);
   assert.match(watchdog, /LIVE_PLAYBACK_WATCHDOG_MAX_ATTEMPTS = 2/);
+  assert.match(watchdog, /LIVE_PLAYBACK_WATCHDOG_LOG_INTERVAL_MS = 2_000/);
   assert.doesNotMatch(watchdog, /setInterval/);
 });
 
@@ -67,6 +68,9 @@ test('diagnostics use bounded safe metadata only', () => {
 
 test('watchdog emits explicit decision diagnostics and ignores unavailable Live positions', () => {
   assert.match(watchdog, /\[NOVACAST_WATCHDOG\]/);
+  assert.match(watchdog, /console\.warn\(WATCHDOG_LOG_TAG/);
+  assert.doesNotMatch(watchdog, /console\.info\(WATCHDOG_LOG_TAG/);
+  assert.match(watchdog, /isHighFrequency = event === 'health-sample' \|\| event === 'watchdog-armed'/);
   for (const event of ['watchdog-armed', 'watchdog-disarmed', 'health-sample', 'stall-suspected', 'stall-confirmed', 'recovery-start', 'recovery-player-reload', 'recovery-success', 'recovery-failed', 'cooldown-start', 'cooldown-complete', 'generation-invalidated']) {
     assert.match(watchdog, new RegExp(event));
   }

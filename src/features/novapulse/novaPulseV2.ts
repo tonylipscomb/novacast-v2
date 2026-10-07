@@ -19,6 +19,8 @@ export type NovaPulseV2Diagnostics = {
   candidateSports: number;
   candidateAnnouncements: number;
   candidateNews: number;
+  newsRank: number | null;
+  newsFilterReason: 'not_candidate' | 'not_ranked' | 'information_cap' | 'not_selected' | 'selected';
   candidateWeather: number;
   hasCriticalAnnouncementCandidate: boolean;
   hasNormalAnnouncementCandidate: boolean;
@@ -313,6 +315,18 @@ export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[], opti
     .slice(0, 2);
   const nonLiveRanked = ranked.filter((item) => item.type !== 'live_epg');
   const items = selectDiverse(nonLiveRanked, liveCandidates, nowMs);
+  const newsCandidate = all.some((item) => item.type === 'news');
+  const newsRankIndex = ranked.findIndex((item) => item.type === 'news');
+  const newsSelected = items.some((item) => item.type === 'news');
+  const newsFilterReason: NovaPulseV2Diagnostics['newsFilterReason'] = !newsCandidate
+    ? 'not_candidate'
+    : newsRankIndex < 0
+      ? 'not_ranked'
+      : newsSelected
+        ? 'selected'
+        : ranked.some(isCriticalAnnouncement) || ranked.some((item) => item.type === 'weather')
+          ? 'information_cap'
+          : 'not_selected';
   const diagnostics: NovaPulseV2Diagnostics = {
     movieSourceWindow: typeCount(all, 'movie'),
     seriesSourceWindow: typeCount(all, 'series'),
@@ -323,6 +337,8 @@ export function composeNovaPulseFeedV2(sources: readonly NovaPulseSource[], opti
     candidateSports: typeCount(ranked, 'sports'),
     candidateAnnouncements: typeCount(ranked, 'announcement'),
     candidateNews: typeCount(ranked, 'news'),
+    newsRank: newsRankIndex >= 0 ? newsRankIndex + 1 : null,
+    newsFilterReason,
     candidateWeather: typeCount(ranked, 'weather'),
     hasCriticalAnnouncementCandidate: ranked.some(isCriticalAnnouncement),
     hasNormalAnnouncementCandidate: ranked.some((item) => item.type === 'announcement' && !isCriticalAnnouncement(item)),

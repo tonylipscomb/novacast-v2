@@ -117,7 +117,8 @@ export function normalizeNovaPulseGenres(genres?: readonly string[]) {
     const parts = value.split(/[,/•]+/).map((part) => part.trim()).filter(Boolean);
     for (const part of parts) {
       const key = part.toLocaleLowerCase();
-      if (!generic.has(key) && !normalized.some((entry) => entry.toLocaleLowerCase() === key)) {
+      const internalIdentifier = /^\d+$/.test(key) || /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(key);
+      if (!internalIdentifier && !generic.has(key) && !normalized.some((entry) => entry.toLocaleLowerCase() === key)) {
         normalized.push(part);
       }
       if (normalized.length === 2) return normalized;

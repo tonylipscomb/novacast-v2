@@ -9,6 +9,8 @@
 export const LIVE_PLAYBACK_WATCHDOG_STALL_MS = 10_000;
 export const LIVE_PLAYBACK_WATCHDOG_COOLDOWN_MS = 25_000;
 export const LIVE_PLAYBACK_WATCHDOG_MAX_ATTEMPTS = 2;
+export const LIVE_PLAYBACK_WATCHDOG_LOG_INTERVAL_MS = 2_000;
+const WATCHDOG_LOG_TAG = '[NOVACAST_WATCHDOG]';
 
 export type LivePlaybackWatchdogEvent =
   | 'live_watchdog_stall_detected'
@@ -87,6 +89,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
   let recoveryInFlight = false;
   let exhausted = false;
   let cooldownUntil = 0;
+  let lastHealthLogAt = -Infinity;
 
   const clearTimer = () => {
     if (timer !== null) {
@@ -96,7 +99,11 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
   };
 
   const diagnostic = (event: string, fields: Record<string, unknown> = {}) => {
-    console.info('[NOVACAST_WATCHDOG]', event, {
+    const isHighFrequency = event === 'health-sample' || event === 'watchdog-armed';
+    const currentTime = now();
+    if (isHighFrequency && currentTime - lastHealthLogAt < LIVE_PLAYBACK_WATCHDOG_LOG_INTERVAL_MS) return;
+    if (isHighFrequency) lastHealthLogAt = currentTime;
+    const payload = {
       channelId: context.channelId,
       playerGenerationId: context.playerGeneration,
       playbackState: context.playbackState ?? null,
@@ -107,7 +114,11 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       elapsedSinceFirstFrameMs: firstFrameAt == null ? null : Math.max(0, Math.round(now() - firstFrameAt)),
       consecutiveFailedSamples,
       ...fields,
-    });
+    };
+    // console.warn is intentionally used for this release-safe operational tag:
+    // React Native release builds may suppress console.info, while warn remains
+    // visible in Android logcat. Payload is bounded and contains no credentials.
+    console.warn(WATCHDOG_LOG_TAG, event, JSON.stringify(payload));
   };
 
   const eligible = () => Boolean(
@@ -235,6 +246,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
     lastProgressAt = null;
     firstFrameAt = null;
     consecutiveFailedSamples = 0;
+    lastHealthLogAt = -Infinity;
     attempts = 0;
     recoveryInFlight = false;
     exhausted = false;

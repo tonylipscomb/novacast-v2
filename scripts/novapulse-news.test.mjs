@@ -40,6 +40,8 @@ test('News remains eligible when Weather is also present', () => {
   ], { seed: 'news-weather' });
   assert.deepEqual(result.items.map((entry) => entry.type), ['weather', 'news']);
   assert.equal(result.items.filter((entry) => entry.type === 'news').length, 1);
+  assert.ok((result.diagnostics.newsRank ?? 0) >= 1);
+  assert.equal(result.diagnostics.newsFilterReason, 'selected');
 });
 
 test('News never displaces provider health and information remains capped at two', () => {
@@ -67,6 +69,7 @@ test('News never displaces provider health and information remains capped at two
   assert.ok(result.items.length <= 12);
   assert.equal(criticalResult.items[0]?.type, 'provider_alert');
   assert.equal(criticalResult.items.filter((entry) => entry.type === 'announcement' || entry.type === 'weather' || entry.type === 'news').length, 2);
+  assert.equal(criticalResult.diagnostics.newsFilterReason, 'information_cap');
   assert.equal(criticalResult.items.length <= 12, true);
 });
 
@@ -107,7 +110,11 @@ test('release-safe News diagnostics are opt-in and aggregate-only', () => {
   assert.match(client, /statusCategory/);
   assert.match(client, /server-count/);
   assert.match(client, /normalized-count/);
+  assert.match(client, /fresh-count/);
   assert.match(hook, /informationSelectedCount/);
+  assert.match(hook, /candidateCreated/);
+  assert.match(hook, /filterReason/);
+  assert.match(hook, /newsRank/);
   const helper = client.slice(client.indexOf('export function recordNovaPulseNewsReleaseDiagnostic'), client.indexOf('function newsDiagnostic'));
   assert.doesNotMatch(helper, /apiUrl|anonKey|Authorization|deviceAuthHeaders|article|headline|summary|error/);
   assert.doesNotMatch(client, /EXPO_PUBLIC_NOVAPULSE_NEWS_DIAGNOSTICS\s*=\s*true/);

@@ -87,6 +87,28 @@ test('V2 keeps sports and announcements bounded and compatible', () => {
   assert.ok(result.diagnostics.selectedSports <= 2);
 });
 
+test('V2 keeps healthy Weather and News from being starved by a normal announcement', () => {
+  const result = composeNovaPulseFeedV2([source([
+    item('normal', 'announcement'),
+    item('weather', 'weather', { priority: 42 }),
+    item('news', 'news', { priority: 38 }),
+  ])]);
+  assert.equal(result.diagnostics.informationSelected, 2);
+  assert.ok(result.items.some((entry) => entry.type === 'weather'));
+  assert.ok(result.items.some((entry) => entry.type === 'news'));
+  assert.equal(result.items.some((entry) => entry.id === 'normal'), false);
+});
+
+test('V2 retains critical announcement priority when Weather and News are present', () => {
+  const result = composeNovaPulseFeedV2([source([
+    item('critical', 'announcement', { announcementPriority: 'critical' }),
+    item('weather', 'weather'),
+    item('news', 'news'),
+  ])]);
+  assert.equal(result.items[0]?.id, 'critical');
+  assert.equal(result.diagnostics.informationSelected, 2);
+});
+
 test('V2 prefers different sports leagues when two comparable cards are available', () => {
   const result = composeNovaPulseFeedV2([source([
     item('nba-upcoming', 'sports', { subtype: 'upcoming', sports: { eventStatus: 'UPCOMING', league: 'NBA' } }),

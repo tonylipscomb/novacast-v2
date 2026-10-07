@@ -8,6 +8,7 @@ import {
   preferNovaPulseEnglishVariants,
   formatNovaPulseCatalogMeta,
   getNovaPulseDisplayRuntimeMinutes,
+  normalizeNovaPulseYear,
   sanitizeNovaPulseDisplayTitle,
 } from '../src/features/novapulse/novaPulseLogic.ts';
 import { enrichNovaPulsePresentation } from '../src/features/novapulse/novaPulsePresentation.ts';
@@ -128,3 +129,19 @@ test('catalog, sports, announcements, and ranking mechanics remain outside the l
   assert.match(v2, /selectSports/);
   assert.match(v2, /selectProtected/);
 });
+
+test('year normalization rejects malformed, runtime-like, and episode-like values without rejecting explicit historical years', () => {
+  const now = new Date(2026, 0, 1);
+  assert.equal(normalizeNovaPulseYear(2024, now), 2024);
+  assert.equal(normalizeNovaPulseYear('2024-06-01', now), 2024);
+  assert.equal(normalizeNovaPulseYear(null, now), undefined);
+  assert.equal(normalizeNovaPulseYear('', now), undefined);
+  assert.equal(normalizeNovaPulseYear('2024x', now), undefined);
+  assert.equal(normalizeNovaPulseYear(1923, now), 1923);
+  assert.equal(normalizeNovaPulseYear(120, now), undefined);
+  assert.equal(normalizeNovaPulseYear(episodeLikeValue(), now), undefined);
+});
+
+function episodeLikeValue() {
+  return 3;
+}

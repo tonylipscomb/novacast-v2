@@ -24,6 +24,10 @@ export type LivePlaybackWatchdogContext = {
   expectedActive: boolean;
   channelChanging: boolean;
   userPaused: boolean;
+  playbackState?: string;
+  isPlaying?: boolean;
+  isBuffering?: boolean;
+  firstFrameSeen?: boolean;
 };
 
 export type LivePlaybackWatchdog = {
@@ -77,6 +81,8 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
   let playbackStarted = false;
   let lastPosition: number | null = null;
   let lastProgressAt: number | null = null;
+  let firstFrameAt: number | null = null;
+  let consecutiveFailedSamples = 0;
   let attempts = 0;
   let recoveryInFlight = false;
   let exhausted = false;
@@ -87,6 +93,21 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       cancel(timer);
       timer = null;
     }
+  };
+
+  const diagnostic = (event: string, fields: Record<string, unknown> = {}) => {
+    console.info('[NOVACAST_WATCHDOG]', event, {
+      channelId: context.channelId,
+      playerGenerationId: context.playerGeneration,
+      playbackState: context.playbackState ?? null,
+      isPlaying: context.isPlaying ?? null,
+      isBuffering: context.isBuffering ?? null,
+      firstFrameSeen: context.firstFrameSeen ?? playable,
+      elapsedSinceHealthyMs: lastProgressAt == null ? null : Math.max(0, Math.round(now() - lastProgressAt)),
+      elapsedSinceFirstFrameMs: firstFrameAt == null ? null : Math.max(0, Math.round(now() - firstFrameAt)),
+      consecutiveFailedSamples,
+      ...fields,
+    });
   };
 
   const eligible = () => Boolean(
@@ -106,6 +127,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
     clearTimer();
     if (!eligible() || recoveryInFlight || exhausted) return;
     const remaining = Math.max(0, LIVE_PLAYBACK_WATCHDOG_STALL_MS - (now() - (lastProgressAt ?? now())));
+    diagnostic('watchdog-armed', { triggerReason: 'eligible-health-observation' });
     timer = schedule(() => {
       timer = null;
       if (!eligible() || recoveryInFlight || exhausted) return;
@@ -114,9 +136,15 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
         arm();
         return;
       }
+      diagnostic('stall-suspected', {
+        elapsedSinceHealthyMs: Math.max(0, Math.round(stalledForMs)),
+        triggerReason: 'health-deadline-reached',
+      });
       if (now() < cooldownUntil) {
+        diagnostic('cooldown-start', { triggerReason: 'recovery-cooldown-active' });
         timer = schedule(() => {
           timer = null;
+          diagnostic('cooldown-complete', { triggerReason: 'recovery-cooldown-expired' });
           arm();
         }, cooldownUntil - now());
         return;
@@ -124,6 +152,11 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       if (attempts >= LIVE_PLAYBACK_WATCHDOG_MAX_ATTEMPTS) {
         exhausted = true;
         const elapsedSinceProgressMs = Math.max(0, Math.round(stalledForMs));
+        diagnostic('recovery-failed', {
+          recoveryAttempt: attempts,
+          elapsedSinceProgressMs,
+          triggerReason: 'recovery-attempts-exhausted',
+        });
         emit('live_watchdog_exhausted', {
           attempts,
           elapsedSinceProgressMs,
@@ -138,6 +171,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       const attempt = (attempts + 1) as 1 | 2;
       attempts = attempt;
       recoveryInFlight = true;
+      const recoveryGeneration = context.playerGeneration;
       const recoveryFields = {
         attempt,
         elapsedSinceProgressMs: Math.max(0, Math.round(stalledForMs)),
@@ -146,6 +180,9 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
         channelId: context.channelId,
         sourceIdentitySame: true,
       };
+      diagnostic('stall-confirmed', { ...recoveryFields, triggerReason: 'no-health-sample' });
+      diagnostic('recovery-start', { ...recoveryFields, triggerReason: 'sustained-stall' });
+      diagnostic('recovery-player-reload', { ...recoveryFields, triggerReason: 'same-player-recovery' });
       emit('live_watchdog_stall_detected', {
         ...recoveryFields,
         reason: 'no-playback-progress',
@@ -154,12 +191,26 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
         ...recoveryFields,
         recoveryMethod: attempt === 1 ? 'same-channel-retry' : 'same-channel-rebind',
       });
-      Promise.resolve(input.recover(attempt)).catch(() => {}).finally(() => {
+      Promise.resolve(input.recover(attempt)).catch(() => {
+        diagnostic('recovery-failed', { recoveryAttempt: attempt, triggerReason: 'recovery-rejected' });
+      }).finally(() => {
         if (disposed || !recoveryInFlight) return;
         recoveryInFlight = false;
+        if (context.playerGeneration !== recoveryGeneration) {
+          diagnostic('generation-invalidated', {
+            triggerReason: 'recovery-completed-on-stale-generation',
+            recoveryAttempt: attempt,
+          });
+          return;
+        }
         if (attempt >= LIVE_PLAYBACK_WATCHDOG_MAX_ATTEMPTS) {
           exhausted = true;
           const elapsedSinceProgressMs = Math.max(0, Math.round(now() - (lastProgressAt ?? now())));
+          diagnostic('recovery-failed', {
+            recoveryAttempt: attempt,
+            elapsedSinceProgressMs,
+            triggerReason: 'recovery-attempts-exhausted',
+          });
           emit('live_watchdog_exhausted', {
             attempts: attempt,
             elapsedSinceProgressMs,
@@ -182,10 +233,13 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
     playbackStarted = false;
     lastPosition = null;
     lastProgressAt = null;
+    firstFrameAt = null;
+    consecutiveFailedSamples = 0;
     attempts = 0;
     recoveryInFlight = false;
     exhausted = false;
     cooldownUntil = 0;
+    diagnostic('watchdog-disarmed', { triggerReason: reason });
     if (reason === 'channel-change' || reason === 'source-change' || reason === 'player-teardown') return;
     if (context.expectedActive) arm();
   };
@@ -193,6 +247,11 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
   const markRecovered = () => {
     const recoveredAttempt = attempts;
     if (recoveredAttempt > 0) {
+      diagnostic('recovery-success', {
+        attempt: recoveredAttempt,
+        recoveryAttempt: recoveredAttempt,
+        triggerReason: 'playback-progress-resumed',
+      });
       emit('live_watchdog_recovered', {
         attempt: recoveredAttempt,
         elapsedSinceProgressMs: Math.max(0, Math.round(now() - (lastProgressAt ?? now()))),
@@ -204,6 +263,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
         success: true,
       });
       cooldownUntil = now() + LIVE_PLAYBACK_WATCHDOG_COOLDOWN_MS;
+      diagnostic('cooldown-start', { recoveryAttempt: recoveredAttempt, triggerReason: 'recovery-success' });
     }
     attempts = 0;
     recoveryInFlight = false;
@@ -216,6 +276,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       const identityChanged = !sameContext(context, nextContext);
       context = { ...nextContext };
       if (identityChanged) {
+        diagnostic('generation-invalidated', { triggerReason: 'context-identity-changed' });
         reset('source-change');
       } else if (!context.expectedActive || context.channelChanging || context.userPaused) {
         clearTimer();
@@ -226,7 +287,10 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
     markPlayable() {
       if (disposed || !context.expectedActive) return;
       playable = true;
+      firstFrameAt ??= now();
       lastProgressAt ??= now();
+      consecutiveFailedSamples = 0;
+      diagnostic('health-sample', { triggerReason: 'first-frame-rendered' });
       arm();
     },
     onStatus(status) {
@@ -237,6 +301,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       if (status === 'readyToPlay') {
         playable = true;
         lastProgressAt ??= now();
+        diagnostic('health-sample', { triggerReason: 'player-ready' });
         arm();
       }
     },
@@ -245,6 +310,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
         playbackStarted = true;
         playable = true;
         lastProgressAt ??= now();
+        diagnostic('health-sample', { triggerReason: 'playing-state' });
         arm();
       } else if (!context.userPaused) {
         arm();
@@ -252,12 +318,29 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
     },
     onTimeUpdate(currentTime) {
       if (disposed || !Number.isFinite(currentTime)) return;
+      if (currentTime < 0) {
+        // MediaSession/Live playback may legitimately report position=-1. It
+        // is an unavailable position, not evidence that video has frozen.
+        if (playable && playbackStarted) {
+          lastProgressAt = now();
+          consecutiveFailedSamples = 0;
+          diagnostic('health-sample', { triggerReason: 'position-unavailable' });
+          arm();
+        }
+        return;
+      }
       const progressed = lastPosition === null || currentTime > lastPosition + 0.01;
       lastPosition = currentTime;
-      if (!progressed) return;
+      if (!progressed) {
+        consecutiveFailedSamples += 1;
+        diagnostic('health-sample', { triggerReason: 'position-not-advanced' });
+        return;
+      }
       playable = true;
       playbackStarted = true;
       lastProgressAt = now();
+      consecutiveFailedSamples = 0;
+      diagnostic('health-sample', { triggerReason: 'position-advanced' });
       if (attempts > 0) markRecovered();
       arm();
     },

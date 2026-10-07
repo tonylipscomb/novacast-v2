@@ -128,6 +128,7 @@ import {
 import { logLiveSelection } from './liveTvSelectionDiagnostics';
 import { createLiveTimeshiftProbe, type LiveTimeshiftProbe } from './liveTimeshiftDiagnostics';
 import { createLivePlaybackWatchdog, type LivePlaybackWatchdog } from './livePlaybackWatchdog';
+import { logLivePlaybackSurfaceSelection, type LivePlaybackLaunchSource } from './livePlaybackLaunchDiagnostics';
 import { markLiveCatalogInteraction } from '@/features/catalog/catalogForegroundPriority';
 import {
   LIVE_SURF_OVERLAY_HIDE_MS,
@@ -341,7 +342,7 @@ export function LiveTvScreen() {
   const { theme } = useAppTheme();
   const styles = useMemo(() => createStyles(theme), [theme]);
   const router = useRouter();
-  const routeParams = useLocalSearchParams<{ categoryId?: string | string[]; channelId?: string | string[]; returnRoute?: string | string[]; directPlay?: string | string[] }>();
+  const routeParams = useLocalSearchParams<{ categoryId?: string | string[]; channelId?: string | string[]; returnRoute?: string | string[]; directPlay?: string | string[]; launchSource?: string | string[] }>();
   const { width, height } = useWindowDimensions();
   const tvDensity = getTvDensity(width);
   const navigationGateRef = useRef(createTvNavigationGate());
@@ -375,6 +376,7 @@ export function LiveTvScreen() {
   const routeChannelId = routeValue(routeParams.channelId);
   const routeReturnRoute = routeValue(routeParams.returnRoute);
   const routeDirectPlay = routeValue(routeParams.directPlay);
+  const routeLaunchSource = routeValue(routeParams.launchSource);
   const returnRoute =
     routeReturnRoute === 'guide'
       ? '/guide'
@@ -382,9 +384,14 @@ export function LiveTvScreen() {
         ? '/search'
         : TV_HOME_ROUTE;
   const directPlayRequested =
-    routeReturnRoute === 'search' &&
     routeDirectPlay === '1' &&
     Boolean(routeChannelId);
+  const directPlayLaunchSource: LivePlaybackLaunchSource =
+    routeLaunchSource === 'novapulse' || routeLaunchSource === 'recommendations' || routeLaunchSource === 'favorites' || routeLaunchSource === 'recent'
+      ? routeLaunchSource
+      : routeReturnRoute === 'search'
+        ? 'live_screen'
+        : 'home_rail';
   const {
     bundle,
     status: loadStatus,
@@ -540,6 +547,14 @@ export function LiveTvScreen() {
     searchOverlayVisible,
     fullscreenActive: Boolean(liveState?.fullscreenChannelId),
   });
+  useEffect(() => {
+    logLivePlaybackSurfaceSelection({
+      launchSource: directPlayRequested ? directPlayLaunchSource : 'live_screen',
+      playbackSurface: 'modern_live',
+      routeName: '/live',
+    });
+  }, [directPlayLaunchSource, directPlayRequested]);
+
   useEffect(() => {
     beginLivePerformanceSession('live_tv', { providerId: activeProviderId });
     startLiveJsStallMonitor('live_tv');
@@ -822,8 +837,12 @@ export function LiveTvScreen() {
       expectedActive: Boolean(currentFullscreenId && hasLiveStream),
       channelChanging: Boolean(surfTransactionRef.current),
       userPaused: false,
+      playbackState: String(liveStreamPlayer.status),
+      isPlaying: liveStreamPlayer.playing,
+      isBuffering: liveStreamPlayer.status === 'loading',
+      firstFrameSeen: fullscreenFrameStatus === 'ready',
     });
-  }, [currentFullscreenId, hasLiveStream, livePlaybackWatchdog, playerGenerationId, playerStreamUrl]);
+  }, [currentFullscreenId, fullscreenFrameStatus, hasLiveStream, livePlaybackWatchdog, liveStreamPlayer.playing, liveStreamPlayer.status, playerGenerationId, playerStreamUrl]);
   useEffect(() => () => {
     livePlaybackWatchdog.dispose();
   }, [livePlaybackWatchdog]);

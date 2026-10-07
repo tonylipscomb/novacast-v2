@@ -65,6 +65,25 @@ test('diagnostics use bounded safe metadata only', () => {
   }
 });
 
+test('watchdog emits explicit decision diagnostics and ignores unavailable Live positions', () => {
+  assert.match(watchdog, /\[NOVACAST_WATCHDOG\]/);
+  for (const event of ['watchdog-armed', 'watchdog-disarmed', 'health-sample', 'stall-suspected', 'stall-confirmed', 'recovery-start', 'recovery-player-reload', 'recovery-success', 'recovery-failed', 'cooldown-start', 'cooldown-complete', 'generation-invalidated']) {
+    assert.match(watchdog, new RegExp(event));
+  }
+  assert.match(watchdog, /position-unavailable/);
+  assert.match(watchdog, /currentTime < 0/);
+  assert.doesNotMatch(watchdog, /bufferedPosition/);
+  assert.doesNotMatch(watchdog, /playbackSpeed/);
+  for (const forbidden of ['streamUrl', 'username', 'password', 'authorization', 'rawResponse', 'providerHost']) {
+    assert.doesNotMatch(watchdog, new RegExp(`\\b${forbidden}\\b`));
+  }
+});
+
+test('watchdog recovery is generation-bound and cannot complete on a stale player', () => {
+  assert.match(watchdog, /recoveryGeneration = context\.playerGeneration/);
+  assert.match(watchdog, /recovery-completed-on-stale-generation/);
+});
+
 test('Live fullscreen surface feeds status, playing, first-frame, and time observations', () => {
   assert.match(screen, /onStatusChange=\{handleLivePlayerStatusChange\}/);
   assert.match(screen, /onPlayingChange=\{handleLivePlayerPlayingChange\}/);
@@ -73,4 +92,4 @@ test('Live fullscreen surface feeds status, playing, first-frame, and time obser
   assert.match(screen, /livePlaybackWatchdog\.onTimeUpdate\(currentTime\)/);
 });
 
-console.log('live-playback-watchdog: 8 passed');
+console.log('live-playback-watchdog: 10 passed');

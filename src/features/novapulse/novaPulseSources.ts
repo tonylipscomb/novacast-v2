@@ -1,7 +1,7 @@
 import type { MovieSummary } from '@/features/movies/movieTypes';
 import type { SeriesSummary } from '@/features/media-browser/mediaTypes';
 import type { NovaPulseItem, NovaPulseRecommendationSignals, NovaPulseSourceResult } from './novaPulseTypes';
-import { getNovaPulseDisplayCountry, getNovaPulseDisplayRuntimeMinutes, getNovaPulseDisplayYear, getNovaPulseMovieFreshness, normalizeNovaPulseGenres, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
+import { getNovaPulseDisplayCountry, getNovaPulseDisplayRuntimeMinutes, getNovaPulseDisplayYear, getNovaPulseMovieFreshness, normalizeNovaPulseGenres, normalizeNovaPulseYear, resolveNovaPulseDescription, sanitizeNovaPulseDisplayTitle } from './novaPulseLogic.ts';
 import type { ProviderHealthSnapshot } from '@/features/providers/providerHealth.ts';
 import type { NovaPulseWeatherResult } from './novaPulseWeather';
 import type { NovaPulseNewsResult } from './novaPulseNews';
@@ -81,7 +81,7 @@ function stableSeries(series: SeriesSummary, recommendations?: ReadonlyMap<strin
     subtype: 'featured',
     title: sanitizeNovaPulseDisplayTitle(series.title),
     description: resolveNovaPulseDescription({ description: series.description }, '') || undefined,
-    year: getNovaPulseDisplayYear(series.year ? Number.parseInt(series.year, 10) || undefined : undefined),
+    year: normalizeNovaPulseYear(series.year),
     countryCode: series.countryCode ?? getNovaPulseDisplayCountry(series.title),
     genres: normalizeNovaPulseGenres(series.genres),
     rating: finiteRating(series.rating),
@@ -121,7 +121,7 @@ export function createNovaPulseCatalogSource(
         ...preferPresentable(movies.filter(Boolean), (movie) => presentationScore(movie), 56).map((movie) => stableMovie(movie, recommendations, sessionNowMs)),
         ...preferPresentable(series.filter(Boolean).slice(0, 32), (seriesItem) => presentationScore({
           ...seriesItem,
-          year: seriesItem.year ? Number.parseInt(seriesItem.year, 10) || undefined : undefined,
+          year: normalizeNovaPulseYear(seriesItem.year),
           artworkUrl: seriesItem.backdropUrl ?? seriesItem.posterUrl,
         })).map((seriesItem) => stableSeries(seriesItem, recommendations)),
       ],

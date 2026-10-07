@@ -5,7 +5,7 @@ import type { SeriesDetail } from '@/features/media-browser/mediaTypes.ts';
 import type { SeriesMetadataCacheEntry } from '@/features/series/metadata/seriesMetadataCache.ts';
 import type { NovaPulseMovieEnrichment } from './novaPulseEnrichment.ts';
 import type { NovaPulseItem } from './novaPulseTypes.ts';
-import { getNovaPulseDisplayRuntimeMinutes, isNovaPulseEnglishDescription, normalizeNovaPulseGenres } from './novaPulseLogic.ts';
+import { getNovaPulseDisplayRuntimeMinutes, isNovaPulseEnglishDescription, normalizeNovaPulseGenres, normalizeNovaPulseYear } from './novaPulseLogic.ts';
 
 export type NovaPulsePresentationDiagnostics = {
   movieBackdropAvailable: number;
@@ -113,7 +113,7 @@ export function enrichNovaPulsePresentation(input: NovaPulsePresentationInput): 
         artworkUrl: firstNonEmpty(backdropUrl, cached?.posterUrl, item.posterUrl, local?.posterUrl, item.artworkUrl),
         genres: normalizeNovaPulseGenres(item.genres?.length ? item.genres : cached?.genres),
         runtimeMinutes: item.runtimeMinutes ?? runtimeMinutes(cached?.runtime),
-        year: item.year ?? (cached?.year ? Number.parseInt(cached.year, 10) || undefined : undefined),
+        year: item.year ?? normalizeNovaPulseYear(cached?.year),
         rating: item.rating ?? cached?.rating,
         ratingSource: item.ratingSource ?? cached?.ratingSource,
         contentRating: item.contentRating ?? cached?.contentRating,
@@ -158,7 +158,7 @@ export function enrichNovaPulsePresentation(input: NovaPulsePresentationInput): 
         artworkUrl: firstNonEmpty(backdropUrl, providerDetail?.posterUrl, cached?.posterPath, item.posterUrl, local?.posterUrl, item.artworkUrl),
         genres: normalizeNovaPulseGenres(item.genres?.length ? item.genres : cached?.genres),
         runtimeMinutes: item.runtimeMinutes ?? getNovaPulseDisplayRuntimeMinutes(providerDetail?.runtimeMinutes) ?? getNovaPulseDisplayRuntimeMinutes(cached?.runtimeMinutes),
-        year: item.year ?? (providerDetail?.year ? Number.parseInt(providerDetail.year, 10) || undefined : undefined) ?? cached?.year,
+        year: item.year ?? normalizeNovaPulseYear(providerDetail?.year) ?? normalizeNovaPulseYear(cached?.year),
         rating: item.rating ?? (providerDetail?.rating ? Number.parseFloat(providerDetail.rating) || undefined : undefined) ?? cached?.rating,
         ratingSource: item.ratingSource ?? (providerDetail?.rating != null ? 'Provider' : cached?.rating != null ? 'TMDB' : undefined),
         network: providerDetail?.network ?? cached?.network,

@@ -17,14 +17,14 @@ import { ExitConfirmOverlay, useExitConfirmOnBack } from '@/features/navigation/
 import { classifyProviderCategoryType, type ProviderCategoryType } from '@/features/providers/categoryNormalization';
 import { useProviderStore } from '@/features/providers/providerStore';
 import { useActiveProviderBundle } from '@/features/providers/useActiveProviderBundle';
-import type { ProviderLiveChannel } from '@/features/providers/providerRepositories';
 import { rememberLiveTvMemory } from '@/features/live/liveTvMemory';
 import { getLiveChannelIndexEntry, getLiveChannelIndexSize } from '@/features/search/liveChannelIndex';
 import { getPublishedLiveChannelById } from '@/features/search/liveSearchSqliteCatalog';
 import { liveChannelFromIndexEntry } from '@/features/live/liveFavoriteHydration';
 import { rememberMoviesScreenMemory } from '@/features/movies/moviesScreenMemory';
 import { rememberSeriesScreenMemory } from '@/features/series/seriesScreenMemory';
-import { buildLiveChannelPlaybackUrl, buildMoviePlaybackUrlResolved } from '@/features/providers/providerPlayback';
+import { buildMoviePlaybackUrlResolved } from '@/features/providers/providerPlayback';
+import { logLivePlaybackSurfaceSelection, type LivePlaybackLaunchSource } from '@/features/live/livePlaybackLaunchDiagnostics';
 import { getCatalogMovieItem } from '@/features/catalog/catalogRepository';
 import {
   armHomeContinueWatchingFallbackRecovery,
@@ -442,6 +442,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     } : undefined,
     diagnostics: novaPulseFeedDiagnostics,
   });
+
   const continueWatchingCount = personalization.providerId === activeProviderId
     ? personalization.continueWatching.length
     : 0;
@@ -827,16 +828,10 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     router.replace(route);
   };
 
-  const playLiveChannelFullscreen = async (channel: ProviderLiveChannel) => {
-    if (!bundle) {
-      return;
-    }
-
-    const streamUrl = buildLiveChannelPlaybackUrl(bundle, channel);
-    if (!streamUrl) {
-      return;
-    }
-
+  const playLiveChannelFullscreen = async (
+    channel: { id: string; categoryId?: string; name: string; logoUrl?: string; current?: string; number?: number },
+    launchSource: LivePlaybackLaunchSource,
+  ) => {
     rememberLiveTvMemory(activeProviderId, {
       selectedCategoryId: channel.categoryId,
       selectedChannelId: channel.id,
@@ -853,20 +848,21 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
       categoryId: channel.categoryId,
     });
 
-    await launchPlayback(
-      {
-        id: channel.id,
-        mediaType: 'live',
-        title: channel.name,
-        subtitle: channel.current,
-        streamUrl,
-        artworkUrl: channel.logoUrl,
-        channelNumber: channel.number ? String(channel.number) : undefined,
-        isLive: true,
-        providerId: activeProviderId,
+    logLivePlaybackSurfaceSelection({
+      launchSource,
+      playbackSurface: 'modern_live',
+      routeName: '/live',
+    });
+    router.push({
+      pathname: '/live',
+      params: {
+        categoryId: channel.categoryId ?? '',
+        channelId: channel.id,
+        directPlay: '1',
+        launchSource,
+        returnRoute: 'home',
       },
-      { launchSource: 'channel', contentFit: 'cover' },
-    );
+    });
   };
 
   const handleNovaPulseAction = useCallback((item: NovaPulseItem) => {
@@ -925,11 +921,11 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     if (!channelId || !bundle) return;
     const entry = getLiveChannelIndexEntry(activeProviderId, channelId);
     if (entry) {
-      void playLiveChannelFullscreen(liveChannelFromIndexEntry(entry));
+      void playLiveChannelFullscreen(liveChannelFromIndexEntry(entry), 'novapulse');
       return;
     }
     void getPublishedLiveChannelById(activeProviderId, channelId)
-      .then((channel) => { if (channel) void playLiveChannelFullscreen(channel); })
+      .then((channel) => { if (channel) void playLiveChannelFullscreen(channel, 'novapulse'); })
       .catch(() => undefined);
   }, [activeProviderId, bundle, router]);
 
@@ -1151,7 +1147,10 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     });
   };
 
-  const openRecentItem = async (item: RecentItemRecord) => {
+  const openRecentItem = async (
+    item: RecentItemRecord,
+    liveLaunchSource: LivePlaybackLaunchSource = 'recent',
+  ) => {
     const continueItem = personalization.continueWatching.find(
       (candidate) => candidate.contentId === item.contentId || candidate.episodeId === item.contentId,
     );
@@ -1236,7 +1235,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     if (item.mediaType === 'live' && bundle) {
       const channel = await bundle.live.getChannel(item.contentId).catch(() => null);
       if (channel) {
-        await playLiveChannelFullscreen(channel);
+        await playLiveChannelFullscreen(channel, liveLaunchSource);
         return;
       }
     }
@@ -1411,7 +1410,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
                       ? (handle) => registerHomeFocusHandle(`favorite-channel-${item.id}`, handle)
                       : undefined
                   }
-                  onPress={() => void openRecentItem({ providerId: activeProviderId, mediaType: 'live', contentId: item.id, title: item.title, artworkUrl: item.artworkUrl, lastOpenedAt: Date.now() })}
+                      onPress={() => void openRecentItem({ providerId: activeProviderId, mediaType: 'live', contentId: item.id, title: item.title, artworkUrl: item.artworkUrl, lastOpenedAt: Date.now() }, 'favorites')}
                   auditSectionType="favorite-channels"
                   auditItemIndex={index}
                   onAuditMounted={registerFirstHomeFocusableCard}

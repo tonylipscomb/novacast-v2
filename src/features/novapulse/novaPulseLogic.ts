@@ -92,11 +92,22 @@ export function sanitizeNovaPulseDisplayTitle(title?: string) {
   return withoutStructuredPrefix.replace(NOVA_PULSE_TOP_PREFIX, '').trim() || withoutStructuredPrefix || withoutYear;
 }
 
-export function getNovaPulseDisplayYear(value?: number, now = new Date()) {
-  if (typeof value !== 'number' || !Number.isInteger(value)) return undefined;
-  const year: number = value;
+export function normalizeNovaPulseYear(value: unknown, now = new Date()) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const year = typeof value === 'number'
+    ? value
+    : /^\d{4}$/.test(text)
+      ? Number(text)
+      : /^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(text) && Number.isFinite(Date.parse(text))
+        ? Number(text.slice(0, 4))
+        : undefined;
+  if (year == null || !Number.isInteger(year)) return undefined;
   const currentYear = now.getFullYear();
-  return year >= 1888 && year <= currentYear + 2 ? year : undefined;
+  return year >= 1900 && year <= currentYear + 1 ? year : undefined;
+}
+
+export function getNovaPulseDisplayYear(value?: number, now = new Date()) {
+  return normalizeNovaPulseYear(value, now);
 }
 
 export function normalizeNovaPulseGenres(genres?: readonly string[]) {

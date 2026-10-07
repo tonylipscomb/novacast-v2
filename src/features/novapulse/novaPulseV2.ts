@@ -214,7 +214,10 @@ function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: reado
   const normalAnnouncement = ranked.find((item) => item.type === 'announcement' && !isCriticalAnnouncement(item));
   const weather = ranked.find((item) => item.type === 'weather');
   const news = ranked.find((item) => item.type === 'news');
-  const information = [critical, normalAnnouncement, weather, news]
+  // Critical alerts always lead. Healthy Weather/News are then allocated before
+  // ordinary announcements so the two live product surfaces cannot be starved
+  // by a persistent normal announcement while retaining the information cap.
+  const information = [critical, weather, news, normalAnnouncement]
     .filter((item): item is NovaPulseItem => Boolean(item))
     .slice(0, 2);
   return [urgentProviderAlert, recoveredProviderAlert, ...information, ...sports, ...liveCandidates.slice(0, 2)].filter((item): item is NovaPulseItem => Boolean(item));

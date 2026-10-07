@@ -167,8 +167,8 @@ test('display year validation keeps plausible years and omits malformed/future v
   const now = new Date(2026, 0, 1);
   assert.equal(getNovaPulseDisplayYear(1923, now), 1923);
   assert.equal(getNovaPulseDisplayYear(1887, now), undefined);
-  assert.equal(getNovaPulseDisplayYear(2029, now), undefined);
-  assert.equal(getNovaPulseDisplayYear(2028, now), 2028);
+  assert.equal(getNovaPulseDisplayYear(2028, now), undefined);
+  assert.equal(getNovaPulseDisplayYear(2027, now), 2027);
   assert.equal(getNovaPulseDisplayYear(1923.5, now), undefined);
 });
 

@@ -13,6 +13,12 @@ export const NOVA_PULSE_NEWS_MAX_ITEMS = 1;
 export const NOVA_PULSE_NEWS_STORAGE_KEY = '@novacast/novapulse-news-v1';
 export const NOVA_PULSE_NEWS_DIAGNOSTICS = process.env.EXPO_PUBLIC_NOVAPULSE_NEWS_DIAGNOSTICS === 'true';
 
+type NewsRuntimeDiagnosticValue = string | number | boolean | undefined;
+
+export function recordNovaPulseNewsRuntimeDiagnostic(event: string, fields: Record<string, NewsRuntimeDiagnosticValue> = {}) {
+  console.info('[NOVAPULSE_NEWS]', JSON.stringify({ event, ...fields }));
+}
+
 type NewsProjection = {
   id: string;
   sourceId: string;
@@ -125,8 +131,10 @@ async function writeCache(cache: CachedPayload) {
 }
 
 async function fetchRemote(): Promise<NovaPulseNewsResult> {
+  recordNovaPulseNewsRuntimeDiagnostic('news-fetch-start');
   const api = apiConfig();
   if (!api) {
+    recordNovaPulseNewsRuntimeDiagnostic('news-skipped', { reason: 'missing-endpoint' });
     recordNovaPulseNewsReleaseDiagnostic('fallback', { reason: 'config_missing' });
     return { source: 'none', item: null };
   }
@@ -137,6 +145,7 @@ async function fetchRemote(): Promise<NovaPulseNewsResult> {
   try {
     const response = await fetch(`${api.apiUrl}/novapulse-news-feed`, { method: 'GET', cache: 'no-store', headers: { apikey: api.anonKey, Authorization: `Bearer ${api.anonKey}`, 'Cache-Control': 'no-cache', ...(await deviceAuthHeaders()) }, signal: controller.signal });
     const statusCategory = response.status >= 200 && response.status < 300 ? '2xx' : response.status >= 400 && response.status < 500 ? '4xx' : response.status >= 500 ? '5xx' : 'network';
+    recordNovaPulseNewsRuntimeDiagnostic('news-fetch-result', { statusCategory });
     newsDiagnostic('http_outcome', statusCategory);
     recordNovaPulseNewsReleaseDiagnostic('http', { statusCategory });
     if (!response.ok) throw new Error(statusCategory === '4xx' ? 'news_http_4xx' : statusCategory === '5xx' ? 'news_http_5xx' : 'news_unavailable');
@@ -153,6 +162,8 @@ async function fetchRemote(): Promise<NovaPulseNewsResult> {
     if (!payload || payload.ok !== true || !Array.isArray(payload.items)) throw new Error('news_response_body_parse');
     const nowMs = Date.now();
     const items = payload.items.map((row) => validateRow(row, nowMs)).filter((row): row is NewsProjection => Boolean(row)).slice(0, NOVA_PULSE_NEWS_MAX_ITEMS);
+    recordNovaPulseNewsRuntimeDiagnostic('news-normalized', { serverCount: serverItemCount, normalizedCount: items.length });
+    recordNovaPulseNewsRuntimeDiagnostic('news-freshness-result', { serverCount: serverItemCount, freshCount: items.length, rejectedCount: Math.max(0, serverItemCount - items.length) });
     recordNovaPulseNewsReleaseDiagnostic('fresh-count', { count: items.length });
     recordNovaPulseNewsReleaseDiagnostic('normalized-count', { count: items.length });
     const cache: CachedPayload = { schemaVersion: 1, fetchedAt: nowMs, kind: items.length ? 'items' : 'empty', items };
@@ -174,17 +185,24 @@ async function fetchRemote(): Promise<NovaPulseNewsResult> {
           : errorType === 'AbortError'
             ? 'network_abort'
             : 'network';
+    recordNovaPulseNewsRuntimeDiagnostic('news-skipped', { reason: reason === 'response_body_parse' ? 'invalid-payload' : reason === 'http_4xx' || reason === 'http_5xx' || reason === 'network_abort' || reason === 'network' ? 'fetch-error' : reason });
     recordNovaPulseNewsReleaseDiagnostic('fallback', { reason: fallback ? 'lkg' : reason });
     return fallback ?? { source: 'none', item: null };
   } finally { clearTimeout(timeout); }
 }
 
 export async function loadNovaPulseNews(): Promise<NovaPulseNewsResult> {
-  if (!NOVA_PULSE_NEWS_ENABLED) return { source: 'none', item: null };
+  recordNovaPulseNewsRuntimeDiagnostic('news-runtime-entry');
+  recordNovaPulseNewsRuntimeDiagnostic('news-feature-state', { enabled: NOVA_PULSE_NEWS_ENABLED });
+  if (!NOVA_PULSE_NEWS_ENABLED) {
+    recordNovaPulseNewsRuntimeDiagnostic('news-skipped', { reason: 'feature-disabled' });
+    return { source: 'none', item: null };
+  }
   const memory = fromCache(memoryCache);
   if (memory?.cacheAgeBucket === 'fresh') {
     newsDiagnostic('cache_source', 'memory');
     recordNovaPulseNewsReleaseDiagnostic('cache-source', { source: 'memory' });
+    recordNovaPulseNewsRuntimeDiagnostic('news-fetch-result', { statusCategory: 'cache' });
     return memory;
   }
   const stored = await readCache();
@@ -194,6 +212,7 @@ export async function loadNovaPulseNews(): Promise<NovaPulseNewsResult> {
     if (cached) {
       newsDiagnostic('cache_source', cached.source === 'lkg' ? 'storage_lkg' : 'storage');
       recordNovaPulseNewsReleaseDiagnostic('cache-source', { source: cached.source === 'lkg' ? 'lkg' : 'storage' });
+      recordNovaPulseNewsRuntimeDiagnostic('news-fetch-result', { statusCategory: 'cache' });
       return cached;
     }
   }

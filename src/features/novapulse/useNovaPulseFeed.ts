@@ -34,7 +34,7 @@ import {
 import { getRepositoryBundleGeneration } from '@/features/providers/providerBundle';
 import { NOVA_PULSE_PROVIDER_HEALTH_ENABLED, useNovaPulseProviderHealth } from '@/features/providers/providerHealth';
 import { loadNovaPulseWeather, NOVA_PULSE_WEATHER_ENABLED, type NovaPulseWeatherResult } from './novaPulseWeather';
-import { getCachedNovaPulseNews, loadNovaPulseNews, NOVA_PULSE_NEWS_ENABLED, recordNovaPulseNewsReleaseDiagnostic, type NovaPulseNewsResult } from './novaPulseNews';
+import { getCachedNovaPulseNews, loadNovaPulseNews, NOVA_PULSE_NEWS_ENABLED, recordNovaPulseNewsReleaseDiagnostic, recordNovaPulseNewsRuntimeDiagnostic, type NovaPulseNewsResult } from './novaPulseNews';
 import { recordSanitizedDiagnostic } from '@/features/resilience/sanitizedDiagnostics';
 
 const EMPTY_NOVA_PULSE_HISTORY = [] as const;
@@ -148,7 +148,12 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
     }).catch(() => undefined);
   }, [providerId]);
   useEffect(() => {
-    if (!NOVA_PULSE_NEWS_ENABLED) return;
+    recordNovaPulseNewsRuntimeDiagnostic('news-runtime-entry', { lifecycle: 'feed-effect' });
+    recordNovaPulseNewsRuntimeDiagnostic('news-feature-state', { enabled: NOVA_PULSE_NEWS_ENABLED });
+    if (!NOVA_PULSE_NEWS_ENABLED) {
+      recordNovaPulseNewsRuntimeDiagnostic('news-skipped', { reason: 'feature-disabled' });
+      return;
+    }
     let active = true;
     setNewsSession({ providerId, result: getCachedNovaPulseNews() });
     void loadNovaPulseNews().then((result) => {
@@ -475,10 +480,16 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
       criticalAnnouncementCandidate: composed.diagnostics.hasCriticalAnnouncementCandidate,
       normalAnnouncementCandidate: composed.diagnostics.hasNormalAnnouncementCandidate,
     });
+    recordNovaPulseNewsRuntimeDiagnostic('news-candidate-created', { count: composed.diagnostics.candidateNews });
+    recordNovaPulseNewsRuntimeDiagnostic('news-ranked', { rank: composed.diagnostics.newsRank ?? 0, filterReason: composed.diagnostics.newsFilterReason });
+    recordNovaPulseNewsRuntimeDiagnostic('news-selected', { count: composed.diagnostics.selectedNews });
+    if (composed.diagnostics.candidateNews === 0) {
+      recordNovaPulseNewsRuntimeDiagnostic('news-skipped', { reason: newsSession.result?.source === 'empty' ? 'empty-response' : newsSession.result?.source === 'none' ? 'no-fresh-items' : 'candidate-rejected' });
+    }
     recordSanitizedDiagnostic({ operation: 'novapulse_news', screen: 'home', errorType: 'composition', outcome: `candidate:${composed.diagnostics.candidateNews}:selected:${composed.diagnostics.selectedNews}` });
     console.info('[NOVAPULSE_V2]', JSON.stringify(payload));
     recordDiagnostic({ eventType: 'live_performance', metadata: { summary: 'novapulse_v2', ...payload } });
-  }, [composed]);
+  }, [composed, newsSession.result?.source]);
 
   useEffect(() => {
     const feedSignature = [recommendationSeeds.signature, composed.diagnostics.signature, recommendationSignalSignature].join('||');

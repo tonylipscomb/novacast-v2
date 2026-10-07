@@ -120,6 +120,19 @@ test('release-safe News diagnostics are opt-in and aggregate-only', () => {
   assert.doesNotMatch(client, /EXPO_PUBLIC_NOVAPULSE_NEWS_DIAGNOSTICS\s*=\s*true/);
 });
 
+test('runtime News diagnostics begin before early returns and remain sanitized', () => {
+  assert.match(client, /\[NOVAPULSE_NEWS\]/);
+  for (const event of ['news-runtime-entry', 'news-feature-state', 'news-fetch-start', 'news-fetch-result', 'news-normalized', 'news-freshness-result', 'news-candidate-created', 'news-ranked', 'news-selected', 'news-skipped']) {
+    assert.match(client + hook, new RegExp(event));
+  }
+  assert.match(client, /reason: 'feature-disabled'/);
+  assert.match(client, /reason: 'missing-endpoint'/);
+  assert.match(client, /reason === 'response_body_parse'/);
+  assert.match(client, /invalid-payload/);
+  assert.match(client, /fetch-error/);
+  assert.doesNotMatch(client + hook, /console\.info\([^\n]*(?:apiUrl|anonKey|Authorization|deviceAuthHeaders|headline|articleUrl|providerId)/);
+});
+
 test('indexed Movie and Series summaries retain regional metadata for NovaPulse curation', async () => {
   const { getMovieCatalogIndex, resetMovieCatalogIndex } = await import('../src/features/movies/smart/movieCatalogIndex.ts');
   const { getSeriesCatalogIndex, resetSeriesCatalogIndex } = await import('../src/features/series/smart/seriesCatalogIndex.ts');

@@ -221,7 +221,7 @@ function selectProtected(ranked: readonly NovaPulseItem[], liveCandidates: reado
   // by a persistent normal announcement while retaining the information cap.
   const information = [critical, weather, news, normalAnnouncement]
     .filter((item): item is NovaPulseItem => Boolean(item))
-    .slice(0, 2);
+    .slice(0, 3);
   return [urgentProviderAlert, recoveredProviderAlert, ...information, ...sports, ...liveCandidates.slice(0, 2)].filter((item): item is NovaPulseItem => Boolean(item));
 }
 

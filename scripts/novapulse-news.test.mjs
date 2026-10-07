@@ -44,7 +44,38 @@ test('News remains eligible when Weather is also present', () => {
   assert.equal(result.diagnostics.newsFilterReason, 'selected');
 });
 
-test('News never displaces provider health and information remains capped at two', () => {
+test('information allocation preserves critical, weather, news, then normal priority', () => {
+  const source = (entries) => ({
+    id: entries.map((entry) => entry.id).join('-'),
+    getItems: () => ({ sourceId: 'information-test', items: entries }),
+  });
+  const critical = item('critical', 'announcement', { announcementPriority: 'critical', announcementType: 'service_alert', priority: 100 });
+  const weather = item('weather', 'weather', { priority: 80 });
+  const news = item('news', 'news', { newsCategory: 'top', priority: 20 });
+  const normal = item('normal', 'announcement', { announcementType: 'update', priority: 1 });
+  const selectedInfo = (...entries) => composeNovaPulseFeedV2(entries.map((entry) => source([entry]))).items
+    .filter((entry) => entry.type === 'announcement' || entry.type === 'weather' || entry.type === 'news');
+
+  assert.deepEqual(selectedInfo(critical, weather, news, normal).map((entry) => entry.id), ['critical', 'weather', 'news']);
+  assert.deepEqual(selectedInfo(weather, news, normal).map((entry) => entry.id), ['weather', 'news', 'normal']);
+  assert.deepEqual(selectedInfo(critical, news, normal).map((entry) => entry.id), ['critical', 'news', 'normal']);
+  assert.deepEqual(selectedInfo(news, normal).map((entry) => entry.id), ['news', 'normal']);
+  assert.deepEqual(selectedInfo(weather, normal).map((entry) => entry.id), ['weather', 'normal']);
+  assert.deepEqual(selectedInfo(normal).map((entry) => entry.id), ['normal']);
+
+  const full = composeNovaPulseFeedV2([
+    source([critical]),
+    source([weather]),
+    source([news]),
+    source([normal]),
+    source(Array.from({ length: 20 }, (_, index) => item(`movie-${index}`, 'movie'))),
+  ]);
+  assert.equal(full.diagnostics.informationSelected, 3);
+  assert.ok(full.items.length <= 12);
+  assert.equal(full.items.filter((entry) => entry.type === 'news').length, 1);
+});
+
+test('News never displaces provider health and information remains capped at three', () => {
   const provider = item('provider', 'provider_alert', { providerHealthState: 'unavailable', priority: 88 });
   const news = item('news', 'news', { newsCategory: 'top', priority: 38 });
   const weather = item('weather', 'weather', { priority: 50 });
@@ -68,8 +99,9 @@ test('News never displaces provider health and information remains capped at two
   assert.ok(result.items.filter((entry) => entry.type === 'news').length <= 1);
   assert.ok(result.items.length <= 12);
   assert.equal(criticalResult.items[0]?.type, 'provider_alert');
-  assert.equal(criticalResult.items.filter((entry) => entry.type === 'announcement' || entry.type === 'weather' || entry.type === 'news').length, 2);
-  assert.equal(criticalResult.diagnostics.newsFilterReason, 'information_cap');
+  assert.equal(criticalResult.items.filter((entry) => entry.type === 'announcement' || entry.type === 'weather' || entry.type === 'news').length, 3);
+  assert.equal(criticalResult.items.filter((entry) => entry.type === 'news').length, 1);
+  assert.equal(criticalResult.diagnostics.newsFilterReason, 'selected');
   assert.equal(criticalResult.items.length <= 12, true);
 });
 

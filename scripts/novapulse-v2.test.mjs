@@ -93,10 +93,10 @@ test('V2 keeps healthy Weather and News from being starved by a normal announcem
     item('weather', 'weather', { priority: 42 }),
     item('news', 'news', { priority: 38 }),
   ])]);
-  assert.equal(result.diagnostics.informationSelected, 2);
+  assert.equal(result.diagnostics.informationSelected, 3);
   assert.ok(result.items.some((entry) => entry.type === 'weather'));
   assert.ok(result.items.some((entry) => entry.type === 'news'));
-  assert.equal(result.items.some((entry) => entry.id === 'normal'), false);
+  assert.equal(result.items.some((entry) => entry.id === 'normal'), true);
 });
 
 test('V2 retains critical announcement priority when Weather and News are present', () => {
@@ -106,7 +106,7 @@ test('V2 retains critical announcement priority when Weather and News are presen
     item('news', 'news'),
   ])]);
   assert.equal(result.items[0]?.id, 'critical');
-  assert.equal(result.diagnostics.informationSelected, 2);
+  assert.equal(result.diagnostics.informationSelected, 3);
 });
 
 test('V2 prefers different sports leagues when two comparable cards are available', () => {

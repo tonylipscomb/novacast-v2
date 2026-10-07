@@ -2045,8 +2045,8 @@ export function LiveTvScreen() {
   const handleLivePlayerStatusChange = useCallback(({ status }: StatusChangeEventPayload) => {
     livePlaybackWatchdog.onStatus(String(status));
   }, [livePlaybackWatchdog]);
-  const handleLivePlayerTimeUpdate = useCallback(({ currentTime }: TimeUpdateEventPayload) => {
-    livePlaybackWatchdog.onTimeUpdate(currentTime);
+  const handleLivePlayerTimeUpdate = useCallback(({ currentTime, currentLiveTimestamp, bufferedPosition }: TimeUpdateEventPayload) => {
+    livePlaybackWatchdog.onTimeUpdate(currentTime, { currentLiveTimestamp, bufferedPosition });
     if (
       liveStateRef.current?.fullscreenChannelId &&
       currentTime > 0 &&

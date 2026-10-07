@@ -32,12 +32,17 @@ export type LivePlaybackWatchdogContext = {
   firstFrameSeen?: boolean;
 };
 
+export type LivePlaybackProgress = {
+  currentLiveTimestamp?: number | null;
+  bufferedPosition?: number | null;
+};
+
 export type LivePlaybackWatchdog = {
   setContext: (context: LivePlaybackWatchdogContext) => void;
   markPlayable: () => void;
   onStatus: (status: string) => void;
   onPlaying: (isPlaying: boolean) => void;
-  onTimeUpdate: (currentTime: number) => void;
+  onTimeUpdate: (currentTime: number, progress?: LivePlaybackProgress) => void;
   setUserPaused: (paused: boolean) => void;
   reset: (reason: string) => void;
   dispose: () => void;
@@ -82,7 +87,10 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
   let playable = false;
   let playbackStarted = false;
   let lastPosition: number | null = null;
-  let lastProgressAt: number | null = null;
+  let lastLiveTimestamp: number | null = null;
+  let lastBufferedPosition: number | null = null;
+  let lastRealProgressAt: number | null = null;
+  let lastProgressSignalType: 'frame-render' | 'position' | 'live-timestamp' | 'buffered-position' | null = null;
   let firstFrameAt: number | null = null;
   let consecutiveFailedSamples = 0;
   let attempts = 0;
@@ -110,7 +118,13 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       isPlaying: context.isPlaying ?? null,
       isBuffering: context.isBuffering ?? null,
       firstFrameSeen: context.firstFrameSeen ?? playable,
-      elapsedSinceHealthyMs: lastProgressAt == null ? null : Math.max(0, Math.round(now() - lastProgressAt)),
+      elapsedSinceHealthyMs: lastRealProgressAt == null ? null : Math.max(0, Math.round(now() - lastRealProgressAt)),
+      lastRealProgressAt,
+      elapsedSinceRealProgressMs: lastRealProgressAt == null ? null : Math.max(0, Math.round(now() - lastRealProgressAt)),
+      progressSignalType: lastProgressSignalType,
+      progressObserved: lastRealProgressAt !== null,
+      playerStateHealthy: context.playbackState === 'readyToPlay' && context.isPlaying === true && context.isBuffering !== true,
+      renderProgressHealthy: lastRealProgressAt !== null && now() - lastRealProgressAt < LIVE_PLAYBACK_WATCHDOG_STALL_MS,
       elapsedSinceFirstFrameMs: firstFrameAt == null ? null : Math.max(0, Math.round(now() - firstFrameAt)),
       consecutiveFailedSamples,
       ...fields,
@@ -131,24 +145,25 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       !context.userPaused &&
       playable &&
       playbackStarted &&
-      lastProgressAt !== null,
+      lastRealProgressAt !== null,
   );
 
   const arm = () => {
     clearTimer();
     if (!eligible() || recoveryInFlight || exhausted) return;
-    const remaining = Math.max(0, LIVE_PLAYBACK_WATCHDOG_STALL_MS - (now() - (lastProgressAt ?? now())));
+    const remaining = Math.max(0, LIVE_PLAYBACK_WATCHDOG_STALL_MS - (now() - (lastRealProgressAt ?? now())));
     diagnostic('watchdog-armed', { triggerReason: 'eligible-health-observation' });
     timer = schedule(() => {
       timer = null;
       if (!eligible() || recoveryInFlight || exhausted) return;
-      const stalledForMs = now() - (lastProgressAt ?? now());
+      const stalledForMs = now() - (lastRealProgressAt ?? now());
       if (stalledForMs < LIVE_PLAYBACK_WATCHDOG_STALL_MS) {
         arm();
         return;
       }
       diagnostic('stall-suspected', {
         elapsedSinceHealthyMs: Math.max(0, Math.round(stalledForMs)),
+        stalledSignal: lastProgressSignalType,
         triggerReason: 'health-deadline-reached',
       });
       if (now() < cooldownUntil) {
@@ -191,7 +206,11 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
         channelId: context.channelId,
         sourceIdentitySame: true,
       };
-      diagnostic('stall-confirmed', { ...recoveryFields, triggerReason: 'no-health-sample' });
+      diagnostic('stall-confirmed', {
+        ...recoveryFields,
+        stalledSignal: lastProgressSignalType,
+        triggerReason: 'no-real-progress',
+      });
       diagnostic('recovery-start', { ...recoveryFields, triggerReason: 'sustained-stall' });
       diagnostic('recovery-player-reload', { ...recoveryFields, triggerReason: 'same-player-recovery' });
       emit('live_watchdog_stall_detected', {
@@ -216,7 +235,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
         }
         if (attempt >= LIVE_PLAYBACK_WATCHDOG_MAX_ATTEMPTS) {
           exhausted = true;
-          const elapsedSinceProgressMs = Math.max(0, Math.round(now() - (lastProgressAt ?? now())));
+          const elapsedSinceProgressMs = Math.max(0, Math.round(now() - (lastRealProgressAt ?? now())));
           diagnostic('recovery-failed', {
             recoveryAttempt: attempt,
             elapsedSinceProgressMs,
@@ -243,7 +262,10 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
     playable = false;
     playbackStarted = false;
     lastPosition = null;
-    lastProgressAt = null;
+    lastRealProgressAt = null;
+    lastLiveTimestamp = null;
+    lastBufferedPosition = null;
+    lastProgressSignalType = null;
     firstFrameAt = null;
     consecutiveFailedSamples = 0;
     lastHealthLogAt = -Infinity;
@@ -266,7 +288,7 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       });
       emit('live_watchdog_recovered', {
         attempt: recoveredAttempt,
-        elapsedSinceProgressMs: Math.max(0, Math.round(now() - (lastProgressAt ?? now()))),
+        elapsedSinceProgressMs: Math.max(0, Math.round(now() - (lastRealProgressAt ?? now()))),
         playerGenerationId: context.playerGeneration,
         channelId: context.channelId,
         sourceIdentitySame: true,
@@ -300,7 +322,8 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       if (disposed || !context.expectedActive) return;
       playable = true;
       firstFrameAt ??= now();
-      lastProgressAt ??= now();
+      lastRealProgressAt = now();
+      lastProgressSignalType = 'frame-render';
       consecutiveFailedSamples = 0;
       diagnostic('health-sample', { triggerReason: 'first-frame-rendered' });
       arm();
@@ -312,7 +335,6 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       }
       if (status === 'readyToPlay') {
         playable = true;
-        lastProgressAt ??= now();
         diagnostic('health-sample', { triggerReason: 'player-ready' });
         arm();
       }
@@ -321,38 +343,42 @@ export function createLivePlaybackWatchdog(input: WatchdogInput): LivePlaybackWa
       if (isPlaying) {
         playbackStarted = true;
         playable = true;
-        lastProgressAt ??= now();
         diagnostic('health-sample', { triggerReason: 'playing-state' });
         arm();
       } else if (!context.userPaused) {
         arm();
       }
     },
-    onTimeUpdate(currentTime) {
+    onTimeUpdate(currentTime, progress = {}) {
       if (disposed || !Number.isFinite(currentTime)) return;
-      if (currentTime < 0) {
-        // MediaSession/Live playback may legitimately report position=-1. It
-        // is an unavailable position, not evidence that video has frozen.
-        if (playable && playbackStarted) {
-          lastProgressAt = now();
-          consecutiveFailedSamples = 0;
-          diagnostic('health-sample', { triggerReason: 'position-unavailable' });
-          arm();
-        }
-        return;
-      }
-      const progressed = lastPosition === null || currentTime > lastPosition + 0.01;
-      lastPosition = currentTime;
-      if (!progressed) {
+      const positionAvailable = currentTime >= 0;
+      const positionProgressed = positionAvailable && (lastPosition === null || currentTime > lastPosition + 0.01);
+      const liveTimestamp = progress.currentLiveTimestamp;
+      const liveTimestampProgressed = Number.isFinite(liveTimestamp) &&
+        (lastLiveTimestamp === null || liveTimestamp! > lastLiveTimestamp);
+      const bufferedPosition = progress.bufferedPosition;
+      const bufferedPositionProgressed = !positionAvailable && !liveTimestampProgressed &&
+        Number.isFinite(bufferedPosition) && bufferedPosition! >= 0 &&
+        (lastBufferedPosition === null || bufferedPosition! > lastBufferedPosition + 0.01);
+
+      if (positionAvailable) lastPosition = currentTime;
+      if (Number.isFinite(liveTimestamp)) lastLiveTimestamp = liveTimestamp!;
+      if (Number.isFinite(bufferedPosition)) lastBufferedPosition = bufferedPosition!;
+
+      if (!positionProgressed && !liveTimestampProgressed && !bufferedPositionProgressed) {
         consecutiveFailedSamples += 1;
-        diagnostic('health-sample', { triggerReason: 'position-not-advanced' });
+        diagnostic('health-sample', {
+          triggerReason: positionAvailable ? 'position-not-advanced' : 'progress-not-observed',
+        });
         return;
       }
+
       playable = true;
       playbackStarted = true;
-      lastProgressAt = now();
+      lastRealProgressAt = now();
+      lastProgressSignalType = positionProgressed ? 'position' : liveTimestampProgressed ? 'live-timestamp' : 'buffered-position';
       consecutiveFailedSamples = 0;
-      diagnostic('health-sample', { triggerReason: 'position-advanced' });
+      diagnostic('health-sample', { triggerReason: `${lastProgressSignalType}-advanced` });
       if (attempts > 0) markRecovered();
       arm();
     },

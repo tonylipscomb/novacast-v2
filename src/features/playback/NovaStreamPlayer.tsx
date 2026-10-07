@@ -179,6 +179,10 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
       applyVodBufferProfile(nextPlayer);
     }
     nextPlayer.muted = muted;
+    // Live watchdog progress uses the existing expo-video time payload. A
+    // one-second cadence is low-overhead and also carries live-frame and
+    // buffered-position signals when currentTime is unavailable.
+    nextPlayer.timeUpdateEventInterval = bufferPolicy === 'live' ? 1 : 0;
     if (autoPlay && streamUrl) {
       nextPlayer.play();
     }

@@ -20,7 +20,7 @@ test('watchdog requires active fullscreen context, prior playability, and progre
   assert.match(watchdog, /!context\.userPaused/);
   assert.match(watchdog, /playable/);
   assert.match(watchdog, /playbackStarted/);
-  assert.match(watchdog, /lastProgressAt !== null/);
+  assert.match(watchdog, /lastRealProgressAt !== null/);
 });
 
 test('progress recovery resets the episode and emits a bounded success event', () => {
@@ -66,7 +66,7 @@ test('diagnostics use bounded safe metadata only', () => {
   }
 });
 
-test('watchdog emits explicit decision diagnostics and ignores unavailable Live positions', () => {
+test('watchdog emits explicit decision diagnostics and uses real progress metadata', () => {
   assert.match(watchdog, /\[NOVACAST_WATCHDOG\]/);
   assert.match(watchdog, /console\.warn\(WATCHDOG_LOG_TAG/);
   assert.doesNotMatch(watchdog, /console\.info\(WATCHDOG_LOG_TAG/);
@@ -74,13 +74,42 @@ test('watchdog emits explicit decision diagnostics and ignores unavailable Live 
   for (const event of ['watchdog-armed', 'watchdog-disarmed', 'health-sample', 'stall-suspected', 'stall-confirmed', 'recovery-start', 'recovery-player-reload', 'recovery-success', 'recovery-failed', 'cooldown-start', 'cooldown-complete', 'generation-invalidated']) {
     assert.match(watchdog, new RegExp(event));
   }
-  assert.match(watchdog, /position-unavailable/);
-  assert.match(watchdog, /currentTime < 0/);
-  assert.doesNotMatch(watchdog, /bufferedPosition/);
+  assert.match(watchdog, /progress-not-observed/);
+  assert.match(watchdog, /positionAvailable = currentTime >= 0/);
+  assert.match(watchdog, /currentLiveTimestamp/);
+  assert.match(watchdog, /bufferedPosition/);
+  assert.match(watchdog, /lastRealProgressAt/);
+  assert.match(watchdog, /elapsedSinceRealProgressMs/);
+  assert.match(watchdog, /playerStateHealthy/);
+  assert.match(watchdog, /renderProgressHealthy/);
+  assert.match(watchdog, /stalledSignal: lastProgressSignalType/);
   assert.doesNotMatch(watchdog, /playbackSpeed/);
   for (const forbidden of ['streamUrl', 'username', 'password', 'authorization', 'rawResponse', 'providerHost']) {
     assert.doesNotMatch(watchdog, new RegExp(`\\b${forbidden}\\b`));
   }
+});
+
+test('player state callbacks do not refresh real progress or reset the stall deadline', () => {
+  assert.match(watchdog, /triggerReason: 'player-ready'/);
+  assert.match(watchdog, /triggerReason: 'playing-state'/);
+  assert.doesNotMatch(watchdog, /status === 'readyToPlay'[\s\S]{0,180}lastRealProgressAt\s*=/);
+  assert.doesNotMatch(watchdog, /if \(isPlaying\)[\s\S]{0,180}lastRealProgressAt\s*=/);
+  assert.match(watchdog, /lastRealProgressAt = now\(\);/);
+});
+
+test('Live player enables bounded time samples for alternate progress signals', () => {
+  assert.match(player, /timeUpdateEventInterval = bufferPolicy === 'live' \? 1 : 0/);
+  assert.match(screen, /currentLiveTimestamp/);
+  assert.match(screen, /bufferedPosition/);
+  assert.match(screen, /livePlaybackWatchdog\.onTimeUpdate\(currentTime, \{ currentLiveTimestamp, bufferedPosition \}\)/);
+});
+
+test('unavailable position requires an alternate advancing signal or eventually stalls', () => {
+  assert.match(watchdog, /positionAvailable = currentTime >= 0/);
+  assert.match(watchdog, /liveTimestampProgressed/);
+  assert.match(watchdog, /bufferedPositionProgressed/);
+  assert.match(watchdog, /!positionProgressed && !liveTimestampProgressed && !bufferedPositionProgressed/);
+  assert.match(watchdog, /LIVE_PLAYBACK_WATCHDOG_STALL_MS - \(now\(\) - \(lastRealProgressAt \?\? now\(\)\)\)/);
 });
 
 test('watchdog recovery is generation-bound and cannot complete on a stale player', () => {
@@ -93,7 +122,7 @@ test('Live fullscreen surface feeds status, playing, first-frame, and time obser
   assert.match(screen, /onPlayingChange=\{handleLivePlayerPlayingChange\}/);
   assert.match(screen, /onTimeUpdate=\{handleLivePlayerTimeUpdate\}/);
   assert.match(screen, /livePlaybackWatchdog\.markPlayable\(\)/);
-  assert.match(screen, /livePlaybackWatchdog\.onTimeUpdate\(currentTime\)/);
+  assert.match(screen, /livePlaybackWatchdog\.onTimeUpdate\(currentTime, \{ currentLiveTimestamp, bufferedPosition \}\)/);
 });
 
 console.log('live-playback-watchdog: 10 passed');

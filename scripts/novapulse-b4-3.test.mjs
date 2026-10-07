@@ -85,10 +85,14 @@ test('remote/cache behavior distinguishes disabled, empty, cached, and terminal 
 
   const authFailure = loadClient({ fetchImpl: async () => response(401, {}) });
   assert.equal((await authFailure.api.loadNovaPulseAnnouncements()).source, 'none');
+  const httpFailure = loadClient({ fetchImpl: async () => response(503, {}) });
+  assert.equal((await httpFailure.api.loadNovaPulseAnnouncements()).source, 'none');
+  const networkFailure = loadClient({ fetchImpl: async () => { throw new Error('network failure'); } });
+  assert.equal((await networkFailure.api.loadNovaPulseAnnouncements()).source, 'none');
   const invalid = loadClient({ fetchImpl: async () => response(200, { ok: true, items: [record('bad')] }) });
   assert.equal((await invalid.api.loadNovaPulseAnnouncements()).source, 'none');
   const disabled = loadClient({ enabled: false, fetchImpl: async () => { throw new Error('must not fetch'); } });
-  assert.equal((await disabled.api.loadNovaPulseAnnouncements()).source, 'static');
+  assert.equal((await disabled.api.loadNovaPulseAnnouncements()).source, 'none');
 });
 
 test('concurrent callers share one remote request and storage failures stay non-fatal', async () => {
@@ -152,9 +156,9 @@ test('cache and fallback semantics preserve authoritative empty results', () => 
   assert.match(client, /response\.status === 408 \|\| response\.status === 429 \|\| response\.status >= 500/);
   assert.match(client, /result\('empty', \[\],/);
   assert.match(client, /result\('none', \[\]\)/);
-  assert.match(client, /result\('static', \[\]\)/);
-  assert.match(hook, /announcementResult\.source === 'static'/);
-  assert.match(hook, /announcementResult\.items/);
+  assert.doesNotMatch(client, /result\('static', \[\]\)/);
+  assert.doesNotMatch(hook, /announcementResult\.source === 'static'/);
+  assert.match(hook, /announcementResult\??\.items/);
   assert.match(hook, /announcementFrozenRef\.current/);
   assert.match(hook, /if \(!active \|\| announcementFrozenRef\.current\) return;\s*announcementFrozenRef\.current = true;\s*setAnnouncementSession/);
   assert.doesNotMatch(hook, /useEffect\(\(\) => \{\s*announcementFrozenRef\.current = true;/);

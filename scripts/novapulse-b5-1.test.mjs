@@ -97,12 +97,12 @@ test('B5.1 uses kind fallbacks for blank announcement badges', () => {
 test('B5.1 applies five-minute critical LKG and sixty-minute noncritical LKG limits', async () => {
   const critical = record('00000000-0000-4000-8000-000000000101', { importance: 'critical', endsAt: new Date(Date.now() + 60 * 60_000).toISOString() });
   assert.equal((await loadMobile({ fetchedAt: Date.now() - 4 * 60_000, item: critical }).loadNovaPulseAnnouncements()).source, 'lkg');
-  assert.equal((await loadMobile({ fetchedAt: Date.now() - 6 * 60_000, item: critical }).loadNovaPulseAnnouncements()).source, 'static');
+  assert.equal((await loadMobile({ fetchedAt: Date.now() - 6 * 60_000, item: critical }).loadNovaPulseAnnouncements()).source, 'none');
   const normal = record('00000000-0000-4000-8000-000000000102');
   assert.equal((await loadMobile({ fetchedAt: Date.now() - 59 * 60_000, item: normal }).loadNovaPulseAnnouncements()).source, 'lkg');
-  assert.equal((await loadMobile({ fetchedAt: Date.now() - 61 * 60_000, item: normal }).loadNovaPulseAnnouncements()).source, 'static');
+  assert.equal((await loadMobile({ fetchedAt: Date.now() - 61 * 60_000, item: normal }).loadNovaPulseAnnouncements()).source, 'none');
   const expired = record('00000000-0000-4000-8000-000000000103', { importance: 'critical', endsAt: new Date(Date.now() - 1).toISOString() });
-  assert.equal((await loadMobile({ fetchedAt: Date.now() - 1_000, item: expired }).loadNovaPulseAnnouncements()).source, 'static');
+  assert.equal((await loadMobile({ fetchedAt: Date.now() - 1_000, item: expired }).loadNovaPulseAnnouncements()).source, 'none');
 });
 
 test('B5.1 successful empty responses remain authoritative and unsupported kinds do not hydrate', async () => {

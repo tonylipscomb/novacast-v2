@@ -522,12 +522,11 @@ test('catalog adaptor introduces no provider fetch path', () => {
 
 test('NovaPulse source keeps only non-catalog demonstration variants', () => {
   const source = fs.readFileSync(new URL('../src/features/novapulse/novaPulseMockFeed.ts', import.meta.url), 'utf8');
-  assert.equal((source.match(/id: '/g) ?? []).length, 3);
+  assert.equal((source.match(/id: '/g) ?? []).length, 1);
   assert.match(source, /type: 'announcement'/);
   assert.doesNotMatch(source, /featured-movie-demo|featured-series-demo|Superman|The Last Horizon|Ravens|Lions|Rams|Canelo|Portland FC/);
   assert.doesNotMatch(source, /type: 'sports'/);
-  assert.match(source, /title: 'NovaCast Beta 24'/);
-  assert.match(source, /title: 'Scheduled Maintenance'/);
+  assert.doesNotMatch(source, /NovaCast Beta 24|Scheduled Maintenance/);
 });
 
 test('selected NovaPulse artwork prefetch is bounded, normalized, deduplicated, and provider-scoped', () => {

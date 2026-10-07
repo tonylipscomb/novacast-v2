@@ -37,7 +37,7 @@ export type NovaPulseRemoteAnnouncement = {
 };
 
 export type NovaPulseAnnouncementsResult = {
-  source: 'remote' | 'lkg' | 'static' | 'empty' | 'none';
+  source: 'remote' | 'lkg' | 'empty' | 'none';
   items: NovaPulseItem[];
   acceptedCount: number;
   rejectedCount: number;
@@ -263,7 +263,7 @@ async function fetchRemote(signal?: AbortSignal): Promise<NovaPulseAnnouncements
     const transient = response.status === 408 || response.status === 429 || response.status >= 500;
     if (!response.ok) {
           const cached = transient ? usableCached(await readCache(Date.now(), api.origin), Date.now()) : null;
-      const fallback = cached ? (cached.cache.kind === 'empty' ? result('empty', [], 0, cached.cache.fetchedAt) : result('lkg', cached.items, 0, cached.cache.fetchedAt)) : result(transient ? 'static' : 'none', []);
+      const fallback = cached ? (cached.cache.kind === 'empty' ? result('empty', [], 0, cached.cache.fetchedAt) : result('lkg', cached.items, 0, cached.cache.fetchedAt)) : result('none', []);
       diagnostics(`http_${Math.floor(response.status / 100)}xx`, { source: fallback.source, acceptedCount: fallback.acceptedCount, rejectedCount: 0, cacheAgeBucket: fallback.cacheAgeBucket, transient });
       return fallback;
     }
@@ -278,7 +278,7 @@ async function fetchRemote(signal?: AbortSignal): Promise<NovaPulseAnnouncements
     return output;
   } catch {
         const cached = usableCached(await readCache(Date.now(), api.origin), Date.now());
-        const output = cached ? (cached.cache.kind === 'empty' ? result('empty', [], 0, cached.cache.fetchedAt) : result('lkg', cached.items, 0, cached.cache.fetchedAt)) : result('static', []);
+        const output = cached ? (cached.cache.kind === 'empty' ? result('empty', [], 0, cached.cache.fetchedAt) : result('lkg', cached.items, 0, cached.cache.fetchedAt)) : result('none', []);
         diagnostics(callerAborted ? 'unmounted' : controller.signal.aborted ? 'timeout' : 'network_failure', { source: output.source, acceptedCount: output.acceptedCount, rejectedCount: 0, cacheAgeBucket: output.cacheAgeBucket, transient: true });
     return output;
   } finally {
@@ -288,7 +288,7 @@ async function fetchRemote(signal?: AbortSignal): Promise<NovaPulseAnnouncements
 }
 
 export async function loadNovaPulseAnnouncements(signal?: AbortSignal): Promise<NovaPulseAnnouncementsResult> {
-  if (!NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED) return result('static', []);
+  if (!NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED) return result('none', []);
   const memory = getCachedNovaPulseAnnouncements();
   if (memory?.cacheAgeBucket === 'fresh') return memory;
   if (inFlight) return inFlight;

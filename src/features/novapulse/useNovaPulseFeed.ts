@@ -341,11 +341,9 @@ export function useNovaPulseFeed({ providerId, movies, series, fetchMovieDetail,
   const composed = useMemo(() => {
     const includeMockCatalogFallback = { movie: boundedMovies.length === 0, series: boundedSeries.length === 0 };
     const announcementResult = announcementSession.providerId === providerId ? announcementSession.result : null;
-    const announcementItems = !NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED || !announcementResult
-      ? NOVA_PULSE_MOCK_FEED
-      : announcementResult.source === 'static'
-        ? NOVA_PULSE_MOCK_FEED
-        : announcementResult.items;
+    const announcementItems = NOVA_PULSE_REMOTE_ANNOUNCEMENTS_ENABLED
+      ? announcementResult?.items ?? []
+      : NOVA_PULSE_MOCK_FEED;
     const weatherResult = weatherSession.providerId === providerId ? weatherSession.result : null;
     const newsResult = newsSession.providerId === providerId ? newsSession.result : null;
     const result = composeNovaPulseFeedV2([

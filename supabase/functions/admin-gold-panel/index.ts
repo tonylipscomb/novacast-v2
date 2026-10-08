@@ -7,6 +7,7 @@ import { autoProvisionXtreamEpg, enqueueProviderEpgRefresh } from '../_shared/au
 import { checkGoldRoute, createM3uAccount, getDeviceInfo, getPackages, getReseller, parseM3uUrl, renewAccount, safeGoldBaseUrl, setAccountStatus, GoldPanelError } from '../_shared/goldPanelClient.ts';
 import { sanitizeGoldError, sanitizeGoldText } from '../_shared/goldPanelSanitization.ts';
 import { GoldActivityTableMissingError, listGoldAdminActivity, recordGoldAdminEvent } from '../_shared/goldAdminEvents.ts';
+import { projectGoldAssignment } from '../_shared/goldAssignmentProjection.ts';
 
 type Client = Awaited<ReturnType<typeof requireAdmin>>['client'];
 type Credentials = { type: 'xtream'; baseUrl: string; username: string; password: string; upstreamUrl?: string };
@@ -67,13 +68,16 @@ async function listAccounts(client: Client) {
   const providerIds = (accounts ?? []).map((row) => row.managed_provider_id);
   const providers = providerIds.length ? await client.from('managed_providers').select('id,display_name,status,health_status,last_health_summary').in('id', providerIds) : { data: [], error: null };
   if (providers.error) throw new Error('gold_query_failed');
-  const assignments = providerIds.length ? await client.from('device_provider_assignments').select('managed_provider_id,device_id').in('managed_provider_id', providerIds).eq('status', 'active') : { data: [], error: null };
+  const assignments = providerIds.length ? await client.from('device_provider_assignments').select('managed_provider_id,device_id,status,assigned_at').in('managed_provider_id', providerIds).eq('status', 'active') : { data: [], error: null };
   const deviceIds = (assignments.data ?? []).map((row) => row.device_id);
   const devices = deviceIds.length ? await client.from('devices').select('id,public_device_code,friendly_name,assigned_tester_name').in('id', deviceIds) : { data: [], error: null };
   const providerById = new Map((providers.data ?? []).map((row) => [row.id, row]));
   const deviceById = new Map((devices.data ?? []).map((row) => [row.id, row]));
-  const assignmentByProvider = new Map((assignments.data ?? []).map((row) => [row.managed_provider_id, deviceById.get(row.device_id) ?? null]));
-  return (accounts ?? []).map((account) => ({ ...account, provider: providerById.get(account.managed_provider_id) ?? null, assignedDevice: assignmentByProvider.get(account.managed_provider_id) ?? null }));
+  const assignmentByProvider = new Map((assignments.data ?? []).map((row) => [row.managed_provider_id, { assignment: projectGoldAssignment(row), device: deviceById.get(row.device_id) ?? null }]));
+  return (accounts ?? []).map((account) => {
+    const current = assignmentByProvider.get(account.managed_provider_id);
+    return { ...account, provider: providerById.get(account.managed_provider_id) ?? null, assignedDevice: current?.device ?? null, assignment: current?.assignment ?? null };
+  });
 }
 
 async function listActivity(client: Client) {

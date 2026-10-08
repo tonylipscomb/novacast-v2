@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyGoldExpiration, filterGoldLines, GOLD_CAPABILITIES, normalizeGoldLine } from './goldOperations.ts';
+import { classifyGoldExpiration, filterGoldLines, formatGoldAssignmentTimestamp, GOLD_CAPABILITIES, normalizeGoldLine, resolveGoldAssignmentStatus } from './goldOperations.ts';
 
 const now = new Date(2026, 8, 4, 12, 0, 0);
 const date = (day: number) => new Date(2026, 8, day, 23, 59, 0).toISOString();
@@ -38,6 +38,22 @@ test('Gold line normalization preserves only sanitized operational fields', () =
     id: 'account-1', providerId: '', username: 'gold-user', displayName: 'Gold Demo', packageName: 'Sports', assignedDevice: 'NC-1234',
   });
   assert.equal('credentials_ciphertext' in line, false);
+});
+
+test('Gold assignment status uses exposed values and derives active from the current assignment join', () => {
+  assert.equal(resolveGoldAssignmentStatus('active'), 'ACTIVE');
+  assert.equal(resolveGoldAssignmentStatus('superseded'), 'SUPERSEDED');
+  assert.equal(resolveGoldAssignmentStatus('inactive'), 'INACTIVE');
+  assert.equal(normalizeGoldLine({ assignedDevice: { public_device_code: 'NC-1234' } }).assignmentStatus, 'ACTIVE');
+});
+
+test('Gold assignment details fall back safely when unassigned or timestamp is invalid', () => {
+  const line = normalizeGoldLine({ assignment: { status: 'inactive', assigned_at: 'not-a-date' } });
+  assert.equal(line.assignedDevice, 'Unassigned');
+  assert.equal(line.assignmentStatus, 'INACTIVE');
+  assert.equal(formatGoldAssignmentTimestamp(line.assignedAt), '—');
+  assert.equal(normalizeGoldLine({}).assignmentStatus, 'UNASSIGNED');
+  assert.equal(formatGoldAssignmentTimestamp('2026-10-08T12:00:00Z').includes('2026'), true);
 });
 
 test('Gold line filters support username and expiration status', () => {

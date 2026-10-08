@@ -42,6 +42,8 @@ export type GoldLine = {
   providerStatus: string;
   healthStatus: string;
   assignedDevice: string;
+  assignmentStatus: 'ACTIVE' | 'SUPERSEDED' | 'INACTIVE' | 'UNASSIGNED';
+  assignedAt: string | null;
   createdAt: string | null;
   upstreamUrl: string;
   routeMode: string;
@@ -49,6 +51,20 @@ export type GoldLine = {
   lastSyncedAt: string | null;
   lastSyncError: string;
 };
+
+export function resolveGoldAssignmentStatus(value: unknown): GoldLine['assignmentStatus'] {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (raw === 'active') return 'ACTIVE';
+  if (raw === 'superseded') return 'SUPERSEDED';
+  if (raw === 'inactive' || raw === 'revoked' || raw === 'expired') return 'INACTIVE';
+  return 'UNASSIGNED';
+}
+
+export function formatGoldAssignmentTimestamp(value: string | null): string {
+  if (!value) return '—';
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : '—';
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -58,6 +74,9 @@ export function normalizeGoldLine(value: unknown): GoldLine {
   const row = record(value);
   const provider = record(row.provider);
   const device = record(row.assignedDevice);
+  const assignment = record(row.assignment);
+  const assignmentStatus = resolveGoldAssignmentStatus(assignment.status ?? row.assignment_status ?? device.assignment_status);
+  const hasAssignedDevice = Object.keys(device).length > 0;
   const goldUserId = String(row.gold_user_id ?? '').trim();
   const displayName = String(provider.display_name ?? (goldUserId ? `Gold ${goldUserId}` : 'Gold account')).trim();
   return {
@@ -73,6 +92,10 @@ export function normalizeGoldLine(value: unknown): GoldLine {
     providerStatus: String(provider.status ?? 'unknown'),
     healthStatus: String(provider.health_status ?? 'unvalidated'),
     assignedDevice: String(device.public_device_code ?? 'Unassigned'),
+    assignmentStatus: assignmentStatus === 'UNASSIGNED' && hasAssignedDevice ? 'ACTIVE' : assignmentStatus,
+    assignedAt: typeof (assignment.assigned_at ?? row.assigned_at ?? device.assigned_at) === 'string'
+      ? String(assignment.assigned_at ?? row.assigned_at ?? device.assigned_at)
+      : null,
     createdAt: typeof row.created_at === 'string' ? row.created_at : null,
     upstreamUrl: String(row.gold_upstream_url ?? '').trim(),
     routeMode: String(row.route_mode ?? 'default').trim() || 'default',

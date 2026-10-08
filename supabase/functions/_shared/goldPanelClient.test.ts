@@ -36,8 +36,8 @@ Deno.test('parses generated Xtream M3U URL without using get.php as base URL', (
 });
 
 Deno.test('rejects malformed generated M3U URLs', () => {
-  assertThrows(() => parseM3uUrl('not-a-url'), GoldPanelError, 'gold_m3u_invalid');
-  assertThrows(() => parseM3uUrl('http://gold.example/get.php?username=user'), GoldPanelError, 'gold_m3u_invalid');
+  assertThrows(() => parseM3uUrl('not-a-url'), (error) => error instanceof GoldPanelError && error.category === 'gold_m3u_invalid');
+  assertThrows(() => parseM3uUrl('http://gold.example/get.php?username=user'), (error) => error instanceof GoldPanelError && error.category === 'gold_m3u_invalid');
 });
 
 Deno.test('redacts Gold and credential-bearing values', () => {
@@ -74,8 +74,7 @@ Deno.test('rejects malformed non-array bouquet responses safely', async () => {
   await withGoldResponse({ packages: 'not-an-array' }, async () => {
     await assertRejects(
       () => getPackages(),
-      GoldPanelError,
-      'gold_packages_invalid_response',
+      (error) => error instanceof GoldPanelError && error.category === 'gold_packages_invalid_response',
     );
   });
 });
@@ -144,7 +143,7 @@ Deno.test('retains status validation for reseller responses', async () => {
   Object.defineProperty(globalThis, 'Deno', { configurable: true, value: { env: { get: (name: string) => name === 'GOLD_PANEL_API_KEY' ? 'test-api-key' : undefined } } });
   globalThis.fetch = async () => new Response(JSON.stringify({ status: 'false', message: 'disabled' }));
   try {
-    await assertRejects(() => getReseller(), GoldPanelError, 'gold_operation_failed');
+    await assertRejects(() => getReseller(), (error) => error instanceof GoldPanelError && error.category === 'gold_operation_failed');
   } finally {
     Object.defineProperty(globalThis, 'Deno', { configurable: true, value: previousDeno });
     globalThis.fetch = previousFetch;
@@ -168,7 +167,7 @@ Deno.test('retains status validation for create-account responses', async () => 
   Object.defineProperty(globalThis, 'Deno', { configurable: true, value: { env: { get: (name: string) => name === 'GOLD_PANEL_API_KEY' ? 'test-api-key' : undefined } } });
   globalThis.fetch = async () => new Response(JSON.stringify({ status: 'false', message: 'disabled' }));
   try {
-    await assertRejects(() => createM3uAccount({ sub: '1', pack: '2', country: 'ALL' }), GoldPanelError, 'gold_operation_failed');
+    await assertRejects(() => createM3uAccount({ sub: '1', pack: '2', country: 'ALL' }), (error) => error instanceof GoldPanelError && error.category === 'gold_operation_failed');
   } finally {
     Object.defineProperty(globalThis, 'Deno', { configurable: true, value: previousDeno });
     globalThis.fetch = previousFetch;

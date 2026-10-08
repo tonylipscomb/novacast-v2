@@ -6,6 +6,90 @@ export const EXPIRATION_BUCKET_LABELS: Record<ExpirationBucket, string> = {
   next30: 'Next 30 days', later: 'Later', unknown: 'Unknown expiration',
 };
 
+export const GOLD_CAPABILITIES = {
+  listAccounts: 'supported',
+  resellerSummary: 'supported',
+  packages: 'supported',
+  createAccount: 'supported',
+  importM3uAccount: 'supported',
+  syncAccount: 'supported',
+  diagnostics: 'supported',
+  renewAccount: 'supported',
+  setAccountStatus: 'supported',
+  routeHealth: 'supported',
+  copyCredentials: 'supported',
+  editLine: 'unsupported',
+  kickOut: 'unsupported',
+  ispLock: 'unsupported',
+  vpnSwitch: 'unsupported',
+  moveReseller: 'unsupported',
+  packageUpdate: 'unsupported',
+  smartTvUpload: 'unsupported',
+  androidAppUpload: 'unsupported',
+  refund: 'unsupported',
+} as const;
+
+export type GoldLine = {
+  id: string;
+  providerId: string;
+  username: string;
+  displayName: string;
+  packageName: string;
+  reseller: string;
+  country: string;
+  expiration: string | null;
+  enabled: boolean | null;
+  providerStatus: string;
+  healthStatus: string;
+  assignedDevice: string;
+  createdAt: string | null;
+};
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+export function normalizeGoldLine(value: unknown): GoldLine {
+  const row = record(value);
+  const provider = record(row.provider);
+  const device = record(row.assignedDevice);
+  const goldUserId = String(row.gold_user_id ?? '').trim();
+  const displayName = String(provider.display_name ?? (goldUserId ? `Gold ${goldUserId}` : 'Gold account')).trim();
+  return {
+    id: String(row.id ?? '').trim(),
+    providerId: String(row.managed_provider_id ?? '').trim(),
+    username: goldUserId || 'Unavailable',
+    displayName,
+    packageName: String(row.gold_package_name ?? row.gold_package_id ?? 'Unavailable').trim(),
+    reseller: String(row.reseller_name ?? row.reseller ?? 'Unavailable').trim(),
+    country: String(row.gold_country ?? 'Unavailable').trim(),
+    expiration: typeof row.gold_expiration === 'string' && row.gold_expiration.trim() ? row.gold_expiration : null,
+    enabled: typeof row.gold_enabled === 'boolean' ? row.gold_enabled : null,
+    providerStatus: String(provider.status ?? 'unknown'),
+    healthStatus: String(provider.health_status ?? 'unvalidated'),
+    assignedDevice: String(device.public_device_code ?? 'Unassigned'),
+    createdAt: typeof row.created_at === 'string' ? row.created_at : null,
+  };
+}
+
+export function filterGoldLines(lines: GoldLine[], query: string, status: 'all' | 'active' | 'expired' = 'all') {
+  const normalizedQuery = query.trim().toLowerCase();
+  return lines.filter((line) => {
+    const expirationStatus = classifyGoldExpiration(line.expiration);
+    const statusMatches = status === 'all' || (status === 'expired' ? expirationStatus === 'expired' : line.enabled !== false && expirationStatus !== 'expired');
+    const queryMatches = !normalizedQuery || [line.username, line.displayName, line.packageName, line.country].some((field) => field.toLowerCase().includes(normalizedQuery));
+    return statusMatches && queryMatches;
+  });
+}
+
+export function sortGoldLines(lines: GoldLine[], sort: 'expiration' | 'created' = 'expiration') {
+  return [...lines].sort((left, right) => {
+    const leftValue = sort === 'created' ? left.createdAt : left.expiration;
+    const rightValue = sort === 'created' ? right.createdAt : right.expiration;
+    return String(leftValue ?? '').localeCompare(String(rightValue ?? ''));
+  });
+}
+
 function startOfDay(date: Date) { return new Date(date.getFullYear(), date.getMonth(), date.getDate()); }
 function parseExpiration(value: unknown) {
   const raw = String(value);

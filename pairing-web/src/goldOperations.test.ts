@@ -49,6 +49,24 @@ test('Gold line filters support username and expiration status', () => {
   assert.deepEqual(filterGoldLines(lines, '', 'expired').map((line) => line.id), ['expired']);
 });
 
+test('Gold line filters support package and expiration buckets', () => {
+  const lines = [
+    normalizeGoldLine({ id: 'sports', gold_user_id: 'Alpha', gold_package_name: 'Sports', gold_expiration: '2099-01-01', gold_enabled: true }),
+    normalizeGoldLine({ id: 'movies', gold_user_id: 'Beta', gold_package_name: 'Movies', gold_expiration: '2020-01-01', gold_enabled: true }),
+  ];
+  assert.deepEqual(filterGoldLines(lines, '', 'all', 'Sports').map((line) => line.id), ['sports']);
+  assert.deepEqual(filterGoldLines(lines, '', 'all', '', 'expired').map((line) => line.id), ['movies']);
+});
+
+test('Gold normalization exposes sanitized route and sync context without credentials', () => {
+  const line = normalizeGoldLine({ id: 'account-2', gold_user_id: 'safe-user', gold_upstream_url: 'http://cf.novacastlink.com', route_mode: 'direct', route_domain: 'cf.novacastlink.com', last_synced_at: '2026-10-07T00:00:00Z', last_sync_error: '', credentials_ciphertext: 'secret' });
+  assert.equal(line.upstreamUrl, 'http://cf.novacastlink.com');
+  assert.equal(line.routeMode, 'direct');
+  assert.equal(line.routeDomain, 'cf.novacastlink.com');
+  assert.equal('password' in line, false);
+  assert.equal('credentials_ciphertext' in line, false);
+});
+
 test('Gold capability map exposes only actions backed by the current API', () => {
   assert.equal(GOLD_CAPABILITIES.renewAccount, 'supported');
   assert.equal(GOLD_CAPABILITIES.setAccountStatus, 'supported');

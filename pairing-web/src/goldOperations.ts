@@ -43,6 +43,11 @@ export type GoldLine = {
   healthStatus: string;
   assignedDevice: string;
   createdAt: string | null;
+  upstreamUrl: string;
+  routeMode: string;
+  routeDomain: string;
+  lastSyncedAt: string | null;
+  lastSyncError: string;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -69,16 +74,23 @@ export function normalizeGoldLine(value: unknown): GoldLine {
     healthStatus: String(provider.health_status ?? 'unvalidated'),
     assignedDevice: String(device.public_device_code ?? 'Unassigned'),
     createdAt: typeof row.created_at === 'string' ? row.created_at : null,
+    upstreamUrl: String(row.gold_upstream_url ?? '').trim(),
+    routeMode: String(row.route_mode ?? 'default').trim() || 'default',
+    routeDomain: String(row.route_domain ?? '').trim(),
+    lastSyncedAt: typeof row.last_synced_at === 'string' ? row.last_synced_at : null,
+    lastSyncError: String(row.last_sync_error ?? '').trim(),
   };
 }
 
-export function filterGoldLines(lines: GoldLine[], query: string, status: 'all' | 'active' | 'expired' = 'all') {
+export function filterGoldLines(lines: GoldLine[], query: string, status: 'all' | 'active' | 'expired' = 'all', packageName = '', expiration: ExpirationBucket | null = null) {
   const normalizedQuery = query.trim().toLowerCase();
   return lines.filter((line) => {
     const expirationStatus = classifyGoldExpiration(line.expiration);
     const statusMatches = status === 'all' || (status === 'expired' ? expirationStatus === 'expired' : line.enabled !== false && expirationStatus !== 'expired');
     const queryMatches = !normalizedQuery || [line.username, line.displayName, line.packageName, line.country].some((field) => field.toLowerCase().includes(normalizedQuery));
-    return statusMatches && queryMatches;
+    const packageMatches = !packageName || line.packageName === packageName;
+    const expirationMatches = !expiration || expirationStatus === expiration;
+    return statusMatches && queryMatches && packageMatches && expirationMatches;
   });
 }
 

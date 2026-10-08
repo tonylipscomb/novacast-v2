@@ -1,6 +1,6 @@
 [build]
-command = "npm run build"
-publish = "dist"
+command = "npm --prefix pairing-web run build"
+publish = "pairing-web/dist"
 
 # Permanent APK redirects must appear before the SPA fallback.
 [[redirects]]

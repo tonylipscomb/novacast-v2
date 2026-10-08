@@ -1,5 +1,5 @@
 import { jsonResponse, optionsResponse } from '../_shared/http.ts';
-import { authenticateDevice, deviceRateKey } from '../_shared/device.ts';
+import { authenticateDevice, deviceRateKey, isDeviceAuthorizationActive } from '../_shared/device.ts';
 import { consumeRateLimit, getAdminClient } from '../_shared/supabase.ts';
 
 Deno.serve(async (request) => {
@@ -21,7 +21,7 @@ Deno.serve(async (request) => {
 
     const { data: activation } = await client
       .from('device_activations')
-      .select('status,expires_at,content_policy,managed_provider_id')
+      .select('status,expires_at,activation_source,content_policy,managed_provider_id')
       .eq('device_id', device.id)
       .eq('status', 'active')
       .order('created_at', { ascending: false })
@@ -35,8 +35,9 @@ Deno.serve(async (request) => {
       .eq('status', 'active')
       .maybeSingle();
 
+    const productionActivation = activation?.activation_source === 'production';
     let activationStatus =
-      activation?.expires_at && new Date(activation.expires_at).getTime() <= nowMs
+      activation?.expires_at && !productionActivation && new Date(activation.expires_at).getTime() <= nowMs
         ? 'expired'
         : activation?.status ?? device.activation_status;
 
@@ -44,15 +45,17 @@ Deno.serve(async (request) => {
       await client.from('devices').update({ activation_status: 'expired', updated_at: nowIso }).eq('id', device.id);
     }
 
-    const remaining = activation?.expires_at
+    const remaining = activation?.expires_at && !productionActivation
       ? Math.max(0, new Date(activation.expires_at).getTime() - nowMs)
       : null;
+
+    const deviceActive = isDeviceAuthorizationActive(device, activation, nowMs);
 
     return jsonResponse({
       deviceId: device.id,
       publicDeviceCode: device.public_device_code,
       status: device.status,
-      activationStatus,
+      activationStatus: device.status === 'inactive' ? 'inactive' : activationStatus,
       activationExpiresAt: activation?.expires_at ?? null,
       remainingBetaMs: remaining,
       remainingBetaHours: remaining == null ? null : Math.ceil(remaining / (60 * 60 * 1000)),
@@ -61,8 +64,7 @@ Deno.serve(async (request) => {
       contentPolicy: assignment?.content_policy ?? activation?.content_policy ?? 'us_only',
       requiresProviderDownload: Boolean(assignment?.managed_provider_id),
       serverTime: nowIso,
-      offlineGraceUntil:
-        activationStatus === 'active' ? new Date(nowMs + 24 * 60 * 60 * 1000).toISOString() : null,
+      offlineGraceUntil: deviceActive ? new Date(nowMs + 24 * 60 * 60 * 1000).toISOString() : null,
     });
   } catch (error) {
     const category =

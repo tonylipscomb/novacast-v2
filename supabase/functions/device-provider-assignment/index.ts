@@ -1,5 +1,5 @@
 import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
-import { authenticateDevice, deviceRateKey, hasDeviceAuthHeaders } from '../_shared/device.ts';
+import { authenticateDevice, deviceRateKey, hasDeviceAuthHeaders, isDeviceAuthorizationActive } from '../_shared/device.ts';
 import { consumeRateLimit, getAdminClient } from '../_shared/supabase.ts';
 import { decryptSecret } from '../_shared/security.ts';
 
@@ -102,17 +102,14 @@ Deno.serve(async (request) => {
 
     const { data: activation } = await client
       .from('device_activations')
-      .select('status,expires_at,content_policy')
+      .select('status,expires_at,activation_source,content_policy')
       .eq('device_id', device.id)
       .eq('status', 'active')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    const activationExpired = Boolean(
-      activation?.expires_at && new Date(activation.expires_at).getTime() <= Date.now(),
-    );
-    const activationActive = Boolean(activation) && !activationExpired;
+    const activationActive = isDeviceAuthorizationActive(device, activation);
 
     const { data: storedMeta } = await client
       .from('devices')

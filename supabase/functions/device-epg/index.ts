@@ -1,4 +1,4 @@
-import { authenticateDevice, deviceRateKey } from '../_shared/device.ts';
+import { authenticateDevice, deviceRateKey, isDeviceAuthorizationActive } from '../_shared/device.ts';
 import { jsonResponse, optionsResponse, readJson } from '../_shared/http.ts';
 import { consumeRateLimit, getAdminClient } from '../_shared/supabase.ts';
 
@@ -47,13 +47,13 @@ Deno.serve(async (request) => {
 
     const { data: activation } = await client
       .from('device_activations')
-      .select('status,expires_at')
+      .select('status,expires_at,activation_source')
       .eq('device_id', device.id)
       .eq('status', 'active')
       .order('created_at', { ascending: false })
       .limit(1)
       .maybeSingle();
-    if (!activation || (activation.expires_at && new Date(activation.expires_at).getTime() <= now)) {
+    if (!isDeviceAuthorizationActive(device, activation, now)) {
       return unavailable('activation_required', 403);
     }
 

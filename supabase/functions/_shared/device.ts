@@ -84,11 +84,12 @@ export async function autoActivateDeviceAfterPairing(
 
 export function isDeviceAuthorizationActive(
   device: { status?: string | null; activation_status?: string | null },
-  activation: { status?: string | null; expires_at?: string | null } | null,
+  activation: { status?: string | null; expires_at?: string | null; activation_source?: string | null } | null,
   nowMs = Date.now(),
 ) {
   if (!device.status || !['registered', 'active'].includes(device.status)) return false;
   if (device.activation_status !== 'active' || activation?.status !== 'active') return false;
+  if (activation?.activation_source === 'production') return device.status === 'active';
   if (activation.expires_at) {
     const expiresAtMs = new Date(activation.expires_at).getTime();
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) return false;
@@ -100,7 +101,7 @@ export async function authenticateActiveDevice(request: Request, client: ReturnT
   const device = await lookupDevice(request, client);
   const { data: activation, error } = await client
     .from('device_activations')
-    .select('status,expires_at')
+    .select('status,expires_at,activation_source')
     .eq('device_id', device.id)
     .eq('status', 'active')
     .maybeSingle();

@@ -154,7 +154,10 @@ Deno.serve(async (request) => {
       programs: result.programs,
       serverTime: new Date().toISOString(),
     });
-  } catch {
+  } catch (error) {
+    const category = error instanceof Error ? error.message : '';
+    if (category === 'invalid_device') return unavailable('invalid_device', 401);
+    if (category === 'device_not_authorized') return unavailable('device_not_authorized', 403);
     return unavailable();
   }
 });

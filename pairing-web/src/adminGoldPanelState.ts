@@ -1,5 +1,6 @@
 export type GoldPackageLike = { id: string; name: string };
 export type GoldAccountType = 'import' | 'paid';
+export type GoldWorkspaceMode = 'demo' | 'paid';
 
 export function resolveGoldPackageState(result: Record<string, unknown>) {
   const packages = Array.isArray(result.packages) ? result.packages as GoldPackageLike[] : [];
@@ -18,6 +19,14 @@ export function resolveGoldImportRequest(input: { m3uUrl: unknown; displayName: 
 
 export function resolvePaidGoldCreationRequest(input: { subscription?: unknown; sub?: unknown; packageId: unknown; country: unknown; displayName: unknown; notes: unknown; runDiagnostics: boolean; activateIfHealthy: boolean }) {
   return { action: 'create_account', accountType: 'paid', sub: String(input.subscription ?? input.sub ?? '').trim(), packageId: String(input.packageId ?? '').trim(), country: String(input.country ?? 'US').trim().toUpperCase(), displayName: String(input.displayName ?? '').trim(), notes: String(input.notes ?? ''), runDiagnostics: input.runDiagnostics === true, activateIfHealthy: input.activateIfHealthy === true };
+}
+
+export function resolveGoldWorkspaceRequest(mode: GoldWorkspaceMode, input: { m3uUrl: unknown; displayName: unknown; notes: unknown; runDiagnostics: boolean; activateIfHealthy: boolean; subscription?: unknown; sub?: unknown; packageId?: unknown; country?: unknown }) {
+  if (mode === 'demo') {
+    if (!canSubmitGoldImport(input.m3uUrl)) throw new Error('demo_import_only_requires_m3u');
+    return resolveGoldImportRequest(input);
+  }
+  return resolvePaidGoldCreationRequest({ ...input, packageId: input.packageId ?? '', country: input.country ?? 'US' });
 }
 
 export function paidGoldCreditWarning(accountType: GoldAccountType) { return accountType === 'paid' ? 'This will use Gold reseller credits. Continue?' : ''; }

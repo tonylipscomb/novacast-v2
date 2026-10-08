@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canSubmitGoldImport, canSubmitPaidGoldCreation, paidGoldCreditWarning, resolveGoldImportRequest, resolveGoldPackageState, resolvePaidGoldCreationRequest } from './adminGoldPanelState.ts';
+import { canSubmitGoldImport, canSubmitPaidGoldCreation, paidGoldCreditWarning, resolveGoldImportRequest, resolveGoldPackageState, resolveGoldWorkspaceRequest, resolvePaidGoldCreationRequest } from './adminGoldPanelState.ts';
 
 test('empty bouquets still allow Gold demo import', () => {
   assert.deepEqual(resolveGoldPackageState({ success: true, packages: [], emptyReason: 'no_custom_bouquets' }), { packages: [], emptyReason: 'no_custom_bouquets' });
@@ -21,4 +21,21 @@ test('paid creation only permits documented subscriptions and real packages', ()
   assert.equal(canSubmitPaidGoldCreation([], '132', '1'), false); assert.equal(canSubmitPaidGoldCreation([{ id: '132', name: 'Package' }], 'all', '1'), false); assert.equal(canSubmitPaidGoldCreation([{ id: '132', name: 'Package' }], '132', '99'), false); assert.equal(canSubmitPaidGoldCreation([{ id: '132', name: 'Package' }], '132', '1'), true);
   assert.deepEqual(resolvePaidGoldCreationRequest({ subscription: '12', packageId: '132', country: 'all', displayName: 'Paid', notes: '', runDiagnostics: true, activateIfHealthy: false }), { action: 'create_account', accountType: 'paid', sub: '12', packageId: '132', country: 'ALL', displayName: 'Paid', notes: '', runDiagnostics: true, activateIfHealthy: false });
   assert.equal(paidGoldCreditWarning('paid'), 'This will use Gold reseller credits. Continue?'); assert.equal(paidGoldCreditWarning('import'), '');
+});
+
+test('demo workspace is import-only and never constructs a paid request', () => {
+  const request = resolveGoldWorkspaceRequest('demo', { m3uUrl: 'http://cf.novacastlink.com/get.php?username=demo&password=secret', displayName: '24-hour demo', notes: '', runDiagnostics: true, activateIfHealthy: false, sub: '1', packageId: 'paid-package', country: 'US' });
+  assert.equal(request.action, 'import_account');
+  assert.equal('sub' in request, false);
+  assert.equal('packageId' in request, false);
+  assert.equal('accountType' in request, false);
+});
+
+test('demo workspace requires an M3U URL and rejects paid fallback', () => {
+  assert.throws(() => resolveGoldWorkspaceRequest('demo', { m3uUrl: '', displayName: 'Demo', notes: '', runDiagnostics: false, activateIfHealthy: false, sub: '1' }), /demo_import_only_requires_m3u/);
+  assert.throws(() => resolveGoldWorkspaceRequest('demo', { m3uUrl: ' ', displayName: 'Demo', notes: '', runDiagnostics: false, activateIfHealthy: false, sub: '99' }), /demo_import_only_requires_m3u/);
+});
+
+test('paid workspace retains create-account mapping', () => {
+  assert.deepEqual(resolveGoldWorkspaceRequest('paid', { m3uUrl: '', displayName: 'Paid', notes: '', runDiagnostics: true, activateIfHealthy: false, sub: '3', packageId: '132', country: 'us' }), { action: 'create_account', accountType: 'paid', sub: '3', packageId: '132', country: 'US', displayName: 'Paid', notes: '', runDiagnostics: true, activateIfHealthy: false });
 });

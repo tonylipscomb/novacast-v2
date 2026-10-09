@@ -3264,9 +3264,6 @@ export function LiveTvScreen() {
           categoryId: channel.categoryId,
         });
       }
-      if (shouldClearPreviewStreamUrl(liveState?.previewChannelId ?? null, channelId)) {
-        setPreviewStreamSource(null);
-      }
       if (isChannelPressEnteringFullscreen(base, channelId) && channel) {
         const streamUrl = resolvePlaybackUrl(channel);
         if (streamUrl) {

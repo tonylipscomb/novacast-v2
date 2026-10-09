@@ -80,6 +80,14 @@ assert.match(screen, /focusOwnerRef\.current = 'channels'[\s\S]{0,180}preferCate
 assert.match(screen, /triggerLatencyMs/);
 assert.doesNotMatch(screen, /fullscreen-surf-preserve-current-until-next-source[\s\S]{0,120}setPreviewStreamSource\(null\)/);
 
+const tuneChannelBody = screen.match(/const tuneChannel = useCallback\(([\s\S]*?)\n  \}, \[/)?.[1] ?? '';
+assert.ok(tuneChannelBody, 'tuneChannel body should be present');
+assert.match(tuneChannelBody, /setPreviewStreamSource\(resolvePlaybackSource\(channel\)\)/);
+assert.doesNotMatch(tuneChannelBody, /shouldClearPreviewStreamUrl[\s\S]*setPreviewStreamSource\(null\)/);
+
+const sourceClearCount = (screen.match(/setPreviewStreamSource\(null\)/g) ?? []).length;
+assert.ok(sourceClearCount >= 2, 'genuine error/idle source-clear paths must remain');
+
 assert.match(screen, /\[NovaCast Live Back Perf\].*back-key-received/);
 assert.match(screen, /\[NovaCast Live Back Perf\].*fullscreen-close-requested/);
 assert.match(screen, /\[NovaCast Live Back Perf\].*fullscreen-state-cleared/);

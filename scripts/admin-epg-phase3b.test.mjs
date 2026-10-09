@@ -36,6 +36,14 @@ test('refresh stages a generation and promotes it only during finalization', () 
   assert.match(admin, /result\.status !== 'success'/);
 });
 
+test('Edge channel persistence ignores duplicate XMLTV ids within the same source generation', () => {
+  assert.match(admin, /async function insertBatches\(client:[^,]+, table: string, rows: Record<string, unknown>\[\], onConflict\?: string\)/);
+  assert.match(admin, /onConflict\s*\?\s*await client\.from\(table\)\.upsert\(batch, \{ onConflict, ignoreDuplicates: true \}\)/);
+  assert.match(admin, /insertBatches\(client, 'managed_provider_epg_source_channels', channels\.map[\s\S]*?'source_id,cache_generation,xmltv_channel_id'\)/);
+  assert.doesNotMatch(admin, /insertBatches\(client, 'managed_provider_epg_source_programmes',[\s\S]*?'source_id,cache_generation,xmltv_channel_id'/);
+  assert.match(admin, /source_id: job\.source_id,[\s\S]*?cache_generation: job\.generation/);
+});
+
 test('source testing is diagnostic-only while source refresh explicitly enables cache mode', () => {
   assert.match(admin, /action === 'start_epg_refresh' \|\| action === 'refresh_epg_source'/);
   assert.match(admin, /await enqueueEpgRefresh\(client, source\)/);

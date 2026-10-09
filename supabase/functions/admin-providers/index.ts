@@ -355,9 +355,12 @@ async function runEpgSourceTest(client: Awaited<ReturnType<typeof requireAdmin>>
 
 const EPG_CACHE_BATCH_SIZE = 1_000;
 
-async function insertBatches(client: Awaited<ReturnType<typeof requireAdmin>>['client'], table: string, rows: Record<string, unknown>[]) {
+async function insertBatches(client: Awaited<ReturnType<typeof requireAdmin>>['client'], table: string, rows: Record<string, unknown>[], onConflict?: string) {
   for (let offset = 0; offset < rows.length; offset += EPG_CACHE_BATCH_SIZE) {
-    const { error } = await client.from(table).insert(rows.slice(offset, offset + EPG_CACHE_BATCH_SIZE));
+    const batch = rows.slice(offset, offset + EPG_CACHE_BATCH_SIZE);
+    const { error } = onConflict
+      ? await client.from(table).upsert(batch, { onConflict, ignoreDuplicates: true })
+      : await client.from(table).insert(batch);
     if (error) throw new Error('admin_cache_write_failed');
   }
 }
@@ -509,7 +512,7 @@ async function continueEpgRefresh(client: Awaited<ReturnType<typeof requireAdmin
   try {
     if (!checkpoint.channelsProcessed) {
       const channels = await downloadRefreshArtifact<Array<{ id: string; displayNames: string[] }>>(client, String(checkpoint.channelsPath));
-      await insertBatches(client, 'managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: job.source_id, managed_provider_id: job.managed_provider_id, cache_generation: job.generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalizeEpgName(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1, 6), refreshed_at: job.started_at ?? job.updated_at })));
+      await insertBatches(client, 'managed_provider_epg_source_channels', channels.map((channel) => ({ source_id: job.source_id, managed_provider_id: job.managed_provider_id, cache_generation: job.generation, xmltv_channel_id: channel.id, display_name: channel.displayNames[0] || channel.id, canonical_name: canonicalizeEpgName(channel.displayNames[0] || channel.id), alternate_names: channel.displayNames.slice(1, 6), refreshed_at: job.started_at ?? job.updated_at })), 'source_id,cache_generation,xmltv_channel_id');
       checkpoint.channelsProcessed = true;
       job = (await updateRefreshJob(client, job, checkpoint, { stage: 'programmes', processedChannels: channels.length })) as EpgRefreshJobRow;
     }

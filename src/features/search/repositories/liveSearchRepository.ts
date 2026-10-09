@@ -2,7 +2,7 @@ import { novacastTrace } from '../../diagnostics/novacastLogPolicy.ts';
 import type { ProviderRepositories } from '../../providers/providerRepositories.ts';
 import { scheduleLiveSearchCatalogIdleBuild, searchLiveSqliteCatalog } from '../liveSearchSqliteCatalog.ts';
 
-import { ingestLiveChannels, ingestLiveSearchCategories, liveChannelIndexSize, searchLiveChannelIndex, findMatchingLiveCategoryIds, type LiveSearchMatchMode } from '../liveChannelIndex.ts';
+import { ingestLiveChannels, ingestLiveChannelsYielding, ingestLiveSearchCategories, liveChannelIndexSize, searchLiveChannelIndex, findMatchingLiveCategoryIds, type LiveSearchMatchMode } from '../liveChannelIndex.ts';
 import { matchesSearchQuery } from '../searchRanking.ts';
 import type { LiveSearchResult, SearchPageRequest, SearchPageResult } from '../searchTypes.ts';
 import { recordLiveSearchDiagnostic } from '../liveSearchDiagnostics.ts';
@@ -136,4 +136,4 @@ export async function searchLiveChannels(
   };
 }
 
-export { ingestLiveChannels, ingestLiveSearchCategories };
+export { ingestLiveChannels, ingestLiveChannelsYielding, ingestLiveSearchCategories };

@@ -48,7 +48,7 @@ import {
   getPublishedLiveCategories,
   getPublishedLiveChannels,
 } from '@/features/search/liveSearchSqliteCatalog';
-import { ingestLiveChannels, ingestLiveSearchCategories } from '@/features/search/repositories/liveSearchRepository';
+import { ingestLiveChannelsYielding, ingestLiveSearchCategories } from '@/features/search/repositories/liveSearchRepository';
 import { resetLiveTvFocusIdle, runAfterLiveTvFocusIdle } from './liveTvFocusIdle';
 import { computeLiveStartupKey, shouldRestartLiveStartup } from './liveTvStartupGate';
 import {
@@ -389,7 +389,7 @@ export function useLiveTvScreenModel(
     setEpgByChannelId(buildLiveTvChannelEpgMap(next));
     setEpgRevision((revision) => revision + 1);
     if (bundle?.providerId) {
-      ingestLiveChannels(bundle.providerId, next);
+      void ingestLiveChannelsYielding(bundle.providerId, next);
     }
   }, [bundle]);
 

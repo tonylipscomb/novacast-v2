@@ -46,6 +46,137 @@ const liveNavigationSummary: LiveNavigationSummary = {
   lastSummaryAt: 0,
 };
 
+type LiveBrowseCorrelation = {
+  correlationId: string;
+  direction: 'up' | 'down';
+  nativeEventTime: number | null;
+  jsReceivedAt: number;
+  repeatCount: number;
+  rowFocusedAt: number | null;
+  focusedIndex: number | null;
+  categoryId: string | null;
+  mountedRowCount: number | null;
+};
+
+let liveBrowseInputCount = 0;
+let liveBrowseSequence = 0;
+let pendingLiveBrowseCorrelation: LiveBrowseCorrelation | null = null;
+const mountedRowDiagnostics = new Map<string, {
+  mountedCount: number;
+  maxMountedCount: number;
+  mountBurstCount: number;
+  releaseBurstCount: number;
+  lastAt: number;
+  lastLoggedAt: number;
+}>();
+
+export function recordLiveMountedRowChange(fields: {
+  categoryId?: string | null;
+  mountedCount: number;
+  action: 'mount' | 'unmount';
+  at?: number;
+}) {
+  const categoryId = safeCategoryId(fields.categoryId) ?? 'unknown';
+  const now = fields.at ?? Date.now();
+  const previous = mountedRowDiagnostics.get(categoryId) ?? {
+    mountedCount: 0,
+    maxMountedCount: 0,
+    mountBurstCount: 0,
+    releaseBurstCount: 0,
+    lastAt: now,
+    lastLoggedAt: 0,
+  };
+  const next = {
+    mountedCount: fields.mountedCount,
+    maxMountedCount: Math.max(previous.maxMountedCount, fields.mountedCount),
+    mountBurstCount: fields.action === 'mount' ? previous.mountBurstCount + 1 : previous.mountBurstCount,
+    releaseBurstCount: fields.action === 'unmount' ? previous.releaseBurstCount + 1 : previous.releaseBurstCount,
+    lastAt: now,
+    lastLoggedAt: previous.lastLoggedAt,
+  };
+  mountedRowDiagnostics.set(categoryId, next);
+
+  if (now - previous.lastLoggedAt < 1_000) {
+    return;
+  }
+  next.lastLoggedAt = now;
+  console.info('[NOVACAST_PERF] live_mounted_rows', {
+    categoryId,
+    mountedCount: next.mountedCount,
+    maxMountedCount: next.maxMountedCount,
+    mountBurstCount: next.mountBurstCount,
+    releaseBurstCount: next.releaseBurstCount,
+    change: fields.action,
+    changeGapMs: now - previous.lastAt,
+  });
+}
+
+export function recordLiveBrowseInput(fields: {
+  direction: 'up' | 'down';
+  nativeEventTime?: number | null;
+  repeatCount?: number;
+  jsReceivedAt?: number;
+}) {
+  liveBrowseInputCount += 1;
+  const repeatCount = fields.repeatCount ?? 0;
+  if (repeatCount !== 0 && liveBrowseInputCount % 8 !== 0) {
+    return null;
+  }
+
+  liveBrowseSequence += 1;
+  pendingLiveBrowseCorrelation = {
+    correlationId: `live-browse-${liveBrowseSequence}`,
+    direction: fields.direction,
+    nativeEventTime: fields.nativeEventTime ?? null,
+    jsReceivedAt: fields.jsReceivedAt ?? Date.now(),
+    repeatCount,
+    rowFocusedAt: null,
+    focusedIndex: null,
+    categoryId: null,
+    mountedRowCount: null,
+  };
+  return pendingLiveBrowseCorrelation.correlationId;
+}
+
+export function recordLiveBrowseRowFocus(fields: {
+  focusedIndex: number;
+  categoryId?: string | null;
+  mountedRowCount?: number | null;
+  at?: number;
+}) {
+  if (!pendingLiveBrowseCorrelation) return;
+  pendingLiveBrowseCorrelation = {
+    ...pendingLiveBrowseCorrelation,
+    rowFocusedAt: fields.at ?? Date.now(),
+    focusedIndex: fields.focusedIndex,
+    categoryId: safeCategoryId(fields.categoryId),
+    mountedRowCount: fields.mountedRowCount ?? null,
+  };
+}
+
+export function completeLiveBrowseCorrelation(fields: { at?: number }) {
+  const pending = pendingLiveBrowseCorrelation;
+  if (!pending?.rowFocusedAt) return;
+  const renderReadyAt = fields.at ?? Date.now();
+  pendingLiveBrowseCorrelation = null;
+  console.info('[NOVACAST_PERF] live_browse_correlation', {
+    correlationId: pending.correlationId,
+    direction: pending.direction,
+    nativeEventTime: pending.nativeEventTime,
+    jsReceivedAt: pending.jsReceivedAt,
+    rowFocusedAt: pending.rowFocusedAt,
+    renderReadyAt,
+    focusedIndex: pending.focusedIndex,
+    categoryId: pending.categoryId,
+    repeatCount: pending.repeatCount,
+    mountedRowCount: pending.mountedRowCount,
+    nativeToJsMs: pending.nativeEventTime == null ? null : pending.jsReceivedAt - pending.nativeEventTime,
+    jsToRowFocusMs: pending.rowFocusedAt - pending.jsReceivedAt,
+    rowFocusToRenderReadyMs: renderReadyAt - pending.rowFocusedAt,
+    totalMs: renderReadyAt - (pending.nativeEventTime ?? pending.jsReceivedAt),
+  });
+}
+
 export function recordLiveNavigationMetric(
   metric: 'vertical-key-down' | 'channel-focus' | 'visible-zero' | 'unexpected-region-transition' | 'native-ref-miss' | 'restore',
   fields: { direction?: string | null; nativeDeltaMs?: number | null } = {},

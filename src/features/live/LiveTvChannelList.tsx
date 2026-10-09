@@ -18,7 +18,8 @@ import {
 import { getLiveTvChannelItemLayout } from './liveTvChannelRowLayout';
 import { recordLiveTvManualScroll } from './liveTvScrollPerf';
 import { recordLiveTvProgrammaticScroll, recordLiveTvVisibleRowRender } from './liveTvFocusDiagnostics';
-import { logLiveNavPerf } from './liveTvDiagnostics';
+import { completeLiveBrowseCorrelation, logLiveNavPerf, recordLiveBrowseRowFocus, recordLiveMountedRowChange } from './liveTvDiagnostics';
+import { areLiveFocusGraphPropsEqual, buildLiveFocusGraph, type LiveFocusGraphProps } from './liveFocusGraph';
 
 const CHANNEL_KEY_EXTRACTOR = (item: LiveTvChannelRowShellData) => item.id;
 
@@ -104,6 +105,9 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   const focusRenderBandRef = useRef<{ first: number; last: number } | null>(null);
   const focusedIndexRef = useRef<number | null>(null);
   const mountedRowRefsRef = useRef<Map<string, { index: number; handle: number; instance: ElementRef<typeof View> }>>(new Map());
+  const appliedNativeFocusPropsRef = useRef<Map<string, LiveFocusGraphProps>>(new Map());
+  const focusGraphFrameRef = useRef<number | null>(null);
+  const focusGraphUnmountedRef = useRef(false);
   const nativeRefLogRef = useRef<Map<string, number>>(new Map());
   const scrollRetryRef = useRef<{ index: number; attempts: number } | null>(null);
 
@@ -131,23 +135,48 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
   const rowShells = useMemo(() => buildLiveTvChannelRowShellList(channels), [channels]);
   const channelIndexById = useMemo(() => new Map(rowShells.map((row, index) => [row.id, index])), [rowShells]);
 
-  const applyNativeFocusGraph = useCallback((entry: { index: number; handle: number; instance: ElementRef<typeof View> }) => {
-    const previous = Array.from(mountedRowRefsRef.current.values()).find((candidate) => candidate.index === entry.index - 1);
-    const next = Array.from(mountedRowRefsRef.current.values()).find((candidate) => candidate.index === entry.index + 1);
-    (entry.instance as unknown as { setNativeProps?: (props: object) => void }).setNativeProps?.({
-      nextFocusUp: entry.index === 0 ? channelNextFocusUpHandle ?? entry.handle : previous?.handle ?? entry.handle,
-      nextFocusDown: next?.handle ?? entry.handle,
-      nextFocusRight: entry.handle,
-    });
+  const reconcileNativeFocusGraph = useCallback(() => {
+    if (focusGraphUnmountedRef.current) return;
+    const entries = Array.from(mountedRowRefsRef.current.entries()).map(([id, entry]) => ({
+      id,
+      index: entry.index,
+      handle: entry.handle,
+    }));
+    const graph = buildLiveFocusGraph(entries, channelNextFocusUpHandle);
+    for (const [id, props] of graph) {
+      const entry = mountedRowRefsRef.current.get(id);
+      if (!entry || areLiveFocusGraphPropsEqual(appliedNativeFocusPropsRef.current.get(id), props)) continue;
+      (entry.instance as unknown as { setNativeProps?: (nextProps: object) => void }).setNativeProps?.(props);
+      appliedNativeFocusPropsRef.current.set(id, props);
+    }
   }, [channelNextFocusUpHandle]);
 
-  const refreshNativeFocusGraphAround = useCallback((index: number) => {
-    for (const entry of mountedRowRefsRef.current.values()) {
-      if (Math.abs(entry.index - index) <= 1) {
-        applyNativeFocusGraph(entry);
+  const scheduleNativeFocusGraphReconciliation = useCallback(() => {
+    if (focusGraphUnmountedRef.current || focusGraphFrameRef.current != null) return;
+    focusGraphFrameRef.current = requestAnimationFrame(() => {
+      focusGraphFrameRef.current = null;
+      reconcileNativeFocusGraph();
+    });
+  }, [reconcileNativeFocusGraph]);
+
+  useEffect(() => {
+    focusGraphUnmountedRef.current = false;
+    const mountedRows = mountedRowRefsRef.current;
+    const appliedNativeFocusProps = appliedNativeFocusPropsRef.current;
+    return () => {
+      focusGraphUnmountedRef.current = true;
+      if (focusGraphFrameRef.current != null) {
+        cancelAnimationFrame(focusGraphFrameRef.current);
+        focusGraphFrameRef.current = null;
       }
-    }
-  }, [applyNativeFocusGraph]);
+      mountedRows.clear();
+      appliedNativeFocusProps.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    scheduleNativeFocusGraphReconciliation();
+  }, [channelIndexById, rowShells.length, scheduleNativeFocusGraphReconciliation]);
 
   const registerMountedRowRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
     const index = channelIndexById.get(channelId);
@@ -156,6 +185,11 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       return;
     }
     if (instance) {
+      const existing = mountedRowRefsRef.current.get(channelId);
+      if (existing?.instance === instance) {
+        scheduleNativeFocusGraphReconciliation();
+        return;
+      }
       const handle = findNodeHandle(instance);
       if (handle == null) {
         onRegister(channelId, instance);
@@ -182,10 +216,13 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
         });
         return;
       }
+      if (!existing || existing.instance !== instance || existing.handle !== handle) {
+        appliedNativeFocusPropsRef.current.delete(channelId);
+      }
       mountedRowRefsRef.current.set(channelId, { index, handle, instance });
       onRegister(channelId, instance);
-      applyNativeFocusGraph({ index, handle, instance });
-      refreshNativeFocusGraphAround(index);
+      scheduleNativeFocusGraphReconciliation();
+      recordLiveMountedRowChange({ categoryId, mountedCount: mountedRowRefsRef.current.size, action: 'mount' });
       const focusedIndex = focusedIndexRef.current;
       if (focusedIndex != null && Math.abs(index - focusedIndex) <= 3) {
         const now = Date.now();
@@ -217,8 +254,10 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       return;
     }
     mountedRowRefsRef.current.delete(channelId);
+    appliedNativeFocusPropsRef.current.delete(channelId);
     onRegister(channelId, null);
-    refreshNativeFocusGraphAround(index);
+    scheduleNativeFocusGraphReconciliation();
+    recordLiveMountedRowChange({ categoryId, mountedCount: mountedRowRefsRef.current.size, action: 'unmount' });
     const focusedIndex = focusedIndexRef.current;
     if (focusedIndex != null && Math.abs(index - focusedIndex) <= 3) {
       const now = Date.now();
@@ -247,7 +286,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
         });
       }
     }
-  }, [applyNativeFocusGraph, categoryId, channelIndexById, getLastNavigationIntent, onRegister, refreshNativeFocusGraphAround, rowShells, selectedChannelId]);
+  }, [categoryId, channelIndexById, getLastNavigationIntent, onRegister, rowShells, scheduleNativeFocusGraphReconciliation, selectedChannelId]);
 
   useEffect(() => {
     logLiveNavPerf('channel-list-derived', {
@@ -277,6 +316,11 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       const focusedIndex = channelIndexById.get(channelId);
       focusedIndexRef.current = focusedIndex ?? null;
       if (focusedIndex !== undefined) {
+        recordLiveBrowseRowFocus({
+          focusedIndex,
+          categoryId,
+          mountedRowCount: mountedRowRefsRef.current.size,
+        });
         const currentBand = focusRenderBandRef.current;
         const needsRecenter =
           !currentBand || focusedIndex < currentBand.first + 8 || focusedIndex > currentBand.last - 8;
@@ -423,6 +467,7 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
       onScrollToIndexFailed={onScrollToIndexFailed}
       renderItem={renderItem}
       onLayout={(event) => {
+        completeLiveBrowseCorrelation({ at: Date.now() });
         logLiveNavPerf('channel-list-render-ready', {
           categoryId,
           channelCount: rowShells.length,

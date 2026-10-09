@@ -144,7 +144,7 @@ import {
 } from '@/features/playback/continuity/playbackContinuity';
 import { getLiveTvRowVisualFlags } from './liveTvUiPerfMode';
 import { hydrateFavoriteLiveChannels } from './liveFavoriteHydration';
-import { logLiveCategoryOrderAudit, logLiveStabilityLoader, logLivePerformance, logLiveNavPerf, recordLiveNavigationMetric } from './liveTvDiagnostics';
+import { logLiveCategoryOrderAudit, logLiveStabilityLoader, logLivePerformance, logLiveNavPerf, recordLiveBrowseInput, recordLiveNavigationMetric } from './liveTvDiagnostics';
 import { resolveChannelFocusRetentionTarget, shouldRetainChannelFocus, type LiveFocusNavigationIntent } from './liveTvFocusRetention';
 import { LiveTvChannelListReveal, LiveTvPlanetLoader } from './LiveTvPlanetLoader';
 import {
@@ -1138,6 +1138,7 @@ export function LiveTvScreen() {
   );
   const firstCategoryFocusLoggedRef = useRef(false);
   const categoryFocusTargetLoggedRef = useRef(false);
+  const focusAuditSampleCountRef = useRef(0);
   const stabilityLoaderShownAtRef = useRef<number | null>(null);
   const surfSessionIdRef = useRef<string | null>(null);
   const intendedSurfChannelIdRef = useRef<string | null>(null);
@@ -1183,6 +1184,12 @@ export function LiveTvScreen() {
         };
         if (isDown) {
           recordLiveNavigationMetric('vertical-key-down', { direction, nativeDeltaMs });
+          recordLiveBrowseInput({
+            direction,
+            nativeEventTime: event.eventTime ?? null,
+            repeatCount: event.repeatCount ?? 0,
+            jsReceivedAt: now,
+          });
         }
         if (isDown && (now - verticalNavigationRef.current.lastLogAt > 1_000 || (event.repeatCount ?? 0) === 0 || direction !== previousDirection)) {
           verticalNavigationRef.current.lastLogAt = now;
@@ -1207,6 +1214,12 @@ export function LiveTvScreen() {
   }, [epgRevision]);
 
   const logFocusAudit = useCallback((event: string, details: Record<string, unknown> = {}) => {
+    if (event === 'channel-received-focus') {
+      focusAuditSampleCountRef.current += 1;
+      if (focusAuditSampleCountRef.current % 4 !== 1) {
+        return;
+      }
+    }
     const current = liveStateRef.current;
     console.log('[NOVACAST_FOCUS]', event, {
       selectedCategoryId: current?.selectedCategoryId ?? selectedCategoryId ?? null,

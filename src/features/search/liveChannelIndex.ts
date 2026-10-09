@@ -34,6 +34,8 @@ export type LiveChannelIndexEntry = {
 
 const indexes = new Map<string, Map<string, LiveChannelIndexEntry>>();
 const categoryNames = new Map<string, Map<string, string>>();
+const pendingIngestChannels = new Map<string, Map<string, ProviderLiveChannel>>();
+const ingestGenerations = new Map<string, number>();
 
 function providerMap(providerId: string) {
   const existing = indexes.get(providerId);
@@ -102,35 +104,94 @@ export function findMatchingLiveCategoryIds(providerId: string, query: string) {
   return matches;
 }
 
+function toLiveChannelIndexEntry(
+  providerId: string,
+  categories: ReadonlyMap<string, string>,
+  channel: ProviderLiveChannel,
+): LiveChannelIndexEntry {
+  const normalizedName = normalizeSearchQuery(channel.name);
+  const normalizedCurrent = normalizeSearchQuery(channel.current ?? '');
+  const categoryName = categories.get(channel.categoryId) ?? '';
+  const numberText = String(channel.number);
+  return {
+    id: channel.id,
+    providerId,
+    categoryId: channel.categoryId,
+    categoryName: categoryName || undefined,
+    name: channel.name,
+    number: channel.number,
+    current: channel.current,
+    tone: channel.tone,
+    logoUrl: channel.logoUrl,
+    containerExtension: channel.containerExtension,
+    streamUrl: channel.streamUrl,
+    normalizedName,
+    normalizedCurrent,
+    normalizedCategory: normalizeSearchQuery(categoryName),
+    numberText,
+    nameTokens: tokenizeLiveSearchText(normalizedName),
+    currentTokens: tokenizeLiveSearchText(normalizedCurrent),
+  };
+}
+
 export function ingestLiveChannels(providerId: string, channels: ProviderLiveChannel[]) {
   const map = providerMap(providerId);
   const categories = providerCategoryMap(providerId);
   for (const channel of channels) {
-    const normalizedName = normalizeSearchQuery(channel.name);
-    const normalizedCurrent = normalizeSearchQuery(channel.current ?? '');
-    const categoryName = categories.get(channel.categoryId) ?? '';
-    const numberText = String(channel.number);
-
-    map.set(channel.id, {
-      id: channel.id,
-      providerId,
-      categoryId: channel.categoryId,
-      categoryName: categoryName || undefined,
-      name: channel.name,
-      number: channel.number,
-      current: channel.current,
-      tone: channel.tone,
-      logoUrl: channel.logoUrl,
-      containerExtension: channel.containerExtension,
-      streamUrl: channel.streamUrl,
-      normalizedName,
-      normalizedCurrent,
-      normalizedCategory: normalizeSearchQuery(categoryName),
-      numberText,
-      nameTokens: tokenizeLiveSearchText(normalizedName),
-      currentTokens: tokenizeLiveSearchText(normalizedCurrent),
-    });
+    map.set(channel.id, toLiveChannelIndexEntry(providerId, categories, channel));
   }
+}
+
+function nextIngestGeneration(providerId: string) {
+  const generation = (ingestGenerations.get(providerId) ?? 0) + 1;
+  ingestGenerations.set(providerId, generation);
+  return generation;
+}
+
+function yieldLiveIndexWork() {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Builds a complete candidate index off to the side, yielding between chunks.
+ * The published map is replaced only after the newest generation completes.
+ */
+export async function ingestLiveChannelsYielding(
+  providerId: string,
+  channels: readonly ProviderLiveChannel[],
+  chunkSize = 512,
+): Promise<{ committed: boolean; generation: number }> {
+  const pending = pendingIngestChannels.get(providerId) ?? new Map<string, ProviderLiveChannel>();
+  for (const channel of channels) {
+    pending.set(channel.id, channel);
+  }
+  pendingIngestChannels.set(providerId, pending);
+
+  const generation = nextIngestGeneration(providerId);
+  const snapshot = Array.from(pending.values());
+  const candidate = new Map(indexes.get(providerId) ?? []);
+  const categories = providerCategoryMap(providerId);
+  const safeChunkSize = Math.max(1, chunkSize);
+
+  for (let offset = 0; offset < snapshot.length; offset += safeChunkSize) {
+    if (ingestGenerations.get(providerId) !== generation) {
+      return { committed: false, generation };
+    }
+    const chunk = snapshot.slice(offset, offset + safeChunkSize);
+    for (const channel of chunk) {
+      candidate.set(channel.id, toLiveChannelIndexEntry(providerId, categories, channel));
+    }
+    if (offset + safeChunkSize < snapshot.length) {
+      await yieldLiveIndexWork();
+    }
+  }
+
+  if (ingestGenerations.get(providerId) !== generation) {
+    return { committed: false, generation };
+  }
+  indexes.set(providerId, candidate);
+  pendingIngestChannels.delete(providerId);
+  return { committed: true, generation };
 }
 
 export function getLiveChannelIndexEntry(providerId: string, channelId: string) {
@@ -143,13 +204,19 @@ export function getLiveChannelIndexSize(providerId: string) {
 
 export function resetLiveChannelIndex(providerId?: string) {
   if (providerId) {
+    nextIngestGeneration(providerId);
     indexes.delete(providerId);
     categoryNames.delete(providerId);
+    pendingIngestChannels.delete(providerId);
     return;
   }
 
+  for (const providerId of ingestGenerations.keys()) {
+    nextIngestGeneration(providerId);
+  }
   indexes.clear();
   categoryNames.clear();
+  pendingIngestChannels.clear();
 }
 
 function toLiveSearchResult(providerId: string, entry: LiveChannelIndexEntry): LiveSearchResult {

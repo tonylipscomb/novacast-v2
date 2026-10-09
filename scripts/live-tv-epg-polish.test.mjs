@@ -1,8 +1,34 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import {
+  isFocusedEpgRequestCurrent,
+  LIVE_EPG_FOCUS_DEBOUNCE_MS,
+} from '../src/features/live/liveTvChannelEpg.ts';
 
 const read = (path) => fs.readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+
+test('focused EPG generations drop A/B completions and allow C to commit', () => {
+  assert.equal(LIVE_EPG_FOCUS_DEBOUNCE_MS, 280);
+  assert.equal(isFocusedEpgRequestCurrent({
+    requestGeneration: 101,
+    currentGeneration: 103,
+    requestedChannelId: 'A',
+    focusedChannelId: 'C',
+  }), false);
+  assert.equal(isFocusedEpgRequestCurrent({
+    requestGeneration: 102,
+    currentGeneration: 103,
+    requestedChannelId: 'B',
+    focusedChannelId: 'C',
+  }), false);
+  assert.equal(isFocusedEpgRequestCurrent({
+    requestGeneration: 103,
+    currentGeneration: 103,
+    requestedChannelId: 'C',
+    focusedChannelId: 'C',
+  }), true);
+});
 
 test('Live TV display text and channel number presentation are bounded', () => {
   const text = read('src/features/live/liveTvProgramText.ts');

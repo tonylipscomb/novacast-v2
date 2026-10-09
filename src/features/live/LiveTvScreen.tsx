@@ -755,6 +755,7 @@ export function LiveTvScreen() {
   const { player: liveStreamPlayer, retry: retryLiveStream, hasStream: hasLiveStream, playerGenerationId } = useNovaStreamPlayer(
     playerStreamSource,
     {
+      persistentPlayer: true,
       shouldAcceptAsyncCommit: shouldAcceptLiveSurfPlayerCommit,
       onError: (message) => {
         if (!shouldAcceptLiveSurfPlayerCommit()) {
@@ -921,10 +922,6 @@ export function LiveTvScreen() {
     },
     [channels, selectedChannel, liveState?.previewChannelId, searchPlaybackSessionActive],
   );
-  const [, setFocusedChannelId] = useState<string | null>(
-    liveMemory.focusedChannelId ?? null,
-  );
-
   useEffect(() => {
     if (!previewStreamUrl) {
       return;
@@ -2526,8 +2523,6 @@ export function LiveTvScreen() {
       }
       recordLiveTvFocusEvent(channelId);
       enrichFocusedChannelEpg(channelId);
-      setFocusedChannelId((current) => (current === channelId ? current : channelId));
-
       if (previousFocusedId !== channelId) {
         logLiveSelection('focus-changed', {
           focusedChannelId: channelId,
@@ -3127,7 +3122,7 @@ export function LiveTvScreen() {
       // Category OK must leave the category rail and land in the channel list.
       preferCategoryFocusRef.current = false;
       if (nextChannelId) {
-        setFocusedChannelId(nextChannelId);
+        focusedChannelIdRef.current = nextChannelId;
       }
       setState((current) =>
         current ? selectLiveCategory(current, categoryId, nextChannelId) : createLiveTvLandingState(categoryId, nextChannelId),

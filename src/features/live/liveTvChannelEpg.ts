@@ -16,6 +16,18 @@ export const LIVE_EPG_FOCUS_DEBOUNCE_MS = 280;
 export const LIVE_EPG_FETCH_CONCURRENCY = 1;
 export const EPG_CACHE_TTL_MS = 5 * 60 * 1000;
 
+export function isFocusedEpgRequestCurrent(input: {
+  requestGeneration: number;
+  currentGeneration: number;
+  requestedChannelId: string;
+  focusedChannelId: string | null;
+}) {
+  return (
+    input.requestGeneration === input.currentGeneration &&
+    input.requestedChannelId === input.focusedChannelId
+  );
+}
+
 type CachedEpgEntry = {
   programs: ProviderGuideProgram[];
   fetchedAt: number;

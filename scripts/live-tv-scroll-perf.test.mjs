@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -21,6 +22,17 @@ import {
 } from '../src/features/live/liveTvScrollPerf.ts';
 import { chooseLiveChannel, createInitialLiveTvState } from '../src/features/live/liveTvLogic.ts';
 import { shouldScrollListToFocusIndex } from '../src/features/live/liveTvPreviewScheduling.ts';
+
+const channelListSource = fs.readFileSync(new URL('../src/features/live/LiveTvChannelList.tsx', import.meta.url), 'utf8');
+
+test('FlatList extraData contains row-visible state, not browse-only focus metadata', () => {
+  const extraData = channelListSource.match(/const listExtraData = useMemo\([\s\S]*?\n  \);/)?.[0] ?? '';
+  assert.match(extraData, /selectedChannelId/);
+  assert.match(extraData, /previewChannelId/);
+  assert.match(extraData, /favoriteChannelIds/);
+  assert.match(extraData, /epgRevision/);
+  assert.doesNotMatch(extraData, /focusedChannelId|focusOwner|diagnostic|renderBand/);
+});
 
 const SAMPLE_CHANNEL = {
   id: 'chan-1',

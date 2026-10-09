@@ -44,6 +44,22 @@ test('source identity stabilization compares URI/content type instead of object 
   assert.doesNotMatch(player, /lastUrlRef/);
 });
 
+test('Live uses one persistent player and replaces sources asynchronously', () => {
+  assert.match(player, /persistentPlayer\?: boolean/);
+  assert.match(player, /useVideoPlayer\(persistentPlayer \? null : stableSource/);
+  assert.match(player, /if \(playerChanged && !persistentPlayer\)/);
+  assert.match(player, /replaceAsync-start/);
+  assert.match(player, /replaceAsync-complete/);
+  assert.match(player, /persistent-player-reuse/);
+  assert.match(screen, /persistentPlayer: true/);
+});
+
+test('non-Live callers retain source-keyed player behavior', () => {
+  assert.match(player, /persistentPlayer = false/);
+  assert.match(player, /if \(playerChanged && !persistentPlayer\)/);
+  assert.match(readFileSync(new URL('../src/features/playback/unified/UnifiedPlayerController.tsx', import.meta.url), 'utf8'), /useNovaStreamPlayer\(streamUrl, \{/);
+});
+
 test('channel, source, player, pause, and teardown changes clear watchdog timers/state', () => {
   assert.match(watchdog, /reset\('source-change'\)/);
   assert.match(watchdog, /a\.streamKey === b\.streamKey/);

@@ -36,6 +36,7 @@ import {
   enrichChannelsWithPrefetchedEpg,
   enrichSingleChannelEpg,
   hasCachedLiveTvEpg,
+  isFocusedEpgRequestCurrent,
   logLiveEpgPerformance,
   mapChannelsWithoutEpg,
   selectVisibleEpgWindow,
@@ -150,6 +151,8 @@ export function useLiveTvScreenModel(
   const focusedEpgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedEpgActiveChannelRef = useRef<string | null>(null);
   const focusedEpgLatestChannelRef = useRef<string | null>(null);
+  const focusedEpgGenerationRef = useRef(0);
+  const focusedEpgPendingChannelRef = useRef<string | null>(null);
   const lastFocusedEpgRef = useRef<{ channelId: string; atMs: number } | null>(null);
   const channelsBaselineRef = useRef<ProviderLiveChannel[]>([]);
   const mountStartedAtRef = useRef(0);
@@ -1142,6 +1145,7 @@ export function useLiveTvScreenModel(
             focusedEpgTimerRef.current = null;
           }
           cancelLiveTvEpgWork('live-model-unmount');
+          focusedEpgGenerationRef.current += 1;
     };
   }, [bundle?.generation]);
 
@@ -1162,6 +1166,8 @@ export function useLiveTvScreenModel(
         resetLiveTvFocusIdle();
         epgFetchedIdsRef.current.clear();
         epgInFlightIdsRef.current.clear();
+        focusedEpgGenerationRef.current += 1;
+        focusedEpgPendingChannelRef.current = null;
         setEpgPendingChannelIds(new Set());
         if (focusedEpgTimerRef.current) {
           clearTimeout(focusedEpgTimerRef.current);
@@ -1200,6 +1206,8 @@ export function useLiveTvScreenModel(
       resetLiveTvFocusIdle();
       epgFetchedIdsRef.current.clear();
       epgInFlightIdsRef.current.clear();
+      focusedEpgGenerationRef.current += 1;
+      focusedEpgPendingChannelRef.current = null;
       setEpgPendingChannelIds(new Set());
       if (focusedEpgTimerRef.current) {
         clearTimeout(focusedEpgTimerRef.current);
@@ -1292,7 +1300,22 @@ export function useLiveTvScreenModel(
         return;
       }
 
+      const requestGeneration = focusedEpgGenerationRef.current + 1;
+      focusedEpgGenerationRef.current = requestGeneration;
+      const previousPendingChannelId = focusedEpgPendingChannelRef.current;
       focusedEpgLatestChannelRef.current = channelId;
+
+      if (previousPendingChannelId && previousPendingChannelId !== channelId) {
+        setEpgPendingChannelIds((current) => {
+          if (!current.has(previousPendingChannelId)) {
+            return current;
+          }
+          const next = new Set(current);
+          next.delete(previousPendingChannelId);
+          return next;
+        });
+        focusedEpgPendingChannelRef.current = null;
+      }
 
       if (focusedEpgTimerRef.current) {
         clearTimeout(focusedEpgTimerRef.current);
@@ -1301,6 +1324,14 @@ export function useLiveTvScreenModel(
       focusedEpgTimerRef.current = setTimeout(() => {
         focusedEpgTimerRef.current = null;
         runAfterLiveTvFocusIdle(() => {
+        if (!isFocusedEpgRequestCurrent({
+          requestGeneration,
+          currentGeneration: focusedEpgGenerationRef.current,
+          requestedChannelId: channelId,
+          focusedChannelId: focusedEpgLatestChannelRef.current,
+        })) {
+          return;
+        }
         if (focusedEpgActiveChannelRef.current) {
           logEpgPerf('focused-request-queued-latest', {
             selectedCategoryId,
@@ -1341,6 +1372,15 @@ export function useLiveTvScreenModel(
           return;
         }
 
+        if (!isFocusedEpgRequestCurrent({
+          requestGeneration,
+          currentGeneration: focusedEpgGenerationRef.current,
+          requestedChannelId: channelId,
+          focusedChannelId: focusedEpgLatestChannelRef.current,
+        })) {
+          return;
+        }
+        focusedEpgPendingChannelRef.current = channelId;
         setEpgPendingChannelIds((current) => new Set(current).add(channelId));
         lastFocusedEpgRef.current = { channelId, atMs: Date.now() };
         epgFetchedIdsRef.current.add(channelId);
@@ -1370,11 +1410,27 @@ export function useLiveTvScreenModel(
         });
         void enrichSingleChannelEpg(bundle, channel)
           .then((enriched) => {
+            const isCurrentRequest = isFocusedEpgRequestCurrent({
+              requestGeneration,
+              currentGeneration: focusedEpgGenerationRef.current,
+              requestedChannelId: channelId,
+              focusedChannelId: focusedEpgLatestChannelRef.current,
+            });
+            if (!isCurrentRequest) {
+              logLiveNavPerf('focused-epg-stale-drop', {
+                categoryId: selectedCategoryId,
+                requestedChannelId: channelId,
+                focusedChannelId: focusedEpgLatestChannelRef.current,
+                generation: requestGeneration,
+              });
+              return;
+            }
             setEpgPendingChannelIds((current) => {
               const next = new Set(current);
               next.delete(channelId);
               return next;
             });
+            focusedEpgPendingChannelRef.current = null;
             if (
               enriched.current === channel.current &&
               enriched.next === channel.next &&

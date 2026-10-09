@@ -87,6 +87,8 @@ type NovaStreamPlayerOptions = {
    * so progressive MKV cannot grow DefaultAllocator to the Java heap ceiling.
    */
   bufferPolicy?: 'vod' | 'live';
+  /** Keep the native player identity stable while Live changes channel sources. */
+  persistentPlayer?: boolean;
 };
 
 type NovaStreamSurfaceProps = {
@@ -144,8 +146,9 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
     onReady,
     shouldAcceptAsyncCommit,
     bufferPolicy = 'live',
+    persistentPlayer = false,
   } = options;
-  const lastSourceIdentityRef = useRef(getSourceIdentity(streamUrl));
+  const lastSourceIdentityRef = useRef(persistentPlayer ? 'none' : getSourceIdentity(streamUrl));
   const lastPlayerRef = useRef<VideoPlayer | null>(null);
   const onErrorRef = useRef(onError);
   const onReadyRef = useRef(onReady);
@@ -173,7 +176,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
 
   const sourceIdentity = getSourceIdentity(streamUrl);
   const stableSource = useMemo(() => streamUrl, [sourceIdentity]);
-  const player = useVideoPlayer(stableSource, (nextPlayer) => {
+  const player = useVideoPlayer(persistentPlayer ? null : stableSource, (nextPlayer) => {
     logPlayerPerf('player-init', { sourcePresent: Boolean(streamUrl), bufferPolicy });
     if (bufferPolicyRef.current === 'vod') {
       applyVodBufferProfile(nextPlayer);
@@ -214,7 +217,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
         logPlayerPerf('player-release-observed', { playerGenerationId });
       }
     };
-  }, [player, playerGenerationId, streamUrl]);
+  }, [player, playerGenerationId]);
 
   useEffect(() => {
     if (bufferPolicy !== 'vod') {
@@ -324,7 +327,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
 
     lastSourceIdentityRef.current = sourceIdentity;
 
-    if (playerChanged) {
+    if (playerChanged && !persistentPlayer) {
       // useVideoPlayer already constructed this generation with the new source.
       // A second replaceAsync would overlap two Media3 loads in one heap.
       if (bufferPolicy === 'vod') {
@@ -334,6 +337,13 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
     }
 
     const requestId = ++replaceRequestRef.current;
+    if (persistentPlayer) {
+      logPlayerPerf('replaceAsync-start', {
+        playerGenerationId,
+        requestId,
+        sourcePresent: true,
+      });
+    }
     if (bufferPolicy === 'vod') {
       applyVodBufferProfile(player);
       logVodPlayerMemory('source-replaced', { playerGenerationId });
@@ -354,6 +364,17 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
         if (autoPlay) {
           player.play();
         }
+        if (persistentPlayer) {
+          logPlayerPerf('replaceAsync-complete', {
+            playerGenerationId,
+            requestId,
+            sourcePresent: true,
+          });
+          logPlayerPerf('persistent-player-reuse', {
+            playerGenerationId,
+            requestId,
+          });
+        }
         onReadyRef.current?.();
       },
       onFailure: () => {
@@ -365,7 +386,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
         }
       },
     });
-  }, [autoPlay, bufferPolicy, enqueuePlayerReplacement, muted, player, playerGenerationId, streamUrl]);
+  }, [autoPlay, bufferPolicy, enqueuePlayerReplacement, muted, persistentPlayer, player, playerGenerationId, streamUrl]);
 
   useEffect(() => {
     return () => {
@@ -420,7 +441,7 @@ export function useNovaStreamPlayer(streamUrl: VideoSource, options: NovaStreamP
         }
       },
     });
-  }, [autoPlay, bufferPolicy, enqueuePlayerReplacement, muted, player, playerGenerationId, streamUrl]);
+  }, [autoPlay, bufferPolicy, enqueuePlayerReplacement, muted, persistentPlayer, player, playerGenerationId, streamUrl]);
 
   return { player, retry, hasStream: Boolean(streamUrl), playerGenerationId };
 }

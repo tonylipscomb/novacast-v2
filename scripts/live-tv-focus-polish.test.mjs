@@ -25,7 +25,7 @@ test('same category focus does not repeat focus state work', () => {
 test('same channel focus does not repeat preferred-channel or state work', () => {
   assert.match(screen, /previousOwner === 'channels' && previousFocusedId === channelId/);
   assert.match(screen, /region: 'channel'/);
-  assert.match(screen, /setFocusedChannelId\(\(current\) => \(current === channelId \? current : channelId\)\)/);
+  assert.doesNotMatch(screen, /setFocusedChannelId/);
 });
 
 test('explicit category-to-channel navigation still requests one channel target', () => {
@@ -110,7 +110,7 @@ test('a real LEFT aborts restore quarantine and remains allowed', () => {
 
 test('mounted channel refs build an imperative vertical neighbor graph', () => {
   assert.match(channelList, /mountedRowRefsRef = useRef/);
-  assert.match(channelList, /nextFocusUp: previous\?\.handle \?\? entry\.handle/);
+  assert.match(channelList, /nextFocusUp:[\s\S]*previous\?\.handle \?\? entry\.handle/);
   assert.match(channelList, /nextFocusDown: next\?\.handle \?\? entry\.handle/);
   assert.match(channelList, /setNativeProps/);
   assert.match(channelList, /channel-native-ref/);

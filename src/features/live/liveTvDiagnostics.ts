@@ -219,6 +219,8 @@ export function logLiveNavPerf(
     elapsedMs?: number | null;
     renderVersion?: number | null;
     focusedChannelId?: string | null;
+    requestedChannelId?: string | null;
+    generation?: number | null;
     focusedIndex?: number | null;
     currentVisibleRange?: { first: number; last: number } | null;
     trustedVisibleRange?: { first: number; last: number } | null;
@@ -274,6 +276,8 @@ export function logLiveNavPerf(
     elapsedMs: fields.elapsedMs ?? null,
     renderVersion: fields.renderVersion ?? null,
     focusedChannelId: fields.focusedChannelId ?? null,
+    requestedChannelId: fields.requestedChannelId ?? null,
+    generation: fields.generation ?? null,
     focusedIndex: fields.focusedIndex ?? null,
     currentVisibleRange: fields.currentVisibleRange ?? null,
     trustedVisibleRange: fields.trustedVisibleRange ?? null,

@@ -18,7 +18,6 @@ import {
 import { getLiveTvChannelItemLayout } from './liveTvChannelRowLayout';
 import { recordLiveTvManualScroll } from './liveTvScrollPerf';
 import { recordLiveTvProgrammaticScroll, recordLiveTvVisibleRowRender } from './liveTvFocusDiagnostics';
-import { resolveLiveTvRowAbMode } from './liveTvUiPerfMode';
 import { logLiveNavPerf } from './liveTvDiagnostics';
 
 const CHANNEL_KEY_EXTRACTOR = (item: LiveTvChannelRowShellData) => item.id;
@@ -261,9 +260,15 @@ export const LiveTvChannelList = memo(function LiveTvChannelList({
 
   // Do not include a full-list EPG signature — per-row EPG props drive memoized updates.
   const listExtraData = useMemo(
-    () =>
-      `${resolveLiveTvRowAbMode()}:${selectedChannelId}:${previewChannelId ?? ''}:${categoryFocusLeftHandle ?? ''}:${channelNextFocusUpHandle ?? ''}:${favoriteChannelIds.size}:${epgRevision}`,
-    [categoryFocusLeftHandle, channelNextFocusUpHandle, epgRevision, favoriteChannelIds.size, previewChannelId, selectedChannelId],
+    () => ({
+      selectedChannelId,
+      previewChannelId,
+      categoryFocusLeftHandle,
+      channelNextFocusUpHandle,
+      favoriteChannelIds,
+      epgRevision,
+    }),
+    [categoryFocusLeftHandle, channelNextFocusUpHandle, epgRevision, favoriteChannelIds, previewChannelId, selectedChannelId],
   );
 
   const handleChannelFocus = useCallback(

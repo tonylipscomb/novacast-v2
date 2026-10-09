@@ -7,10 +7,19 @@ Permanent public download (via NovaCast Connect redirects):
 
 ```text
 https://novacast-connect.netlify.app/downloads/novacast.apk
-â†’ https://github.com/tonylipscomb/novacast-v2/releases/download/beta-latest/novacast.apk
+â†’ the currently approved versioned GitHub production release asset
 ```
 
-Downloader code: `6275368` (points at that permanent URL).
+Official Downloader code: `6275368` (externally mapped to the permanent APK URL).
+
+Permanent checksum alias:
+
+```text
+https://novacast-connect.netlify.app/downloads/novacast.apk.sha256
+```
+
+The Downloader code remains unchanged across releases. Update the Netlify
+production redirects when promoting a new approved release.
 
 ## Verified build facts
 
@@ -49,11 +58,12 @@ Required repository secrets:
 - `EXPO_PUBLIC_SUPABASE_ANON_KEY`
 - `EXPO_PUBLIC_NOVACAST_PAIRING_WEBSITE_URL`
 
-## Main rolling beta (updates `beta-latest`)
+## Internal rolling beta (`beta-latest`)
 
 Every push to `main` (and manual `workflow_dispatch` from `main`) builds a
 release APK, uploads the workflow artifact, and publishes/replaces the
-prerelease GitHub Release `beta-latest`.
+prerelease GitHub Release `beta-latest`. This is an internal testing path only;
+it is not the production download target and must not be presented as one.
 
 That moves:
 
@@ -61,7 +71,7 @@ That moves:
 https://github.com/tonylipscomb/novacast-v2/releases/download/beta-latest/novacast.apk
 ```
 
-and therefore the Netlify permanent URL used by Downloader.
+It does not change the permanent Netlify URL used by Downloader.
 
 Artifact / rolling-release contents:
 
@@ -93,8 +103,9 @@ The workflow will:
 6. Attach `novacast.apk`, `novacast.apk.sha256`, and a versioned copy
 7. Leave a non-prerelease tag as a **full release** so GitHub `/releases/latest` still points at the newest stable version tag
 
-Versioned tags do **not** change the Connect/Downloader URL. That URL always
-follows `beta-latest`.
+After an approved production release is published, update the Netlify
+production redirects to that versioned tag. The Connect/Downloader URL remains
+stable while the Downloader code remains `6275368`.
 
 ## Public prerelease / beta tag
 
@@ -107,15 +118,19 @@ git tag -a v1.1.0-beta.1 -m "NovaCast beta"
 git push origin v1.1.0-beta.1
 ```
 
-## First rolling-beta publish checklist
+## Production release checklist
 
 1. Confirm GitHub secrets: `EXPO_TOKEN`, pairing env secrets, optional keystore secrets.
 2. Confirm Netlify site still uses base `pairing-web`, build `npm run build`, publish `dist`.
-3. Merge Connect website changes so `/downloads/novacast.apk` redirects to `beta-latest`.
-4. Merge this workflow change to `main` and wait for **Android Beta APK** success.
-5. Verify GitHub Release `beta-latest` includes `novacast.apk` and `novacast.apk.sha256`.
+3. Update the Netlify production redirects to the approved production tag.
+4. Build and validate the approved signed production APK through the release workflow.
+5. Verify the versioned GitHub production release includes `novacast.apk` and `novacast.apk.sha256`.
 6. Verify `https://novacast-connect.netlify.app/downloads/novacast.apk` downloads the APK.
-7. On a TV, open Downloader â†’ enter `6275368` â†’ install.
+7. Keep Downloader code `6275368` unchanged and use it to install the approved release.
+
+For internal beta testing, use the beta workflow and `beta-latest` release
+only through explicitly labeled internal/testing paths. Do not use it as the
+production distribution target.
 
 Do not commit APK binaries, keystores, Expo tokens, or signing passwords.
 

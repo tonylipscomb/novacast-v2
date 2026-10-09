@@ -37,7 +37,7 @@ Required env:
 Optional:
 
 - `VITE_PUBLIC_DOWNLOAD_URL` — visible direct-download text on `/download`
-  (button always uses relative `/downloads/novacast.apk`)
+  (the button always uses relative `/downloads/novacast.apk`)
 
 ## Netlify
 
@@ -55,9 +55,20 @@ Environment variables: `VITE_PAIRING_API_URL`, `VITE_SUPABASE_ANON_KEY`,
 `public/_redirects` (and root `netlify.toml`) map:
 
 ```text
-/downloads/novacast.apk → GitHub releases/download/beta-latest/novacast.apk
+/downloads/novacast.apk -> the currently approved versioned production release
+/downloads/novacast.apk.sha256 -> its production checksum asset
 ```
 
-Do not commit APK binaries into this folder. Downloader code `6275368` stays
-stable because the asset is always named `novacast.apk` on the rolling
-`beta-latest` GitHub Release.
+The permanent production aliases currently point to GitHub release `v1.0.7`.
+Downloader code `6275368` should be mapped externally to:
+
+```text
+https://novacast-connect.netlify.app/downloads/novacast.apk
+```
+
+The external Downloader mapping is not controlled by this repository. Keep the
+code unchanged across releases and update the Netlify production redirect when
+promoting a new approved release.
+
+`beta-latest` is reserved for explicitly labeled internal testing and is not a
+production target. Do not commit APK binaries into this folder.

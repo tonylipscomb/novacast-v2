@@ -60,7 +60,7 @@ Environment variables: `VITE_PAIRING_API_URL`, `VITE_SUPABASE_ANON_KEY`,
 ```
 
 The permanent production aliases currently point to GitHub release `v1.0.7`.
-Downloader code `6275368` should be mapped externally to:
+Downloader code `2287321` should be mapped externally to:
 
 ```text
 https://novacast-connect.netlify.app/downloads/novacast.apk

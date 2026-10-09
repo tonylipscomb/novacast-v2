@@ -10,7 +10,7 @@ https://novacast-connect.netlify.app/downloads/novacast.apk
 â†’ the currently approved versioned GitHub production release asset
 ```
 
-Official Downloader code: `6275368` (externally mapped to the permanent APK URL).
+Official Downloader code: `2287321` (externally mapped to the permanent APK URL).
 
 Permanent checksum alias:
 
@@ -105,7 +105,7 @@ The workflow will:
 
 After an approved production release is published, update the Netlify
 production redirects to that versioned tag. The Connect/Downloader URL remains
-stable while the Downloader code remains `6275368`.
+stable while the Downloader code remains `2287321`.
 
 ## Public prerelease / beta tag
 
@@ -126,7 +126,7 @@ git push origin v1.1.0-beta.1
 4. Build and validate the approved signed production APK through the release workflow.
 5. Verify the versioned GitHub production release includes `novacast.apk` and `novacast.apk.sha256`.
 6. Verify `https://novacast-connect.netlify.app/downloads/novacast.apk` downloads the APK.
-7. Keep Downloader code `6275368` unchanged and use it to install the approved release.
+7. Keep Downloader code `2287321` unchanged and use it to install the approved release.
 
 For internal beta testing, use the beta workflow and `beta-latest` release
 only through explicitly labeled internal/testing paths. Do not use it as the

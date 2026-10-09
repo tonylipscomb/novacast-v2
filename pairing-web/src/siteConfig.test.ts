@@ -7,5 +7,5 @@ test('download button targets the permanent relative APK path', () => {
 });
 
 test('Downloader code remains stable', () => {
-  assert.equal(DOWNLOADER_CODE, '6275368');
+  assert.equal(DOWNLOADER_CODE, '2287321');
 });

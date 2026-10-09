@@ -2,7 +2,7 @@
 export const APK_DOWNLOAD_PATH = '/downloads/novacast.apk';
 
 /** Downloader app short code — stable across releases. */
-export const DOWNLOADER_CODE = '6275368';
+export const DOWNLOADER_CODE = '2287321';
 
 const DEFAULT_PUBLIC_DOWNLOAD_URL =
   'https://novacast-connect.netlify.app/downloads/novacast.apk';

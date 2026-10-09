@@ -188,20 +188,6 @@ export function AdminCloud() {
     setReleaseSummary(null);
   };
 
-  const extend = async (id: string, hours: number) => {
-    try {
-      await adminRequest('admin-device-action', token, {
-        method: 'POST',
-        body: JSON.stringify({ deviceId: id, action: 'extend', hours }),
-      });
-      setMessage('Beta access extended successfully.');
-      await load(token, true);
-    } catch (error) {
-      const category = error instanceof Error ? error.message : 'admin_update_failed';
-      setMessage('Beta access could not be extended (' + category + ').');
-    }
-  };
-
   const command = async (id: string) => {
     try {
       await adminRequest('admin-device-action', token, {
@@ -436,7 +422,6 @@ export function AdminCloud() {
           <AdminDevices
             devices={devices}
             providers={providers}
-            onExtend={(id, hours) => void extend(id, hours)}
             onAssignProvider={(id, managedProviderId) => void assignProvider(id, managedProviderId)}
             onCommand={(id) => void command(id)}
             onRevoke={(id) => void revoke(id)}

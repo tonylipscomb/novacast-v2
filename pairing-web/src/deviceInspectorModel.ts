@@ -24,13 +24,27 @@ export function sanitizeProviderSummary(device: DeviceInspectorRow, provider: De
     id: text(provider?.id ?? device.managed_provider_id),
     name: text(provider?.display_name ?? provider?.slug ?? device.providerName),
     type: text(provider?.provider_type ?? provider?.type),
-    assignment: text(device.assignment_command_status ?? device.assignment_status) ?? 'Not reported',
+    assignment: text(device.assignment_status ?? device.assignment_command_status) ?? (device.assignment_id ? 'Assigned' : 'Unassigned'),
+    assignedAt: text(device.assigned_at),
     acknowledgement: text(device.applied_assignment_id ?? device.assignment_acknowledgement) ?? 'Not reported',
     health: text(provider?.health_status ?? device.providerStatus) ?? 'Not reported',
     inventory: text(provider?.inventory_summary ?? provider?.catalog_count),
     epg: text(provider?.epg_status),
+    expiration: text(provider?.expires_at ?? provider?.expiration_at ?? provider?.expiresAt),
     lastCheck: text(provider?.last_checked_at ?? provider?.last_validation_at),
   };
+}
+
+export function deviceLifecycleStatus(device: DeviceInspectorRow): string {
+  const value = text(device.status ?? device.device_status ?? device.activation_status);
+  return value ? value.toUpperCase() : 'UNKNOWN';
+}
+
+export function hasLegacyActivationHistory(device: DeviceInspectorRow): boolean {
+  const source = text(device.activation_source);
+  return source !== null
+    ? source.toLowerCase() !== 'production'
+    : String(device.activation_status ?? '').toLowerCase() === 'expired';
 }
 
 export function readPlaybackSummary(device: DeviceInspectorRow) {

@@ -4,18 +4,14 @@ import { filterAdminDevices } from './operationsCenter';
 type Device = Record<string, unknown>;
 type Provider = Record<string, unknown>;
 type Action = (id: string) => void;
-type ExtendAction = (id: string, hours: number) => void;
 type AssignProviderAction = (id: string, managedProviderId: string) => void;
 type ViewDeviceAction = (device: Device) => void;
 type DeviceQuery = { page: number; pageSize: number; search: string; status: string; platform: string; activation: string; version: string; providerId: string; providerHealth: string };
 type DevicePagination = { page: number; pageSize: number; total: number; totalPages: number };
 
-type ExtendPreset = '7' | '30' | '90' | 'custom' | 'never';
-
 export function AdminDevices({
   devices,
   providers,
-  onExtend,
   onAssignProvider,
   onCommand,
   onRevoke,
@@ -27,7 +23,6 @@ export function AdminDevices({
 }: {
   devices: Device[];
   providers: Provider[];
-  onExtend: ExtendAction;
   onAssignProvider: AssignProviderAction;
   onCommand: Action;
   onRevoke: Action;
@@ -40,14 +35,11 @@ export function AdminDevices({
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('all');
   const [platform, setPlatform] = useState('all');
-  const [beta, setBeta] = useState('all');
+  const [activation, setActivation] = useState('all');
   const [version, setVersion] = useState('all');
   const [providerId, setProviderId] = useState('all');
   const [providerHealth, setProviderHealth] = useState('all');
   const [, setPage] = useState(1);
-  const [extendDevice, setExtendDevice] = useState<Device | null>(null);
-  const [extendPreset, setExtendPreset] = useState<ExtendPreset>('30');
-  const [customDate, setCustomDate] = useState('');
   const [providerDevice, setProviderDevice] = useState<Device | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState('');
 
@@ -76,8 +68,8 @@ export function AdminDevices({
   );
 
   const filtered = useMemo(
-    () => filterAdminDevices(devices, { query, status, platform, activation: beta, version, providerId, providerHealth }, providers),
-    [devices, providers, query, status, platform, beta, version, providerId, providerHealth],
+    () => filterAdminDevices(devices, { query, status, platform, activation, version, providerId, providerHealth }, providers),
+    [devices, providers, query, status, platform, activation, version, providerId, providerHealth],
   );
 
   const pageCount = Math.max(1, pagination.totalPages || 1);
@@ -85,8 +77,8 @@ export function AdminDevices({
   const counts = {
     total: pagination.total,
     online: devices.filter(isOnline).length,
-    active: devices.filter((device) => device.activation_status === 'active').length,
-    expired: devices.filter((device) => device.activation_status === 'expired').length,
+    active: devices.filter((device) => String(device.status ?? '').toLowerCase() === 'active').length,
+    registered: devices.filter((device) => String(device.status ?? '').toLowerCase() === 'registered').length,
     offline: devices.filter((device) => !isOnline(device)).length,
     errors: devices.filter((device) => Boolean(device.last_diagnostics)).length,
   };
@@ -98,7 +90,7 @@ export function AdminDevices({
     setQuery('');
     setStatus('all');
     setPlatform('all');
-    setBeta('all');
+    setActivation('all');
     setVersion('all');
     setProviderId('all');
     setProviderHealth('all');
@@ -153,12 +145,6 @@ export function AdminDevices({
     URL.revokeObjectURL(link.href);
   };
 
-  const openExtend = (device: Device) => {
-    setExtendDevice(device);
-    setExtendPreset('30');
-    setCustomDate('');
-  };
-
   const openChangeProvider = (device: Device) => {
     const currentId = String(device.managed_provider_id ?? '');
     const fallback = activeProviders[0] ? String(activeProviders[0].id) : '';
@@ -176,36 +162,13 @@ export function AdminDevices({
     setProviderDevice(null);
   };
 
-  const saveExtension = () => {
-    if (!extendDevice) return;
-    const id = String(extendDevice.id);
-    let hours = 0;
-
-    if (extendPreset === 'never') {
-      // Uses a 100-year access window while preserving the existing timestamp schema.
-      hours = 24 * 365 * 100;
-    } else if (extendPreset === 'custom') {
-      const target = Date.parse(customDate);
-      if (!Number.isFinite(target) || target <= Date.now()) {
-        onMessage('Choose a future expiration date.');
-        return;
-      }
-      hours = Math.max(1, Math.ceil((target - Date.now()) / 3600000));
-    } else {
-      hours = Number(extendPreset) * 24;
-    }
-
-    onExtend(id, hours);
-    setExtendDevice(null);
-  };
-
   return (
     <div className="devicesPage">
       <div className="deviceMetricGrid">
         <DeviceMetric label="Total devices" value={counts.total} tone="blue" icon="" />
         <DeviceMetric label="Online" value={counts.online} tone="green" icon="" />
-        <DeviceMetric label="Active (beta)" value={counts.active} tone="purple" icon="" />
-        <DeviceMetric label="Expired" value={counts.expired} tone="amber" icon="" />
+        <DeviceMetric label="Active" value={counts.active} tone="purple" icon="" />
+        <DeviceMetric label="Registered" value={counts.registered} tone="amber" icon="" />
         <DeviceMetric label="Offline" value={counts.offline} tone="slate" icon="" />
         <DeviceMetric label="Errors" value={counts.errors} tone="red" icon="!" />
       </div>
@@ -231,12 +194,15 @@ export function AdminDevices({
             notifyQuery({ status: event.target.value });
           }}
           aria-label="Filter by status">
-          <option value="all">All statuses</option>
+          <option value="all">All devices</option>
           <option value="online">Online</option>
           <option value="active">Active</option>
           <option value="registered">Registered</option>
+          <option value="suspended">Suspended</option>
           <option value="revoked">Revoked</option>
-          <option value="offline">Offline / stale</option>
+          <option value="blocked">Blocked</option>
+          <option value="disabled">Disabled</option>
+          <option value="offline">Offline</option>
         </select>
         <select
           value={platform}
@@ -254,16 +220,15 @@ export function AdminDevices({
           ))}
         </select>
         <select
-          value={beta}
+          value={activation}
           onChange={(event) => {
-            setBeta(event.target.value);
+            setActivation(event.target.value);
             setPage(1);
             notifyQuery({ activation: event.target.value });
           }}
-          aria-label="Filter by beta status">
-          <option value="all">All beta statuses</option>
+          aria-label="Filter by activation history">
+          <option value="all">All activation history</option>
           <option value="active">Active</option>
-          <option value="inactive">Pending</option>
           <option value="expired">Expired</option>
           <option value="revoked">Revoked</option>
         </select>
@@ -291,11 +256,11 @@ export function AdminDevices({
         <div className="deviceTableHead">
           <span>Device</span>
           <span>Status</span>
-          <span>Beta status</span>
-          <span>Last seen</span>
-          <span>Platform</span>
-          <span>Model</span>
+          <span>Online</span>
+          <span>Provider</span>
+          <span>Provider status</span>
           <span>App version</span>
+          <span>Last seen</span>
           <span>Actions</span>
         </div>
         {visible.length ? (
@@ -307,11 +272,9 @@ export function AdminDevices({
                 providerNameById.get(String(device.managed_provider_id ?? '')) ?? 'No provider'
               }
               providerHealth={providerHealthById.get(String(device.managed_provider_id ?? '')) ?? 'Not reported'}
-              onExtend={() => openExtend(device)}
               onChangeProvider={() => openChangeProvider(device)}
               onCommand={onCommand}
               onRevoke={onRevoke}
-              onMessage={onMessage}
               onView={onView}
             />
           ))
@@ -344,83 +307,6 @@ export function AdminDevices({
         }>
          Add device
       </button>
-
-      {extendDevice ? (
-        <div className="extendModalBackdrop" role="presentation" onMouseDown={() => setExtendDevice(null)}>
-          <section
-            className="extendModal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="extend-device-title"
-            onMouseDown={(event) => event.stopPropagation()}>
-            <header>
-              <div>
-                <span className="extendEyebrow">BETA ACCESS</span>
-                <h2 id="extend-device-title">Extend device access</h2>
-                <p>
-                  {String(
-                    extendDevice.friendly_name ??
-                      extendDevice.assigned_tester_name ??
-                      extendDevice.public_device_code ??
-                      'NovaCast device',
-                  )}
-                </p>
-              </div>
-              <button className="extendClose" onClick={() => setExtendDevice(null)} aria-label="Close">
-
-              </button>
-            </header>
-
-            <div className="extendDeviceCode">
-              <small>Device ID</small>
-              <strong>{String(extendDevice.public_device_code ?? 'Unassigned')}</strong>
-            </div>
-
-            <div className="extendPresetGrid">
-              {[
-                ['7', '7 days'],
-                ['30', '30 days'],
-                ['90', '90 days'],
-                ['never', 'Never expires'],
-              ].map(([value, label]) => (
-                <button
-                  key={value}
-                  className={extendPreset === value ? 'selected' : ''}
-                  onClick={() => setExtendPreset(value as ExtendPreset)}>
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            <button
-              className={`extendCustomToggle ${extendPreset === 'custom' ? 'selected' : ''}`}
-              onClick={() => setExtendPreset('custom')}>
-              Choose a custom date
-            </button>
-
-            {extendPreset === 'custom' ? (
-              <label className="extendCustomDate">
-                Expiration date
-                <input
-                  type="datetime-local"
-                  value={customDate}
-                  min={new Date(Date.now() + 3600000).toISOString().slice(0, 16)}
-                  onChange={(event) => setCustomDate(event.target.value)}
-                />
-              </label>
-            ) : null}
-
-            <footer>
-              <button className="extendCancel" onClick={() => setExtendDevice(null)}>
-                Cancel
-              </button>
-              <button className="extendSave" onClick={saveExtension}>
-                Save extension
-              </button>
-            </footer>
-          </section>
-        </div>
-      ) : null}
 
       {providerDevice ? (
         <div
@@ -497,7 +383,6 @@ export function AdminDevices({
     </div>
   );
 }
-
 function DeviceMetric({
   label,
   value,
@@ -516,7 +401,7 @@ function DeviceMetric({
       <strong>{value}</strong>
       <span className="deviceMetricHint">
         {label === 'Total devices'
-          ? 'All beta devices'
+          ? 'All devices'
           : label === 'Errors'
             ? value
               ? 'Diagnostics reported'
@@ -531,25 +416,21 @@ function DeviceRow({
   device,
   providerName,
   providerHealth,
-  onExtend,
   onChangeProvider,
   onCommand,
   onRevoke,
-  onMessage,
   onView,
 }: {
   device: Device;
   providerName: string;
   providerHealth: string;
-  onExtend: () => void;
   onChangeProvider: () => void;
   onCommand: Action;
   onRevoke: Action;
-  onMessage: (message: string) => void;
   onView: ViewDeviceAction;
 }) {
   const id = String(device.id);
-  const active = String(device.activation_status ?? 'inactive');
+  const lifecycleStatus = String(device.status ?? 'unknown').toLowerCase();
   const online = isOnline(device);
   const name = String(
     device.friendly_name ??
@@ -557,13 +438,10 @@ function DeviceRow({
       device.public_device_code ??
       'NovaCast device',
   );
-  const remaining = device.activation_expires_at
-    ? betaRemaining(String(device.activation_expires_at))
-    : active === 'active'
-      ? 'Active'
-      : active === 'expired'
-        ? 'Expired'
-        : 'Not activated';
+  const legacy = String(device.activation_source ?? '').toLowerCase() !== ''
+    ? String(device.activation_source).toLowerCase() !== 'production'
+    : String(device.activation_status ?? '').toLowerCase() === 'expired';
+  const assignment = device.assignment_id ? 'Assigned' : 'Unassigned';
 
   return (
     <div className="deviceTableRow">
@@ -577,9 +455,14 @@ function DeviceRow({
           <small>
             {String(device.manufacturer ?? '')} {String(device.model ?? '')}
           </small>
-          <small>{providerName}</small>
-          <small>Health: {providerHealth}</small>
+          <small>Assignment: {assignment}{device.assigned_at ? ` · ${formatDate(device.assigned_at)}` : ''}</small>
+          {legacy ? <small>Legacy activation</small> : null}
         </div>
+      </div>
+
+      <div>
+        <b className={`deviceStatusBadge status-${lifecycleStatus}`}>{lifecycleStatus === 'unknown' ? 'Unknown' : lifecycleStatus[0].toUpperCase() + lifecycleStatus.slice(1)}</b>
+        {device.activation_source ? <small>{String(device.activation_source) === 'production' ? 'Production activation' : 'Legacy activation'}</small> : null}
       </div>
 
       <div className={`deviceOnline ${online ? 'online' : 'offline'}`}>
@@ -588,36 +471,23 @@ function DeviceRow({
       </div>
 
       <div>
-        <b className={`betaBadge beta-${active}`}>
-          {active === 'active'
-            ? 'Active'
-            : active === 'expired'
-              ? 'Expired'
-              : active === 'revoked'
-                ? 'Revoked'
-                : 'Inactive'}
-        </b>
-        <small>{remaining}</small>
+        <strong>{providerName}</strong>
+        <small>{assignment}</small>
       </div>
 
       <div>
-        <strong>{relative(device.last_seen_at)}</strong>
-        <small>{formatDate(device.last_seen_at)}</small>
-      </div>
-
-      <div>
-        <strong>{String(device.platform ?? '-')}</strong>
-        <small>{String(device.os_version ?? '')}</small>
-      </div>
-
-      <div>
-        <strong>{String(device.model ?? '-')}</strong>
-        <small>{String(device.device_type ?? '')}</small>
+        <strong>{providerHealth}</strong>
+        <small>Provider health</small>
       </div>
 
       <div>
         <strong>{String(device.app_version ?? '-')}</strong>
         <small>{device.app_build ? `Build ${String(device.app_build)}` : 'Not installed'}</small>
+      </div>
+
+      <div>
+        <strong>{relative(device.last_seen_at)}</strong>
+        <small>{formatDate(device.last_seen_at)}</small>
       </div>
 
       <div className="deviceActions">
@@ -626,13 +496,6 @@ function DeviceRow({
           title="View device"
           onClick={() => onView(device)}>
           View
-        </button>
-
-        <button
-          aria-label={`Extend ${name}`}
-          title="Extend access"
-          onClick={onExtend}>
-          Extend
         </button>
 
         <button
@@ -693,14 +556,4 @@ function formatDate(value: unknown) {
         minute: '2-digit',
       })
     : 'No heartbeat recorded';
-}
-
-function betaRemaining(value: string) {
-  const time = Date.parse(value);
-  if (!Number.isFinite(time)) return 'Active';
-  const hours = Math.ceil((time - Date.now()) / 3600000);
-  if (hours <= 0) return 'Expired';
-  if (hours >= 24 * 365 * 50) return 'Never expires';
-  if (hours >= 48) return `${Math.ceil(hours / 24)}d remaining`;
-  return `${hours}h remaining`;
 }

@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 
 import { AdminDiagnostics } from './AdminDiagnostics';
-import { buildDeviceActivity, readPlaybackSummary, sanitizeProviderSummary, type DeviceInspectorRow } from './deviceInspectorModel';
+import { buildDeviceActivity, deviceLifecycleStatus, hasLegacyActivationHistory, readPlaybackSummary, sanitizeProviderSummary, type DeviceInspectorRow } from './deviceInspectorModel';
 
 type InspectorTab = 'overview' | 'provider' | 'diagnostics' | 'playback' | 'activity';
 
@@ -62,19 +62,25 @@ export function DeviceInspector({
 function InspectorOverview({ device, provider }: { device: DeviceInspectorRow; provider: ReturnType<typeof sanitizeProviderSummary> }) {
   const fields: [string, unknown][] = [
     ['Device code', device.public_device_code], ['Model', device.model], ['Platform', device.platform],
-    ['App version', device.app_version], ['App build', device.app_build], ['Activation', device.activation_status],
-    ['Activation expiration', device.activation_expires_at], ['Last heartbeat', device.last_seen_at],
+    ['Device status', deviceLifecycleStatus(device)], ['Online state', String(device.status ?? '').toLowerCase() === 'online' ? 'Online' : 'Offline / stale'],
+    ['App version', device.app_version], ['App build', device.app_build], ['Last heartbeat', device.last_seen_at],
     ['Current route', device.current_route], ['Focus state', device.app_focus], ['Provider', provider.name],
     ['Provider health', provider.health],
   ];
-  return <InspectorGrid title="Operational overview" fields={fields} />;
+  return <>
+    <InspectorGrid title="Operational overview" fields={fields} />
+    {hasLegacyActivationHistory(device) ? <InspectorGrid title="Legacy activation history" fields={[
+      ['Activation source', device.activation_source],
+      ['Historical expiration', device.activation_expires_at],
+    ]} /> : null}
+  </>;
 }
 
 function InspectorProvider({ summary }: { summary: ReturnType<typeof sanitizeProviderSummary> }) {
   return <InspectorGrid title="Provider assignment and health" fields={[
     ['Provider', summary.name], ['Provider ID', summary.id], ['Provider type', summary.type],
-    ['Assignment status', summary.assignment], ['Assignment acknowledgement', summary.acknowledgement],
-    ['Health', summary.health], ['Inventory', summary.inventory], ['EPG', summary.epg], ['Last provider check', summary.lastCheck],
+    ['Assignment status', summary.assignment], ['Assigned at', summary.assignedAt], ['Assignment acknowledgement', summary.acknowledgement],
+    ['Health', summary.health], ['Provider expiration', summary.expiration], ['Inventory', summary.inventory], ['EPG', summary.epg], ['Last provider check', summary.lastCheck],
   ]} />;
 }
 

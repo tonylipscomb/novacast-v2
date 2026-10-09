@@ -131,6 +131,22 @@ jobs:
       - name: Generate Android native project
         run: npx expo prebuild --platform android --non-interactive
 
+      - name: Configure CI Gradle heap
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle_properties="android/gradle.properties"
+          memory_line='org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8'
+          test -f "$gradle_properties"
+          if grep -q '^org\.gradle\.jvmargs=' "$gradle_properties"; then
+            sed -i "s|^org\\.gradle\\.jvmargs=.*|$memory_line|" "$gradle_properties"
+          else
+            printf '\n%s\n' "$memory_line" >> "$gradle_properties"
+          fi
+          awk 'BEGIN { found=0 } /^org.gradle.jvmargs=/ { if (found++) next } { print }' "$gradle_properties" > "$gradle_properties.tmp"
+          mv "$gradle_properties.tmp" "$gradle_properties"
+          grep -Fx "$memory_line" "$gradle_properties"
+
       - name: Verify production signing configuration
         shell: bash
         env:

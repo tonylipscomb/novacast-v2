@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   LIVE_TV_CHANNEL_LIST_REVEAL_MS,
   LIVE_TV_CHANNEL_LIST_REVEAL_START_OPACITY,
+  resolveLiveCatalogCompletionStatus,
   resolveLiveChannelPanelLoaderKind,
   shouldShowLiveChannelPanelLoader,
 } from '../src/features/live/liveTvChannelPanelLoader.ts';
@@ -33,6 +34,45 @@ test('initial pending channel list shows the loader', () => {
     true,
   );
   assert.equal(resolveLiveChannelPanelLoaderKind({ channelListPending: true, channelCount: 0, hadReadyChannelList: false }), 'initial');
+});
+
+test('unreadable Live catalog generations stay loading instead of showing empty', () => {
+  assert.equal(
+    resolveLiveCatalogCompletionStatus({
+      source: 'provider-fallback',
+      publishedReadable: false,
+      publishedGeneration: 0,
+      publishedChannelCount: 0,
+      loadedChannelCount: 0,
+      hadReadyChannelList: false,
+    }),
+    'loading',
+  );
+  assert.equal(
+    resolveLiveCatalogCompletionStatus({
+      source: 'published-sqlite',
+      publishedReadable: true,
+      publishedGeneration: 12,
+      publishedChannelCount: 0,
+      loadedChannelCount: 0,
+      hadReadyChannelList: false,
+    }),
+    'empty',
+  );
+});
+
+test('last known Live list is preserved while a refresh has no rows yet', () => {
+  assert.equal(
+    resolveLiveCatalogCompletionStatus({
+      source: 'provider-fallback',
+      publishedReadable: false,
+      publishedGeneration: 0,
+      publishedChannelCount: 0,
+      loadedChannelCount: 0,
+      hadReadyChannelList: true,
+    }),
+    'ready',
+  );
 });
 
 test('category switch pending shows the loader even if previous channels remain in memory', () => {

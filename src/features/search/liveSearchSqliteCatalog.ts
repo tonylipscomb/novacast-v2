@@ -1366,7 +1366,7 @@ async function resolvePublishedLivePointer(providerId: string): Promise<Publishe
   const generation = asNumber(state?.active_generation);
   const buildingGeneration = asNumber(state?.building_generation);
   const channelCount = asNumber(state?.channel_count);
-  if (cached && cached.generation === generation && cached.channelCount === channelCount) {
+  if (cached && cached.generation === generation && cached.channelCount === channelCount && cached.status === (state?.status ?? null)) {
     logLiveReadTiming({
       event: 'published-pointer-timing',
       providerId: id,
@@ -1380,7 +1380,7 @@ async function resolvePublishedLivePointer(providerId: string): Promise<Publishe
     });
     return cached;
   }
-  const ready = Boolean(state && generation > 0 && channelCount > 0);
+  const ready = Boolean(state && state.status === 'ready' && generation > 0);
   const pointer: PublishedLivePointer = {
     ready,
     generation,
@@ -1394,7 +1394,9 @@ async function resolvePublishedLivePointer(providerId: string): Promise<Publishe
         ? 'active-generation-not-positive'
         : ready
           ? null
-          : 'active-generation-has-zero-rows',
+          : state.status !== 'ready'
+            ? 'published-state-not-ready'
+            : 'active-generation-not-readable',
   };
   publishedPointerCache.set(id, pointer);
   logLiveReadTiming({
@@ -1432,7 +1434,7 @@ async function loadPublishedLiveCatalogState(
 
   const summaryStartedAt = Date.now();
   const summary = await readGenerationSummary(providerId, pointer.generation);
-  const ready = summary.channelCount > 0 || pointer.channelCount > 0;
+  const ready = pointer.status === 'ready' && pointer.generation > 0;
   return {
     ready,
     generation: pointer.generation,
@@ -1443,7 +1445,7 @@ async function loadPublishedLiveCatalogState(
     stateRowPresent: true,
     buildingGeneration: pointer.buildingGeneration,
     stateChannelCount: pointer.channelCount,
-    unreadinessReason: ready ? null : 'active-generation-has-zero-rows',
+    unreadinessReason: ready ? null : 'active-generation-not-readable',
     scannedAllChannels: summary.scannedAllChannels,
     summaryMs: Date.now() - summaryStartedAt,
   } as PublishedLiveCatalogState & { scannedAllChannels?: boolean; summaryMs?: number };

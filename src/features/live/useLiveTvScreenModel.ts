@@ -50,6 +50,7 @@ import {
 } from '@/features/search/liveSearchSqliteCatalog';
 import { ingestLiveChannelsYielding, ingestLiveSearchCategories } from '@/features/search/repositories/liveSearchRepository';
 import { resetLiveTvFocusIdle, runAfterLiveTvFocusIdle } from './liveTvFocusIdle';
+import { resolveLiveCatalogCompletionStatus } from './liveTvChannelPanelLoader';
 import { computeLiveStartupKey, shouldRestartLiveStartup } from './liveTvStartupGate';
 import {
   buildLiveTvChannelEpgMap,
@@ -852,11 +853,21 @@ export function useLiveTvScreenModel(
       });
 
       if (!providerCategories.length) {
-        channelsBaselineRef.current = [];
-        setChannels([]);
+        const completionStatus = resolveLiveCatalogCompletionStatus({
+          source: source ?? 'none',
+          publishedReadable: publishedState.ready,
+          publishedGeneration: publishedState.generation,
+          publishedChannelCount: publishedState.channelCount,
+          loadedChannelCount: 0,
+          hadReadyChannelList: keepExistingList,
+        });
+        if (completionStatus !== 'ready') {
+          channelsBaselineRef.current = [];
+          setChannels([]);
+        }
         setSelectedCategoryId('');
-        setChannelListPending(false);
-        setStatus('empty');
+        setChannelListPending(completionStatus === 'loading');
+        setStatus(completionStatus);
         logLiveScreenSource({
           providerId: bundle.providerId,
           source,
@@ -967,12 +978,20 @@ export function useLiveTvScreenModel(
       updateCategoryCount(resolvedCategoryId, nextChannels.length);
 
       if (!nextChannels.length) {
-        if (!keepExistingList) {
+        const completionStatus = resolveLiveCatalogCompletionStatus({
+          source: source ?? 'none',
+          publishedReadable: publishedState.ready,
+          publishedGeneration: publishedState.generation,
+          publishedChannelCount: publishedState.channelCount,
+          loadedChannelCount: 0,
+          hadReadyChannelList: keepExistingList,
+        });
+        if (completionStatus !== 'ready') {
           channelsBaselineRef.current = [];
           setChannels([]);
         }
-        setChannelListPending(false);
-        setStatus(keepExistingList ? 'ready' : 'empty');
+        setChannelListPending(completionStatus === 'loading');
+        setStatus(completionStatus);
         logLiveScreenSource({
           providerId: bundle.providerId,
           source,
@@ -1096,6 +1115,7 @@ export function useLiveTvScreenModel(
 
   const loadCategoriesRef = useRef(loadCategories);
   const lastStartupKeyRef = useRef<string | null>(null);
+  const lastStartupProviderIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     loadCategoriesRef.current = loadCategories;
@@ -1109,7 +1129,32 @@ export function useLiveTvScreenModel(
       // generation change, or a remount all change the key and still run.
       return;
     }
+    const providerId = bundle?.providerId ?? null;
+    if (lastStartupProviderIdRef.current !== null && lastStartupProviderIdRef.current !== providerId) {
+      // Last-known-good data is safe across same-provider generation refreshes,
+      // but never across a provider identity change.
+      channelsBaselineRef.current = [];
+      channelCacheRef.current.clear();
+      publishedSnapshotRef.current = { generation: 0, channelCount: 0 };
+      categoryMetadataKeyRef.current = null;
+      catalogSourceRef.current = null;
+      recentsSessionOrderRef.current = null;
+      recentsSessionChannelsRef.current.clear();
+      epgFetchedIdsRef.current.clear();
+      epgInFlightIdsRef.current.clear();
+      focusedEpgGenerationRef.current += 1;
+      focusedEpgPendingChannelRef.current = null;
+      setChannels([]);
+      setBaseCategories([]);
+      setEpgByChannelId(new Map());
+      setEpgPendingChannelIds(new Set());
+      setSelectedCategoryId('');
+      setChannelListPending(true);
+      setStatus('loading');
+      setErrorMessage(null);
+    }
     lastStartupKeyRef.current = startupKey;
+    lastStartupProviderIdRef.current = providerId;
     mountStartedAtRef.current = Date.now();
     beginLivePerformanceSession('live_tv', { providerIdPresent: Boolean(bundle?.providerId) });
     recordLivePerformanceEvent('live_entry_milestone', { milestone: 'screen-mounted' });

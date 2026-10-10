@@ -37,6 +37,7 @@ import { bindDeviceAssignmentRealtimeLifecycle, sendDeviceHeartbeat } from '@/fe
 import { isStartupReady, markStartupReady, subscribeStartupReadiness } from '@/features/startup/startupReadiness';
 import { beforeSendNovaEvent, initializeNovaSentryContext, setNovaLifecycleContext, setNovaPlaybackContext, setNovaProviderContext, setNovaRouteContext, setNovaStartupContext } from '@/features/diagnostics/sentryDiagnostics';
 import { initializeCatalogAudit, markCatalogAuditFocus } from '@/features/diagnostics/novaCastCatalogAudit';
+import { noteCatalogForegroundInput } from '@/features/catalog/catalogForegroundPriority';
 import { initializeEarlyBootAudit, earlyBootMark, earlyBootTimed } from '@/features/diagnostics/earlyBootAudit';
 import {
   initializeFocusLatencyAudit,
@@ -103,17 +104,30 @@ export default function RootLayout() {
     }
     subscription.__NOVACAST_AUDIT_TV = true;
 
-    const onRemote = (eventType?: string) => {
+    const onRemote = (event?: { eventType?: string; keyCode?: number }) => {
+      const eventType = event?.eventType;
       if (!eventType || eventType === 'blur' || eventType === 'focus') {
         return;
       }
       noteFocusLatencyKeyEvent(eventType);
       markCatalogAuditFocus(`tv:${eventType}`);
+      const normalizedEventType = eventType.toLowerCase();
+      const directionalEvent =
+        normalizedEventType === 'up' ||
+        normalizedEventType === 'down' ||
+        normalizedEventType === 'left' ||
+        normalizedEventType === 'right' ||
+        normalizedEventType === 'arrowup' ||
+        normalizedEventType === 'arrowdown' ||
+        normalizedEventType === 'arrowleft' ||
+        normalizedEventType === 'arrowright' ||
+        [19, 20, 21, 22].includes(event?.keyCode ?? -1);
+      if (directionalEvent) {
+        noteCatalogForegroundInput();
+      }
     };
 
-    const sub = DeviceEventEmitter.addListener('onTVRemoteEvent', (event: { eventType?: string }) => {
-      onRemote(event?.eventType);
-    });
+    const sub = DeviceEventEmitter.addListener('onTVRemoteEvent', onRemote);
 
     let disableTvHandler: (() => void) | null = null;
     try {
@@ -121,14 +135,14 @@ export default function RootLayout() {
         TVEventHandler?: new () => {
           enable: (
             component: unknown,
-            handler: (_component: unknown, event: { eventType?: string }) => void,
+            handler: (_component: unknown, event: { eventType?: string; keyCode?: number }) => void,
           ) => void;
           disable: () => void;
         };
       };
       if (typeof reactNative.TVEventHandler === 'function') {
         const handler = new reactNative.TVEventHandler();
-        handler.enable(null, (_component, event) => onRemote(event?.eventType));
+        handler.enable(null, (_component, event) => onRemote(event));
         disableTvHandler = () => handler.disable();
       }
     } catch {

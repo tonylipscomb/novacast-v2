@@ -763,8 +763,11 @@ export async function writeCatalogItemsFromSourceBudgeted<T>(
       {
         kind: options?.mapKind ?? (handle.mediaType === 'movie' ? 'movieMapping' : 'itemWrites'),
         writeKind: handle.mediaType === 'movie' ? 'movieItemWrites' : 'itemWrites',
-        minItems: handle.mediaType === 'movie' ? 8 : 4,
-        maxItems: handle.mediaType === 'movie' ? 12 : 24,
+        // Keep one native item statement short enough that a foreground D-pad
+        // interaction is not trapped behind a 12/24-row SQLite transaction.
+        // Correctness is unchanged: every item is still streamed and committed.
+        minItems: 4,
+        maxItems: 4,
         hardMs: handle.mediaType === 'movie' ? 100 : undefined,
         pressureMode: handle.mediaType === 'movie',
         diagnostic: true,

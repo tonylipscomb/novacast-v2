@@ -15,6 +15,8 @@ export {
 } from './catalogDatabase.ts';
 export {
   getCatalogBackgroundWriteYield,
+  noteCatalogForegroundInput,
+  isCatalogInputPriorityActive,
   getCatalogUiSurface,
   subscribeCatalogUiSurface,
   hasActiveCatalogForegroundRead,

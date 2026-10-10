@@ -9,6 +9,8 @@ export type CatalogUiSurface = 'live' | 'movies' | 'series' | 'other';
 
 let catalogUiSurface: CatalogUiSurface = 'other';
 let activeForegroundCatalogReads = 0;
+export const CATALOG_INPUT_PRIORITY_WINDOW_MS = 300;
+let lastCatalogInputAtMs = 0;
 export const LIVE_CATALOG_TUNING_COOLDOWN_MS = 1_200;
 let liveCatalogTuningUntilMs = 0;
 let liveCatalogResumeLogged = false;
@@ -42,6 +44,15 @@ export function getCatalogUiSurface(): CatalogUiSurface {
 
 export function isCatalogUiBrowseActive() {
   return catalogUiSurface === 'live' || catalogUiSurface === 'movies' || catalogUiSurface === 'series';
+}
+
+/** Mark a physical D-pad interaction so background catalog writes yield briefly. */
+export function noteCatalogForegroundInput(nowMs = Date.now()) {
+  lastCatalogInputAtMs = nowMs;
+}
+
+export function isCatalogInputPriorityActive(nowMs = Date.now()) {
+  return lastCatalogInputAtMs > 0 && nowMs - lastCatalogInputAtMs < CATALOG_INPUT_PRIORITY_WINDOW_MS;
 }
 
 export function beginCatalogForegroundRead(): () => void {
@@ -82,6 +93,9 @@ export async function waitForForegroundCatalogReadsToDrain(): Promise<void> {
 
 export function getCatalogBackgroundWriteYield(): { pauseMs: number; reason: string } {
   const liveWorkload = getLiveTvWorkload();
+  if (isCatalogInputPriorityActive()) {
+    return { pauseMs: 120, reason: 'input-priority' };
+  }
   if (catalogUiSurface === 'live' && liveWorkload.searchOverlayVisible) {
     return { pauseMs: 300, reason: 'live-search-foreground' };
   }
@@ -157,6 +171,7 @@ export async function waitForLiveCatalogTuningToSettle() {
 export function resetCatalogForegroundPriorityForTests() {
   catalogUiSurface = 'other';
   activeForegroundCatalogReads = 0;
+  lastCatalogInputAtMs = 0;
   foregroundCatalogReadDrainWaiters.clear();
   liveCatalogTuningUntilMs = 0;
   liveCatalogResumeLogged = false;

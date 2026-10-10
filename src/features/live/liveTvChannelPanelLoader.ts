@@ -11,6 +11,35 @@ export type LiveChannelPanelLoaderEvent =
 
 export type LiveChannelPanelLoaderKind = 'initial' | 'category';
 
+export type LiveCatalogCompletionStatus = 'loading' | 'ready' | 'empty';
+
+/**
+ * A zero-result read is not an empty catalog unless it came from a readable,
+ * generation-pinned publication. During sync/bootstrap, keep the loader (or
+ * the last known list) visible instead of replacing it with an empty state.
+ */
+export function resolveLiveCatalogCompletionStatus(input: {
+  source: 'published-sqlite' | 'provider-fallback' | 'none';
+  publishedReadable: boolean;
+  publishedGeneration: number;
+  publishedChannelCount: number;
+  loadedChannelCount: number;
+  hadReadyChannelList: boolean;
+}): LiveCatalogCompletionStatus {
+  if (input.loadedChannelCount > 0 || input.hadReadyChannelList) {
+    return 'ready';
+  }
+  if (
+    input.source === 'published-sqlite' &&
+    input.publishedReadable &&
+    input.publishedGeneration > 0 &&
+    input.publishedChannelCount === 0
+  ) {
+    return 'empty';
+  }
+  return 'loading';
+}
+
 export function resolveLiveChannelPanelLoaderKind(input: {
   channelListPending: boolean;
   channelCount: number;

@@ -456,6 +456,7 @@ export function LiveTvScreen() {
   const [searchRestoreChannelId, setSearchRestoreChannelId] = useState<string | null>(null);
   const [searchCloseFocusHold, setSearchCloseFocusHold] = useState(false);
   const searchToolbarRef = useRef<View | null>(null);
+  const searchBoundaryFocusFrameRef = useRef<number | null>(null);
   const searchCloseHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const liveSearchBrowseSnapshotRef = useRef<LiveSearchBrowseSnapshot | null>(null);
   const liveSearchResultIdsRef = useRef<string[]>([]);
@@ -1468,9 +1469,30 @@ export function LiveTvScreen() {
     const nextRight = channelRef ? findNodeHandle(channelRef) ?? undefined : undefined;
     setCategoryNextFocusRightHandle((current) => (current === nextRight ? current : nextRight));
 
-    const searchHandle = searchToolbarRef.current ? findNodeHandle(searchToolbarRef.current) ?? undefined : undefined;
-    setChannelNextFocusUpHandle((current) => (current === searchHandle ? current : searchHandle));
+    if (searchBoundaryFocusFrameRef.current != null) {
+      cancelAnimationFrame(searchBoundaryFocusFrameRef.current);
+      searchBoundaryFocusFrameRef.current = null;
+    }
+
+    const resolveSearchHandle = (attempt: number) => {
+      const searchHandle = searchToolbarRef.current ? findNodeHandle(searchToolbarRef.current) ?? undefined : undefined;
+      setChannelNextFocusUpHandle((current) => (current === searchHandle ? current : searchHandle));
+      if (searchHandle == null && attempt < 3) {
+        searchBoundaryFocusFrameRef.current = requestAnimationFrame(() => {
+          searchBoundaryFocusFrameRef.current = null;
+          resolveSearchHandle(attempt + 1);
+        });
+      }
+    };
+    resolveSearchHandle(0);
   }, [channels]);
+
+  useEffect(() => () => {
+    if (searchBoundaryFocusFrameRef.current != null) {
+      cancelAnimationFrame(searchBoundaryFocusFrameRef.current);
+      searchBoundaryFocusFrameRef.current = null;
+    }
+  }, []);
 
   const registerChannelRowRef = useCallback((channelId: string, instance: ElementRef<typeof View> | null) => {
     if (instance) {

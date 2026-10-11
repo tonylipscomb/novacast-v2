@@ -147,6 +147,7 @@ export function SeriesScreen() {
   }, [activeProviderId]);
   const seriesDetailPopupOpenRef = useRef(false);
   const seriesDetailPopupCloseInFlightRef = useRef(false);
+  const lastSeriesDetailPopupCloseAtRef = useRef(0);
   /**
    * Stage 4.2O.1 fix (mirrors Movies' `v2CloseFocusTargetId`): force the
    * origin Series card focusable in the same synchronous close transition,
@@ -415,6 +416,7 @@ export function SeriesScreen() {
 
       // Immediate guest dismiss — browse stays mounted underneath.
       seriesDetailPopupOpenRef.current = false;
+      lastSeriesDetailPopupCloseAtRef.current = Date.now();
       setSeriesDetailPopup({ open: false, series: null, originItemId: null });
       setEpisodePlaybackError(null);
 
@@ -772,6 +774,12 @@ export function SeriesScreen() {
           // BackHandler listener registration order, which Movies found to be
           // unreliable on Android) so the V2 popup always wins. The popup
           // itself handles closing an open collection menu before this path.
+          if (Date.now() - lastSeriesDetailPopupCloseAtRef.current < 600) {
+            // Physical remotes can deliver a repeated Back event after the
+            // popup has already closed. Consume that tail event so it cannot
+            // fall through to the browse/router handler.
+            return true;
+          }
           if (seriesDetailPopupOpenRef.current) {
             closeSeriesDetailPopup('back');
             return true;

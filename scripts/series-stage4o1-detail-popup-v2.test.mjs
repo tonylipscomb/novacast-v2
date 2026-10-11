@@ -85,6 +85,12 @@ test('1. SeriesScreen renders SeriesDetailPopupV2', () => {
   assert.match(screen, /<SeriesDetailPopupV2/);
 });
 
+test('repeated Back after popup close cannot fall through to browse/router handling', () => {
+  assert.match(screen, /lastSeriesDetailPopupCloseAtRef/);
+  assert.match(screen, /Date\.now\(\) - lastSeriesDetailPopupCloseAtRef\.current < 600/);
+  assert.match(screen, /Immediate guest dismiss/);
+});
+
 // 2. Old SeriesDetailOverlay is not active.
 test('2. Old SeriesDetailOverlay is not active', () => {
   assert.doesNotMatch(screen, /<SeriesDetailOverlay/);

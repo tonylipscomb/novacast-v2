@@ -21,6 +21,8 @@ test('channel rows keep normal vertical movement and only the top row targets Se
 test('top channel Up targets Search and never directly targets the navbar', () => {
   assert.match(screen, /setChannelNextFocusUpHandle/);
   assert.match(screen, /findNodeHandle\(searchToolbarRef\.current\)/);
+  assert.match(screen, /resolveSearchHandle/);
+  assert.match(screen, /attempt < 3/);
   assert.match(screen, /searchNextFocusDown=\{channelNextFocusUpHandle\}/);
   assert.doesNotMatch(channelList, /nextFocusUp=\{[^}]*nav|nextFocusUp=\{[^}]*navbar/i);
 });

@@ -995,6 +995,7 @@ function SearchOverlayContent({
         loadingMore={controller.status === 'loading' && controller.results.length > 0}
         focusUpHandle={resultsFocusUpHandle}
         listHeader={posterListHeader}
+        interactive={interactive}
       />
     ) : (
       <SearchResults
@@ -1014,6 +1015,7 @@ function SearchOverlayContent({
         onEndReached={scope === 'live' ? handleLoadMore : undefined}
         queryLength={trimmedQuery.length}
         overlayVisible={visible}
+        interactive={interactive}
       />
     )
   ) : null;

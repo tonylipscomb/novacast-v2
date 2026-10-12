@@ -35,6 +35,7 @@ type SearchPosterCardProps = {
   nextFocusLeft?: number;
   searchQuery?: string;
   restoreTargetRef?: MutableRefObject<View | null>;
+  interactive?: boolean;
 };
 
 function makeInitials(title: string) {
@@ -56,6 +57,7 @@ function searchPosterCardPropsAreEqual(previous: SearchPosterCardProps, next: Se
     previous.onPress === next.onPress &&
     previous.searchQuery === next.searchQuery
     && previous.restoreTargetRef === next.restoreTargetRef
+    && previous.interactive === next.interactive
   );
 }
 
@@ -68,6 +70,7 @@ export const SearchPosterCard = memo(function SearchPosterCard({
   nextFocusLeft,
   searchQuery = '',
   restoreTargetRef,
+  interactive = true,
 }: SearchPosterCardProps) {
   const { theme } = useAppTheme();
   const focusChrome = useMemo(() => createMoviePosterFocusChrome(theme), [theme]);
@@ -117,7 +120,7 @@ export const SearchPosterCard = memo(function SearchPosterCard({
   return (
     <Pressable
       ref={setCardRef}
-      focusable
+      focusable={interactive}
       accessibilityRole="button"
       accessibilityLabel={`Open ${result.type} ${result.title}`}
       onFocus={() => {

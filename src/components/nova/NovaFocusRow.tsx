@@ -27,6 +27,7 @@ type NovaFocusRowProps = {
   nextFocusDown?: number;
   nextFocusLeft?: number;
   nativeRef?: RefObject<View | null>;
+  focusable?: boolean;
 };
 
 export function NovaFocusRow({
@@ -48,6 +49,7 @@ export function NovaFocusRow({
   nextFocusDown,
   nextFocusLeft,
   nativeRef,
+  focusable = true,
 }: NovaFocusRowProps) {
   const [selfFocused, setSelfFocused] = useState(false);
   const showFocused = selfFocused;
@@ -55,7 +57,7 @@ export function NovaFocusRow({
   return (
     <Pressable
       ref={nativeRef}
-      focusable
+      focusable={focusable}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel ?? title}
       onPress={onPress}

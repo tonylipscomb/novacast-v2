@@ -40,6 +40,7 @@ type SearchPosterGridProps = {
   focusLeftHandle?: number;
   restoreResultKey?: string | null;
   restoreResultRef?: React.MutableRefObject<View | null>;
+  interactive?: boolean;
 };
 
 function isPosterResult(result: SearchResult): result is MovieSearchResult | SeriesSearchResult {
@@ -71,6 +72,7 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
   focusLeftHandle,
   restoreResultKey,
   restoreResultRef,
+  interactive = true,
 }: SearchPosterGridProps) {
   void focusedResultKey;
   const { width } = useWindowDimensions();
@@ -95,6 +97,16 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
 
   posterResultsRef.current = posterResults;
   columnsRef.current = columns;
+
+  useEffect(() => {
+    if (!interactive) {
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      pendingScrollRef.current = null;
+    }
+  }, [interactive]);
 
   useEffect(() => {
     onFocusResultRef.current = onFocusResult;
@@ -147,6 +159,10 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
   }, []);
 
   const executePendingScroll = useCallback((source: string) => {
+    if (!interactive) {
+      pendingScrollRef.current = null;
+      return;
+    }
     const pending = pendingScrollRef.current;
     const activeRequestId = getActiveMoviesSearchRequestId();
     const decision = decideMoviesSearchScrollExecution({
@@ -219,7 +235,7 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
       });
       // Do not retry invalid / thrown scrolls.
     }
-  }, []);
+  }, [interactive]);
 
   const scheduleScrollToFocusedItem = useCallback(
     (itemIndex: number, reason: string) => {
@@ -256,10 +272,13 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
 
   const handleFocus = useCallback(
     (key: string, index: number) => {
+      if (!interactive) {
+        return;
+      }
       onFocusResultRef.current?.(key);
       scheduleScrollToFocusedItem(index, 'focus-keep-visible');
     },
-    [scheduleScrollToFocusedItem],
+    [interactive, scheduleScrollToFocusedItem],
   );
 
   const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken[] }) => {
@@ -300,13 +319,26 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
             nextFocusUp={isFirstRow ? focusUpHandle : undefined}
             nextFocusLeft={isFirstColumn ? focusLeftHandle : undefined}
             restoreTargetRef={restoreResultKey === key ? restoreResultRef : undefined}
+            interactive={interactive}
             onFocus={() => handleFocus(key, index)}
             onPress={() => onSelectResultRef.current?.(item)}
           />
         </View>
       );
     },
-    [columnWidth, columns, focusLeftHandle, focusUpHandle, focusedMovieId, focusedResultKey, handleFocus, searchQuery],
+    [
+      columnWidth,
+      columns,
+      focusLeftHandle,
+      focusUpHandle,
+      focusedMovieId,
+      focusedResultKey,
+      handleFocus,
+      interactive,
+      restoreResultKey,
+      restoreResultRef,
+      searchQuery,
+    ],
   );
 
   const keyExtractor = useCallback((item: MovieSearchResult | SeriesSearchResult) => searchResultKey(item), []);
@@ -363,6 +395,11 @@ export const SearchPosterGrid = memo(function SearchPosterGrid({
       ListHeaderComponent={listHeaderElement}
       ListFooterComponent={listFooterElement}
       renderItem={renderItem}
+      scrollEnabled={interactive}
+      focusable={interactive}
+      accessible={interactive}
+      importantForAccessibility={interactive ? 'auto' : 'no-hide-descendants'}
+      accessibilityElementsHidden={!interactive}
     />
   );
 });

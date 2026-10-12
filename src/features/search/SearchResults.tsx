@@ -54,6 +54,7 @@ type SearchResultsProps = {
   onToggleLiveFavorite?: (result: LiveSearchResult) => void;
   onFocusLiveResult?: (result: LiveSearchResult | null) => void;
   consumeLiveFavoriteHoldSuppression?: (id: string) => boolean;
+  interactive?: boolean;
 };
 
 function kindLabel(type: SearchResult['type']) {
@@ -122,6 +123,7 @@ function ResultRow({
   onToggleLiveFavorite,
   onFocusLiveResult,
   consumeLiveFavoriteHoldSuppression,
+  interactive = true,
 }: {
   result: SearchResult;
   index: number;
@@ -136,6 +138,7 @@ function ResultRow({
   onToggleLiveFavorite?: (result: LiveSearchResult) => void;
   onFocusLiveResult?: (result: LiveSearchResult | null) => void;
   consumeLiveFavoriteHoldSuppression?: (id: string) => boolean;
+  interactive?: boolean;
 }) {
   const key = searchResultKey(result);
   const isLive = result.type === 'live';
@@ -157,6 +160,7 @@ function ResultRow({
         onToggleFavorite={onToggleLiveFavorite}
         onFocusLiveResult={onFocusLiveResult}
         consumeLiveFavoriteHoldSuppression={consumeLiveFavoriteHoldSuppression}
+        interactive={interactive}
       />
     );
   }
@@ -173,6 +177,7 @@ function ResultRow({
       focusChrome="none"
       nextFocusUp={index === 0 ? focusUpHandle : undefined}
       nextFocusLeft={index === 0 ? focusLeftHandle : undefined}
+      focusable={interactive}
       onFocus={() => {
         setIsFocused(true);
         onFocusResult?.(key);
@@ -211,6 +216,7 @@ function LiveSearchResultRow({
   onToggleFavorite,
   onFocusLiveResult,
   consumeLiveFavoriteHoldSuppression,
+  interactive = true,
 }: {
   result: LiveSearchResult;
   isFavorite: boolean;
@@ -223,6 +229,7 @@ function LiveSearchResultRow({
   onToggleFavorite?: (result: LiveSearchResult) => void;
   onFocusLiveResult?: (result: LiveSearchResult | null) => void;
   consumeLiveFavoriteHoldSuppression?: (id: string) => boolean;
+  interactive?: boolean;
 }) {
   const key = searchResultKey(result);
   const rowRef = useRef<ViewType | null>(null);
@@ -263,7 +270,7 @@ function LiveSearchResultRow({
   return (
     <Pressable
       ref={assignRowRef}
-      focusable
+      focusable={interactive}
       accessible
       accessibilityRole="button"
       accessibilityLabel={`Open Live ${result.title}`}
@@ -325,7 +332,7 @@ function LiveSearchResultRow({
           const handle = instance ? findNodeHandle(instance) ?? undefined : undefined;
           setFavoriteHandle((current) => (current === handle ? current : handle));
         }}
-        focusable
+        focusable={interactive}
         accessible
         accessibilityRole="button"
         accessibilityLabel={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
@@ -382,6 +389,7 @@ function StaticSearchResults({
   onToggleLiveFavorite,
   onFocusLiveResult,
   consumeLiveFavoriteHoldSuppression,
+  interactive = true,
 }: SearchResultsProps) {
   void focusedResultKey;
   void emphasized;
@@ -405,6 +413,7 @@ function StaticSearchResults({
           onToggleLiveFavorite={onToggleLiveFavorite}
           onFocusLiveResult={onFocusLiveResult}
           consumeLiveFavoriteHoldSuppression={consumeLiveFavoriteHoldSuppression}
+          interactive={interactive}
         />
       ))}
     </View>
@@ -429,6 +438,7 @@ function FollowFocusSearchResults({
   onEndReached,
   queryLength = 0,
   overlayVisible = true,
+  interactive = true,
 }: SearchResultsProps) {
   const listRef = useRef<FlatList<SearchResult>>(null);
   const visibleRangeRef = useRef<{ first: number; last: number } | null>(null);
@@ -437,6 +447,9 @@ function FollowFocusSearchResults({
   const applyScrollPlan = useCallback(
     (plan: LiveSearchFocusScrollPlan, source: string, channelId: string | null) => {
       if (plan.action !== 'scroll') {
+        return;
+      }
+      if (!interactive) {
         return;
       }
       if (lastScrolledIndexRef.current === plan.index) {
@@ -480,11 +493,14 @@ function FollowFocusSearchResults({
         });
       }
     },
-    [overlayVisible, queryLength],
+    [interactive, overlayVisible, queryLength],
   );
 
   const handleResultFocus = useCallback(
     (key: string, index: number, channelId: string) => {
+      if (!interactive) {
+        return;
+      }
       onFocusResult?.(key);
       logLiveSearchFocus({
         event: 'result-focus',
@@ -504,15 +520,18 @@ function FollowFocusSearchResults({
       });
       applyScrollPlan(plan, 'focus', channelId);
     },
-    [applyScrollPlan, onFocusResult, overlayVisible, queryLength, results.length],
+    [applyScrollPlan, interactive, onFocusResult, overlayVisible, queryLength, results.length],
   );
 
   useEffect(() => {
+    if (!interactive) {
+      return;
+    }
     lastScrolledIndexRef.current = null;
-  }, [results]);
+  }, [interactive, results]);
 
   useEffect(() => {
-    if (!restoreResultKey) {
+    if (!interactive || !restoreResultKey) {
       return;
     }
     const restoreIndex = results.findIndex((result) => searchResultKey(result) === restoreResultKey);
@@ -537,7 +556,7 @@ function FollowFocusSearchResults({
       reason: 'restore',
     });
     applyScrollPlan(plan, 'restore', channelId);
-  }, [applyScrollPlan, overlayVisible, queryLength, restoreResultKey, results]);
+  }, [applyScrollPlan, interactive, overlayVisible, queryLength, restoreResultKey, results]);
 
   const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: ViewToken[] }) => {
     visibleRangeRef.current = visibleRangeFromViewableItems(viewableItems);
@@ -597,7 +616,15 @@ function FollowFocusSearchResults({
       viewabilityConfig={VIEWABILITY_CONFIG}
       keyboardShouldPersistTaps="handled"
       showsVerticalScrollIndicator={false}
+      scrollEnabled={interactive}
+      focusable={interactive}
+      accessible={interactive}
+      importantForAccessibility={interactive ? 'auto' : 'no-hide-descendants'}
+      accessibilityElementsHidden={!interactive}
       onScrollToIndexFailed={(info) => {
+        if (!interactive) {
+          return;
+        }
         const fallback = planLiveSearchScrollToIndexFailedFallback({
           index: info.index,
           averageItemLength: info.averageItemLength || LIVE_SEARCH_RESULT_ROW_HEIGHT,
@@ -611,6 +638,9 @@ function FollowFocusSearchResults({
         });
         listRef.current?.scrollToOffset({ offset: fallback.offset, animated: false });
         requestAnimationFrame(() => {
+          if (!interactive) {
+            return;
+          }
           try {
             listRef.current?.scrollToIndex({
               index: fallback.retryIndex,

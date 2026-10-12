@@ -7,6 +7,10 @@ const searchOverlay = fs.readFileSync('src/features/search/SearchOverlay.tsx', '
 const searchScreen = fs.readFileSync('src/features/search/SearchScreen.tsx', 'utf8');
 const seriesPopup = fs.readFileSync('src/features/series/components/SeriesDetailPopupV2.tsx', 'utf8');
 const providerSeriesDataSource = fs.readFileSync('src/features/series/data/ProviderSeriesDataSource.ts', 'utf8');
+const searchResults = fs.readFileSync('src/features/search/SearchResults.tsx', 'utf8');
+const searchPosterGrid = fs.readFileSync('src/features/search/SearchPosterGrid.tsx', 'utf8');
+const searchPosterCard = fs.readFileSync('src/features/search/SearchPosterCard.tsx', 'utf8');
+const novaFocusRow = fs.readFileSync('src/components/nova/NovaFocusRow.tsx', 'utf8');
 
 test('search media details reuse the accepted V2 popup implementations', () => {
   assert.match(searchLayer, /import \{ MovieDetailPopupV2 \}/);
@@ -60,6 +64,30 @@ test('Series Search hosts search-origin detail inside the Search overlay', () =>
   assert.match(seriesScreen, /setSearchOriginResultKey\(`series:\$\{result\.id\}`\)/);
   assert.match(seriesScreen, /setSeriesDetailPopup\(\{ open: true, series, originItemId: series\.id \}\)/);
   assert.doesNotMatch(seriesScreen, /handleSearchSelect[\s\S]{0,300}setSearchOpen\(false\)/);
+});
+
+test('Series Search locks every result surface while hosted detail is visible', () => {
+  assert.match(searchOverlay, /<SearchPosterGrid/);
+  assert.match(searchOverlay, /<SearchResults/);
+  assert.equal((searchOverlay.match(/interactive=\{interactive\}/g) ?? []).length, 2);
+  assert.match(searchPosterGrid, /scrollEnabled=\{interactive\}/);
+  assert.match(searchPosterGrid, /focusable=\{interactive\}/);
+  assert.match(searchPosterGrid, /accessibilityElementsHidden=\{!interactive\}/);
+  assert.match(searchPosterCard, /focusable=\{interactive\}/);
+  assert.match(searchResults, /scrollEnabled=\{interactive\}/);
+  assert.match(searchResults, /focusable=\{interactive\}/);
+  assert.match(searchResults, /importantForAccessibility=\{interactive \? 'auto' : 'no-hide-descendants'\}/);
+  assert.match(searchResults, /if \(!interactive\) \{\s*return;\s*\}/);
+  assert.match(novaFocusRow, /focusable = true/);
+  assert.match(novaFocusRow, /focusable=\{focusable\}/);
+});
+
+test('Series Search preserves the originating result until intentional detail dismissal', () => {
+  const seriesScreen = fs.readFileSync('src/features/series/SeriesScreen.tsx', 'utf8');
+  assert.match(searchOverlay, /if \(!visible \|\| detailOpen \|\| !restoreFocusResultKey\)/);
+  assert.match(searchOverlay, /reason: 'restore-after-hosted-detail-close'/);
+  assert.match(searchOverlay, /isActive: \(\) => visible && !detailOpen/);
+  assert.match(seriesScreen, /retainMounted=\{searchOpen \|\| seriesDetailPopup\.open \|\| playbackUiActive\}/);
 });
 
 test('Series detail hydration keeps the sanitized provider audit at the data boundary', () => {

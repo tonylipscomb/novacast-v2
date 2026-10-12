@@ -21,6 +21,7 @@ import * as ReactNative from 'react-native';
 import {
   Platform,
   BackHandler,
+  InteractionManager,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -595,6 +596,7 @@ export function SeriesDetailPopupV2({
   const [posterFailed, setPosterFailed] = useState(false);
   const closeGuardRef = useRef(0);
   const wasVisibleRef = useRef(false);
+  const focusRestoreCancelRef = useRef<(() => void) | null>(null);
 
   const registerDetailHandle = useCallback((id: string, instance: ElementRef<typeof Pressable> | null) => {
     if (instance == null) {
@@ -792,25 +794,42 @@ export function SeriesDetailPopupV2({
 
   // Initial focus: Play/Resume preferred, else the first enabled action.
   useEffect(() => {
+    focusRestoreCancelRef.current?.();
+    focusRestoreCancelRef.current = null;
     if (!visible || !initialFocusActionId) {
       return;
     }
+    // Playback/native focus restoration can run after the popup is revealed.
+    // Reclaim focus through the shared animation-frame helper instead of a
+    // fixed delay, and keep retrying only while the popup owns the screen.
     let cancelled = false;
-    const timer = setTimeout(
-      () => {
-        if (cancelled) return;
-        const target = actionRefs.current.get(initialFocusActionId);
-        try {
-          target?.focus?.();
-        } catch {
-          // Never crash the popup for focus.
-        }
-      },
-      Platform.isTV ? 90 : 0,
-    );
-    return () => {
+    let cancelRequest: (() => void) | null = null;
+    const interactionTask = InteractionManager.runAfterInteractions(() => {
+      if (cancelled) {
+        return;
+      }
+      cancelRequest = requestTvFocus({
+        screen: 'series',
+        source: 'SeriesDetailPopupV2',
+        region: 'detail-action',
+        itemId: series?.id ?? null,
+        reason: 'popup-visible-focus-owner',
+        maxFrames: 12,
+        isActive: () => !cancelled && visible && wasVisibleRef.current,
+        getTarget: () => actionRefs.current.get(initialFocusActionId) ?? null,
+      });
+    });
+    const cancelFocusRestore = () => {
       cancelled = true;
-      clearTimeout(timer);
+      cancelRequest?.();
+      interactionTask.cancel();
+    };
+    focusRestoreCancelRef.current = cancelFocusRestore;
+    return () => {
+      cancelFocusRestore();
+      if (focusRestoreCancelRef.current === cancelFocusRestore) {
+        focusRestoreCancelRef.current = null;
+      }
     };
   }, [initialFocusActionId, series?.id, visible]);
 

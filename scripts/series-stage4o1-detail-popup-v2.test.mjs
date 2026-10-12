@@ -178,6 +178,22 @@ test('9. Focus ring state resets on every open', () => {
   assert.match(popup, /setFocusedActionId\(null\);/);
 });
 
+test('9a. Playback return reclaims native focus inside the visible popup', () => {
+  assert.match(popup, /reason: 'popup-visible-focus-owner'/);
+  assert.match(popup, /maxFrames: 12/);
+  assert.match(popup, /InteractionManager\.runAfterInteractions/);
+  assert.match(popup, /getTarget: \(\) => actionRefs\.current\.get\(initialFocusActionId\) \?\? null/);
+  assert.match(popup, /focusRestoreCancelRef\.current\?\.\(\)/);
+  assert.doesNotMatch(popup, /setTimeout\([\s\S]{0,260}target\?\.focus/);
+});
+
+test('9b. Browse focus remains disabled while the popup is logically open', () => {
+  assert.match(screen, /const seriesBrowseLocked = seriesDetailPopupVisible \|\| playbackUiActive \|\| searchBlocksBrowse/);
+  assert.match(screen, /postersFocusable=\{!seriesBrowseLocked/);
+  assert.match(screen, /interactionLocked=\{seriesBrowseLocked\}/);
+  assert.match(screen, /importantForAccessibility=\{\s*seriesBrowseLocked \? 'no-hide-descendants'/);
+});
+
 // 10. Back and X use the same close function.
 test('10. Back and X use the same close function', () => {
   assert.match(screen, /onClose=\{\(source\) => closeSeriesDetailPopup\(source\)\}/);

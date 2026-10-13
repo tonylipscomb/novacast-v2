@@ -90,6 +90,21 @@ test('Series Search preserves the originating result until intentional detail di
   assert.match(seriesScreen, /retainMounted=\{searchOpen \|\| seriesDetailPopup\.open \|\| playbackUiActive\}/);
 });
 
+test('Search does not reclaim native focus during hosted detail playback return', () => {
+  assert.match(searchOverlay, /if \(detailOpen \|\| closeOwnsFocusRef\.current\) \{\s*return;\s*\}/);
+  assert.match(searchOverlay, /isActive: \(\) => visible && !detailOpen && !closeOwnsFocusRef\.current/);
+  assert.match(searchOverlay, /if \(detailOpen\) \{[\s\S]*source: 'modal-show-hosted-detail'/);
+  assert.match(searchOverlay, /\}, \[detailOpen, focusSearchField, onReady,/);
+});
+
+test('Search result restoration remains dismissal-only after playback return', () => {
+  assert.match(searchOverlay, /if \(!visible \|\| detailOpen \|\| !restoreFocusResultKey\)/);
+  assert.match(searchOverlay, /reason: 'restore-after-hosted-detail-close'/);
+  assert.match(searchOverlay, /isActive: \(\) => visible && !detailOpen/);
+  assert.match(searchResults, /if \(!interactive \|\| !restoreResultKey\) \{\s*return;\s*\}/);
+  assert.match(searchPosterGrid, /if \(!interactive\) \{[\s\S]*pendingScrollRef\.current = null;/);
+});
+
 test('Series detail hydration keeps the sanitized provider audit at the data boundary', () => {
   assert.match(providerSeriesDataSource, /logSeriesInfoAudit\(\{/);
   assert.match(providerSeriesDataSource, /datasource: 'ProviderSeriesDataSource'/);

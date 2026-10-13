@@ -224,7 +224,10 @@ function SearchOverlayContent({
   );
 
   const focusSearchField = useCallback(() => {
-    if (closeOwnsFocusRef.current) {
+    // The hosted detail popup owns native focus while it is visible, including
+    // the playback-return reveal. Search may become visible again while it is
+    // retained, but must not reclaim focus during that handoff.
+    if (detailOpen || closeOwnsFocusRef.current) {
       return;
     }
     if (initialFocusRequestedRef.current && focusConfirmedRef.current) {
@@ -237,10 +240,10 @@ function SearchOverlayContent({
       source: 'SearchOverlay',
       region: 'search-shell',
       reason: 'overlay-open',
-      isActive: () => visible && !closeOwnsFocusRef.current,
+      isActive: () => visible && !detailOpen && !closeOwnsFocusRef.current,
       getTarget: () => searchShellRef.current,
     });
-  }, [visible]);
+  }, [detailOpen, visible]);
 
   const handleSearchShellFocus = useCallback(() => {
     // Preferred focus only for open / empty / Up-return — never reclaim mid-handoff.
@@ -582,6 +585,16 @@ function SearchOverlayContent({
   const handleModalShow = useCallback(() => {
     logSearchEvent('search_overlay_modal_shown', { scope, nativeTvKeyboard: useNativeTvKeyboard });
     onReady?.();
+    if (detailOpen) {
+      closeOwnsFocusRef.current = false;
+      initialFocusRequestedRef.current = true;
+      focusConfirmedRef.current = false;
+      logSearchEvent('search_input_focus_suppressed', {
+        scope,
+        source: 'modal-show-hosted-detail',
+      });
+      return;
+    }
     // Stage 4.2J: Detail→Search return owns focus — never let modal-show reclaim the input.
     if (restoreFocusMovieId || restoreFocusLiveChannelId) {
       closeOwnsFocusRef.current = false;
@@ -603,7 +616,7 @@ function SearchOverlayContent({
     focusConfirmedRef.current = false;
     logSearchEvent('search_input_focus_requested', { scope, source: 'modal-show' });
     focusSearchField();
-  }, [focusSearchField, onReady, restoreFocusLiveChannelId, restoreFocusMovieId, scope, useNativeTvKeyboard]);
+  }, [detailOpen, focusSearchField, onReady, restoreFocusLiveChannelId, restoreFocusMovieId, scope, useNativeTvKeyboard]);
 
   const handleLiveSearchHardwareBack = useCallback(() => {
     const nowMs = Date.now();

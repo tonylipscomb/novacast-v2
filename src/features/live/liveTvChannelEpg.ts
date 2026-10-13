@@ -93,11 +93,18 @@ function epgProgressFromProgram(program: ProviderGuideProgram) {
 }
 
 function isTimedCurrent(program: ProviderGuideProgram, now: number) {
-  return program.startAt != null && program.endAt != null && program.startAt <= now && program.endAt > now;
+  return (
+    typeof program.startAt === 'number' && Number.isFinite(program.startAt) &&
+    typeof program.endAt === 'number' && Number.isFinite(program.endAt) &&
+    program.startAt <= now && program.endAt > now
+  );
 }
 
 export function orderTimedEpgPrograms(programs: ProviderGuideProgram[], now = Date.now()) {
-  const timed = programs.filter((program) => program.startAt != null && program.endAt != null);
+  const timed = programs.filter((program) =>
+    typeof program.startAt === 'number' && Number.isFinite(program.startAt) &&
+    typeof program.endAt === 'number' && Number.isFinite(program.endAt),
+  );
   if (!timed.length) return programs;
   const current = timed.find((program) => isTimedCurrent(program, now));
   const future = timed
@@ -129,12 +136,21 @@ export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: Pro
   }
 
   const orderedPrograms = orderTimedEpgPrograms(programs);
-  const hasTimedPrograms = programs.some((program) => program.startAt != null && program.endAt != null);
-  const now = hasTimedPrograms ? orderedPrograms[0] : programs[0];
-  const hasCurrent = hasTimedPrograms && isTimedCurrent(now, Date.now());
+  const timedPrograms = programs.filter((program) =>
+    typeof program.startAt === 'number' && Number.isFinite(program.startAt) &&
+    typeof program.endAt === 'number' && Number.isFinite(program.endAt),
+  );
+  const hasTimedPrograms = timedPrograms.length > 0;
+  const fallbackTimedProgram = timedPrograms
+    .slice()
+    .sort((left, right) => (left.startAt ?? 0) - (right.startAt ?? 0))[0];
+  // `now` is the selected programme, not the wall-clock timestamp. Keep the
+  // names distinct so the timing predicate always receives a number.
+  const currentProgram = hasTimedPrograms ? (orderedPrograms[0] ?? fallbackTimedProgram) : programs[0];
+  const hasCurrent = hasTimedPrograms && isTimedCurrent(currentProgram, Date.now());
   const next = hasTimedPrograms ? orderedPrograms[hasCurrent ? 1 : 0] : programs[1];
   const following = hasTimedPrograms ? orderedPrograms[hasCurrent ? 2 : 1] : programs[2];
-  const programTitle = displayLiveProgramText(now.title, '');
+  const programTitle = displayLiveProgramText(currentProgram.title, '');
   const channelLabel = displayLiveChannelName(channel.name, '');
   const current = hasCurrent || !hasTimedPrograms;
 
@@ -143,11 +159,11 @@ export function enrichChannelWithEpg(channel: ProviderLiveChannel, programs: Pro
     current: current && programTitle && programTitle !== channelLabel && programTitle !== channel.name.trim() ? programTitle : '',
     next: next?.title ? displayLiveProgramText(next.title, channel.next) : channel.next,
     following: following?.title ? displayLiveProgramText(following.title, channel.following) : channel.following,
-    currentStart: current ? (now.start ?? channel.currentStart) : '',
-    currentEnd: current ? (now.end ?? channel.currentEnd) : '',
-    remaining: current && now.meta.includes('left') ? now.meta : '',
-    progress: current ? epgProgressFromProgram(now) : 0,
-    description: current ? displayLiveProgramText(now.description, 'No program information available.') : 'No program information available.',
+    currentStart: current ? (currentProgram.start ?? channel.currentStart) : '',
+    currentEnd: current ? (currentProgram.end ?? channel.currentEnd) : '',
+    remaining: current && currentProgram.meta.includes('left') ? currentProgram.meta : '',
+    progress: current ? epgProgressFromProgram(currentProgram) : 0,
+    description: current ? displayLiveProgramText(currentProgram.description, 'No program information available.') : 'No program information available.',
   };
   if (audit) console.info('[NovaCast Live EPG Classification Audit]', {
     channelId: channel.id,

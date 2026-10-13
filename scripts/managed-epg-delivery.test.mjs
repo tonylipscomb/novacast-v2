@@ -7,6 +7,17 @@ import { decodeDisplayTextEntities, displayLiveProgramText } from '../src/featur
 
 const now = Date.parse('2026-09-10T12:00:00Z');
 const program = (id, startAt, stopAt) => ({ id, title: id, startAt, stopAt, description: 'safe', category: 'News' });
+const channel = { id: 'stream-1', name: 'Example', current: '', currentStart: '', currentEnd: '', streamUrl: '' };
+
+function withNow(timestamp, callback) {
+  const originalNow = Date.now;
+  Date.now = () => timestamp;
+  try {
+    return callback();
+  } finally {
+    Date.now = originalNow;
+  }
+}
 
 test('managed current, next, and following map in playback order', () => {
   const programs = mapManagedEpgPrograms([
@@ -37,10 +48,67 @@ test('future-only managed programming remains upcoming, never Now Playing', () =
     program('later', '2026-09-10T13:00:00Z', '2026-09-10T14:00:00Z'),
   ], 3, now);
   assert.deepEqual(orderTimedEpgPrograms(future, now).map((item) => item.id), ['later']);
-  const channel = enrichChannelWithEpg({ id: 'stream-1', name: 'Example', current: '', currentStart: '', currentEnd: '', streamUrl: '' }, future);
-  assert.equal(channel.current, '');
-  assert.equal(channel.next, 'later');
-  assert.equal(channel.progress, 0);
+  const enriched = withNow(now, () => enrichChannelWithEpg(channel, future));
+  assert.equal(enriched.current, '');
+  assert.equal(enriched.next, 'later');
+  assert.equal(enriched.progress, 0);
+});
+
+test('enrichment selects the currently airing programme and next programme', () => {
+  const programs = mapManagedEpgPrograms([
+    program('next', '2026-09-10T13:00:00Z', '2026-09-10T14:00:00Z'),
+    program('current', '2026-09-10T11:30:00Z', '2026-09-10T12:30:00Z'),
+    program('expired', '2026-09-10T10:00:00Z', '2026-09-10T11:00:00Z'),
+  ], 3, now);
+  const enriched = withNow(now, () => enrichChannelWithEpg(channel, programs));
+  assert.equal(enriched.current, 'current');
+  assert.equal(enriched.next, 'next');
+  assert.equal(enriched.currentStart, programs.find((item) => item.id === 'current').start);
+});
+
+test('expired timed programmes do not become current and do not crash enrichment', () => {
+  const expired = mapManagedEpgPrograms([
+    program('expired', '2026-09-10T09:00:00Z', '2026-09-10T10:00:00Z'),
+  ], 3, now);
+  const enriched = withNow(now, () => enrichChannelWithEpg(channel, expired));
+  assert.equal(enriched.current, '');
+  assert.equal(enriched.progress, 0);
+});
+
+test('missing timing fields remain safe and preserve untimed provider EPG behavior', () => {
+  const untimed = [{ id: 'untimed', title: 'Untimed', meta: 'Untimed', description: 'safe' }];
+  const enriched = withNow(now, () => enrichChannelWithEpg(channel, untimed));
+  assert.equal(enriched.current, 'Untimed');
+  assert.equal(enriched.currentStart, '');
+});
+
+test('malformed managed timing is discarded before enrichment', () => {
+  const mapped = mapManagedEpgPrograms([
+    program('bad-start', 'not-a-date', '2026-09-10T13:00:00Z'),
+    program('bad-order', '2026-09-10T13:00:00Z', '2026-09-10T12:00:00Z'),
+  ], 3, now);
+  assert.deepEqual(mapped, []);
+  const enriched = withNow(now, () => enrichChannelWithEpg(channel, mapped));
+  assert.equal(enriched.current, '');
+});
+
+test('empty EPG results preserve a safe empty display state', () => {
+  const enriched = enrichChannelWithEpg({ ...channel, current: 'Example' }, []);
+  assert.equal(enriched.current, '');
+  assert.equal(enriched.next, undefined);
+});
+
+test('current-to-next transition follows the wall-clock boundary', () => {
+  const programs = mapManagedEpgPrograms([
+    program('first', '2026-09-10T12:00:00Z', '2026-09-10T13:00:00Z'),
+    program('second', '2026-09-10T13:00:00Z', '2026-09-10T14:00:00Z'),
+  ], 3, now);
+  const before = withNow(Date.parse('2026-09-10T12:59:59Z'), () => enrichChannelWithEpg(channel, programs));
+  const after = withNow(Date.parse('2026-09-10T13:00:00Z'), () => enrichChannelWithEpg(channel, programs));
+  assert.equal(before.current, 'first');
+  assert.equal(before.next, 'second');
+  assert.equal(after.current, 'second');
+  assert.equal(after.next, undefined);
 });
 
 test('managed delivery uses the shared resolver and preserves fallback paths', () => {

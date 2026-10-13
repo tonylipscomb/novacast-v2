@@ -56,7 +56,9 @@ export function classifyCatalogMediaJobResults(
     outcome: allOk ? 'ok' : anyOk ? 'sync-partial-failed' : 'sync-failed',
     abortMovieIndex: !movieOk,
     abortSeriesIndex: !seriesOk,
-    notifyProviderError: !movieOk,
+    // Either VOD catalog can be the first-sync blocker. A Series-only
+    // failure must reach the same recovery/error path as a Movie failure.
+    notifyProviderError: !movieOk || !seriesOk,
   };
 }
 

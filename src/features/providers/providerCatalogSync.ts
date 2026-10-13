@@ -91,6 +91,14 @@ import {
   type CatalogProgressThrottle,
 } from '../catalog/index.ts';
 import {
+  cancelAllCatalogFirstSyncRecovery,
+  cancelCatalogFirstSyncRecovery,
+  getCatalogFirstSyncRecoveryLifecycleToken,
+  resetCatalogFirstSyncRecovery,
+  resetCatalogFirstSyncRecoveryForTests,
+  scheduleCatalogFirstSyncRecovery,
+} from '../catalog/catalogFirstSyncRecovery.ts';
+import {
   createDisabledCatalogSqliteMediaSyncHandle,
   finishCatalogSqliteMediaSync,
   mapMovieSummaryToCatalogItem,
@@ -630,6 +638,51 @@ async function clearLegacyCatalogBlobs(providerId: string) {
 function notifyPhase(providerId: string, phase: CatalogSyncPhase) {
   markCatalogAuditNotifyPhase(phase);
   syncListeners.get(providerId)?.forEach((listener) => listener(phase));
+}
+
+function scheduleFirstSyncRecoveryAfterFailure(
+  input: ProviderCatalogSyncInput,
+  classified: ReturnType<typeof classifyCatalogMediaJobResults>,
+) {
+  const failedMedia: ('movie' | 'series')[] = [];
+  if (!classified.movieOk) failedMedia.push('movie');
+  if (!classified.seriesOk) failedMedia.push('series');
+
+  for (const mediaType of failedMedia) {
+    const lifecycleToken = getCatalogFirstSyncRecoveryLifecycleToken(input.providerId);
+    void resolveReadableCatalogGeneration(input.providerId, mediaType).then((readableGeneration) => {
+      scheduleCatalogFirstSyncRecovery({
+        providerId: input.providerId,
+        mediaType,
+        readableGeneration,
+        lifecycleToken,
+        retry: () => scheduleProviderCatalogSync({
+          ...input,
+          requestSource: 'catalog-first-sync-recovery',
+        }),
+      });
+    }).catch((error) => {
+      scheduleCatalogFirstSyncRecovery({
+        providerId: input.providerId,
+        mediaType,
+        readableGeneration: 0,
+        lifecycleToken,
+        retry: () => scheduleProviderCatalogSync({
+          ...input,
+          requestSource: 'catalog-first-sync-recovery',
+        }),
+      });
+      console.info(
+        '[NOVACAST_CATALOG_RECOVERY]',
+        JSON.stringify({
+          event: 'readiness-check-failed',
+          providerId: input.providerId,
+          mediaType,
+          errorCategory: error instanceof Error ? error.name : 'unknown',
+        }),
+      );
+    });
+  }
 }
 
 export function subscribeCatalogSyncPhase(providerId: string, listener: (phase: CatalogSyncPhase) => void) {
@@ -5022,6 +5075,7 @@ function startProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: num
       outcome: classified.outcome,
     });
     if (classified.outcome === 'ok') {
+      resetCatalogFirstSyncRecovery(providerId);
       return;
     }
 
@@ -5041,6 +5095,7 @@ function startProviderCatalogSync(input: ProviderCatalogSyncInput, runToken: num
     }
 
     if (classified.notifyProviderError) {
+      scheduleFirstSyncRecoveryAfterFailure(input, classified);
       notifyPhase(providerId, 'error');
     }
 
@@ -5239,6 +5294,7 @@ export function cancelProviderCatalogSync(
   }
   syncGeneration += 1;
   if (providerId) {
+    cancelCatalogFirstSyncRecovery(providerId);
     for (const [key, latch] of pendingSeriesRetryLatches) {
       if (latch.providerId === providerId) {
         if (latch.timer) clearTimeout(latch.timer);
@@ -5251,6 +5307,7 @@ export function cancelProviderCatalogSync(
     pendingSyncInputs.delete(providerId);
     invalidateCatalogSyncForProvider(providerId, { cancelSource, cancelCaller });
   } else {
+    cancelAllCatalogFirstSyncRecovery();
     for (const [key, latch] of pendingSeriesRetryLatches) {
       if (latch.timer) clearTimeout(latch.timer);
       pendingSeriesRetryLatches.delete(key);
@@ -5306,6 +5363,7 @@ export function clearProviderCatalogSyncForTests() {
   liveCatalogScheduleDelayMs = 0;
   lastCheckpointWriteAt = 0;
   clearCatalogSyncCoordinatorForTests();
+  resetCatalogFirstSyncRecoveryForTests();
   resetProviderCatalogNetworkGateForTests();
 }
 

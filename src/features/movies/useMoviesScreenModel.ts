@@ -54,6 +54,11 @@ import {
   getCatalogBootstrapState,
   resolveReadableCatalogGeneration,
 } from '@/features/catalog/catalogRepository';
+import {
+  getCatalogFirstSyncRecoveryState,
+  resetCatalogFirstSyncRecovery,
+  scheduleCatalogFirstSyncRecovery,
+} from '@/features/catalog/catalogFirstSyncRecovery';
 import { subscribeSmartCategoryCache } from '@/features/providers/smartCategoryCacheStore';
 import { isSmartCategoryId, normalizeSelectedSmartCategoryId } from '@/features/media-browser/mediaCategoryUtils';
 import {
@@ -720,8 +725,10 @@ export function useMoviesScreenModel(
   }, [settings.hideSmartCategories]);
 
   const reload = useCallback(() => {
+    resetCatalogFirstSyncRecovery(activeProviderId);
     setReloadToken((current) => current + 1);
-  }, []);
+    void activeBundle?.syncCatalog('catalog-user-retry').catch(() => undefined);
+  }, [activeBundle, activeProviderId]);
 
   const syncCategoryCount = useCallback((categoryId: string, count: number) => {
     if (!categoryId || count < 0) {
@@ -1535,8 +1542,51 @@ export function useMoviesScreenModel(
       if (phase === 'syncing') {
         return;
       }
+      if (phase === 'error') {
+        void resolveReadableCatalogGeneration(activeProviderId, 'movie').then((readableGeneration) => {
+          if (!mounted || readableGeneration > 0) {
+            return;
+          }
+          const recovery = getCatalogFirstSyncRecoveryState(activeProviderId);
+          if (recovery.status === 'exhausted') {
+            setCatalogRepairing(false);
+            setLoadStatus('error');
+            setLoadErrorMessage('Unable to load your movie library. NovaCast will retry automatically.');
+            logMoviesDiagnostic('catalog-recovery-exhausted', {
+              providerId: activeProviderId,
+              attempts: recovery.attempts,
+              readableGeneration,
+            });
+          }
+        }).catch((error) => {
+          if (!mounted) {
+            return;
+          }
+          const recovery = scheduleCatalogFirstSyncRecovery({
+            providerId: activeProviderId,
+            mediaType: 'movie',
+            readableGeneration: 0,
+            retry: () => activeBundle?.syncCatalog('catalog-readiness-recovery') ?? Promise.resolve(),
+          });
+          logMoviesDiagnostic('catalog-readiness-check-failed', {
+            providerId: activeProviderId,
+            errorCategory: error instanceof Error ? error.name : 'unknown',
+            attempts: recovery.attempts,
+            recoveryStatus: recovery.status,
+          });
+          if (recovery.status === 'exhausted') {
+            setCatalogRepairing(false);
+            setLoadStatus('error');
+            setLoadErrorMessage('Unable to load your movie library. NovaCast will retry automatically.');
+          }
+        });
+        return;
+      }
       if (phase === 'ready' || phase === 'smart-building') {
         scheduleSmartCountRefresh();
+        if (phase === 'ready' && (categoriesRef.current.length === 0 || loadStatusRef.current === 'error')) {
+          void loadCategories();
+        }
       }
     });
 
@@ -1576,6 +1626,7 @@ export function useMoviesScreenModel(
     };
   }, [
     activeProviderId,
+    activeBundle,
     emitMoviesStartup,
     options.initialSelectedCategoryId,
     providerMemory.selectedCategoryId,

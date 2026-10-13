@@ -26,6 +26,11 @@ import {
   getCatalogTotalCount,
   resolveReadableCatalogGeneration,
 } from '@/features/catalog/catalogRepository';
+import {
+  getCatalogFirstSyncRecoveryState,
+  resetCatalogFirstSyncRecovery,
+  scheduleCatalogFirstSyncRecovery,
+} from '@/features/catalog/catalogFirstSyncRecovery';
 import { getSeriesScreenMemory, rememberSeriesScreenMemory } from './seriesScreenMemory';
 import { matchSeriesMetadata } from './metadata/seriesMetadataMatcher';
 import { emitSeriesStartup, emitSeriesStateHandoff, logSeriesPerf } from './seriesDiagnostics';
@@ -326,15 +331,23 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
         finalCountKnown: category.countKnown === true,
         countSource: category.countKnown === true ? 'readable-generation-or-direct-query' : 'unknown',
       }));
-    }).catch(() => undefined);
+    }).catch((error) => {
+      if (cancelled) return;
+      console.info('[NovaCast Series Count Audit]', JSON.stringify({
+        event: 'readable-generation-check-failed',
+        errorCategory: error instanceof Error ? error.name : 'unknown',
+      }));
+    });
     return () => {
       cancelled = true;
     };
   }, [activeProviderId, categories, selectedCategoryId, visibleItems]);
 
   const reload = useCallback(() => {
+    resetCatalogFirstSyncRecovery(activeProviderId);
     setReloadToken((current) => current + 1);
-  }, []);
+    void bundle?.syncCatalog('catalog-user-retry').catch(() => undefined);
+  }, [activeProviderId, bundle]);
 
   const syncCategoryCount = useCallback((categoryId: string, count: number) => {
     if (!categoryId || count < 0) {
@@ -616,10 +629,51 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
     });
     const unsubscribeSync = subscribeCatalogSyncPhase(activeProviderId, (phase) => {
       if (!mounted || phase === 'syncing') return;
+      if (phase === 'error') {
+        void resolveReadableCatalogGeneration(activeProviderId, 'series').then((readableGeneration) => {
+          if (!mounted || readableGeneration > 0) {
+            return;
+          }
+          const recovery = getCatalogFirstSyncRecoveryState(activeProviderId);
+          if (recovery.status === 'exhausted') {
+            setBrowseLoadStatus('error');
+            setBrowseLoadErrorMessage('Unable to load your series library. NovaCast will retry automatically.');
+            logSeriesPerf('catalog_recovery_exhausted', {
+              providerId: activeProviderId,
+              attempts: recovery.attempts,
+              readableGeneration,
+            });
+          }
+        }).catch((error) => {
+          if (!mounted) {
+            return;
+          }
+          const recovery = scheduleCatalogFirstSyncRecovery({
+            providerId: activeProviderId,
+            mediaType: 'series',
+            readableGeneration: 0,
+            retry: () => bundle?.syncCatalog('catalog-readiness-recovery') ?? Promise.resolve(),
+          });
+          logSeriesPerf('catalog_readiness_check_failed', {
+            providerId: activeProviderId,
+            errorCategory: error instanceof Error ? error.name : 'unknown',
+            attempts: recovery.attempts,
+            recoveryStatus: recovery.status,
+          });
+          if (recovery.status === 'exhausted') {
+            setBrowseLoadStatus('error');
+            setBrowseLoadErrorMessage('Unable to load your series library. NovaCast will retry automatically.');
+          }
+        });
+        return;
+      }
       if (phase === 'ready' || phase === 'smart-building') {
         scheduleSmartCountRefresh();
         if (phase === 'ready') {
           reloadSmartCategoryGridIfNeeded();
+          if (categoriesRef.current.length === 0 || loadStatusRef.current === 'error') {
+            void loadCategoriesFromNetwork('catalog-first-sync-recovery-ready');
+          }
         }
       }
     });
@@ -643,7 +697,7 @@ export function useSeriesScreenModel(options: UseSeriesScreenModelOptions = {}) 
       unsubscribeSettings();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProviderId, reloadToken, resolvedDataSource]);
+  }, [activeProviderId, bundle, reloadToken, resolvedDataSource]);
 
   // ── Stage 4.2O: default-select a category once categories are known ──
   useEffect(() => {

@@ -8,6 +8,7 @@ const hook = readFileSync('src/features/pairing/useMockPairing.ts', 'utf8');
 const service = readFileSync('src/features/pairing/pairingService.ts', 'utf8');
 const diagnostics = readFileSync('src/features/pairing/pairingDiagnostics.ts', 'utf8');
 const screen = readFileSync('src/features/pairing/PairingScreen.tsx', 'utf8');
+const portal = readFileSync('src/features/portal/NovaPortalScreen.tsx', 'utf8');
 
 test('normal pairing-status cadence is five seconds for waiting and validating', () => {
   assert.equal(computePollIntervalMs(0, 'waiting'), 5_000);
@@ -83,4 +84,10 @@ test('pairing diagnostics add only bounded metadata and no sensitive fields', ()
   assert.match(diagnostics, /backoffStep\?: number/);
   assert.doesNotMatch(diagnostics, /pairingCode|pairUrl|username|password|redemptionToken|deviceSecret|authToken|providerUrl/i);
   assert.doesNotMatch(hook, /logPairingReleaseDiagnostic\([^\n]*(?:sessionId|pairingCode|redemptionToken|providerUrl)/i);
+});
+
+test('portal keeps the QR pairing modal mounted during activation refreshes', () => {
+  assert.match(portal, /if \(!pairingVisible && isDeviceActivationRequired\(\) && device\.status && device\.status\.activationStatus !== 'active'\)/);
+  assert.match(portal, /<Modal visible=\{pairingVisible\}/);
+  assert.match(portal, /returnToPortal/);
 });

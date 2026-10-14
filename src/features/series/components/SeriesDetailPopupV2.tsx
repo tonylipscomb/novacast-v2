@@ -885,7 +885,7 @@ export function SeriesDetailPopupV2({
 
   return (
     <View
-      style={StyleSheet.absoluteFill}
+      style={[StyleSheet.absoluteFill, styles.overlay]}
       pointerEvents="auto"
       testID="series-detail-popup-v2"
       accessibilityViewIsModal
@@ -1033,8 +1033,12 @@ export function SeriesDetailPopupV2({
 export default SeriesDetailPopupV2;
 
 const styles = StyleSheet.create({
+  overlay: {
+    zIndex: 100,
+    elevation: 100,
+  },
   scrim: {
-    backgroundColor: 'rgba(0, 0, 0, 0.62)',
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
   },
   centerWrap: {
     flex: 1,

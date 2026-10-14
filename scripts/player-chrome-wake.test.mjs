@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   getPlayerChromeDefaultFocusControl,
+  isDuplicatePlayerChromeWake,
   resolvePlayerChromeWakeKey,
   shouldConsumePlayerChromeWake,
   shouldRouteVisiblePlayerChromeInput,
@@ -192,4 +193,18 @@ test('14. Live TV behavior untouched', () => {
   assert.match(liveRouter, /Live fullscreen LEFT\/RIGHT channel surfing/);
   assert.match(liveScreen, /onSentinelFocus=\{handleLiveSurfSentinelFocus\}/);
   assert.doesNotMatch(liveScreen, /shouldConsumePlayerChromeWake/);
+});
+
+test('15. duplicate wake callback is consumed across the visibility transition', () => {
+  assert.equal(isDuplicatePlayerChromeWake({ pendingKey: 'right', pendingEventKeyAction: 0, key: 'right', eventKeyAction: 0 }), true);
+  assert.equal(isDuplicatePlayerChromeWake({ pendingKey: 'right', pendingEventKeyAction: 0, key: 'left', eventKeyAction: 0 }), false);
+  assert.match(remoteHandlers, /wakeTransitionRef/);
+  assert.match(remoteHandlers, /if \(wakeConsumedRef\.current && !controlsVisibleNow\)/);
+});
+
+test('16. wake requests visibility before post-mount focus', () => {
+  const wakeBlock = remoteHandlers.slice(remoteHandlers.indexOf("event: 'wake-consumed'"), remoteHandlers.indexOf("event: 'visible-input-routed'"));
+  assert.doesNotMatch(wakeBlock, /onRequestDefaultFocusRef\.current/);
+  assert.match(controls, /previousVisibleRef\.current = visible;\s*requestDefaultChromeFocus\(\)/);
+  assert.doesNotMatch(controls.slice(controls.indexOf('const handleHiddenChromeWake'), controls.indexOf('const handleHiddenChromeWake') + 1200), /requestDefaultChromeFocus\(\)/);
 });

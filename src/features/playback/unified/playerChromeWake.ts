@@ -15,6 +15,21 @@ export type PlayerChromeFocusEvent =
 
 export type PlayerChromeDefaultFocusControl = 'play';
 
+export function isDuplicatePlayerChromeWake(input: {
+  pendingKey: PlayerChromeWakeKey;
+  pendingEventKeyAction?: number | null;
+  key: PlayerChromeWakeKey | null;
+  eventKeyAction?: number | null;
+}): boolean {
+  if (input.key !== input.pendingKey) {
+    return false;
+  }
+  if (input.pendingEventKeyAction == null || input.eventKeyAction == null) {
+    return true;
+  }
+  return input.pendingEventKeyAction === input.eventKeyAction;
+}
+
 function normalizeWakeToken(value?: string | null): string {
   return (value ?? '').trim().toLowerCase().replace(/[_-\s]/g, '');
 }

@@ -23,6 +23,7 @@ import {
 } from './vodSeek.ts';
 import {
   logPlayerChromeFocus,
+  isDuplicatePlayerChromeWake,
   resolvePlayerChromeWakeKey,
   shouldConsumePlayerChromeWake,
   shouldRouteVisiblePlayerChromeInput,
@@ -42,7 +43,6 @@ type UnifiedPlayerRemoteHandlersInput = {
   upNextActive?: boolean;
   onTogglePlay: () => void;
   onRevealControls: (source?: 'remote-handler' | 'generic-dpad') => void;
-  onRequestDefaultFocus?: () => void;
   getSeekPreviewActive?: () => boolean;
   getTimelineFocused?: () => boolean;
   getTimelineHandlePresent?: () => boolean;
@@ -85,26 +85,28 @@ export function UnifiedPlayerRemoteHandlers({
   upNextActive = false,
   onTogglePlay: _onTogglePlay,
   onRevealControls,
-  onRequestDefaultFocus,
   getSeekPreviewActive,
   getTimelineFocused,
   getTimelineHandlePresent,
 }: UnifiedPlayerRemoteHandlersInput) {
   const wakeConsumedRef = useRef(false);
-  const controlsVisibleRef = useRef(controlsVisible);
+  const wakeTransitionRef = useRef<{
+    key: NonNullable<ReturnType<typeof resolvePlayerChromeWakeKey>>;
+    eventKeyAction: number | null;
+  } | null>(null);
   const mediaTypeRef = useRef(mediaType);
   const upNextActiveRef = useRef(upNextActive);
   const onRevealControlsRef = useRef(onRevealControls);
-  const onRequestDefaultFocusRef = useRef(onRequestDefaultFocus);
   const getSeekPreviewActiveRef = useRef(getSeekPreviewActive);
   const getTimelineFocusedRef = useRef(getTimelineFocused);
   const getTimelineHandlePresentRef = useRef(getTimelineHandlePresent);
   const enabledRef = useRef(enabled);
 
   useEffect(() => {
-    controlsVisibleRef.current = controlsVisible;
     if (controlsVisible) {
       wakeConsumedRef.current = false;
+    } else {
+      wakeTransitionRef.current = null;
     }
   }, [controlsVisible]);
 
@@ -119,10 +121,6 @@ export function UnifiedPlayerRemoteHandlers({
   useEffect(() => {
     onRevealControlsRef.current = onRevealControls;
   }, [onRevealControls]);
-
-  useEffect(() => {
-    onRequestDefaultFocusRef.current = onRequestDefaultFocus;
-  }, [onRequestDefaultFocus]);
 
   useEffect(() => {
     getSeekPreviewActiveRef.current = getSeekPreviewActive;
@@ -226,8 +224,27 @@ export function UnifiedPlayerRemoteHandlers({
       eventKeyAction: event.eventKeyAction,
     };
 
+    if (wakeTransitionRef.current && controlsVisibleNow) {
+      const duplicateWake = isDuplicatePlayerChromeWake({
+        pendingKey: wakeTransitionRef.current.key,
+        pendingEventKeyAction: wakeTransitionRef.current.eventKeyAction,
+        key: wakeKey,
+        eventKeyAction: event.eventKeyAction,
+      });
+      wakeTransitionRef.current = null;
+      if (duplicateWake) {
+        return;
+      }
+    }
+
     if (shouldConsumePlayerChromeWake(wakeInput) && !isVodSeekKeyUp(event.eventKeyAction)) {
       wakeConsumedRef.current = true;
+      if (wakeKey != null) {
+        wakeTransitionRef.current = {
+          key: wakeKey,
+          eventKeyAction: event.eventKeyAction ?? null,
+        };
+      }
       logPlayerChromeFocus({
         event: 'wake-input',
         key: wakeKey,
@@ -241,7 +258,10 @@ export function UnifiedPlayerRemoteHandlers({
         focusedControl: null,
       });
       onRevealControlsRef.current('remote-handler');
-      onRequestDefaultFocusRef.current?.();
+      return;
+    }
+
+    if (wakeConsumedRef.current && !controlsVisibleNow) {
       return;
     }
 
@@ -298,10 +318,6 @@ export function UnifiedPlayerRemoteHandlers({
           eventConsumedBy: 'visible-controls',
         });
       }
-      return;
-    }
-
-    if (wakeConsumedRef.current) {
       return;
     }
 

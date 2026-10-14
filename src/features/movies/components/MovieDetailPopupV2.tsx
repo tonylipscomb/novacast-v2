@@ -588,7 +588,7 @@ export function MovieDetailPopupV2({
 
   return (
     <View
-      style={StyleSheet.absoluteFill}
+      style={[StyleSheet.absoluteFill, styles.overlay]}
       pointerEvents="auto"
       testID="movie-detail-popup-v2"
       accessibilityViewIsModal
@@ -757,8 +757,12 @@ export function MovieDetailPopupV2({
 export default MovieDetailPopupV2;
 
 const styles = StyleSheet.create({
+  overlay: {
+    zIndex: 100,
+    elevation: 100,
+  },
   scrim: {
-    backgroundColor: 'rgba(0, 0, 0, 0.62)',
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
   },
   centerWrap: {
     flex: 1,

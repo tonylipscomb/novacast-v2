@@ -38,6 +38,7 @@ type DiscoverZoneOverlayProps = {
   ) => void;
   retainMounted?: boolean;
   restoreFocusItemId?: string | null;
+  restoreFocusKey?: string | null;
   onRestoreFocusHandled?: () => void;
 };
 
@@ -49,6 +50,7 @@ export function DiscoverZoneOverlay({
   onSelectItem,
   retainMounted = false,
   restoreFocusItemId = null,
+  restoreFocusKey = null,
   onRestoreFocusHandled,
 }: DiscoverZoneOverlayProps) {
   if (!visible && !retainMounted) {
@@ -63,6 +65,7 @@ export function DiscoverZoneOverlay({
       onClose={onClose}
       onSelectItem={onSelectItem}
       restoreFocusItemId={restoreFocusItemId}
+      restoreFocusKey={restoreFocusKey}
       onRestoreFocusHandled={onRestoreFocusHandled}
     />
   );
@@ -75,6 +78,7 @@ function DiscoverZoneOverlayContent({
   onClose,
   onSelectItem,
   restoreFocusItemId,
+  restoreFocusKey,
   onRestoreFocusHandled,
 }: Omit<DiscoverZoneOverlayProps, 'retainMounted'>) {
   const { theme } = useAppTheme();
@@ -100,11 +104,11 @@ function DiscoverZoneOverlayContent({
     if (!visible || !restoreFocusItemId) {
       return;
     }
-    const node = posterRefs.current.get(restoreFocusItemId);
+    const node = posterRefs.current.get(restoreFocusKey ?? restoreFocusItemId);
     const focusable = node as { focus?: () => void } | undefined;
     focusable?.focus?.();
     onRestoreFocusHandled?.();
-  }, [onRestoreFocusHandled, restoreFocusItemId, visible]);
+  }, [onRestoreFocusHandled, restoreFocusKey, restoreFocusItemId, visible]);
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -156,9 +160,9 @@ function DiscoverZoneOverlayContent({
                         }
                         onFocusableNode={(node) => {
                           if (node) {
-                            posterRefs.current.set(item.id, node);
+                            posterRefs.current.set(`${rail}:${item.id}`, node);
                           } else {
-                            posterRefs.current.delete(item.id);
+                            posterRefs.current.delete(`${rail}:${item.id}`);
                           }
                         }}
                         onPress={() => {

@@ -304,3 +304,11 @@ test('Movie and Series Discover Zone keep overlay mounted and return on detail B
   assert.doesNotMatch(moviesScreen, /setDiscoverZoneOpen\(false\);\s*\n\s*handleSelectMovie/);
   assert.doesNotMatch(seriesScreen, /setDiscoverZoneOpen\(false\);\s*\n\s*handleSelectSeries/);
 });
+
+test('Discover Zone restores duplicate IDs to their originating rail', () => {
+  assert.match(overlay, /restoreFocusKey\?: string \| null/);
+  assert.match(overlay, /posterRefs\.current\.set\(`\$\{rail\}:\$\{item\.id\}`/);
+  assert.match(overlay, /posterRefs\.current\.get\(restoreFocusKey \?\? restoreFocusItemId\)/);
+  assert.match(moviesScreen, /setDiscoverZoneRestoreFocusKey\(`\$\{rail\}:\$\{item\.id\}`\)/);
+  assert.match(seriesScreen, /setDiscoverZoneRestoreFocusKey\(`\$\{rail\}:\$\{item\.id\}`\)/);
+});

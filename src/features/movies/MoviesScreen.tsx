@@ -314,6 +314,7 @@ export function MoviesScreen() {
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
   const [discoverZoneOpen, setDiscoverZoneOpen] = useState(() => Boolean(getMoviesScreenMemory(activeProviderId).openDiscoverZone));
   const [discoverZoneRestoreItemId, setDiscoverZoneRestoreItemId] = useState<string | null>(null);
+  const [discoverZoneRestoreFocusKey, setDiscoverZoneRestoreFocusKey] = useState<string | null>(null);
   const detailLaunchOriginRef = useRef<'browse' | 'search' | typeof DISCOVERY_ZONE_ORIGIN>('browse');
   const moviesMemory = getMoviesScreenMemory(activeProviderId);
   const library = useMovieLibraryStore(activeProviderId);
@@ -5852,18 +5853,21 @@ useEffect(() => {
         visible={discoverZoneOpen && !playbackUiActive && !detailPopup.open}
         retainMounted={discoverZoneOpen}
         restoreFocusItemId={discoverZoneRestoreItemId}
+        restoreFocusKey={discoverZoneRestoreFocusKey}
         providerId={activeProviderId}
         scope="movies"
         onClose={() => {
           detailLaunchOriginRef.current = 'browse';
           setDiscoverZoneRestoreItemId(null);
+          setDiscoverZoneRestoreFocusKey(null);
           setDiscoverZoneOpen(false);
         }}
-        onSelectItem={(item) => {
+        onSelectItem={(item, rail) => {
           if (!item.canonicalMovie) {
             return;
           }
           setDiscoverZoneRestoreItemId(item.id);
+          setDiscoverZoneRestoreFocusKey(`${rail}:${item.id}`);
           handleSelectMovie(item.canonicalMovie, DISCOVERY_ZONE_ORIGIN);
         }}
       />

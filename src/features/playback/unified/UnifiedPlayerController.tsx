@@ -2258,7 +2258,6 @@ export function UnifiedPlayerController() {
         upNextActive={Boolean(upNext)}
         onTogglePlay={handleTogglePlay}
         onRevealControls={revealControls}
-        onRequestDefaultFocus={() => requestDefaultChromeFocusRef.current()}
         getSeekPreviewActive={() => seekPreviewActiveRef.current}
         getTimelineFocused={() => getTimelineFocusedRef.current()}
         getTimelineHandlePresent={() => getTimelineHandlePresentRef.current()}

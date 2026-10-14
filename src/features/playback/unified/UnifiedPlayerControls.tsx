@@ -963,9 +963,8 @@ export function UnifiedPlayerControls({
         focusedControl: null,
       });
       onReveal('hidden-focus-sentinel');
-      requestDefaultChromeFocus();
     },
-    [mediaType, onReveal, requestDefaultChromeFocus, upNextActive, visible],
+    [mediaType, onReveal, upNextActive, visible],
   );
 
   useEffect(() => {

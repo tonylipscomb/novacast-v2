@@ -90,6 +90,7 @@ export function SeriesScreen() {
   const activeProviderId = selectedProvider?.id ?? 'no-provider';
   const [discoverZoneOpen, setDiscoverZoneOpen] = useState(() => Boolean(getSeriesScreenMemory(activeProviderId).openDiscoverZone));
   const [discoverZoneRestoreItemId, setDiscoverZoneRestoreItemId] = useState<string | null>(null);
+  const [discoverZoneRestoreFocusKey, setDiscoverZoneRestoreFocusKey] = useState<string | null>(null);
   const [searchOriginResultKey, setSearchOriginResultKey] = useState<string | null>(null);
   const detailLaunchOriginRef = useRef<'browse' | 'search' | typeof DISCOVERY_ZONE_ORIGIN>('browse');
   const memory = getSeriesScreenMemory(activeProviderId);
@@ -1397,18 +1398,21 @@ useEffect(() => {
         visible={discoverZoneOpen && !playbackUiActive && !seriesDetailPopup.open}
         retainMounted={discoverZoneOpen}
         restoreFocusItemId={discoverZoneRestoreItemId}
+        restoreFocusKey={discoverZoneRestoreFocusKey}
         providerId={activeProviderId}
         scope="series"
         onClose={() => {
           detailLaunchOriginRef.current = 'browse';
           setDiscoverZoneRestoreItemId(null);
+          setDiscoverZoneRestoreFocusKey(null);
           setDiscoverZoneOpen(false);
         }}
-        onSelectItem={(item) => {
+        onSelectItem={(item, rail) => {
           if (!item.canonicalSeries) {
             return;
           }
           setDiscoverZoneRestoreItemId(item.id);
+          setDiscoverZoneRestoreFocusKey(`${rail}:${item.id}`);
           handleSelectSeries(item.canonicalSeries, DISCOVERY_ZONE_ORIGIN);
         }}
       />

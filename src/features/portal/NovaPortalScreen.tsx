@@ -807,7 +807,7 @@ export function NovaPortalScreen() {
     return setPanel('diagnostics');
   }, [openPairing, openProviders, router]);
 
-  if (isDeviceActivationRequired() && device.status && device.status.activationStatus !== 'active') {
+  if (!pairingVisible && isDeviceActivationRequired() && device.status && device.status.activationStatus !== 'active') {
     if (device.status.activationStatus === 'expired') {
       return (
         <BetaExpiredScreen

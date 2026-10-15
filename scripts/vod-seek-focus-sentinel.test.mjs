@@ -95,11 +95,16 @@ test('3. chrome hide requests hidden anchor focus', () => {
   assert.match(router, /focusNativeViewWhenReady\(\(\) => anchorRef\.current/);
 });
 
-test('4. hidden anchor focus is confirmed', () => {
+test('4. hidden anchor focus is confirmed without preferred-focus takeover', () => {
   assert.match(router, /hidden-anchor-focus-confirmed/);
   assert.match(router, /onFocus=\{handleAnchorFocus\}/);
   assert.match(router, /focusable=\{!chromeVisible\}/);
-  assert.match(router, /hasTVPreferredFocus=\{!chromeVisible\}/);
+  assert.match(router, /focusNativeViewWhenReady\(\(\) => anchorRef\.current/);
+  assert.match(router, /nextFocusLeft: handles\.left/);
+  assert.match(router, /nextFocusRight: handles\.right/);
+  assert.match(router, /nextFocusUp: wakeHandles\.up/);
+  assert.match(router, /nextFocusDown: wakeHandles\.down/);
+  assert.doesNotMatch(router, /hasTVPreferredFocus=\{!chromeVisible\}/);
 });
 
 test('5. left sentinel focus calls centralized LEFT seek preview', () => {

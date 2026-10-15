@@ -204,7 +204,17 @@ function buildAndroidControlFocusProps(
   controlId: UnifiedControlFocusId,
   handles: Partial<Record<UnifiedControlFocusId, number>>,
   sentinelHandles?: { left?: number | null; right?: number | null },
+  hiddenWakeHandle?: number | null,
 ) {
+  if (hiddenWakeHandle != null) {
+    return {
+      nextFocusLeft: hiddenWakeHandle,
+      nextFocusRight: hiddenWakeHandle,
+      nextFocusUp: hiddenWakeHandle,
+      nextFocusDown: hiddenWakeHandle,
+    };
+  }
+
   const rewind = handles.rewind;
   const play = handles.play;
   const forward = handles.forward;
@@ -316,7 +326,12 @@ export function UnifiedPlayerControls({
     nextEpisode: null,
   });
   const [androidFocusHandles, setAndroidFocusHandles] = useState<Partial<Record<UnifiedControlFocusId, number>>>({});
-  const [sentinelHandles, setSentinelHandles] = useState<{ left: number | null; right: number | null }>({
+  const [sentinelHandles, setSentinelHandles] = useState<{
+    anchor: number | null;
+    left: number | null;
+    right: number | null;
+  }>({
+    anchor: null,
     left: null,
     right: null,
   });
@@ -794,6 +809,26 @@ export function UnifiedPlayerControls({
 
   const handleControlPress = useCallback(
     (controlId: UnifiedControlFocusId, actionTaken: string, handler: () => void) => {
+      if (!visibleRef.current) {
+        if (upNextActive || wakeRevealPendingRef.current) {
+          return;
+        }
+        wakeRevealPendingRef.current = true;
+        logPlayerChromeFocus({
+          event: 'wake-input',
+          key: 'select',
+          mediaType,
+          focusedControl: null,
+        });
+        logPlayerChromeFocus({
+          event: 'wake-consumed',
+          key: 'select',
+          mediaType,
+          focusedControl: null,
+        });
+        onRevealRef.current('hidden-focus-sentinel');
+        return;
+      }
       if (controlId !== 'back' && Date.now() - lastKeyActivateAtRef.current < UNIFIED_CONTROL_ACTIVATE_DEBOUNCE_MS) {
         return;
       }
@@ -809,7 +844,7 @@ export function UnifiedPlayerControls({
       }
       handler();
     },
-    [],
+    [mediaType, upNextActive],
   );
 
   useEffect(() => {
@@ -1149,20 +1184,31 @@ export function UnifiedPlayerControls({
     previousEpisode: showEpisodeButtons && canGoPreviousEpisode ? androidFocusHandles.previousEpisode : undefined,
     nextEpisode: showEpisodeButtons && canGoNextEpisode ? androidFocusHandles.nextEpisode : undefined,
   };
-  const backFocusProps = Platform.OS === 'android' ? buildAndroidControlFocusProps('back', episodeFocusHandles) : null;
+  const hiddenWakeHandle = visible ? null : sentinelHandles.anchor;
+  const backFocusProps =
+    Platform.OS === 'android' ? buildAndroidControlFocusProps('back', episodeFocusHandles, undefined, hiddenWakeHandle) : null;
   const rewindFocusProps =
-    Platform.OS === 'android' ? buildAndroidControlFocusProps('rewind', episodeFocusHandles) : null;
-  const playFocusProps = Platform.OS === 'android' ? buildAndroidControlFocusProps('play', episodeFocusHandles) : null;
+    Platform.OS === 'android'
+      ? buildAndroidControlFocusProps('rewind', episodeFocusHandles, undefined, hiddenWakeHandle)
+      : null;
+  const playFocusProps =
+    Platform.OS === 'android' ? buildAndroidControlFocusProps('play', episodeFocusHandles, undefined, hiddenWakeHandle) : null;
   const forwardFocusProps =
-    Platform.OS === 'android' ? buildAndroidControlFocusProps('forward', episodeFocusHandles) : null;
+    Platform.OS === 'android'
+      ? buildAndroidControlFocusProps('forward', episodeFocusHandles, undefined, hiddenWakeHandle)
+      : null;
   const seekFocusProps =
     Platform.OS === 'android'
-      ? buildAndroidControlFocusProps('seek', episodeFocusHandles, sentinelHandles)
+      ? buildAndroidControlFocusProps('seek', episodeFocusHandles, sentinelHandles, hiddenWakeHandle)
       : null;
   const previousEpisodeFocusProps =
-    Platform.OS === 'android' ? buildAndroidControlFocusProps('previousEpisode', episodeFocusHandles) : null;
+    Platform.OS === 'android'
+      ? buildAndroidControlFocusProps('previousEpisode', episodeFocusHandles, undefined, hiddenWakeHandle)
+      : null;
   const nextEpisodeFocusProps =
-    Platform.OS === 'android' ? buildAndroidControlFocusProps('nextEpisode', episodeFocusHandles) : null;
+    Platform.OS === 'android'
+      ? buildAndroidControlFocusProps('nextEpisode', episodeFocusHandles, undefined, hiddenWakeHandle)
+      : null;
   const vodFocusRouterEnabled = shouldActivateVodFocusRouter({
     mediaType,
     upNextActive,
@@ -1356,10 +1402,10 @@ export function UnifiedPlayerControls({
         onHiddenChromeWake={handleHiddenChromeWake}
         onHandlesChange={(next) => {
           setSentinelHandles((current) => {
-            if (current.left === next.left && current.right === next.right) {
+            if (current.anchor === next.anchor && current.left === next.left && current.right === next.right) {
               return current;
             }
-            return { left: next.left, right: next.right };
+            return { anchor: next.anchor, left: next.left, right: next.right };
           });
         }}
       />

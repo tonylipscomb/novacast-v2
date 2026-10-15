@@ -31,9 +31,10 @@ type UnifiedPlayerVodFocusRouterProps = {
 };
 
 /**
- * Native TV focus router for VOD LEFT/RIGHT.
+ * Native TV focus router for VOD hidden-chrome wake and visible seek preview.
  * ONN consumes DPAD as focus navigation, not JS key events.
- * Hidden chrome parks on the anchor; LEFT/RIGHT move to dedicated sentinels.
+ * Hidden chrome parks on one anchor; each direction has one explicit wake
+ * sentinel, while visible LEFT/RIGHT retain their seek-preview routing.
  */
 export function UnifiedPlayerVodFocusRouter({
   enabled,
@@ -253,7 +254,7 @@ export function UnifiedPlayerVodFocusRouter({
         {...(handles.right != null ? { nextFocusRight: handles.right } : {})}
         {...(!chromeVisible && wakeHandles.up != null ? { nextFocusUp: wakeHandles.up } : {})}
         {...(!chromeVisible && wakeHandles.down != null ? { nextFocusDown: wakeHandles.down } : {})}
-        style={styles.sentinel}
+        style={styles.anchor}
       />
       <View
         ref={assignLeftRef}
@@ -262,6 +263,14 @@ export function UnifiedPlayerVodFocusRouter({
         accessible={false}
         importantForAccessibility="no"
         onFocus={() => handleSentinelNativeFocus(-1)}
+        {...(!chromeVisible && handles.anchor != null
+          ? {
+              nextFocusLeft: handles.anchor,
+              nextFocusRight: handles.anchor,
+              nextFocusUp: handles.anchor,
+              nextFocusDown: handles.anchor,
+            }
+          : {})}
         {...(chromeVisible && timelineReturn != null
           ? {
               nextFocusLeft: timelineReturn,
@@ -270,7 +279,7 @@ export function UnifiedPlayerVodFocusRouter({
               nextFocusDown: timelineReturn,
             }
           : {})}
-        style={styles.sentinel}
+        style={styles.leftSentinel}
       />
       <View
         ref={assignRightRef}
@@ -279,6 +288,14 @@ export function UnifiedPlayerVodFocusRouter({
         accessible={false}
         importantForAccessibility="no"
         onFocus={() => handleSentinelNativeFocus(1)}
+        {...(!chromeVisible && handles.anchor != null
+          ? {
+              nextFocusLeft: handles.anchor,
+              nextFocusRight: handles.anchor,
+              nextFocusUp: handles.anchor,
+              nextFocusDown: handles.anchor,
+            }
+          : {})}
         {...(chromeVisible && timelineReturn != null
           ? {
               nextFocusLeft: timelineReturn,
@@ -287,7 +304,7 @@ export function UnifiedPlayerVodFocusRouter({
               nextFocusDown: timelineReturn,
             }
           : {})}
-        style={styles.sentinel}
+        style={styles.rightSentinel}
       />
       <View
         ref={assignUpRef}
@@ -296,7 +313,15 @@ export function UnifiedPlayerVodFocusRouter({
         accessible={false}
         importantForAccessibility="no"
         onFocus={() => handleVerticalWake('up')}
-        style={styles.sentinel}
+        {...(!chromeVisible && handles.anchor != null
+          ? {
+              nextFocusLeft: handles.anchor,
+              nextFocusRight: handles.anchor,
+              nextFocusUp: handles.anchor,
+              nextFocusDown: handles.anchor,
+            }
+          : {})}
+        style={styles.upSentinel}
       />
       <View
         ref={assignDownRef}
@@ -305,7 +330,15 @@ export function UnifiedPlayerVodFocusRouter({
         accessible={false}
         importantForAccessibility="no"
         onFocus={() => handleVerticalWake('down')}
-        style={styles.sentinel}
+        {...(!chromeVisible && handles.anchor != null
+          ? {
+              nextFocusLeft: handles.anchor,
+              nextFocusRight: handles.anchor,
+              nextFocusUp: handles.anchor,
+              nextFocusDown: handles.anchor,
+            }
+          : {})}
+        style={styles.downSentinel}
       />
     </>
   );
@@ -313,16 +346,24 @@ export function UnifiedPlayerVodFocusRouter({
 
 export const UnifiedPlayerHiddenChromeCapture = UnifiedPlayerVodFocusRouter;
 
+const sentinelBase = {
+  position: 'absolute' as const,
+  width: 1,
+  height: 1,
+  opacity: 0.01,
+  overflow: 'hidden' as const,
+  backgroundColor: 'transparent',
+  borderWidth: 0,
+};
+
 const styles = StyleSheet.create({
-  sentinel: {
-    position: 'absolute',
-    width: 1,
-    height: 1,
-    opacity: 0.01,
-    left: 0,
-    top: 0,
-    overflow: 'hidden',
-    backgroundColor: 'transparent',
-    borderWidth: 0,
+  anchor: {
+    ...sentinelBase,
+    left: 1,
+    top: 1,
   },
+  leftSentinel: { ...sentinelBase, left: 0, top: 1 },
+  rightSentinel: { ...sentinelBase, left: 2, top: 1 },
+  upSentinel: { ...sentinelBase, left: 1, top: 0 },
+  downSentinel: { ...sentinelBase, left: 1, top: 2 },
 });

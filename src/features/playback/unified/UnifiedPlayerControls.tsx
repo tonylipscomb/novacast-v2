@@ -335,6 +335,7 @@ export function UnifiedPlayerControls({
   const defaultFocusRequestedLogRef = useRef(false);
   const visibleRef = useRef(visible);
   const previousVisibleRef = useRef(visible);
+  const wakeRevealPendingRef = useRef(false);
   const previousContentIdRef = useRef(contentId);
   const seekTargetMsRef = useRef<number | null>(null);
   const seekSessionIdRef = useRef<string | null>(null);
@@ -947,9 +948,10 @@ export function UnifiedPlayerControls({
 
   const handleHiddenChromeWake = useCallback(
     (key: PlayerChromeWakeKey) => {
-      if (visible || upNextActive) {
+      if (visible || upNextActive || wakeRevealPendingRef.current) {
         return;
       }
+      wakeRevealPendingRef.current = true;
       logPlayerChromeFocus({
         event: 'wake-input',
         key,
@@ -966,6 +968,12 @@ export function UnifiedPlayerControls({
     },
     [mediaType, onReveal, upNextActive, visible],
   );
+
+  useEffect(() => {
+    if (visible) {
+      wakeRevealPendingRef.current = false;
+    }
+  }, [visible]);
 
   useEffect(() => {
     onRegisterHiddenVodSeekPreview?.(beginVodDirectionalPreview);

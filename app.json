@@ -20,7 +20,7 @@
                                  "usesCleartextTraffic":  true,
                                  "predictiveBackGestureEnabled":  false,
                                  "package":  "com.novacast.novacastv2",
-                                 "versionCode":  43
+                                 "versionCode":  44
                              },
                  "web":  {
                              "output":  "static",

@@ -155,7 +155,7 @@ test('11. Up Next visible -> player chrome wake gate does not steal focus', () =
     false,
   );
   assert.match(controller, /enabled=\{playbackActive && !upNext\}/);
-  assert.match(controls, /if \(visible \|\| upNextActive\)/);
+  assert.match(controls, /if \(visible \|\| upNextActive \|\| wakeRevealPendingRef\.current\)/);
 });
 
 test('12. Cancel Up Next -> normal VOD chrome wake behavior returns', () => {
@@ -207,4 +207,12 @@ test('16. wake requests visibility before post-mount focus', () => {
   assert.doesNotMatch(wakeBlock, /onRequestDefaultFocusRef\.current/);
   assert.match(controls, /previousVisibleRef\.current = visible;\s*requestDefaultChromeFocus\(\)/);
   assert.doesNotMatch(controls.slice(controls.indexOf('const handleHiddenChromeWake'), controls.indexOf('const handleHiddenChromeWake') + 1200), /requestDefaultChromeFocus\(\)/);
+});
+
+test('17. hidden native focus anchor handles Select as wake-only input', () => {
+  assert.match(router, /onHiddenChromeWake\?: \(key: 'left' \| 'right' \| 'up' \| 'down' \| 'select'\)/);
+  assert.match(router, /<Pressable[\s\S]{0,500}onPress=\{handleAnchorPress\}/);
+  assert.match(router, /onHiddenChromeWakeRef\.current\?\.\('select'\)/);
+  assert.match(controls, /wakeRevealPendingRef/);
+  assert.match(controls, /if \(visible \|\| upNextActive \|\| wakeRevealPendingRef\.current\)/);
 });

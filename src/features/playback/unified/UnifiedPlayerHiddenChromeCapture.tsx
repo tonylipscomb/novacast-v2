@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { findNodeHandle, Platform, StyleSheet, View } from 'react-native';
+import { findNodeHandle, Platform, Pressable, StyleSheet, View } from 'react-native';
 
 import { focusNativeViewWhenReady } from '@/features/navigation/focusNativeViewWhenReady';
 
@@ -26,7 +26,7 @@ type UnifiedPlayerVodFocusRouterProps = {
   seekSessionId: string | null;
   seekHandle?: number | null;
   onSentinelFocus: (direction: VodSeekDirection) => void;
-  onHiddenChromeWake?: (key: 'left' | 'right' | 'up' | 'down') => void;
+  onHiddenChromeWake?: (key: 'left' | 'right' | 'up' | 'down' | 'select') => void;
   onHandlesChange?: (handles: VodFocusRouterHandles) => void;
 };
 
@@ -196,6 +196,12 @@ export function UnifiedPlayerVodFocusRouter({
     });
   }, [snapshotFields]);
 
+  const handleAnchorPress = useCallback(() => {
+    if (!chromeVisibleRef.current) {
+      onHiddenChromeWakeRef.current?.('select');
+    }
+  }, []);
+
   const handleSentinelNativeFocus = useCallback(
     (direction: VodSeekDirection) => {
       if (!chromeVisibleRef.current) {
@@ -233,13 +239,14 @@ export function UnifiedPlayerVodFocusRouter({
 
   return (
     <>
-      <View
+      <Pressable
         ref={assignAnchorRef}
         collapsable={false}
         focusable={!chromeVisible}
         accessible={false}
         importantForAccessibility="no"
         onFocus={handleAnchorFocus}
+        onPress={handleAnchorPress}
         // Hidden playback chrome is an explicit handoff target, never a
         // startup preferred-focus owner. Home owns first native focus.
         {...(handles.left != null ? { nextFocusLeft: handles.left } : {})}

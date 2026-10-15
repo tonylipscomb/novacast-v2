@@ -1,4 +1,11 @@
 export type AppNotificationType = 'error' | 'warning' | 'success' | 'info';
+export type AppNotificationCategory =
+  | 'app-update'
+  | 'maintenance'
+  | 'provider-health'
+  | 'announcement'
+  | 'service-notice'
+  | 'general';
 export type AppNotificationPosition = 'top-right' | 'bottom-right' | 'bottom-center';
 
 /**
@@ -29,6 +36,7 @@ export type AppNotification = {
   autoFocusAction?: boolean;
   /** Defaults to `passive`. Existing call sites stay non-blocking unless they opt in. */
   interactionMode?: NotificationInteractionMode;
+  category?: AppNotificationCategory;
 };
 
 export type ShowNotificationInput = Omit<AppNotification, 'id'> & { id?: string };

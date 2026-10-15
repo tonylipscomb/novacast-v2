@@ -1,4 +1,4 @@
-import type { ComponentType, ReactNode } from 'react';
+import { useEffect, type ComponentType, type ReactNode } from 'react';
 import { useSyncExternalStore } from 'react';
 import * as ReactNative from 'react-native';
 import { Platform, StyleSheet, View } from 'react-native';
@@ -8,6 +8,7 @@ import { AppNotificationToast } from './AppNotificationToast';
 import { shouldCaptureNotificationFocus } from './notificationFocusLogic';
 import { getNotificationsSnapshot, subscribeNotifications } from './notificationStore';
 import type { AppNotification, AppNotificationPosition } from './types';
+import { hydrateNotificationCenter } from './notificationCenterStore';
 
 type PositionOffsets = { top?: number; bottom?: number; left?: number; right?: number };
 
@@ -59,6 +60,9 @@ function groupByPosition(notifications: AppNotification[]): Record<AppNotificati
  * Blocking toasts may trap focus locally; the scrim stays non-interactive.
  */
 export function AppNotificationProvider() {
+  useEffect(() => {
+    void hydrateNotificationCenter();
+  }, []);
   const { visible } = useNotificationsSnapshot();
   const insets = useSafeAreaInsets();
 

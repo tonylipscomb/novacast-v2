@@ -719,6 +719,42 @@ export function SeriesScreen() {
     [activeProviderId, bundle, launchPlayback, seriesDetail],
   );
 
+  const openRecentlyWatchedEpisode = useCallback(async (item: { id: string; artworkUrl?: string; recentEpisode?: { seriesId: string; episodeId: string; seasonNumber: string; episodeNumber: string }; continueWatching?: { positionMs: number; durationMs: number; progressPercent: number } }, resumePolicy: 'silent' | 'prompt' = 'prompt') => {
+    const recentEpisode = item.recentEpisode;
+    if (!bundle || !recentEpisode) return;
+    setLaunchingEpisodePlayback(true);
+    setEpisodePlaybackError(null);
+    try {
+      const detail = await bundle.seriesDataSource.getSeriesInfo(recentEpisode.seriesId).catch(() => null);
+      const episode = detail
+        ? Object.values(detail.episodesBySeason).flat().find((candidate) =>
+            candidate.id === recentEpisode.episodeId ||
+            (candidate.seasonNumber === recentEpisode.seasonNumber && candidate.episodeNumber === recentEpisode.episodeNumber),
+          )
+        : undefined;
+      if (!episode) {
+        setEpisodePlaybackError('This episode is no longer available.');
+        return;
+      }
+      const launched = await launchSeriesEpisodePlayback({
+        bundle,
+        providerId: activeProviderId,
+        episode,
+        seriesTitle: detail?.title,
+        artworkUrl: item.artworkUrl ?? detail?.posterUrl,
+        episodes: detail ? Object.values(detail.episodesBySeason).flat() : undefined,
+        launchSource: 'episode',
+        resumePolicy,
+        launchPlayback,
+      });
+      if (!launched) setEpisodePlaybackError('This episode could not be played right now.');
+    } catch {
+      setEpisodePlaybackError('This episode could not be played right now.');
+    } finally {
+      setLaunchingEpisodePlayback(false);
+    }
+  }, [activeProviderId, bundle, launchPlayback]);
+
   const playFirstEpisode = useCallback(
     async (fromBeginning = false) => {
       if (!seriesDetail) {
@@ -1408,6 +1444,12 @@ useEffect(() => {
           setDiscoverZoneOpen(false);
         }}
         onSelectItem={(item, rail) => {
+          if (item.mediaType === 'episode') {
+            setDiscoverZoneRestoreItemId(item.id);
+            setDiscoverZoneRestoreFocusKey(`${rail}:${item.id}`);
+            void openRecentlyWatchedEpisode(item, item.continueWatching ? 'silent' : 'prompt');
+            return;
+          }
           if (!item.canonicalSeries) {
             return;
           }

@@ -33,7 +33,7 @@ type DiscoverZoneOverlayProps = {
   onClose: () => void;
   onSelectItem: (
     item: DiscoverZoneItem,
-    rail: 'watchlist' | 'favorites' | 'recent',
+    rail: 'continueWatching' | 'watchlist' | 'favorites' | 'recent',
     railItems?: DiscoverZoneItem[],
   ) => void;
   retainMounted?: boolean;
@@ -243,6 +243,12 @@ function DiscoverZonePoster({
       <Text numberOfLines={2} style={[styles.posterTitle, focused && styles.posterTitleFocused]}>
         {item.title}
       </Text>
+      {item.subtitle ? <Text numberOfLines={1} style={styles.posterSubtitle}>{item.subtitle}</Text> : null}
+      {item.continueWatching ? (
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${Math.max(0, Math.min(100, item.continueWatching.progressPercent))}%` }]} />
+        </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -352,6 +358,25 @@ function createStyles(theme: NovaTheme) {
       fontWeight: '700',
     },
     posterTitleFocused: focusText.title,
+    posterSubtitle: {
+      marginTop: 2,
+      color: theme.colors.textMuted,
+      fontSize: 10,
+      fontWeight: '600',
+    },
+    progressTrack: {
+      height: 4,
+      width: 116,
+      marginTop: 5,
+      overflow: 'hidden',
+      borderRadius: 2,
+      backgroundColor: 'rgba(255,255,255,0.16)',
+    },
+    progressFill: {
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: theme.colors.accent,
+    },
     empty: {
       flex: 1,
       alignItems: 'center',

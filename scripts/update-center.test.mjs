@@ -13,12 +13,15 @@ const validManifest = {
   versionCode: 45,
   apkUrl: 'https://novacast-connect.netlify.app/downloads/novacast.apk',
   sha256: 'A'.repeat(64),
+  channel: 'production',
 };
 
 test('rejects malformed manifests and package mismatches', () => {
   assert.equal(parseUpdateManifest({ ...validManifest, packageName: 'other.app' }), null);
   assert.equal(parseUpdateManifest({ ...validManifest, sha256: 'not-a-checksum' }), null);
   assert.equal(parseUpdateManifest({ ...validManifest, apkUrl: 'file:///private.apk' }), null);
+  assert.equal(parseUpdateManifest({ ...validManifest, channel: 'beta' }), null);
+  assert.equal(parseUpdateManifest({ ...validManifest, apkUrl: 'http://example.test/app.apk' }), null);
 });
 
 test('returns no-update when installed version is current or newer', () => {

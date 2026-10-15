@@ -7,10 +7,21 @@ export type DiscoverZoneItem = {
   title: string;
   artworkUrl?: string;
   subtitle?: string;
-  mediaType: 'movie' | 'series' | 'live';
+  mediaType: 'movie' | 'series' | 'episode' | 'live';
   resolved?: boolean;
   canonicalMovie?: MovieSummary;
   canonicalSeries?: SeriesSummary;
+  recentEpisode?: {
+    seriesId: string;
+    episodeId: string;
+    seasonNumber: string;
+    episodeNumber: string;
+  };
+  continueWatching?: {
+    positionMs: number;
+    durationMs: number;
+    progressPercent: number;
+  };
 };
 
 
@@ -103,6 +114,9 @@ export function canOpenDiscoverZoneDetail(item: DiscoverZoneItem): boolean {
     return Boolean(
       item.canonicalSeries && isSafeDiscoverZoneTitle(item.canonicalSeries.title, item.canonicalSeries.id),
     );
+  }
+  if (item.mediaType === 'episode') {
+    return Boolean(item.recentEpisode?.seriesId && item.recentEpisode.episodeId);
   }
   return false;
 }

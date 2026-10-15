@@ -64,6 +64,8 @@ type SettingsDetailPanelProps = {
   onToggleSmartCategories: () => void;
   onReplayGuides: () => void;
   onSuppressGuides: () => void;
+  onOpenNotifications: () => void;
+  onOpenUpgrade: () => void;
   onFocusHandleReady?: (handle: number | undefined) => void;
   nextFocusLeftHandle?: number;
 };
@@ -90,6 +92,8 @@ export function SettingsDetailPanel({
   onClearPin,
   onReplayGuides,
   onSuppressGuides,
+  onOpenNotifications,
+  onOpenUpgrade,
   onFocusHandleReady,
   nextFocusLeftHandle,
 }: SettingsDetailPanelProps) {
@@ -494,6 +498,57 @@ export function SettingsDetailPanel({
     </View>
   );
 
+  const renderNotifications = () => (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Notifications</Text>
+      <Text style={styles.sectionCopy}>Review service notices and approved NovaCast updates without leaving your account settings.</Text>
+      <Pressable
+        ref={bindFirstControlRef}
+        focusable
+        {...leftFocusProps}
+        onFocus={() => setFocusedControl('open-notifications')}
+        onBlur={() => setFocusedControl((current) => (current === 'open-notifications' ? null : current))}
+        onPress={onOpenNotifications}
+        style={[styles.inlineButtonPrimary, novaTvFocus.base, focusedControl === 'open-notifications' && styles.rowFocused]}>
+        <MaterialCommunityIcons name="bell-outline" size={17} color={theme.colors.accentHover} />
+        <Text style={styles.inlineButtonPrimaryText}>Open Notification Center</Text>
+      </Pressable>
+    </View>
+  );
+
+  const renderUpdates = () => (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Upgrade Center</Text>
+      <Text style={styles.sectionCopy}>Check the approved production channel for a newer NovaCast build. Downloads remain explicit; this screen does not install APKs.</Text>
+      <Pressable
+        ref={bindFirstControlRef}
+        focusable
+        {...leftFocusProps}
+        onFocus={() => setFocusedControl('open-upgrade')}
+        onBlur={() => setFocusedControl((current) => (current === 'open-upgrade' ? null : current))}
+        onPress={onOpenUpgrade}
+        style={[styles.inlineButtonPrimary, novaTvFocus.base, focusedControl === 'open-upgrade' && styles.rowFocused]}>
+        <MaterialCommunityIcons name="update" size={17} color={theme.colors.accentHover} />
+        <Text style={styles.inlineButtonPrimaryText}>Open Upgrade Center</Text>
+      </Pressable>
+    </View>
+  );
+
+  const renderDiagnostics = () => (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Diagnostics</Text>
+      <Text style={styles.sectionCopy}>Sanitized device and provider health information for troubleshooting. Credentials, tokens, and stream URLs are never shown.</Text>
+      <View style={styles.betaSupportBox}>
+        <InfoCell label="Device" value={betaSupport.deviceId} styles={styles} />
+        <InfoCell label="Model" value={betaSupport.deviceModel} styles={styles} />
+        <InfoCell label="Android" value={betaSupport.osVersion} styles={styles} />
+        <InfoCell label="Activation" value={betaSupport.activation} styles={styles} />
+        <InfoCell label="Network" value={betaSupport.network} styles={styles} />
+        <InfoCell label="Diagnostic code" value={betaSupport.diagnosticCode} styles={styles} />
+      </View>
+    </View>
+  );
+
   const renderAbout = () => (
     <View style={styles.aboutSection}>
       <Text style={styles.sectionTitle}>About</Text>
@@ -585,6 +640,12 @@ export function SettingsDetailPanel({
             ? renderParental()
             : sectionId === 'smart-categories'
               ? renderSmartCategories()
+            : sectionId === 'notifications'
+              ? renderNotifications()
+              : sectionId === 'updates'
+                ? renderUpdates()
+                : sectionId === 'diagnostics'
+                  ? renderDiagnostics()
               : renderAbout();
 
   return (
@@ -644,6 +705,11 @@ function createStyles(theme: NovaTheme) {
     panel: {
       flex: 1,
       minWidth: 0,
+      padding: 18,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: theme.colors.borderSubtle,
+      backgroundColor: 'rgba(5,10,24,0.88)',
       borderTopWidth: 1,
       borderTopColor: theme.colors.borderSubtle,
       paddingTop: 10,

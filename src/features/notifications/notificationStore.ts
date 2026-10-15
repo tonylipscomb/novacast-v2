@@ -1,4 +1,5 @@
 import type { AppNotification, NotificationsSnapshot, ShowNotificationInput } from './types';
+import { dismissCenterNotification, recordNotification } from './notificationCenterStore.ts';
 
 declare const __DEV__: boolean | undefined;
 
@@ -133,6 +134,7 @@ function buildNotification(id: string, input: ShowNotificationInput): AppNotific
     dedupeKey: input.dedupeKey,
     autoFocusAction: input.autoFocusAction ?? false,
     interactionMode: input.interactionMode ?? 'passive',
+    category: input.category ?? 'general',
   };
 }
 
@@ -150,6 +152,7 @@ function notificationContentEqual(left: AppNotification, right: AppNotification)
     left.dedupeKey === right.dedupeKey &&
     left.autoFocusAction === right.autoFocusAction &&
     left.interactionMode === right.interactionMode
+    && left.category === right.category
   );
 }
 
@@ -195,6 +198,15 @@ export function showNotification(input: ShowNotificationInput): string {
   const id = targetId ?? generateNotificationId();
   const notification = buildNotification(id, input);
 
+  recordNotification({
+    id,
+    category: notification.category ?? 'general',
+    type: notification.type,
+    title: notification.title,
+    message: notification.message,
+    actionLabel: notification.actionLabel,
+  });
+
   if (input.dedupeKey) {
     dedupeIndex.set(input.dedupeKey, { id, lastTriggeredAt: now });
   }
@@ -220,6 +232,8 @@ export function dismissNotification(id: string) {
   if (!changed) {
     return;
   }
+
+  dismissCenterNotification(id);
 
   setState({ visible: nextVisible, queued: nextQueued });
   if (wasVisible) {

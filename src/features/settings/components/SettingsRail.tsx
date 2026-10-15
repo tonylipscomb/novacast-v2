@@ -12,6 +12,9 @@ export type SettingsSectionId =
   | 'appearance'
   | 'parental'
   | 'smart-categories'
+  | 'notifications'
+  | 'updates'
+  | 'diagnostics'
   | 'about';
 
 type SettingsRailItem = {
@@ -113,6 +116,11 @@ function createRailStyles(theme: NovaTheme) {
       width: 240,
       minWidth: 220,
       maxWidth: 260,
+      padding: 12,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: theme.colors.borderSubtle,
+      backgroundColor: 'rgba(5,10,24,0.88)',
       borderTopWidth: 1,
       borderTopColor: theme.colors.borderSubtle,
       paddingTop: 10,

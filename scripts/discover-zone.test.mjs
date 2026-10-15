@@ -174,6 +174,62 @@ test('Movie Favorite and Watchlist hydrate to canonical Movie title and poster',
   assert.doesNotMatch(snapshot.watchlist[0]?.title ?? '', /^\d+$/);
 });
 
+test('Recently Watched is provider-scoped, bounded, ordered, and routes episode identity', async () => {
+  const snapshot = await loadDiscoverZoneSnapshot('provider-a', 'series', {
+    getMediaLibrary: async () => ({ favorites: [], favoriteRecords: [], watchlist: [], watchHistory: [], continueWatching: [] }),
+    getRecentItems: async (providerId) => {
+      assert.equal(providerId, 'provider-a');
+      return [
+        { providerId, mediaType: 'episode', contentId: 'ep-2', parentSeriesId: 'series-1', seasonNumber: '2', episodeNumber: '3', title: 'Later episode', lastOpenedAt: 30 },
+        { providerId: 'provider-b', mediaType: 'episode', contentId: 'wrong', parentSeriesId: 'series-2', seasonNumber: '1', episodeNumber: '1', title: 'Wrong provider', lastOpenedAt: 40 },
+        { providerId, mediaType: 'episode', contentId: 'ep-1', parentSeriesId: 'series-1', seasonNumber: '1', episodeNumber: '1', title: 'Earlier episode', lastOpenedAt: 20 },
+      ];
+    },
+  });
+  assert.deepEqual(snapshot.recent.map((item) => item.id), ['ep-2', 'ep-1']);
+  assert.equal(snapshot.recent[0]?.recentEpisode?.seriesId, 'series-1');
+  assert.equal(canOpenDiscoverZoneDetail(snapshot.recent[0]), true);
+  assert.deepEqual(discoverZoneRails(snapshot).map(([rail]) => rail), ['recent']);
+  assert.equal(discoverZoneRailTitle('series', 'recent'), 'Recently Watched');
+});
+
+test('Continue Watching keeps unfinished movie and episode progress separate from Recently Watched', async () => {
+  const movieSnapshot = await loadDiscoverZoneSnapshot('provider-a', 'movies', {
+    getMovieLibrary: async () => ({
+      favorites: [],
+      watchlist: [],
+      watchHistory: [
+        { movieId: 'movie-complete', title: 'Complete', watchedAt: 40, positionMs: 900_000, durationMs: 1_000_000, progressPercent: 90, completed: true },
+        { movieId: 'movie-resume', title: 'Resume', watchedAt: 30, positionMs: 120_000, durationMs: 600_000, progressPercent: 20 },
+        { movieId: 'movie-resume', title: 'Resume older', watchedAt: 10, positionMs: 60_000, durationMs: 600_000, progressPercent: 10 },
+      ],
+    }),
+    getRecentItems: async () => [],
+    getMovieFromIndex: (_providerId, id) => id === 'movie-resume' ? movieSummary(id, 'Resume') : null,
+  });
+  assert.deepEqual(movieSnapshot.continueWatching.map((item) => item.id), ['movie-resume']);
+  assert.equal(movieSnapshot.continueWatching[0]?.continueWatching?.progressPercent, 20);
+  assert.deepEqual(discoverZoneRails(movieSnapshot).map(([rail]) => rail), ['continueWatching']);
+  assert.equal(discoverZoneRailTitle('movies', 'continueWatching'), 'Continue Watching');
+
+  const seriesSnapshot = await loadDiscoverZoneSnapshot('provider-a', 'series', {
+    getMediaLibrary: async () => ({
+      favorites: [],
+      favoriteRecords: [],
+      watchlist: [],
+      watchHistory: [],
+      continueWatching: [
+        { providerId: 'provider-a', mediaKind: 'episode', mediaId: 'series-1:1:2', seriesId: 'series-1', episodeId: 'episode-2', seasonNumber: '1', episodeNumber: '2', title: 'Episode 2', seriesTitle: 'Show', positionMs: 180_000, durationMs: 600_000, progressPercent: 30, lastWatchedAt: 50 },
+        { providerId: 'provider-a', mediaKind: 'episode', mediaId: 'series-1:1:3', seriesId: 'series-1', episodeId: 'episode-3', seasonNumber: '1', episodeNumber: '3', title: 'Done', seriesTitle: 'Show', positionMs: 600_000, durationMs: 600_000, progressPercent: 100, lastWatchedAt: 60 },
+      ],
+    }),
+    getRecentItems: async () => [],
+  });
+  assert.deepEqual(seriesSnapshot.continueWatching.map((item) => item.id), ['series-1:1:2']);
+  assert.equal(seriesSnapshot.continueWatching[0]?.recentEpisode?.episodeId, 'episode-2');
+  assert.equal(seriesSnapshot.continueWatching[0]?.continueWatching?.progressPercent, 30);
+});
+
 test('Movie Discover selection requires a canonical Movie summary', () => {
   const hydrated = resolveHydratedMovie({
     providerId: 'provider-a',

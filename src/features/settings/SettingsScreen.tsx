@@ -124,6 +124,9 @@ export function SettingsScreen() {
       { id: 'appearance' as const, icon: 'palette-outline' as const, title: 'Appearance' },
       { id: 'parental' as const, icon: 'shield-lock-outline' as const, title: 'Parental Controls' },
       { id: 'smart-categories' as const, icon: 'compass-outline' as const, title: 'Discover Zone' },
+      { id: 'notifications' as const, icon: 'bell-outline' as const, title: 'Notifications' },
+      { id: 'updates' as const, icon: 'update' as const, title: 'Upgrade Center' },
+      { id: 'diagnostics' as const, icon: 'pulse' as const, title: 'Diagnostics' },
       { id: 'about' as const, icon: 'information-outline' as const, title: 'About' },
     ],
     [],
@@ -324,6 +327,8 @@ export function SettingsScreen() {
             onToggleSmartCategories={() => void toggleSmartCategories()}
             onReplayGuides={() => void replayGuides()}
             onSuppressGuides={() => void suppressGuides()}
+            onOpenNotifications={() => router.push('/notifications')}
+            onOpenUpgrade={() => router.push('/upgrade')}
             onFocusHandleReady={setDetailFocusHandle}
             nextFocusLeftHandle={railFocusHandle}
           />

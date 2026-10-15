@@ -47,6 +47,7 @@ import { createTvNavigationGate, tryAcquireTvNavigationGate } from '@/features/n
 import { TV_HOME_ROUTE } from '@/features/navigation/tvRoutes';
 import { displayProviderCategoryName } from '@/features/providers/categoryDisplay';
 import { buildMoviePlaybackUrlResolved } from '@/features/providers/providerPlayback';
+import { launchSeriesEpisodePlayback } from '@/features/series/seriesPlayback';
 import { useAppTheme } from '@/theme/AppThemeProvider';
 import type { NovaTheme } from '@/theme/tokens';
 import { MovieCategoryRail } from './components/MovieCategoryRail';
@@ -4765,6 +4766,36 @@ export function MoviesScreen() {
     showNotification,
   ]);
 
+  const openRecentlyWatchedEpisode = useCallback(async (item: { id: string; recentEpisode?: { seriesId: string; episodeId: string; seasonNumber: string; episodeNumber: string }; artworkUrl?: string; continueWatching?: { positionMs: number; durationMs: number; progressPercent: number } }, resumePolicy: 'silent' | 'prompt' = 'prompt') => {
+    const recentEpisode = item.recentEpisode;
+    if (!bundle || !recentEpisode) return;
+    const detail = await bundle.seriesDataSource.getSeriesInfo(recentEpisode.seriesId).catch(() => null);
+    const episode = detail
+      ? Object.values(detail.episodesBySeason).flat().find((candidate) =>
+          candidate.id === recentEpisode.episodeId ||
+          (candidate.seasonNumber === recentEpisode.seasonNumber && candidate.episodeNumber === recentEpisode.episodeNumber),
+        )
+      : undefined;
+    if (!episode) {
+      showNotification({ type: 'error', title: 'Playback unavailable', message: 'This episode is no longer available.', duration: PLAYBACK_NOTIFICATION_DURATION_MS, scope: 'movies' });
+      return;
+    }
+    const launched = await launchSeriesEpisodePlayback({
+      bundle,
+      providerId: activeProviderId,
+      episode,
+      seriesTitle: detail?.title,
+      artworkUrl: item.artworkUrl ?? detail?.posterUrl,
+      episodes: detail ? Object.values(detail.episodesBySeason).flat() : undefined,
+      launchSource: 'episode',
+      resumePolicy,
+      launchPlayback,
+    });
+    if (!launched) {
+      showNotification({ type: 'error', title: 'Playback unavailable', message: 'This episode could not start playing right now.', duration: PLAYBACK_NOTIFICATION_DURATION_MS, scope: 'movies' });
+    }
+  }, [activeProviderId, bundle, launchPlayback, showNotification]);
+
   const openMovieDetailFromSearch = useCallback(
     (
       movie: Parameters<typeof selectMovie>[0],
@@ -5863,6 +5894,12 @@ useEffect(() => {
           setDiscoverZoneOpen(false);
         }}
         onSelectItem={(item, rail) => {
+          if (item.mediaType === 'episode') {
+            setDiscoverZoneRestoreItemId(item.id);
+            setDiscoverZoneRestoreFocusKey(`${rail}:${item.id}`);
+            void openRecentlyWatchedEpisode(item, item.continueWatching ? 'silent' : 'prompt');
+            return;
+          }
           if (!item.canonicalMovie) {
             return;
           }

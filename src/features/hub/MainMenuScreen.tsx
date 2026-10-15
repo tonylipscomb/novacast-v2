@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode
 import { findNodeHandle, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import * as ReactNative from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import * as Application from 'expo-application';
 import { Image } from 'expo-image';
 import { useFocusEffect, useRouter } from 'expo-router';
 
@@ -69,6 +70,8 @@ import { showNotification } from '@/features/notifications/notificationStore';
 import { maybeTriggerDevCatalogRefreshOnce } from '@/features/diagnostics/devCatalogRefreshOnce';
 import { NOVA_GLASS } from '@/components/nova/novaGlassTheme';
 import { NovaPulseRail } from '@/features/novapulse/NovaPulseRail';
+import { NotificationBell } from '@/features/notifications/NotificationBell';
+import { fetchProductionUpdateManifest, resolveUpdateDecision } from '@/features/updates/updateCenter';
 import { useNovaPulseFeed } from '@/features/novapulse/useNovaPulseFeed';
 import type { NovaPulseItem } from '@/features/novapulse/novaPulseTypes';
 import type { NovaPulseArtworkDiagnostics, NovaPulseArtworkStatus } from '@/features/novapulse/NovaPulseCard';
@@ -149,6 +152,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
   const novaPulseCandidateSignaturesRef = useRef({ providerId: activeProviderId, movie: '', series: '' });
   const novaPulseLocalHydrationSignatureRef = useRef('');
   const novaPulseArtworkStatusSeenRef = useRef(new Set<string>());
+  const updateCheckStartedRef = useRef(false);
   const homeProviderIdRef = useRef(activeProviderId);
   activeProviderIdRef.current = activeProviderId;
   bundleRef.current = bundle;
@@ -167,6 +171,28 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
     seriesArtworkLoadError: 0,
   });
   const [novaPulseRecentMovies, setNovaPulseRecentMovies] = useState<MovieSummary[]>([]);
+  useEffect(() => {
+    if (updateCheckStartedRef.current) return;
+    updateCheckStartedRef.current = true;
+    void fetchProductionUpdateManifest().then((manifest) => {
+      if (!manifest) return;
+      const installedCode = Number(Application.nativeBuildVersion ?? 0);
+      const decision = resolveUpdateDecision(installedCode, manifest);
+      if (decision.kind === 'available') {
+        showNotification({
+          id: 'production-update-available',
+          category: 'app-update',
+          type: 'info',
+          title: 'NovaCast update available',
+          message: `Production ${manifest.versionName} is ready to review in Upgrade Center.`,
+          actionLabel: 'View update',
+          onAction: () => router.push('/upgrade'),
+          persistent: true,
+          duration: 0,
+        });
+      }
+    });
+  }, [router]);
   const handleNovaPulseArtworkStatus = useCallback((item: NovaPulseItem, status: NovaPulseArtworkStatus, diagnostics?: NovaPulseArtworkDiagnostics) => {
     if (item.type !== 'movie' && item.type !== 'series') return;
     const key = `${activeProviderId}:${item.id}:${status}:${diagnostics?.layoutNonZero ?? 'unknown'}`;
@@ -1461,6 +1487,7 @@ export function MainMenuScreen({ startupProviderBootstrapTerminal = false }: { s
           </ScrollView>
         </NovaTvShell>
       </View>
+      {!playbackActive && !playbackClosing ? <View pointerEvents="box-none" style={styles.notificationBell}><NotificationBell /></View> : null}
       <ExitConfirmOverlay
         visible={exitConfirm.visible}
         onCancel={exitConfirm.cancel}
@@ -1669,6 +1696,13 @@ function createHomeStyles(theme: NovaTheme) {
   },
   browseLayer: {
     flex: 1,
+  },
+  notificationBell: {
+    position: 'absolute',
+    top: 14,
+    right: 18,
+    zIndex: 80,
+    elevation: 8,
   },
   screenScroll: {
     flex: 1,

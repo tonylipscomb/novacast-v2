@@ -3,7 +3,10 @@
  * Movie and episode playback share this path. Live TV must never enter it.
  */
 
-import { isNovaCastTraceLoggingEnabled } from '../../diagnostics/novacastLogPolicy.ts';
+import {
+  isNovaCastPlayerFocusDiagnosticsEnabled,
+  isNovaCastTraceLoggingEnabled,
+} from '../../diagnostics/novacastLogPolicy.ts';
 
 export const VOD_SEEK_IDLE_COMMIT_MS = 700;
 export const VOD_SEEK_END_GUARD_MS = 1_000;
@@ -414,12 +417,13 @@ export function logVodSeekRemote(fields: {
   keyCode?: number | null;
   direction?: VodSeekDirection | null;
 }): void {
-  if (!isNovaCastTraceLoggingEnabled()) {
+  if (!isNovaCastPlayerFocusDiagnosticsEnabled()) {
     return;
   }
   console.info(
     '[NovaCast VOD Seek Remote] ' +
       JSON.stringify({
+        timestamp: new Date().toISOString(),
         event: fields.event,
         mediaType: fields.mediaType ?? null,
         controlsVisible: fields.controlsVisible ?? null,
@@ -480,12 +484,13 @@ export function logPlayerChrome(fields: {
   focusedControl?: string | null;
   seekPreviewActive?: boolean | null;
 }): void {
-  if (!isNovaCastTraceLoggingEnabled()) {
+  if (!isNovaCastPlayerFocusDiagnosticsEnabled()) {
     return;
   }
   console.info(
     '[NovaCast Player Chrome] ' +
       JSON.stringify({
+        timestamp: new Date().toISOString(),
         event: fields.event,
         source: fields.source,
         mediaType: fields.mediaType ?? null,
@@ -505,12 +510,13 @@ export function logTvInputRaw(fields: {
   focusedControl?: string | null;
   mediaType?: string | null;
 }): void {
-  if (!isNovaCastTraceLoggingEnabled()) {
+  if (!isNovaCastPlayerFocusDiagnosticsEnabled()) {
     return;
   }
   console.info(
     '[NovaCast TV Input Raw] ' +
       JSON.stringify({
+        timestamp: new Date().toISOString(),
         source: fields.source,
         rawEventType: fields.rawEventType ?? null,
         eventKeyAction: fields.eventKeyAction ?? null,
@@ -529,12 +535,13 @@ export function logPlayerFocus(fields: {
   controlsVisible?: boolean | null;
   seekPreviewActive?: boolean | null;
 }): void {
-  if (!isNovaCastTraceLoggingEnabled()) {
+  if (!isNovaCastPlayerFocusDiagnosticsEnabled()) {
     return;
   }
   console.info(
     '[NovaCast Player Focus] ' +
       JSON.stringify({
+        timestamp: new Date().toISOString(),
         event: fields.event,
         control: fields.control,
         previousControl: fields.previousControl ?? null,
@@ -639,15 +646,18 @@ export function logVodFocusSeek(fields: {
   repeatCount?: number | null;
   seekSessionId?: string | null;
 }): void {
-  if (!isNovaCastTraceLoggingEnabled()) {
+  const traceEnabled = isNovaCastTraceLoggingEnabled();
+  if (!traceEnabled && !isNovaCastPlayerFocusDiagnosticsEnabled()) {
     return;
   }
   console.info(
     '[NovaCast VOD Focus Seek] ' +
       JSON.stringify({
+        timestamp: new Date().toISOString(),
         event: fields.event,
         mediaType: fields.mediaType ?? null,
-        contentId: fields.contentId ?? null,
+        contentId: traceEnabled ? fields.contentId ?? null : null,
+        contentIdPresent: Boolean(fields.contentId),
         controlsVisible: fields.controlsVisible ?? null,
         timelineFocused: fields.timelineFocused ?? null,
         seekPreviewActive: fields.seekPreviewActive ?? null,

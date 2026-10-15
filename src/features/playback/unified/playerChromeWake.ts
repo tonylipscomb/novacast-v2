@@ -1,4 +1,4 @@
-import { isNovaCastTraceLoggingEnabled } from '../../diagnostics/novacastLogPolicy.ts';
+import { isNovaCastPlayerFocusDiagnosticsEnabled } from '../../diagnostics/novacastLogPolicy.ts';
 import { isVodSeekMediaType } from './vodSeek.ts';
 import { isUnifiedControlActivateKey, isUnifiedTvSelectEvent } from './unifiedPlayerLogic.ts';
 
@@ -128,7 +128,7 @@ export function logPlayerChromeFocus(fields: {
   mediaType?: string | null;
   focusedControl?: string | null;
 }): void {
-  if (!isNovaCastTraceLoggingEnabled()) {
+  if (!isNovaCastPlayerFocusDiagnosticsEnabled()) {
     return;
   }
   const mediaType =
@@ -136,6 +136,7 @@ export function logPlayerChromeFocus(fields: {
   console.info(
     '[NovaCast Player Chrome Focus] ' +
       JSON.stringify({
+        timestamp: new Date().toISOString(),
         event: fields.event,
         ...(fields.key ? { key: fields.key } : {}),
         ...(mediaType ? { mediaType } : {}),

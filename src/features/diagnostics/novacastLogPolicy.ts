@@ -38,6 +38,26 @@ export function isNovaCastTraceLoggingEnabled(): boolean {
   return typeof process === 'undefined' || process.env?.NODE_ENV !== 'production';
 }
 
+/** Stable string for private CI verification without enabling diagnostics by default. */
+export const NOVACAST_PLAYER_FOCUS_DIAGNOSTICS_BUILD_MARKER =
+  typeof process !== 'undefined' &&
+  (process.env?.EXPO_PUBLIC_NOVACAST_PLAYER_FOCUS_DIAGNOSTICS?.trim().toLowerCase() === 'true' ||
+    process.env?.EXPO_PUBLIC_NOVACAST_PLAYER_FOCUS_DIAGNOSTICS?.trim() === '1')
+    ? 'player-focus-diagnostics-enabled'
+    : 'player-focus-diagnostics-disabled';
+
+/**
+ * Opt-in release diagnostics for the Android TV player-focus investigation.
+ * This is intentionally separate from the general trace switch so a private
+ * beta can expose focus lifecycle events without enabling unrelated traces.
+ */
+export function isNovaCastPlayerFocusDiagnosticsEnabled(): boolean {
+  return (
+    NOVACAST_PLAYER_FOCUS_DIAGNOSTICS_BUILD_MARKER === 'player-focus-diagnostics-enabled' ||
+    isReactNativeDev() === true
+  );
+}
+
 export function isNovaCastCatalogTraceEnabled(): boolean {
   return (
     isNovaCastTraceLoggingEnabled() ||

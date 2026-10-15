@@ -2,6 +2,7 @@ import { derivePlaybackMode } from './unifiedPlayerLogic.ts';
 import type { UnifiedControlFocusId } from './unifiedPlayerLogic.ts';
 import type { PlaybackMode, UnifiedPlayerMachineState } from './types.ts';
 import { getUnifiedPlayerState } from './unifiedPlayerStore.ts';
+import { isNovaCastPlayerFocusDiagnosticsEnabled } from '../../diagnostics/novacastLogPolicy.ts';
 
 export const UNIFIED_REMOTE_DEBUG_PREFIX = '[UnifiedRemoteDebug]';
 
@@ -40,13 +41,8 @@ const recentEvents = new Map<string, RecentRemoteEvent>();
 let focusedControl: UnifiedRemoteFocusedControl = 'none';
 let tvHandlerAvailabilityLogged = false;
 
-declare const __DEV__: boolean | undefined;
-
 export function isUnifiedRemoteDebugEnabled(): boolean {
-  if (typeof __DEV__ !== 'undefined') {
-    return __DEV__;
-  }
-  return process.env.NODE_ENV !== 'production';
+  return isNovaCastPlayerFocusDiagnosticsEnabled();
 }
 
 export function setUnifiedRemoteFocusedControl(control: UnifiedRemoteFocusedControl) {

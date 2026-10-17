@@ -132,7 +132,7 @@ jobs:
         run: npx expo prebuild --platform android --non-interactive
 
       - name: Enable Batch 1C player-focus diagnostics
-        if: github.ref == 'refs/heads/feature/v1.0.9-batch1c' || github.ref == 'refs/heads/feature/v1.0.9-integration'
+        if: github.ref == 'refs/heads/feature/v1.0.9-batch1c' || github.ref == 'refs/heads/feature/v1.0.9-integration' || github.ref == 'refs/heads/feature/v1.0.9-code47'
         shell: bash
         run: echo "EXPO_PUBLIC_NOVACAST_PLAYER_FOCUS_DIAGNOSTICS=true" >> "$GITHUB_ENV"
 
@@ -241,7 +241,7 @@ jobs:
 
           BADGING="$($AAPT dump badging "$APK_PATH")"
           EXPECTED_VERSION_CODE='45'
-          if [[ "$GITHUB_REF" == "refs/heads/feature/v1.0.9-integration" ]]; then
+          if [[ "$GITHUB_REF" == "refs/heads/feature/v1.0.9-integration" || "$GITHUB_REF" == "refs/heads/feature/v1.0.9-code47" ]]; then
             EXPECTED_VERSION_CODE='46'
           fi
           echo "$BADGING" | grep -Fq "package: name='com.novacast.novacastv2' versionCode='${EXPECTED_VERSION_CODE}' versionName='1.0.9'" || {
@@ -255,7 +255,7 @@ jobs:
           echo "Production APK signature and metadata verified."
 
       - name: Verify Batch 1C diagnostic bundle
-        if: github.ref == 'refs/heads/feature/v1.0.9-batch1c' || github.ref == 'refs/heads/feature/v1.0.9-integration'
+        if: github.ref == 'refs/heads/feature/v1.0.9-batch1c' || github.ref == 'refs/heads/feature/v1.0.9-integration' || github.ref == 'refs/heads/feature/v1.0.9-code47'
         shell: bash
         run: |
           set -euo pipefail

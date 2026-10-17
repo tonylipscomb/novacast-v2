@@ -9,6 +9,7 @@ export const UNIFIED_REMOTE_DEBUG_PREFIX = '[UnifiedRemoteDebug]';
 export type UnifiedRemoteEventSource =
   | 'useTVEventHandler'
   | 'TVEventHandler'
+  | 'native-vod-wake'
   | 'BackHandler'
   | 'overlay-key-capture'
   | 'controls-interaction-key'

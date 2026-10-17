@@ -198,6 +198,9 @@ export type VodSeekRemoteEvent = {
   eventType?: string | null;
   eventKeyAction?: number | null;
   keyCode?: number | null;
+  nativeEventTime?: number | null;
+  nativeDownTime?: number | null;
+  nativeFocusedView?: string | null;
   key?: string | null;
 };
 
@@ -415,6 +418,9 @@ export function logVodSeekRemote(fields: {
   eventType?: string | null;
   eventKeyAction?: number | null;
   keyCode?: number | null;
+  nativeEventTime?: number | null;
+  nativeDownTime?: number | null;
+  nativeFocusedView?: string | null;
   direction?: VodSeekDirection | null;
 }): void {
   if (!isNovaCastPlayerFocusDiagnosticsEnabled()) {
@@ -437,6 +443,9 @@ export function logVodSeekRemote(fields: {
         eventType: fields.eventType ?? null,
         eventKeyAction: fields.eventKeyAction ?? null,
         keyCode: fields.keyCode ?? null,
+        nativeEventTime: fields.nativeEventTime ?? null,
+        nativeDownTime: fields.nativeDownTime ?? null,
+        nativeFocusedView: fields.nativeFocusedView ?? null,
         direction: fields.direction ?? null,
       }),
   );
@@ -506,6 +515,9 @@ export function logTvInputRaw(fields: {
   rawEventType?: string | null;
   eventKeyAction?: number | null;
   keyCode?: number | null;
+  nativeEventTime?: number | null;
+  nativeDownTime?: number | null;
+  nativeFocusedView?: string | null;
   controlsVisible?: boolean | null;
   focusedControl?: string | null;
   mediaType?: string | null;
@@ -521,6 +533,9 @@ export function logTvInputRaw(fields: {
         rawEventType: fields.rawEventType ?? null,
         eventKeyAction: fields.eventKeyAction ?? null,
         keyCode: fields.keyCode ?? null,
+        nativeEventTime: fields.nativeEventTime ?? null,
+        nativeDownTime: fields.nativeDownTime ?? null,
+        nativeFocusedView: fields.nativeFocusedView ?? null,
         controlsVisible: fields.controlsVisible ?? null,
         focusedControl: fields.focusedControl ?? null,
         mediaType: fields.mediaType ?? null,

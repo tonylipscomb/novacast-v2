@@ -10,6 +10,7 @@ export type PlayerChromeFocusEvent =
   | 'controls-revealed'
   | 'default-focus-requested'
   | 'default-focused'
+  | 'controls-render-committed'
   | 'visible-input-routed'
   | 'stale-focus-cleared';
 

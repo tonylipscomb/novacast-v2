@@ -28,12 +28,16 @@ import {
   shouldConsumePlayerChromeWake,
   shouldRouteVisiblePlayerChromeInput,
 } from './playerChromeWake.ts';
+import { setVodWakeEnabled, subscribeVodWakeKeys, type VodWakeKeyEvent } from './vodWakeNative.ts';
 
 type TvEventPayload = {
   eventType?: string;
   eventKeyAction?: number;
   keyCode?: number;
   key?: string;
+  eventTime?: number;
+  downTime?: number;
+  focusedView?: string;
 };
 
 type UnifiedPlayerRemoteHandlersInput = {
@@ -138,7 +142,10 @@ export function UnifiedPlayerRemoteHandlers({
     enabledRef.current = enabled;
   }, [enabled]);
 
-  const handleTvEvent = (event: TvEventPayload, source: 'useTVEventHandler' | 'TVEventHandler') => {
+  const handleTvEvent = (
+    event: TvEventPayload,
+    source: 'useTVEventHandler' | 'TVEventHandler' | 'native-vod-wake',
+  ) => {
     if (!enabledRef.current) {
       return;
     }
@@ -170,6 +177,9 @@ export function UnifiedPlayerRemoteHandlers({
       rawEventType: eventType,
       eventKeyAction: event.eventKeyAction ?? null,
       keyCode,
+      nativeEventTime: event.eventTime ?? null,
+      nativeDownTime: event.downTime ?? null,
+      nativeFocusedView: event.focusedView ?? null,
       controlsVisible: controlsVisibleNow,
       focusedControl: timelineFocused ? 'seek' : null,
       mediaType: mediaTypeNow,
@@ -187,6 +197,9 @@ export function UnifiedPlayerRemoteHandlers({
       eventType,
       eventKeyAction: event.eventKeyAction ?? null,
       keyCode,
+      nativeEventTime: event.eventTime ?? null,
+      nativeDownTime: event.downTime ?? null,
+      nativeFocusedView: event.focusedView ?? null,
       direction,
     };
 
@@ -341,6 +354,52 @@ export function UnifiedPlayerRemoteHandlers({
       });
     }
   };
+
+  const handleTvEventRef = useRef(handleTvEvent);
+  useEffect(() => {
+    handleTvEventRef.current = handleTvEvent;
+  }, [handleTvEvent]);
+
+  useEffect(() => {
+    const eligible =
+      Platform.OS === 'android' &&
+      enabled &&
+      !controlsVisible &&
+      !upNextActive &&
+      isVodSeekMediaType(mediaType);
+
+    if (!eligible) {
+      setVodWakeEnabled(false);
+      return;
+    }
+
+    const nativeReady = setVodWakeEnabled(true);
+    if (!nativeReady) {
+      return () => {
+        setVodWakeEnabled(false);
+      };
+    }
+
+    const subscription = subscribeVodWakeKeys((event: VodWakeKeyEvent) => {
+      handleTvEventRef.current(
+        {
+          eventType: event.eventType,
+          keyCode: event.keyCode,
+          eventKeyAction: event.eventKeyAction,
+          key: event.eventType,
+          eventTime: event.eventTime,
+          downTime: event.downTime,
+          focusedView: event.focusedView,
+        },
+        'native-vod-wake',
+      );
+    });
+
+    return () => {
+      subscription?.remove();
+      setVodWakeEnabled(false);
+    };
+  }, [controlsVisible, enabled, mediaType, upNextActive]);
 
   useEffect(() => {
     if (!enabled || Platform.OS !== 'android') {

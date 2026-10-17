@@ -762,7 +762,10 @@ test('8. native focus does not escape horizontally while scrub active', () => {
   );
   assert.match(controls, /nextFocusLeft: leftSentinel/);
   assert.match(controls, /nextFocusRight: rightSentinel/);
-  assert.match(controls, /buildAndroidControlFocusProps\('seek', episodeFocusHandles, sentinelHandles\)/);
+  assert.match(
+    controls,
+    /buildAndroidControlFocusProps\('seek', episodeFocusHandles, sentinelHandles, hiddenWakeHandle\)/,
+  );
   assert.match(controls, /if \(controlId === 'seek' && direction != null\)/);
 });
 

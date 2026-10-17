@@ -4,6 +4,13 @@ const { withDangerousMod } = require('@expo/config-plugins');
 
 const FAVORITE_MARKER = '// NovaCast native favorite key bridge';
 const METHOD = `
+    if (expo.modules.novacastcatalogdecode.NovacastVodWakeModule.dispatchKeyEvent(
+      event,
+      currentFocus?.javaClass?.simpleName ?: "none",
+    )) {
+      return true
+    }
+
     ${FAVORITE_MARKER}
     if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
         event.keyCode == KeyEvent.KEYCODE_ENTER ||
@@ -50,7 +57,7 @@ function withNovacastNativeTvKeyEvents(config) {
     const activityPath = findMainActivity(path.join(config.modRequest.platformProjectRoot, 'app', 'src', 'main', 'java'));
     if (!activityPath) throw new Error('Expected generated MainActivity.kt not found');
     let source = fs.readFileSync(activityPath, 'utf8');
-    const alreadyPresent = source.includes('onNovaCastNativeTvKey');
+    const alreadyPresent = source.includes('NovaCastVodWakeModule.dispatchKeyEvent');
     if (!source.includes('import android.view.KeyEvent')) {
       source = source.replace(/import android\.os\.Bundle\r?\n/, (match) => `${match}import android.view.KeyEvent\n`);
     }

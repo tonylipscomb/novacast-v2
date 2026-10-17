@@ -3,7 +3,8 @@
   "android": {
     "modules": [
       "expo.modules.novacastcatalogdecode.NovacastCatalogDecodeModule",
-      "expo.modules.novacastcatalogdecode.NovacastFullscreenSurfModule"
+      "expo.modules.novacastcatalogdecode.NovacastFullscreenSurfModule",
+      "expo.modules.novacastcatalogdecode.NovacastVodWakeModule"
     ]
   }
 }

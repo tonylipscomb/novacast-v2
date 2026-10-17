@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import type { ComponentType, ElementRef, ReactNode } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
 import {
   Animated,
@@ -854,6 +854,17 @@ export function UnifiedPlayerControls({
       useNativeDriver: true,
     }).start();
   }, [opacity, visible]);
+
+  useLayoutEffect(() => {
+    if (!visible) {
+      return;
+    }
+    logPlayerChromeFocus({
+      event: 'controls-render-committed',
+      mediaType,
+      focusedControl: focusedControlRef.current ?? 'play',
+    });
+  }, [mediaType, visible]);
 
   useEffect(() => {
     onRegisterCancelSeekPreview?.(cancelSeekPreview);
